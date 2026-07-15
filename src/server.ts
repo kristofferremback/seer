@@ -1,6 +1,6 @@
 import type { Server, WebSocketHandler } from "bun";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { join, normalize } from "node:path";
+import { join, normalize, resolve } from "node:path";
 import { config } from "./config";
 import { getBundle, listBundles, listVersions, createVersion } from "./db";
 import { inspectZip, saveZip, ensureExtracted } from "./store";
@@ -336,5 +336,8 @@ export function startServer() {
   });
 
   console.log(`Seer listening on ${config.baseUrl} (port ${server.port})`);
+  // Log the absolute data path so a Railway volume's mount path can be verified
+  // against it — they must match, or writes land on ephemeral disk.
+  console.log(`Data dir: ${resolve(config.dataDir)} (mount your persistent volume here)`);
   return server;
 }
