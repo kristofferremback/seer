@@ -244,6 +244,27 @@ export function startServer() {
         });
       },
 
+      // Self-hosted type. A closed whitelist — only these five faces are ever
+      // served, so a slug like "../secret" can never traverse out of assets/fonts.
+      "/fonts/:file": (req) => {
+        const allowed = new Set([
+          "switzer.woff2",
+          "cabinet-grotesk.woff2",
+          "commit-mono-400.woff2",
+          "commit-mono-500.woff2",
+          "commit-mono-700.woff2",
+        ]);
+        const name = req.params.file;
+        if (!allowed.has(name)) return new Response("Not found", { status: 404 });
+        const file = Bun.file(join(import.meta.dir, "..", "assets", "fonts", name));
+        return new Response(file, {
+          headers: {
+            "content-type": "font/woff2",
+            "cache-control": "public, max-age=31536000, immutable",
+          },
+        });
+      },
+
       // Committed OG card asset. Long cache; it only changes when the art does.
       "/og.png": () => {
         const file = Bun.file(join(import.meta.dir, "..", "assets", "og.png"));

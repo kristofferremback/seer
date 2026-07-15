@@ -13,188 +13,393 @@ export function escapeHtml(s: string): string {
 // oxblood glint inside is the only accent, and it is the one thing that moves.
 function markSvg(cls = "mark"): string {
   return `<svg class="${cls}" viewBox="0 0 48 58" role="img" aria-label="A crystal ball on a small stand" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <circle cx="24" cy="21" r="15" stroke="var(--ink)" stroke-width="1.5"/>
-  <path d="M14 17 Q16 11 23 10" stroke="var(--ink)" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
-  <path d="M11 31 Q24 43 37 31" stroke="var(--ink)" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M13.5 33 L18 50" stroke="var(--ink)" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M34.5 33 L30 50" stroke="var(--ink)" stroke-width="1.5" stroke-linecap="round"/>
-  <path d="M16 51 L32 51" stroke="var(--ink)" stroke-width="1.6" stroke-linecap="round"/>
-  <path class="glint" d="M30 21.6 L30.95 24.05 L33.4 25 L30.95 25.95 L30 28.4 L29.05 25.95 L26.6 25 L29.05 24.05 Z" fill="var(--accent)"/>
+  <circle cx="24" cy="21" r="15" stroke="currentColor" stroke-width="1.5"/>
+  <path d="M14 17 Q16 11 23 10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+  <path d="M11 31 Q24 43 37 31" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M13.5 33 L18 50" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M34.5 33 L30 50" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M16 51 L32 51" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  <path class="glint" d="M30 21.6 L30.95 24.05 L33.4 25 L30.95 25.95 L30 28.4 L29.05 25.95 L26.6 25 L29.05 24.05 Z" fill="hsl(var(--accent))"/>
 </svg>`;
 }
 
 // ---- shared paper substrate + type ----
-// Design language: keep Seer's identity (paper tone, serif masthead, oxblood
-// accent, hand-drawn mark, mono only for data) but adopt a calmer, border-first
-// restraint. Depth comes from hairline warm borders and surfaces a hair off the
-// paper, not from heavy broadsheet rules or shadows. Oxblood carries interactive
-// meaning only: links, focus rings, the mark's glint.
+// Design language: a warm-paper world shared with the Threa marketing site, but
+// carrying Seer's own oxblood accent instead of gold. The page is a stack of
+// full-bleed tonal bands (paper / paper-warm / night) that touch with no borders
+// — separation by tone alone. Type is Cabinet Grotesk (display, light weight),
+// Switzer (body), Commit Mono (real data only: slugs, versions, timestamps,
+// curl). Oxblood carries interactive meaning: link hover, focus rings, the mark's
+// glint, one thread spine. Tokens are HSL triplets so hsl(var(--x)/0.3) gives
+// alpha variants. Light and dark both fully defined; theme resolved pre-paint.
 function styles(): string {
   return `
+  @font-face {
+    font-family: "Switzer";
+    src: url("/fonts/switzer.woff2") format("woff2");
+    font-weight: 100 900; font-display: swap; font-style: normal;
+  }
+  @font-face {
+    font-family: "Cabinet Grotesk";
+    src: url("/fonts/cabinet-grotesk.woff2") format("woff2");
+    font-weight: 100 900; font-display: swap; font-style: normal;
+  }
+  @font-face {
+    font-family: "Commit Mono";
+    src: url("/fonts/commit-mono-400.woff2") format("woff2");
+    font-weight: 400; font-display: swap; font-style: normal;
+  }
+  @font-face {
+    font-family: "Commit Mono";
+    src: url("/fonts/commit-mono-500.woff2") format("woff2");
+    font-weight: 500; font-display: swap; font-style: normal;
+  }
+  @font-face {
+    font-family: "Commit Mono";
+    src: url("/fonts/commit-mono-700.woff2") format("woff2");
+    font-weight: 700; font-display: swap; font-style: normal;
+  }
+
   :root {
     color-scheme: light;
-    --paper: #f4efe3;
-    --surface: #f8f4ea;      /* card: a hair lighter than the paper */
-    --surface-sunk: #ece4d3; /* code specimen: sunk a hair below */
-    --ink: #24201a;
-    --ink-soft: #6b6154;
-    --accent: #6d1f22;
-    --accent-soft: rgba(109, 31, 34, 0.14);
-    --hair: #dcd2bd;         /* warm hairline border */
-    --hair-soft: #e5dcca;
-    --r-card: 12px;
-    --r-item: 8px;
-    --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
-    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-    --gutter: clamp(1.25rem, 5vw, 2rem);
+    --paper: 40 22% 98%;
+    --paper-warm: 38 16% 94%;
+    --paper-sunk: 40 14% 93%;
+    --ink: 30 10% 12%;
+    --ink-soft: 30 9% 26%;
+    --line: 35 15% 88%;
+    --muted: 30 8% 45%;
+    --night: 26 16% 10%;
+    /* Oxblood — Seer's accent, in place of Threa's gold. */
+    --accent: 356 55% 27%;
+    --accent-soft: 356 40% 42%;
+
+    --font-display: "Cabinet Grotesk", "Switzer", system-ui, -apple-system, sans-serif;
+    --font-body: "Switzer", system-ui, -apple-system, sans-serif;
+    --font-mono: "Commit Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --pad-x: 56px;
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper: 26 12% 13%;
+    --paper-warm: 26 14% 11%;
+    --paper-sunk: 26 15% 9%;
+    --ink: 38 16% 90%;
+    --ink-soft: 35 11% 74%;
+    --line: 26 8% 24%;
+    --muted: 32 7% 57%;
+    --night: 26 16% 7%;
+    /* Lifted so oxblood reads on espresso. */
+    --accent: 356 45% 62%;
+    --accent-soft: 356 38% 52%;
+  }
+  @media (max-width: 880px) {
+    :root { --pad-x: 28px; }
+  }
+
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
   body {
     margin: 0;
     min-height: 100vh;
-    background-color: var(--paper);
-    color: var(--ink);
-    font-family: var(--serif);
-    font-size: 17px;
-    line-height: 1.6;
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    background: hsl(var(--paper-warm));
+    color: hsl(var(--ink));
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
     touch-action: manipulation;
-    /* A quiet warm rake of light from the top, resolving into the paper. */
-    background-image: radial-gradient(115% 70% at 50% -20%, rgba(255, 250, 238, 0.7), rgba(255, 250, 238, 0) 58%);
   }
-  /* Fine printed grain on the substrate, behind everything. Felt, not seen. */
-  body::before {
+  /* Paper grain — a fixed film of fractal noise behind the content. Multiply on
+     light so it reads as paper tooth; screen on dark so it lifts rather than
+     muddies the espresso. pointer-events none, low opacity: felt, not seen. */
+  body::after {
     content: "";
     position: fixed;
     inset: 0;
-    z-index: -1;
+    z-index: 0;
     pointer-events: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
     mix-blend-mode: multiply;
+    opacity: 0.05;
+  }
+  :root[data-theme="dark"] body::after {
+    mix-blend-mode: screen;
     opacity: 0.04;
   }
-  .sheet {
-    max-width: 44rem;
+  ::selection { background: hsl(var(--accent) / 0.22); }
+
+  /* ---- tonal bands ---- */
+  .frame { width: 100%; background: hsl(var(--paper)); position: relative; z-index: 1; }
+  /* The content band grows to fill any leftover viewport height so the night
+     footer always pins to the bottom, even on the short shell page. */
+  .frame.grow { flex: 1 0 auto; }
+  .frame.warm { background: hsl(var(--paper-warm)); }
+  .frame.night { background: hsl(var(--night)); color: hsl(38 14% 80%); }
+
+  .shell {
+    max-width: 52rem;
     margin: 0 auto;
-    /* safe-area aware gutters so nothing kisses a notch or the screen rim */
     padding:
-      clamp(2rem, 6vw, 3.4rem)
-      max(var(--gutter), env(safe-area-inset-right))
-      max(2.2rem, env(safe-area-inset-bottom))
-      max(var(--gutter), env(safe-area-inset-left));
+      clamp(2.4rem, 6vw, 4.5rem)
+      max(var(--pad-x), env(safe-area-inset-right))
+      clamp(2.4rem, 6vw, 4.5rem)
+      max(var(--pad-x), env(safe-area-inset-left));
+    padding-bottom: max(clamp(2.4rem, 6vw, 4.5rem), env(safe-area-inset-bottom));
+    position: relative;
   }
-  a {
-    color: var(--ink);
-    text-decoration: underline;
-    text-underline-offset: 2.5px;
-    text-decoration-thickness: 1px;
-    text-decoration-color: var(--hair);
+
+  /* ---- thread spine: a 1px oxblood line down the content's left margin, with a
+     small rotated diamond bead where the section begins. Hidden on narrow. ---- */
+  .spine::before {
+    content: "";
+    position: absolute;
+    left: calc(var(--pad-x) / 2);
+    top: 0; bottom: 0;
+    width: 1px;
+    background: hsl(var(--accent) / 0.22);
+    pointer-events: none;
   }
-  /* Hover is a fine-pointer affordance only, so touch never sticks a colour. */
+  .spine::after {
+    content: "";
+    position: absolute;
+    left: calc(var(--pad-x) / 2);
+    top: clamp(2.4rem, 6vw, 4.5rem);
+    width: 7px; height: 7px;
+    transform: translate(-3.5px, 6px) rotate(45deg);
+    background: hsl(var(--paper));
+    border: 1px solid hsl(var(--accent));
+    pointer-events: none;
+  }
+  .frame.warm .spine::after { background: hsl(var(--paper-warm)); }
+  .frame.night .spine::after { background: hsl(var(--night)); }
+  @media (max-width: 880px) {
+    .spine::before, .spine::after { display: none; }
+  }
+
+  /* ---- masthead / nav row ---- */
+  .nav-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: clamp(2.2rem, 6vw, 3.6rem);
+  }
+  .brand { display: flex; align-items: center; gap: 0.65rem; text-decoration: none; color: inherit; }
+  .brand .mark { width: 22px; height: 27px; flex: none; }
+  .wordmark {
+    font-family: var(--font-display);
+    font-weight: 300;
+    font-size: 12px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: hsl(var(--ink));
+  }
+  .nav-actions { display: flex; align-items: center; gap: 1.1rem; }
+  .nav-action {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: hsl(var(--muted));
+    text-decoration: none;
+  }
+
+  /* quiet theme toggle — a bare icon, no pill. Shows the icon for the mode a
+     click switches TO (moon in light, sun in dark). */
+  .theme-toggle {
+    background: none; border: 0; padding: 4px; margin: 0;
+    color: hsl(var(--muted));
+    cursor: pointer; line-height: 0;
+    display: inline-flex; align-items: center;
+    border-radius: 4px;
+  }
+  .theme-toggle .tt-sun { display: none; }
+  .theme-toggle .tt-moon { display: block; }
+  :root[data-theme="dark"] .theme-toggle .tt-sun { display: block; }
+  :root[data-theme="dark"] .theme-toggle .tt-moon { display: none; }
+
+  /* ---- display + body type ---- */
+  .h-display {
+    font-family: var(--font-display);
+    font-weight: 300;
+    font-size: clamp(34px, 6.2vw, 52px);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    margin: 0;
+    max-width: 15ch;
+  }
+  .h-display .accent { color: hsl(var(--accent)); font-weight: 500; }
+  .h-section {
+    font-family: var(--font-display);
+    font-weight: 300;
+    font-size: clamp(28px, 4.4vw, 40px);
+    line-height: 1.08;
+    letter-spacing: -0.018em;
+    margin: 0;
+  }
+  .subtitle {
+    font-family: var(--font-body);
+    font-size: clamp(1.02rem, 2.4vw, 1.16rem);
+    line-height: 1.5;
+    color: hsl(var(--ink-soft));
+    margin: 1.15rem 0 0;
+    max-width: 34ch;
+  }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: hsl(var(--muted));
+    margin: 0 0 0.9rem;
+  }
+  .email-tag { font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.02em; color: hsl(var(--muted)); }
+
+  p { margin: 0 0 0.85rem; max-width: 42ch; min-width: 0; }
+  .lede { font-size: 1.02rem; line-height: 1.6; max-width: 46ch; margin-top: 1.6rem; }
+  .prose { color: hsl(var(--ink-soft)); }
+  .prose p { max-width: 48ch; }
+  .aside { color: hsl(var(--muted)); font-size: 0.95rem; }
+
+  a { color: inherit; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; text-decoration-color: hsl(var(--line)); }
   @media (hover: hover) and (pointer: fine) {
     a { transition: color 150ms ease, text-decoration-color 150ms ease; }
-    a:hover { color: var(--accent); text-decoration-color: var(--accent); }
+    a:hover { color: hsl(var(--accent)); text-decoration-color: hsl(var(--accent)); }
+    .nav-action:hover, .brand:hover { color: hsl(var(--accent)); }
+    .theme-toggle:hover { color: hsl(var(--accent)); }
+    .frame.night a:hover, .frame.night .nav-action:hover { color: hsl(var(--accent)); }
   }
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+  :focus-visible { outline: 2px solid hsl(var(--accent)); outline-offset: 2px; border-radius: 3px; }
 
-  /* thin, restrained scrollbars on the overflow blocks */
-  .scroll-x { overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--hair) transparent; }
+  code { font-family: var(--font-mono); font-size: 0.85em; }
+
+  /* thin restrained scrollbars on overflow blocks */
+  .scroll-x { overflow-x: auto; scrollbar-width: thin; scrollbar-color: hsl(var(--line)) transparent; }
   .scroll-x::-webkit-scrollbar { height: 6px; }
-  .scroll-x::-webkit-scrollbar-thumb { background: var(--hair); border-radius: 999px; }
+  .scroll-x::-webkit-scrollbar-thumb { background: hsl(var(--line)); border-radius: 999px; }
   .scroll-x::-webkit-scrollbar-track { background: transparent; }
 
-  /* masthead */
-  .masthead { display: flex; align-items: center; gap: 1rem; }
-  .mark { width: 42px; height: 51px; flex: none; }
-  .mark-fig { width: 60px; height: 73px; }
-  h1 { font-size: clamp(2.3rem, 6vw, 3.1rem); line-height: 1; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
-  .subtitle { font-style: italic; color: var(--ink-soft); font-size: clamp(0.98rem, 3vw, 1.08rem); margin: 0.35rem 0 0; }
-  .email-tag { font-family: var(--mono); font-style: normal; font-size: 0.8rem; color: var(--ink-soft); }
+  /* ---- primary CTA: solid ink, paper text, literal 2px radius ---- */
+  .cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: hsl(var(--ink));
+    color: hsl(var(--paper));
+    padding: 12px 20px;
+    font-family: var(--font-body);
+    font-weight: 500;
+    font-size: 13.5px;
+    letter-spacing: 0.005em;
+    text-decoration: none;
+    border-radius: 2px;
+    border: 0;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .cta { transition: background-color 150ms ease; }
+    .cta:hover { background: hsl(var(--accent)); color: hsl(var(--paper)); }
+  }
 
-  /* the nameplate rule, slimmed to a single quiet hairline */
-  .scotch { height: 1px; background: var(--hair); border: 0; margin: 1.4rem 0 1.8rem; }
+  /* ---- specimen band: figure beside the copy-paste command ---- */
+  .specimen-grid { display: grid; grid-template-columns: 1fr; gap: clamp(1.6rem, 4vw, 2.6rem); align-items: center; }
+  .specimen-grid > * { min-width: 0; }
+  @media (min-width: 720px) { .specimen-grid { grid-template-columns: minmax(0, 1fr) 200px; } }
+  .fig { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 0.7rem; text-align: center; }
+  .fig .mark-fig { width: 66px; height: 80px; }
+  .fig figcaption { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: hsl(var(--muted)); }
 
-  p { margin: 0 0 0.9rem; max-width: 36em; min-width: 0; }
-  .lede { font-size: 1.1rem; }
-  .aside { color: var(--ink-soft); font-style: italic; }
-
-  .columns { display: grid; grid-template-columns: 1fr; gap: 1.8rem 2.4rem; align-items: start; }
-  /* min-width:0 lets a wide code line scroll inside its own box instead of
-     forcing the grid track (and the page) wider than the viewport. */
-  .columns > * { min-width: 0; }
-  @media (min-width: 40rem) { .columns { grid-template-columns: 1.15fr 1fr; } }
-
-  .fig { display: flex; align-items: center; gap: 0.8rem; margin: 0 0 1.2rem; }
-  .fig figcaption { font-style: italic; color: var(--ink-soft); font-size: 0.9rem; }
-
-  /* specimen: a quiet bordered card holding the copy-paste command */
   .specimen {
-    background: var(--surface);
-    border: 1px solid var(--hair);
-    border-radius: var(--r-card);
-    padding: 1rem 1.1rem;
+    background: hsl(var(--paper-warm));
+    border: 1px solid hsl(var(--line));
+    border-radius: 14px;
+    padding: 1.1rem 1.2rem 1.2rem;
   }
-  .specimen-label { font-style: italic; font-size: 0.92rem; color: var(--ink-soft); margin: 0 0 0.6rem; }
+  .frame.warm .specimen { background: hsl(var(--paper)); }
   pre.cmd {
-    font-family: var(--mono);
+    font-family: var(--font-mono);
     font-size: 0.76rem;
-    line-height: 1.65;
-    margin: 0;
-    padding: 0.8rem 0.9rem;
-    background: var(--surface-sunk);
-    border: 1px solid var(--hair-soft);
-    border-radius: var(--r-item);
+    line-height: 1.7;
+    margin: 0.7rem 0 0;
+    padding: 0.85rem 0.95rem;
+    background: hsl(var(--paper-sunk));
+    border: 1px solid hsl(var(--line));
+    border-radius: 8px;
     white-space: pre;
-    color: var(--ink);
+    color: hsl(var(--ink));
   }
-  pre.cmd .flag { color: var(--ink-soft); }
-  .specimen-note { font-size: 0.92rem; color: var(--ink-soft); max-width: none; margin: 0.7rem 0 0; }
-  code { font-family: var(--mono); font-size: 0.85em; }
+  pre.cmd .flag { color: hsl(var(--muted)); }
+  .specimen-note { font-size: 0.9rem; color: hsl(var(--ink-soft)); max-width: none; margin: 0.85rem 0 0; }
 
-  /* colophon */
-  .colophon {
-    margin-top: 2.6rem;
-    padding-top: 1rem;
-    border-top: 1px solid var(--hair);
+  /* ---- ledger table ---- */
+  .ledger {
+    background: hsl(var(--paper-warm));
+    border: 1px solid hsl(var(--line));
+    border-radius: 14px;
+    overflow: hidden;
+    margin-top: 0.6rem;
+  }
+  .frame.warm .ledger { background: hsl(var(--paper)); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 0.7rem 1rem; vertical-align: baseline; text-align: left; }
+  th {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10.5px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: hsl(var(--muted));
+    border-bottom: 1px solid hsl(var(--line));
+  }
+  td { border-bottom: 1px solid hsl(var(--line) / 0.6); }
+  tr:last-child td { border-bottom: 0; }
+  .mono { font-family: var(--font-mono); font-size: 0.82rem; color: hsl(var(--ink-soft)); }
+  .slug a { text-decoration: none; font-weight: 500; color: hsl(var(--ink)); }
+  @media (hover: hover) and (pointer: fine) { .slug a:hover { color: hsl(var(--accent)); } }
+  .history a { margin-right: 0.6rem; color: hsl(var(--muted)); text-decoration: none; }
+  @media (hover: hover) and (pointer: fine) { .history a:hover { color: hsl(var(--accent)); } }
+  .empty { color: hsl(var(--muted)); margin-bottom: 1.4rem; }
+
+  /* ---- private-preview gate card ---- */
+  .card {
+    background: hsl(var(--paper-warm));
+    border: 1px solid hsl(var(--line));
+    border-radius: 14px;
+    padding: clamp(1.6rem, 4vw, 2.2rem);
+    max-width: 32rem;
+  }
+  .frame.warm .card { background: hsl(var(--paper)); }
+  .gate { font-size: 1.05rem; line-height: 1.55; margin: 0; max-width: none; }
+  .gate-meta { display: block; font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.02em; color: hsl(var(--muted)); margin-top: 0.6rem; }
+  .gate-action { margin: 1.4rem 0 0; }
+
+  /* ---- footer ---- */
+  .footer {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.35rem 1rem;
-    font-size: 0.9rem;
-    color: var(--ink-soft);
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.9rem 1.6rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: hsl(38 12% 62%);
   }
-  .colophon .mid { color: var(--hair); }
-
-  /* ledger (signed-in bundle list): a clean data table in a quiet card */
-  .ledger {
-    background: var(--surface);
-    border: 1px solid var(--hair);
-    border-radius: var(--r-card);
-    margin-top: 0.4rem;
-  }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { padding: 0.6rem 0.9rem; vertical-align: baseline; text-align: left; }
-  th {
-    font-style: italic; font-weight: 400; color: var(--ink-soft); font-size: 0.88rem;
-    border-bottom: 1px solid var(--hair);
-  }
-  td { border-bottom: 1px solid var(--hair-soft); }
-  tr:last-child td { border-bottom: 0; }
-  .mono { font-family: var(--mono); font-size: 0.83rem; }
-  .slug a { text-decoration: none; font-weight: 600; }
-  @media (hover: hover) and (pointer: fine) { .slug a:hover { text-decoration: underline; } }
-  .history a { margin-right: 0.55rem; color: var(--ink-soft); }
-  .empty { color: var(--ink-soft); font-style: italic; }
-
-  /* shell (private preview gate): the same quiet card treatment */
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--hair);
-    border-radius: var(--r-card);
-    padding: 1.2rem 1.3rem;
-  }
-  .gate { font-size: 1.05rem; margin: 0; }
-  .gate-meta { display: block; font-family: var(--mono); font-size: 0.8rem; color: var(--ink-soft); margin-top: 0.5rem; }
-  .gate-action { margin: 1.1rem 0 0; font-size: 1.02rem; }
+  .frame.night .footer { color: hsl(38 12% 62%); }
+  .footer .brand { color: hsl(38 14% 80%); }
+  .footer .brand .wordmark { color: hsl(38 14% 80%); }
+  .footer .brand .mark { width: 18px; height: 22px; }
+  .footer-links { display: flex; flex-wrap: wrap; gap: 0.7rem 1.4rem; }
+  .footer a { color: inherit; text-decoration: none; }
+  .footer code { font-size: 0.95em; text-transform: none; letter-spacing: 0; }
 
   .glint { transform-box: fill-box; transform-origin: center; }
   @media (prefers-reduced-motion: no-preference) {
@@ -207,6 +412,7 @@ function styles(): string {
 `;
 }
 
+
 function head(title: string, og: Record<string, string>, extra = ""): string {
   const tags = Object.entries(og)
     .map(([k, v]) => {
@@ -217,14 +423,55 @@ function head(title: string, og: Record<string, string>, extra = ""): string {
   return `<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<script>${themeBootstrap()}</script>
 <title>${escapeHtml(title)}</title>
-${tags}${extra ? `\n${extra}` : ""}
+${tags}
+<link rel="preload" href="/fonts/switzer.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/cabinet-grotesk.woff2" as="font" type="font/woff2" crossorigin>${extra ? `\n${extra}` : ""}
 <style>${styles()}</style>
 </head>`;
 }
 
-function scotch(): string {
-  return `<hr class="scotch" aria-hidden="true">`;
+// Pre-paint theme resolution: a stored choice wins, else the system preference.
+// Runs inline in <head> so data-theme is set before the first paint (no flash).
+function themeBootstrap(): string {
+  return `(()=>{let t=null;try{t=localStorage.getItem("seer:theme")}catch(e){}const d=t==="dark"||(t!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light"})();`;
+}
+
+// The toggle writes the explicit choice and flips data-theme on <html>. One
+// delegated listener covers every toggle on the page.
+function themeToggleScript(): string {
+  return `<script>(()=>{if(window.__seerTT)return;window.__seerTT=1;document.addEventListener("click",e=>{const b=e.target.closest("[data-theme-toggle]");if(!b)return;const n=document.documentElement.dataset.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=n;try{localStorage.setItem("seer:theme",n)}catch(x){}})})();</script>`;
+}
+
+function themeToggle(): string {
+  return `<button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle light and dark mode">
+    <svg class="tt-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    <svg class="tt-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+  </button>`;
+}
+
+// Masthead nav row: the mark + SEER wordmark on the left, a quiet mono action
+// link + the theme toggle on the right.
+function navRow(action: { href: string; label: string } | null): string {
+  return `<nav class="nav-row">
+    <a class="brand" href="/">
+      ${markSvg("mark")}
+      <span class="wordmark">Seer</span>
+    </a>
+    <div class="nav-actions">
+      ${action ? `<a class="nav-action" href="${action.href}">${action.label}</a>` : ""}
+      ${themeToggle()}
+    </div>
+  </nav>`;
+}
+
+// Footer, in the reference register: mark + wordmark left, mono links right.
+function footer(links: string[]): string {
+  return `<footer class="footer">
+    <a class="brand" href="/">${markSvg("mark")}<span class="wordmark">Seer</span></a>
+    <div class="footer-links">${links.join("")}</div>
+  </footer>`;
 }
 
 // ---- agent-facing skill doc (/skill.md, /llms.txt) ----
@@ -357,49 +604,54 @@ export function landingPage(signedIn: boolean): string {
     "twitter:image": `${config.baseUrl}/og.png`,
   };
 
+  const action = signedIn
+    ? { href: "/bundles", label: "your bundles" }
+    : { href: "/login", label: "Sign in" };
+
   return `<!doctype html>
 <html lang="en">
 ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">`)}
 <body>
-<main class="sheet">
-  <header class="masthead">
-    ${markSvg("mark")}
-    <div>
-      <h1>Seer</h1>
-      <p class="subtitle">A private instrument for previewing HTML&nbsp;bundles.</p>
-    </div>
-  </header>
-  ${scotch()}
-  <div class="columns">
-    <div>
+<div class="frame warm">
+  <div class="shell spine">
+    ${navRow(action)}
+    <h1 class="h-display">Preview what your <span class="accent">agents</span> build.</h1>
+    <p class="subtitle">A private instrument for previewing HTML&nbsp;bundles.</p>
+    <div class="prose">
       <p class="lede">An agent builds a page, zips it, and pushes it here. Seer keeps every
       version and hands back a URL that reloads itself the moment a new build lands.</p>
       <p>One person's tool, kept behind a Google sign-in. No accounts, no dashboard, no
       product. Just a place for half-finished pages to be looked at.</p>
       <p class="aside">It is a slop site, for sure. It also works.</p>
     </div>
-    <aside>
-      <figure class="fig">
-        ${markSvg("mark mark-fig")}
-        <figcaption>Fig. 1. The scrying glass.</figcaption>
-      </figure>
+  </div>
+</div>
+<div class="frame grow">
+  <div class="shell spine">
+    <div class="specimen-grid">
       <div class="specimen">
-        <p class="specimen-label">To push a bundle</p>
+        <p class="eyebrow">To push a bundle</p>
         <pre class="cmd scroll-x">${curl}</pre>
         <p class="specimen-note">Back comes <code>/b/your-slug/</code>, versioned and live.</p>
       </div>
-    </aside>
+      <figure class="fig">
+        ${markSvg("mark mark-fig")}
+        <figcaption>Fig. 1 &middot; the scrying glass</figcaption>
+      </figure>
+    </div>
   </div>
-  <footer class="colophon">
-    <span>Open source at <a href="${GITHUB_URL}">github.com/kristofferremback/seer</a></span>
-    <span class="mid" aria-hidden="true">&middot;</span>
-    <span>Curious? <a href="mailto:${CONTACT_EMAIL}">drop a line</a></span>
-    <span class="mid" aria-hidden="true">&middot;</span>
-    <span><a href="/skill.md"><code>skill.md</code></a> for agents</span>
-    <span class="mid" aria-hidden="true">&middot;</span>
-    <span>${signedIn ? `<a href="/bundles">Your bundles</a>` : `<a href="/login">Sign in</a>`}</span>
-  </footer>
-</main>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([
+      `<a href="${GITHUB_URL}">github</a>`,
+      `<a href="mailto:${CONTACT_EMAIL}">email</a>`,
+      `<a href="/skill.md"><code>skill.md</code></a>`,
+      signedIn ? `<a href="/bundles">bundles</a>` : `<a href="/login">Sign in</a>`,
+    ])}
+  </div>
+</div>
+${themeToggleScript()}
 </body>
 </html>`;
 }
@@ -434,7 +686,7 @@ export function bundlesPage(email: string, bundles: LedgerBundle[]): string {
     bundles.length === 0
       ? `<p class="empty">No bundles yet.</p>
          <div class="specimen">
-           <p class="specimen-label">Push your first one</p>
+           <p class="eyebrow">Push your first one</p>
            <pre class="cmd scroll-x">curl -X PUT --data-binary @bundle.zip \\
   <span class="flag">-H "Authorization: Bearer $API_TOKEN"</span> \\
   ${escapeHtml(config.baseUrl)}/api/bundles/your-slug</pre>
@@ -450,20 +702,25 @@ export function bundlesPage(email: string, bundles: LedgerBundle[]): string {
 <html lang="en">
 ${head("Bundles · Seer", og)}
 <body>
-<main class="sheet">
-  <header class="masthead">
-    ${markSvg("mark")}
-    <div>
-      <h1>Bundles</h1>
-      <p class="subtitle">Everything Seer is holding &middot; <span class="email-tag">${escapeHtml(email)}</span></p>
-    </div>
-  </header>
-  ${scotch()}
-  ${body}
-  <footer class="colophon">
-    <span><a href="/">Back to the front</a></span>
-  </footer>
-</main>
+<div class="frame warm">
+  <div class="shell spine">
+    ${navRow(null)}
+    <p class="eyebrow"><span class="email-tag">${escapeHtml(email)}</span></p>
+    <h1 class="h-section">Bundles</h1>
+    <p class="subtitle">Everything Seer is holding.</p>
+  </div>
+</div>
+<div class="frame grow">
+  <div class="shell spine">
+    ${body}
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
 </body>
 </html>`;
 }
@@ -495,25 +752,28 @@ export function shellPage(slug: string, path: string, meta: ShellMeta | null): s
 <html lang="en">
 ${head(title, og)}
 <body>
-<main class="sheet">
-  <header class="masthead">
-    ${markSvg("mark")}
-    <div>
-      <h1>Seer</h1>
-      <p class="subtitle">A private preview.</p>
-    </div>
-  </header>
-  ${scotch()}
-  <div class="card">
-    <p class="gate">You are looking at <code>${escapeHtml(slug)}</code>, a private bundle on Seer.${
+<div class="frame warm">
+  <div class="shell spine">
+    ${navRow(null)}
+  </div>
+</div>
+<div class="frame grow">
+  <div class="shell spine">
+    <div class="card">
+      <p class="eyebrow">Private preview</p>
+      <p class="gate">You are looking at <code>${escapeHtml(slug)}</code>, a private bundle on Seer.${
     meta ? `<span class="gate-meta">${meta.versions} version${meta.versions === 1 ? "" : "s"} &middot; updated ${escapeHtml(meta.updated)}</span>` : ""
   }</p>
-    <p class="gate-action"><a href="${escapeHtml(loginHref)}">Sign in with Google to view</a></p>
+      <p class="gate-action"><a class="cta" href="${escapeHtml(loginHref)}">Sign in with Google to view</a></p>
+    </div>
   </div>
-  <footer class="colophon">
-    <span>Open source at <a href="${GITHUB_URL}">github.com/kristofferremback/seer</a></span>
-  </footer>
-</main>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="${GITHUB_URL}">github</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
 </body>
 </html>`;
 }
