@@ -2,7 +2,7 @@ import type { Server, WebSocketHandler } from "bun";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { join, normalize, resolve } from "node:path";
 import { config } from "./config";
-import { getBundle, listBundles, listVersions, createVersion } from "./db";
+import { db, getBundle, listBundles, listVersions, createVersion } from "./db";
 import { inspectZip, saveZip, ensureExtracted } from "./store";
 import { loginRedirect, handleCallback, requireSession, sessionEmail } from "./auth";
 import { landingPage, bundlesPage, skillDoc, type LedgerBundle } from "./pages";
@@ -295,5 +295,27 @@ export function startServer() {
   // Log the absolute data path so a Railway volume's mount path can be verified
   // against it — they must match, or writes land on ephemeral disk.
   console.log(`Data dir: ${resolve(config.dataDir)} (mount your persistent volume here)`);
+
+  // Graceful shutdown. Railway (and most platforms) send SIGTERM to the old
+  // container on every redeploy. Without a handler the process is terminated
+  // with a non-zero code (143), which the platform reports as a crash. Stop
+  // the server, flush SQLite (WAL checkpoint on close), and exit 0 so a redeploy
+  // is a clean handoff, not a "crash".
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[seer] ${signal} received — shutting down gracefully`);
+    server.stop();
+    try {
+      db.close();
+    } catch (err) {
+      console.error("[seer] error closing database on shutdown:", err);
+    }
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+
   return server;
 }
