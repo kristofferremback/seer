@@ -10,7 +10,7 @@ Uploads are immutable and versioned: every upload of a slug creates a new versio
 - **Storage**: the raw zip is written to disk under `DATA_DIR/zips`. Metadata (slugs, versions, sizes) goes into `bun:sqlite`. The zip is the source of truth.
 - **Serving**: `/b/:slug/` serves the latest version, `/b/:slug/v/N/` serves a pinned version. Bundles are extracted on demand into a disposable cache.
 - **Live reload**: a tiny WebSocket script is injected into HTML served from the latest URL. When a new version lands, open viewers reload themselves.
-- **Auth**: writes need the API token. Reads need Google sign-in against an email allowlist.
+- **Auth**: writes need the API token. Individual bundle links are public — anyone with the URL can view. Only the private inventory (`/bundles` and `GET /api/bundles`) requires Google sign-in / the token.
 
 ## Quickstart
 
@@ -120,11 +120,12 @@ Returns every bundle with its full version history:
 
 There are two separate trust boundaries.
 
-- **Writes (uploads and the JSON API)** are authenticated by a single shared bearer token, `API_TOKEN`. This is what an AI agent uses. The comparison is constant-time. There are no per-user upload credentials.
-- **Reads (viewing bundles in a browser)** require Google sign-in. Seer runs a plain OIDC flow: it redirects to Google, receives an `id_token` from Google's token endpoint over TLS, reads the email claim, and checks it against `ALLOWED_EMAILS`. Only verified, allowlisted emails get a session. The session is a signed (HMAC-SHA256) `HttpOnly` cookie; there is no server-side session store. Cookies are marked `Secure` automatically when `BASE_URL` is `https`.
+- **Writes (uploads and the JSON API)** are authenticated by a single shared bearer token, `API_TOKEN`. This is what an AI agent uses. The comparison is constant-time. There are no per-user upload credentials. Listing every bundle (`GET /api/bundles`) also needs this token.
+- **Viewing individual bundles is public.** `/b/:slug/` and everything under it (pinned versions, sub-assets, the live-reload socket) are served to anyone with the link — no sign-in. Bundle links are shareable; hand one out and the recipient can open it in a browser.
+- **The inventory is private.** The signed-in ledger at `/bundles` requires Google sign-in. Seer runs a plain OIDC flow: it redirects to Google, receives an `id_token` from Google's token endpoint over TLS, reads the email claim, and checks it against `ALLOWED_EMAILS`. Only verified, allowlisted emails get a session. The session is a signed (HMAC-SHA256) `HttpOnly` cookie; there is no server-side session store. Cookies are marked `Secure` automatically when `BASE_URL` is `https`.
 - **Local dev.** Set `AUTH_DISABLED=true` to bypass Google entirely. Every viewer is treated as `dev@localhost`. Do not use this in a deployment.
 
-Public, unauthenticated bundle URLs render an OG-tagged sign-in shell page so a link previews nicely in chat and lands the visitor at Google sign-in. The public landing page lives at `/`, and the signed-in list of bundles lives at `/bundles`.
+A bundle serves its own `index.html` as-is, so a shared link previews with whatever OG tags the bundle itself carries. The public landing page lives at `/`, and the private list of bundles lives at `/bundles`.
 
 ## For agents
 
@@ -133,7 +134,7 @@ Seer hosts its own usage doc, written for an AI agent that holds a base URL and 
 - `GET /skill.md` — a public, no-auth Markdown guide covering how to build the zip, upload it with `curl`, read the response (`url` = latest, `versionUrl` = pinned), iterate, and list bundles. The `curl` examples are interpolated with the deployment's `BASE_URL`, so they are copy-pasteable as-is.
 - `GET /llms.txt` — the same document, at the path agents conventionally probe for.
 
-The landing page advertises the doc via `<link rel="alternate" type="text/markdown" href="/skill.md">` and a colophon link. Point an agent at `$BASE_URL/skill.md` (or `/llms.txt`) and it has everything it needs. Note that *viewing* a bundle still requires Google sign-in, so agents should hand the returned URL to a human rather than trying to fetch it back.
+The landing page advertises the doc via `<link rel="alternate" type="text/markdown" href="/skill.md">` and a colophon link. Point an agent at `$BASE_URL/skill.md` (or `/llms.txt`) and it has everything it needs. Bundle URLs are public, so an agent can hand the returned URL to anyone — or fetch it back itself to verify the rendered page. Only the inventory (`GET /api/bundles`) stays behind the token.
 
 ## Configuration
 

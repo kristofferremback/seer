@@ -5,7 +5,7 @@ import { config } from "./config";
 import { getBundle, listBundles, listVersions, createVersion } from "./db";
 import { inspectZip, saveZip, ensureExtracted } from "./store";
 import { loginRedirect, handleCallback, requireSession, sessionEmail } from "./auth";
-import { landingPage, bundlesPage, shellPage, skillDoc, type LedgerBundle, type ShellMeta } from "./pages";
+import { landingPage, bundlesPage, skillDoc, type LedgerBundle } from "./pages";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -83,56 +83,13 @@ async function serveBundleFile(
   return new Response(file, { headers: { "cache-control": cacheControl } });
 }
 
-/**
- * Is this /b/ request asking for an HTML document (a page a human navigates to)
- * rather than a sub-asset (css/js/image the page fetches)? Root, directories and
- * .html targets are documents; anything with another extension is an asset.
- */
-function isHtmlDocRequest(rest: string | undefined): boolean {
-  if (!rest || rest === "/" || rest.endsWith("/")) return true;
-  const base = rest.slice(rest.lastIndexOf("/") + 1);
-  const dot = base.lastIndexOf(".");
-  if (dot === -1) return true; // extensionless → treat as a document/directory
-  const ext = base.slice(dot + 1).toLowerCase();
-  return ext === "html" || ext === "htm";
-}
-
-/**
- * Unauthenticated shell for /b/:slug/. Returns a 200 preview-gate page with
- * per-bundle OG tags. Policy: the same 200 status is returned whether or not the
- * slug exists, so status never leaks which slugs are real. Only the OG metadata
- * (version count, last-updated) is enriched for bundles that actually exist; the
- * slug itself is already known to the requester (it is in the URL they used), so
- * echoing it back leaks nothing. No file content is ever read here.
- */
-function bundleShellResponse(slug: string, path: string): Response {
-  const bundle = SLUG_RE.test(slug) ? getBundle(slug) : null;
-  let meta: ShellMeta | null = null;
-  if (bundle) {
-    const versions = listVersions(slug);
-    const updated = new Date(versions[0]?.created_at ?? bundle.created_at)
-      .toISOString()
-      .slice(0, 10);
-    meta = { versions: bundle.latest_version, updated };
-  }
-  return new Response(shellPage(slug, path, meta), {
-    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
-  });
-}
-
+// Bundles are public: anyone with the link can view them, no session required.
 async function handleBundleRoute(req: Request): Promise<Response> {
   const url = new URL(req.url);
   // /b/:slug[/v/:version]/rest...
   const match = url.pathname.match(/^\/b\/([^/]+)(?:\/v\/(\d+))?(\/.*)?$/);
   if (!match) return new Response("Not found", { status: 404 });
   const [, slug, versionStr, rest] = match;
-
-  // No session: document requests get the OG shell + sign-in link; sub-asset
-  // requests get the normal login redirect (they are re-fetched after auth).
-  if (!sessionEmail(req)) {
-    if (isHtmlDocRequest(rest)) return bundleShellResponse(slug!, url.pathname);
-    return requireSession(req)!;
-  }
 
   if (!SLUG_RE.test(slug!)) return new Response("Not found", { status: 404 });
   const bundle = getBundle(slug!);
@@ -319,8 +276,7 @@ export function startServer() {
       const url = new URL(req.url);
 
       if (url.pathname === "/ws/livereload") {
-        // Viewers arrive here from an authed page, but the cookie rides along — check it.
-        if (!sessionEmail(req)) return new Response("Unauthorized", { status: 401 });
+        // Public: bundles are viewable by anyone, so their live-reload socket is too.
         const slug = url.searchParams.get("slug") ?? "";
         if (!SLUG_RE.test(slug)) return new Response("Bad slug", { status: 400 });
         if (srv.upgrade(req, { data: { slug } })) return undefined as unknown as Response;

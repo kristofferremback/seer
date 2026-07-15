@@ -137,7 +137,7 @@ function styles(): string {
   /* ---- tonal bands ---- */
   .frame { width: 100%; background: hsl(var(--paper)); position: relative; z-index: 1; }
   /* The content band grows to fill any leftover viewport height so the night
-     footer always pins to the bottom, even on the short shell page. */
+     footer always pins to the bottom, even on a short page. */
   .frame.grow { flex: 1 0 auto; }
   .frame.warm { background: hsl(var(--paper-warm)); }
   .frame.night { background: hsl(var(--night)); color: hsl(38 14% 80%); }
@@ -285,29 +285,6 @@ function styles(): string {
   .scroll-x::-webkit-scrollbar-thumb { background: hsl(var(--line)); border-radius: 999px; }
   .scroll-x::-webkit-scrollbar-track { background: transparent; }
 
-  /* ---- primary CTA: solid ink, paper text, literal 2px radius ---- */
-  .cta {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.6rem;
-    background: hsl(var(--ink));
-    color: hsl(var(--paper));
-    padding: 12px 20px;
-    font-family: var(--font-body);
-    font-weight: 500;
-    font-size: 13.5px;
-    letter-spacing: 0.005em;
-    text-decoration: none;
-    border-radius: 2px;
-    border: 0;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  @media (hover: hover) and (pointer: fine) {
-    .cta { transition: background-color 150ms ease; }
-    .cta:hover { background: hsl(var(--accent)); color: hsl(var(--paper)); }
-  }
-
   /* ---- specimen band: figure beside the copy-paste command ---- */
   .specimen-grid { display: grid; grid-template-columns: 1fr; gap: clamp(1.6rem, 4vw, 2.6rem); align-items: center; }
   .specimen-grid > * { min-width: 0; }
@@ -366,19 +343,6 @@ function styles(): string {
   .history a { margin-right: 0.6rem; color: hsl(var(--muted)); text-decoration: none; }
   @media (hover: hover) and (pointer: fine) { .history a:hover { color: hsl(var(--accent)); } }
   .empty { color: hsl(var(--muted)); margin-bottom: 1.4rem; }
-
-  /* ---- private-preview gate card ---- */
-  .card {
-    background: hsl(var(--paper-warm));
-    border: 1px solid hsl(var(--line));
-    border-radius: 14px;
-    padding: clamp(1.6rem, 4vw, 2.2rem);
-    max-width: 32rem;
-  }
-  .frame.warm .card { background: hsl(var(--paper)); }
-  .gate { font-size: 1.05rem; line-height: 1.55; margin: 0; max-width: none; }
-  .gate-meta { display: block; font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.02em; color: hsl(var(--muted)); margin-top: 0.6rem; }
-  .gate-action { margin: 1.4rem 0 0; }
 
   /* ---- footer ---- */
   .footer {
@@ -577,13 +541,17 @@ curl -H "Authorization: Bearer $API_TOKEN" ${base}/api/bundles
 Returns every bundle with its full version history (slugs, versions, sizes,
 timestamps).
 
-## Important: viewing requires a human
+## Sharing and viewing
 
-Bundle URLs (\`/b/<slug>/\`) are gated behind Google sign-in. **You cannot fetch and
-verify the rendered page yourself** — an unauthenticated fetch gets a sign-in shell,
-not the bundle. Give the \`url\` to the human and let them open it in their browser.
-Trust the upload response (\`200\` + \`hasIndexHtml: true\`) as your confirmation that
-the bundle was stored, rather than trying to GET it back.
+Bundle URLs (\`/b/<slug>/\`) are **public** — anyone with the link can open it in a
+browser, no sign-in required. Hand the \`url\` to whoever should see it, or open it
+yourself. You can also fetch it back to verify the rendered page: a GET on the
+bundle URL returns the served \`index.html\` (the latest URL has the live-reload
+script injected before \`</body>\`).
+
+Only the write side and the inventory are private: uploading needs the API token,
+and the list of every bundle (\`GET /api/bundles\`) needs the token too. Individual
+bundle links do not.
 `;
 }
 
@@ -627,8 +595,10 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
     <div class="prose">
       <p class="lede">An agent builds a page, zips it, and pushes it here. Seer keeps every
       version and hands back a URL that reloads itself the moment a new build lands.</p>
-      <p>One person's tool, kept behind a Google sign-in. No accounts, no dashboard, no
-      product. Just a place for half-finished pages to be looked at.</p>
+      <p>One person's tool. Pushing a bundle needs the API key and the list of what's
+      here stays private, but the bundle links themselves are public — hand one to
+      anyone and they can open it, no sign-in. No accounts, no dashboard, no product.
+      Just a place for half-finished pages to be looked at.</p>
       <p class="aside">It is a slop site, for sure. It also works.</p>
     </div>
   </div>
@@ -732,60 +702,3 @@ ${themeToggleScript()}
 </html>`;
 }
 
-// ---- private preview gate (unauthenticated /b/:slug/) ----
-
-export interface ShellMeta {
-  versions: number;
-  updated: string;
-}
-
-export function shellPage(slug: string, path: string, meta: ShellMeta | null): string {
-  const loginHref = `/login?next=${encodeURIComponent(path)}`;
-  const title = `${slug} · Seer`;
-  const desc = meta
-    ? `${meta.versions} version${meta.versions === 1 ? "" : "s"}, last updated ${meta.updated}. Sign in with Google to view.`
-    : "A private preview on Seer. Sign in with Google to view.";
-  const og = {
-    "og:title": title,
-    "og:description": desc,
-    "og:type": "website",
-    "og:url": `${config.baseUrl}${path}`,
-    "og:site_name": "Seer",
-    "og:image": `${config.baseUrl}/og.png`,
-    "og:image:width": "1200",
-    "og:image:height": "630",
-    "twitter:card": "summary_large_image",
-    "twitter:title": title,
-    "twitter:description": desc,
-    "twitter:image": `${config.baseUrl}/og.png`,
-  };
-
-  return `<!doctype html>
-<html lang="en">
-${head(title, og)}
-<body>
-<div class="frame warm">
-  <div class="shell spine">
-    ${navRow(null)}
-  </div>
-</div>
-<div class="frame grow">
-  <div class="shell spine">
-    <div class="card">
-      <p class="eyebrow">Private preview</p>
-      <p class="gate">You are looking at <code>${escapeHtml(slug)}</code>, a private bundle on Seer.${
-    meta ? `<span class="gate-meta">${meta.versions} version${meta.versions === 1 ? "" : "s"} &middot; updated ${escapeHtml(meta.updated)}</span>` : ""
-  }</p>
-      <p class="gate-action"><a class="cta" href="${escapeHtml(loginHref)}">Sign in with Google to view</a></p>
-    </div>
-  </div>
-</div>
-<div class="frame night">
-  <div class="shell">
-    ${footer([`<a href="${GITHUB_URL}">github</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
-  </div>
-</div>
-${themeToggleScript()}
-</body>
-</html>`;
-}

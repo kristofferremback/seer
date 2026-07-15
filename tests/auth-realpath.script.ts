@@ -189,73 +189,80 @@ const base = `http://localhost:${server.port}`;
   );
 }
 
-// 11c. Unauthenticated /b/:slug/ returns a 200 OG shell (not a redirect) for an
-// existing bundle: per-bundle OG tags + a sign-in link, and NO bundle file content.
+// 11c. Bundles are PUBLIC: unauthenticated /b/:slug/ serves the real bundle
+// index.html (200), content and all, with the live-reload script injected.
 {
-  const zip = zipSync({ "index.html": strToU8("<!doctype html><body>SECRET-BUNDLE-BODY</body>") });
-  const up = await fetch(`${base}/api/bundles/private-preview`, {
+  const zip = zipSync({
+    "index.html": strToU8("<!doctype html><body>PUBLIC-BUNDLE-BODY</body>"),
+    "style.css": strToU8("body { color: teal; }"),
+  });
+  const up = await fetch(`${base}/api/bundles/public-preview`, {
     method: "PUT",
     headers: { authorization: `Bearer ${config.apiToken}` },
     body: zip,
   });
   assert(up.status === 200, `seeding bundle should 200, got ${up.status}`);
 
-  const r = await fetch(`${base}/b/private-preview/`, { redirect: "manual" });
-  assert(r.status === 200, `unauth /b/:slug/ should return the 200 shell, got ${r.status}`);
+  const r = await fetch(`${base}/b/public-preview/`, { redirect: "manual" });
+  assert(r.status === 200, `unauth /b/:slug/ should serve the bundle (200), got ${r.status}`);
   const html = await r.text();
-  assert(
-    html.includes('property="og:title"') && html.includes("private-preview"),
-    "shell carries per-bundle og:title",
-  );
-  assert(html.includes("/login?next="), "shell links to /login with the return path");
-  assert(!html.includes("SECRET-BUNDLE-BODY"), "shell must NOT leak bundle file content");
+  assert(html.includes("PUBLIC-BUNDLE-BODY"), "public bundle serves its real index.html content");
+  assert(html.includes("/ws/livereload?slug=public-preview"), "latest bundle carries live-reload script");
+  assert(!html.includes("/login?next="), "public bundle must NOT redirect to sign-in");
 }
 
-// 11d. Unauthenticated sub-asset requests under /b/ still redirect to login
-// (they are re-fetched by the page after sign-in).
+// 11d. Unauthenticated sub-asset requests under /b/ are served directly (200,
+// not a login redirect), with a sensible content-type.
 {
-  const r = await fetch(`${base}/b/private-preview/app.js`, { redirect: "manual" });
-  assert(r.status === 302, `unauth /b asset should 302 to login, got ${r.status}`);
-  assert((r.headers.get("location") ?? "").startsWith("/login?next="), "asset redirects to /login");
+  const r = await fetch(`${base}/b/public-preview/style.css`, { redirect: "manual" });
+  assert(r.status === 200, `unauth /b asset should 200, got ${r.status}`);
+  assert(
+    (r.headers.get("content-type") ?? "").includes("text/css"),
+    `asset should carry text/css content-type, got ${r.headers.get("content-type")}`,
+  );
+  assert((await r.text()).includes("color: teal"), "asset serves its real content");
 }
 
-// 11e. Unknown slug returns the SAME 200 status (no existence leak via status).
+// 11e. Unknown slug -> 404 (a real bundle 404, not a shell).
 {
   const r = await fetch(`${base}/b/no-such-bundle/`, { redirect: "manual" });
-  assert(r.status === 200, `unknown slug shell should also 200, got ${r.status}`);
+  assert(r.status === 404, `unknown slug should 404, got ${r.status}`);
 }
 
-// 12. WS live reload without a session cookie -> 401 (upgrade never happens).
+// 12. WS live reload without a session cookie -> PUBLIC: it upgrades and receives
+// "reload" when a new version is uploaded (previously this was gated to 401).
 {
-  const r = await fetch(`${base}/ws/livereload?slug=some-slug`, {
-    headers: { upgrade: "websocket", connection: "Upgrade" },
+  const slug = "ws-public";
+  const seed = await fetch(`${base}/api/bundles/${slug}`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${config.apiToken}` },
+    body: zipSync({ "index.html": strToU8("<!doctype html><body>initial</body>") }),
   });
-  assert(r.status === 401, `WS without session should 401, got ${r.status}`);
+  assert(seed.status === 200, `seeding ws bundle should 200, got ${seed.status}`);
 
-  // And a real WebSocket client connection fails to open.
-  const ws = new WebSocket(`ws://localhost:${server.port}/ws/livereload?slug=some-slug`);
-  const outcome = await new Promise<string>((res) => {
+  // No cookie header -> unauthenticated.
+  const ws = new WebSocket(`ws://localhost:${server.port}/ws/livereload?slug=${slug}`);
+  const opened = await new Promise<string>((res) => {
     ws.onopen = () => res("open");
     ws.onerror = () => res("error");
     ws.onclose = () => res("close");
     setTimeout(() => res("timeout"), 2000);
   });
-  assert(outcome !== "open" && outcome !== "timeout", `WS should fail to connect, got ${outcome}`);
-}
+  assert(opened === "open", `public WS should connect without a session, got ${opened}`);
 
-// 13. WS live reload WITH a valid session cookie succeeds.
-{
-  const cookie = cookieValue(sessionCookie("allowed@example.com"));
-  const ws = new WebSocket(`ws://localhost:${server.port}/ws/livereload?slug=some-slug`, {
-    headers: { cookie: `seer_session=${cookie}` },
+  const gotReload = new Promise<string>((res) => {
+    ws.onmessage = (e) => res(String(e.data));
   });
-  const outcome = await new Promise<string>((res) => {
-    ws.onopen = () => res("open");
-    ws.onerror = () => res("error");
-    ws.onclose = () => res("close");
-    setTimeout(() => res("timeout"), 2000);
+  await fetch(`${base}/api/bundles/${slug}`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${config.apiToken}` },
+    body: zipSync({ "index.html": strToU8("<!doctype html><body>updated</body>") }),
   });
-  assert(outcome === "open", `WS with session should connect, got ${outcome}`);
+  const msg = await Promise.race([
+    gotReload,
+    new Promise<string>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000)),
+  ]);
+  assert(msg === "reload", `public WS should receive reload on new upload, got ${msg}`);
   ws.close();
 }
 
