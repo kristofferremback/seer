@@ -152,7 +152,7 @@ function styles(): string {
 `;
 }
 
-function head(title: string, og: Record<string, string>): string {
+function head(title: string, og: Record<string, string>, extra = ""): string {
   const tags = Object.entries(og)
     .map(([k, v]) => {
       const attr = k.startsWith("og:") ? "property" : "name";
@@ -163,13 +163,123 @@ function head(title: string, og: Record<string, string>): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
-${tags}
+${tags}${extra ? `\n${extra}` : ""}
 <style>${styles()}</style>
 </head>`;
 }
 
 function scotch(): string {
   return `<div class="scotch" aria-hidden="true"><span class="thick"></span><span class="thin"></span></div>`;
+}
+
+// ---- agent-facing skill doc (/skill.md, /llms.txt) ----
+//
+// Written FOR an AI agent that holds a SEER_URL and SEER_API_TOKEN and wants to
+// publish an HTML bundle. config.baseUrl is interpolated so every curl example is
+// copy-pasteable against this exact deployment. Served as text/markdown, no-cache.
+
+export function skillDoc(): string {
+  const base = config.baseUrl;
+  return `# Seer — publishing HTML bundles as an agent
+
+Seer is a personal preview host for self-contained HTML bundles. You (an AI agent)
+zip up a page you built, \`PUT\` it here with a bearer token, and Seer returns a stable,
+versioned URL a human can open in a browser. Re-uploading the same slug creates a new
+version and live-reloads any viewer that already has the page open. This is the place
+to put richer output than a chat reply can carry — dashboards, small apps, interactive
+reports — instead of pasting a wall of code.
+
+You need two things, which the human has given you (typically as environment
+variables): the base URL of this Seer instance (\`${base}\`) and an API token
+(referred to below as \`$API_TOKEN\`). Keep the token secret; it is the only write
+credential.
+
+## 1. Build the zip
+
+- The zip must contain a root \`index.html\` (at the top level of the archive, not
+  inside a subdirectory). That is what loads at the bundle URL.
+- Use **relative** asset paths (\`./style.css\`, \`assets/app.js\`, \`img/logo.png\`).
+  Absolute paths like \`/style.css\` will not resolve, because the bundle is served
+  under \`/b/<slug>/\`.
+- Nested directories are fine. Directory requests fall back to their \`index.html\`.
+- Prefer a self-contained bundle (inline or bundled JS/CSS, or assets shipped inside
+  the zip). External network requests are the human's browser's problem, not Seer's.
+- Zip the **contents** of your build directory, not the directory itself, so
+  \`index.html\` lands at the root of the archive:
+
+\`\`\`sh
+# from inside the build directory:
+zip -r ../bundle.zip .
+\`\`\`
+
+Default size limit is 50 MB. Unsafe zip entries (absolute paths, \`..\`, null bytes)
+are rejected.
+
+## 2. Upload it
+
+Pick a slug matching \`[a-z0-9][a-z0-9-]{0,63}\` (lowercase letters, digits, hyphens;
+must start with a letter or digit; up to 64 characters). Send the zip as the raw
+request body with \`--data-binary\` (not multipart):
+
+\`\`\`sh
+curl -X PUT --data-binary @bundle.zip \\
+  -H "Authorization: Bearer $API_TOKEN" \\
+  ${base}/api/bundles/<slug>
+\`\`\`
+
+\`PUT\` and \`POST\` behave identically. Each successful call creates the next version
+for that slug.
+
+## 3. Read the response
+
+A successful upload returns \`200\` with JSON:
+
+\`\`\`json
+{
+  "slug": "<slug>",
+  "version": 1,
+  "url": "${base}/b/<slug>/",
+  "versionUrl": "${base}/b/<slug>/v/1/",
+  "bytes": 2048,
+  "files": 3,
+  "hasIndexHtml": true
+}
+\`\`\`
+
+- \`url\` is the **latest** URL: it always shows the newest version and live-reloads.
+  Hand this one to the human in most cases.
+- \`versionUrl\` is a **pinned** URL for this exact version; it never changes and does
+  not live-reload. Use it when you want to reference a specific build permanently.
+- Check \`hasIndexHtml\`: if it is \`false\`, you forgot the root \`index.html\` and the
+  bundle URL will 404. Re-zip and re-upload.
+
+Error responses are JSON with an \`error\` field. Notable statuses: \`400\` (invalid
+slug, empty body, or bad zip), \`401\` (invalid or missing token), \`413\` (zip exceeds
+the size limit).
+
+## 4. Iterating
+
+Upload the same slug again to publish a new version. Any browser tab already open on
+the latest \`url\` reloads itself automatically. You do not need to send a new link —
+the old one keeps working and updates in place.
+
+## 5. Listing what is published
+
+\`\`\`sh
+curl -H "Authorization: Bearer $API_TOKEN" ${base}/api/bundles
+\`\`\`
+
+Returns every bundle with its full version history (slugs, versions, sizes,
+timestamps).
+
+## Important: viewing requires a human
+
+Bundle URLs (\`/b/<slug>/\`) are gated behind Google sign-in. **You cannot fetch and
+verify the rendered page yourself** — an unauthenticated fetch gets a sign-in shell,
+not the bundle. Give the \`url\` to the human and let them open it in their browser.
+Trust the upload response (\`200\` + \`hasIndexHtml: true\`) as your confirmation that
+the bundle was stored, rather than trying to GET it back.
+`;
 }
 
 // ---- public landing ----
@@ -194,7 +304,7 @@ export function landingPage(signedIn: boolean): string {
 
   return `<!doctype html>
 <html lang="en">
-${head("Seer", og)}
+${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">`)}
 <body>
 <main class="sheet">
   <header class="masthead">
@@ -227,6 +337,8 @@ ${head("Seer", og)}
     <span>Open source at <a href="${GITHUB_URL}">github.com/kristofferremback/seer</a></span>
     <span class="mid" aria-hidden="true">&middot;</span>
     <span>Curious? <a href="mailto:${CONTACT_EMAIL}">drop a line</a></span>
+    <span class="mid" aria-hidden="true">&middot;</span>
+    <span><a href="/skill.md"><code>skill.md</code></a> for agents</span>
     <span class="mid" aria-hidden="true">&middot;</span>
     <span>${signedIn ? `<a href="/bundles">Your bundles</a>` : `<a href="/login">Sign in</a>`}</span>
   </footer>

@@ -166,6 +166,19 @@ const base = `http://localhost:${server.port}`;
   assert(html.includes("Sign in"), "landing offers a sign-in link when logged out");
 }
 
+// 11a. The agent skill doc is public (no session): both paths serve markdown.
+{
+  const skill = await fetch(`${base}/skill.md`, { redirect: "manual" });
+  assert(skill.status === 200, `/skill.md should 200 without auth, got ${skill.status}`);
+  assert(
+    (skill.headers.get("content-type") ?? "").startsWith("text/markdown"),
+    "/skill.md is text/markdown",
+  );
+  const llms = await fetch(`${base}/llms.txt`, { redirect: "manual" });
+  assert(llms.status === 200, `/llms.txt should 200 without auth, got ${llms.status}`);
+  assert((await llms.text()) === (await skill.text()), "/llms.txt matches /skill.md body");
+}
+
 // 11b. The signed-in ledger (/bundles) redirects to /login without a session.
 {
   const r = await fetch(`${base}/bundles`, { redirect: "manual" });

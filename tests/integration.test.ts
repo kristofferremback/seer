@@ -113,6 +113,34 @@ describe("landing page", () => {
   });
 });
 
+describe("agent skill doc", () => {
+  test("GET /skill.md -> 200 text/markdown with configured base URL and bearer header, no auth", async () => {
+    const r = await fetch(`${base}/skill.md`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    expect(r.headers.get("cache-control")).toBe("no-cache");
+    const md = await r.text();
+    // The copy-pasteable upload curl carries the configured base URL and bearer header.
+    expect(md).toContain(`${config.baseUrl}/api/bundles/`);
+    expect(md).toContain(`-H "Authorization: Bearer $API_TOKEN"`);
+    expect(md).toContain("--data-binary @bundle.zip");
+  });
+
+  test("GET /llms.txt -> identical body to /skill.md", async () => {
+    const skill = await (await fetch(`${base}/skill.md`)).text();
+    const r = await fetch(`${base}/llms.txt`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    expect(await r.text()).toBe(skill);
+  });
+
+  test("landing HTML advertises the doc (alternate link + colophon anchor)", async () => {
+    const html = await (await fetch(`${base}/`)).text();
+    expect(html).toContain('<link rel="alternate" type="text/markdown" href="/skill.md">');
+    expect(html).toContain('href="/skill.md"');
+  });
+});
+
 describe("bundle ledger", () => {
   test("GET /bundles (auth disabled) -> 200 listing an uploaded bundle", async () => {
     await put("ledger-listed", htmlZip("hello"));

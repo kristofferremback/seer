@@ -5,11 +5,17 @@ import { config } from "./config";
 import { getBundle, listBundles, listVersions, createVersion } from "./db";
 import { inspectZip, saveZip, ensureExtracted } from "./store";
 import { loginRedirect, handleCallback, requireSession, sessionEmail } from "./auth";
-import { landingPage, bundlesPage, shellPage, type LedgerBundle, type ShellMeta } from "./pages";
+import { landingPage, bundlesPage, shellPage, skillDoc, type LedgerBundle, type ShellMeta } from "./pages";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 type WSData = { slug: string };
+
+function markdownDoc(): Response {
+  return new Response(skillDoc(), {
+    headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-cache" },
+  });
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
@@ -223,6 +229,11 @@ export function startServer() {
         new Response(landingPage(!!sessionEmail(req)), {
           headers: { "content-type": "text/html;charset=utf-8" },
         }),
+
+      // Agent-facing usage doc. Public, no auth — agents (and llms.txt probers)
+      // fetch this to learn how to publish. Both paths serve identical markdown.
+      "/skill.md": () => markdownDoc(),
+      "/llms.txt": () => markdownDoc(),
 
       // The signed-in ledger of held bundles.
       "/bundles": (req) => {

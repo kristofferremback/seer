@@ -126,6 +126,15 @@ There are two separate trust boundaries.
 
 Public, unauthenticated bundle URLs render an OG-tagged sign-in shell page so a link previews nicely in chat and lands the visitor at Google sign-in. The public landing page lives at `/`, and the signed-in list of bundles lives at `/bundles`.
 
+## For agents
+
+Seer hosts its own usage doc, written for an AI agent that holds a base URL and an API token and wants to publish a bundle:
+
+- `GET /skill.md` — a public, no-auth Markdown guide covering how to build the zip, upload it with `curl`, read the response (`url` = latest, `versionUrl` = pinned), iterate, and list bundles. The `curl` examples are interpolated with the deployment's `BASE_URL`, so they are copy-pasteable as-is.
+- `GET /llms.txt` — the same document, at the path agents conventionally probe for.
+
+The landing page advertises the doc via `<link rel="alternate" type="text/markdown" href="/skill.md">` and a colophon link. Point an agent at `$BASE_URL/skill.md` (or `/llms.txt`) and it has everything it needs. Note that *viewing* a bundle still requires Google sign-in, so agents should hand the returned URL to a human rather than trying to fetch it back.
+
 ## Configuration
 
 All configuration is via environment variables. Bun loads `.env` automatically. Copy `.env.example` to `.env` to start.
