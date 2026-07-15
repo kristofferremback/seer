@@ -24,19 +24,29 @@ function markSvg(cls = "mark"): string {
 }
 
 // ---- shared paper substrate + type ----
+// Design language: keep Seer's identity (paper tone, serif masthead, oxblood
+// accent, hand-drawn mark, mono only for data) but adopt a calmer, border-first
+// restraint. Depth comes from hairline warm borders and surfaces a hair off the
+// paper, not from heavy broadsheet rules or shadows. Oxblood carries interactive
+// meaning only: links, focus rings, the mark's glint.
 function styles(): string {
   return `
   :root {
     color-scheme: light;
     --paper: #f4efe3;
-    --paper-deep: #ece4d3;
-    --ink: #211d18;
+    --surface: #f8f4ea;      /* card: a hair lighter than the paper */
+    --surface-sunk: #ece4d3; /* code specimen: sunk a hair below */
+    --ink: #24201a;
     --ink-soft: #6b6154;
     --accent: #6d1f22;
-    --rule: rgba(33, 29, 24, 0.85);
-    --hair: rgba(33, 29, 24, 0.2);
+    --accent-soft: rgba(109, 31, 34, 0.14);
+    --hair: #dcd2bd;         /* warm hairline border */
+    --hair-soft: #e5dcca;
+    --r-card: 12px;
+    --r-item: 8px;
     --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
     --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --gutter: clamp(1.25rem, 5vw, 2rem);
   }
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
@@ -46,10 +56,11 @@ function styles(): string {
     background-color: var(--paper);
     color: var(--ink);
     font-family: var(--serif);
-    font-size: 18px;
-    line-height: 1.62;
-    /* A warm rake of light from the top, resolving into the paper. One source. */
-    background-image: radial-gradient(120% 80% at 50% -18%, rgba(255, 250, 238, 0.9), rgba(255, 250, 238, 0) 60%);
+    font-size: 17px;
+    line-height: 1.6;
+    touch-action: manipulation;
+    /* A quiet warm rake of light from the top, resolving into the paper. */
+    background-image: radial-gradient(115% 70% at 50% -20%, rgba(255, 250, 238, 0.7), rgba(255, 250, 238, 0) 58%);
   }
   /* Fine printed grain on the substrate, behind everything. Felt, not seen. */
   body::before {
@@ -60,56 +71,84 @@ function styles(): string {
     pointer-events: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
     mix-blend-mode: multiply;
-    opacity: 0.05;
+    opacity: 0.04;
   }
   .sheet {
     max-width: 44rem;
     margin: 0 auto;
-    padding: clamp(2.4rem, 7vw, 4.5rem) clamp(1.4rem, 5vw, 2.2rem) 2.6rem;
+    /* safe-area aware gutters so nothing kisses a notch or the screen rim */
+    padding:
+      clamp(2rem, 6vw, 3.4rem)
+      max(var(--gutter), env(safe-area-inset-right))
+      max(2.2rem, env(safe-area-inset-bottom))
+      max(var(--gutter), env(safe-area-inset-left));
   }
-  a { color: var(--ink); text-decoration: underline; text-underline-offset: 2.5px; text-decoration-thickness: 1px; transition: color 0.12s ease; }
-  a:hover { color: var(--accent); }
+  a {
+    color: var(--ink);
+    text-decoration: underline;
+    text-underline-offset: 2.5px;
+    text-decoration-thickness: 1px;
+    text-decoration-color: var(--hair);
+  }
+  /* Hover is a fine-pointer affordance only, so touch never sticks a colour. */
+  @media (hover: hover) and (pointer: fine) {
+    a { transition: color 150ms ease, text-decoration-color 150ms ease; }
+    a:hover { color: var(--accent); text-decoration-color: var(--accent); }
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+  /* thin, restrained scrollbars on the overflow blocks */
+  .scroll-x { overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--hair) transparent; }
+  .scroll-x::-webkit-scrollbar { height: 6px; }
+  .scroll-x::-webkit-scrollbar-thumb { background: var(--hair); border-radius: 999px; }
+  .scroll-x::-webkit-scrollbar-track { background: transparent; }
 
   /* masthead */
-  .masthead { display: flex; align-items: flex-end; gap: 1.1rem; }
-  .mark { width: 46px; height: 56px; flex: none; }
-  .mark-fig { width: 68px; height: 82px; }
-  h1 { font-size: clamp(2.9rem, 8vw, 4.1rem); line-height: 0.94; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
-  .subtitle { font-style: italic; color: var(--ink-soft); font-size: clamp(1rem, 3.4vw, 1.16rem); margin: 0.5rem 0 0; }
-  .email-tag { font-family: var(--mono); font-size: 0.82rem; color: var(--ink-soft); }
+  .masthead { display: flex; align-items: center; gap: 1rem; }
+  .mark { width: 42px; height: 51px; flex: none; }
+  .mark-fig { width: 60px; height: 73px; }
+  h1 { font-size: clamp(2.3rem, 6vw, 3.1rem); line-height: 1; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
+  .subtitle { font-style: italic; color: var(--ink-soft); font-size: clamp(0.98rem, 3vw, 1.08rem); margin: 0.35rem 0 0; }
+  .email-tag { font-family: var(--mono); font-style: normal; font-size: 0.8rem; color: var(--ink-soft); }
 
-  /* the scotch rule: the broadsheet nameplate device */
-  .scotch { margin: 1.5rem 0 1.7rem; }
-  .scotch span { display: block; background: var(--rule); }
-  .scotch .thick { height: 3px; }
-  .scotch .thin { height: 1px; margin-top: 3px; }
+  /* the nameplate rule, slimmed to a single quiet hairline */
+  .scotch { height: 1px; background: var(--hair); border: 0; margin: 1.4rem 0 1.8rem; }
 
-  p { margin: 0 0 1rem; max-width: 34em; }
-  .lede { font-size: 1.12rem; }
+  p { margin: 0 0 0.9rem; max-width: 36em; min-width: 0; }
+  .lede { font-size: 1.1rem; }
   .aside { color: var(--ink-soft); font-style: italic; }
 
   .columns { display: grid; grid-template-columns: 1fr; gap: 1.8rem 2.4rem; align-items: start; }
+  /* min-width:0 lets a wide code line scroll inside its own box instead of
+     forcing the grid track (and the page) wider than the viewport. */
+  .columns > * { min-width: 0; }
   @media (min-width: 40rem) { .columns { grid-template-columns: 1.15fr 1fr; } }
 
-  .fig { display: flex; align-items: center; gap: 0.85rem; margin: 0.3rem 0 1.3rem; }
+  .fig { display: flex; align-items: center; gap: 0.8rem; margin: 0 0 1.2rem; }
   .fig figcaption { font-style: italic; color: var(--ink-soft); font-size: 0.9rem; }
 
-  .specimen-label { font-style: italic; font-size: 0.95rem; color: var(--ink-soft); margin: 0 0 0.5rem; }
+  /* specimen: a quiet bordered card holding the copy-paste command */
+  .specimen {
+    background: var(--surface);
+    border: 1px solid var(--hair);
+    border-radius: var(--r-card);
+    padding: 1rem 1.1rem;
+  }
+  .specimen-label { font-style: italic; font-size: 0.92rem; color: var(--ink-soft); margin: 0 0 0.6rem; }
   pre.cmd {
     font-family: var(--mono);
-    font-size: 0.78rem;
+    font-size: 0.76rem;
     line-height: 1.65;
-    margin: 0 0 0.7rem;
-    padding: 0.85rem 0.95rem;
-    background: var(--paper-deep);
-    border: 1px solid var(--hair);
-    border-radius: 3px;
-    overflow-x: auto;
+    margin: 0;
+    padding: 0.8rem 0.9rem;
+    background: var(--surface-sunk);
+    border: 1px solid var(--hair-soft);
+    border-radius: var(--r-item);
     white-space: pre;
     color: var(--ink);
   }
   pre.cmd .flag { color: var(--ink-soft); }
-  .specimen-note { font-size: 0.95rem; color: var(--ink-soft); max-width: none; }
+  .specimen-note { font-size: 0.92rem; color: var(--ink-soft); max-width: none; margin: 0.7rem 0 0; }
   code { font-family: var(--mono); font-size: 0.85em; }
 
   /* colophon */
@@ -120,26 +159,42 @@ function styles(): string {
     display: flex;
     flex-wrap: wrap;
     gap: 0.35rem 1rem;
-    font-size: 0.92rem;
+    font-size: 0.9rem;
     color: var(--ink-soft);
   }
   .colophon .mid { color: var(--hair); }
 
-  /* ledger (signed-in bundle list) */
-  table { width: 100%; border-collapse: collapse; margin-top: 0.4rem; }
-  th { text-align: left; font-style: italic; font-weight: 400; color: var(--ink-soft); font-size: 0.9rem; padding: 0 0.9rem 0.5rem 0; border-bottom: 1px solid var(--hair); }
-  td { padding: 0.62rem 0.9rem 0.62rem 0; border-bottom: 1px solid var(--hair); vertical-align: baseline; }
-  td:last-child, th:last-child { padding-right: 0; }
-  .mono { font-family: var(--mono); font-size: 0.85rem; }
+  /* ledger (signed-in bundle list): a clean data table in a quiet card */
+  .ledger {
+    background: var(--surface);
+    border: 1px solid var(--hair);
+    border-radius: var(--r-card);
+    margin-top: 0.4rem;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 0.6rem 0.9rem; vertical-align: baseline; text-align: left; }
+  th {
+    font-style: italic; font-weight: 400; color: var(--ink-soft); font-size: 0.88rem;
+    border-bottom: 1px solid var(--hair);
+  }
+  td { border-bottom: 1px solid var(--hair-soft); }
+  tr:last-child td { border-bottom: 0; }
+  .mono { font-family: var(--mono); font-size: 0.83rem; }
   .slug a { text-decoration: none; font-weight: 600; }
-  .slug a:hover { text-decoration: underline; }
+  @media (hover: hover) and (pointer: fine) { .slug a:hover { text-decoration: underline; } }
   .history a { margin-right: 0.55rem; color: var(--ink-soft); }
   .empty { color: var(--ink-soft); font-style: italic; }
 
-  /* shell (private preview gate) */
-  .gate { font-size: 1.08rem; }
-  .gate-meta { font-family: var(--mono); font-size: 0.82rem; color: var(--ink-soft); margin-top: 0.4rem; }
-  .gate-action { margin-top: 1.5rem; font-size: 1.05rem; }
+  /* shell (private preview gate): the same quiet card treatment */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--hair);
+    border-radius: var(--r-card);
+    padding: 1.2rem 1.3rem;
+  }
+  .gate { font-size: 1.05rem; margin: 0; }
+  .gate-meta { display: block; font-family: var(--mono); font-size: 0.8rem; color: var(--ink-soft); margin-top: 0.5rem; }
+  .gate-action { margin: 1.1rem 0 0; font-size: 1.02rem; }
 
   .glint { transform-box: fill-box; transform-origin: center; }
   @media (prefers-reduced-motion: no-preference) {
@@ -161,7 +216,7 @@ function head(title: string, og: Record<string, string>, extra = ""): string {
     .join("\n");
   return `<head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>${escapeHtml(title)}</title>
 ${tags}${extra ? `\n${extra}` : ""}
 <style>${styles()}</style>
@@ -169,7 +224,7 @@ ${tags}${extra ? `\n${extra}` : ""}
 }
 
 function scotch(): string {
-  return `<div class="scotch" aria-hidden="true"><span class="thick"></span><span class="thin"></span></div>`;
+  return `<hr class="scotch" aria-hidden="true">`;
 }
 
 // ---- agent-facing skill doc (/skill.md, /llms.txt) ----
@@ -328,9 +383,11 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
         ${markSvg("mark mark-fig")}
         <figcaption>Fig. 1. The scrying glass.</figcaption>
       </figure>
-      <p class="specimen-label">To push a bundle</p>
-      <pre class="cmd">${curl}</pre>
-      <p class="specimen-note">Back comes <code>/b/your-slug/</code>, versioned and live.</p>
+      <div class="specimen">
+        <p class="specimen-label">To push a bundle</p>
+        <pre class="cmd scroll-x">${curl}</pre>
+        <p class="specimen-note">Back comes <code>/b/your-slug/</code>, versioned and live.</p>
+      </div>
     </aside>
   </div>
   <footer class="colophon">
@@ -376,14 +433,18 @@ export function bundlesPage(email: string, bundles: LedgerBundle[]): string {
   const body =
     bundles.length === 0
       ? `<p class="empty">No bundles yet.</p>
-         <p class="specimen-label">Push your first one</p>
-         <pre class="cmd">curl -X PUT --data-binary @bundle.zip \\
+         <div class="specimen">
+           <p class="specimen-label">Push your first one</p>
+           <pre class="cmd scroll-x">curl -X PUT --data-binary @bundle.zip \\
   <span class="flag">-H "Authorization: Bearer $API_TOKEN"</span> \\
-  ${escapeHtml(config.baseUrl)}/api/bundles/your-slug</pre>`
-      : `<table>
-          <tr><th>Bundle</th><th>Latest</th><th>Updated</th><th>History</th></tr>
-          ${rows}
-        </table>`;
+  ${escapeHtml(config.baseUrl)}/api/bundles/your-slug</pre>
+         </div>`
+      : `<div class="ledger scroll-x">
+          <table>
+            <tr><th>Bundle</th><th>Latest</th><th>Updated</th><th>History</th></tr>
+            ${rows}
+          </table>
+        </div>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -443,10 +504,12 @@ ${head(title, og)}
     </div>
   </header>
   ${scotch()}
-  <p class="gate">You are looking at <code>${escapeHtml(slug)}</code>, a private bundle on Seer.${
+  <div class="card">
+    <p class="gate">You are looking at <code>${escapeHtml(slug)}</code>, a private bundle on Seer.${
     meta ? `<span class="gate-meta">${meta.versions} version${meta.versions === 1 ? "" : "s"} &middot; updated ${escapeHtml(meta.updated)}</span>` : ""
   }</p>
-  <p class="gate-action"><a href="${escapeHtml(loginHref)}">Sign in with Google to view</a></p>
+    <p class="gate-action"><a href="${escapeHtml(loginHref)}">Sign in with Google to view</a></p>
+  </div>
   <footer class="colophon">
     <span>Open source at <a href="${GITHUB_URL}">github.com/kristofferremback/seer</a></span>
   </footer>
