@@ -16,11 +16,11 @@ Uploads are immutable and versioned: every upload of a slug creates a new versio
 
 ```sh
 bun install
-cp .env.example .env      # then edit it (at minimum set API_TOKEN)
+cp .env.example .env      # then edit it (at minimum set API_KEY)
 bun run dev               # starts on http://localhost:3000 with hot reload
 ```
 
-For local development you can skip Google sign-in entirely by setting `AUTH_DISABLED=true` in `.env`. With that set, only `API_TOKEN` is required.
+For local development you can skip Google sign-in entirely by setting `AUTH_DISABLED=true` in `.env`. With that set, only `API_KEY` is required.
 
 Upload a bundle. Here is a one-file example:
 
@@ -141,7 +141,7 @@ All configuration is via environment variables. Bun loads `.env` automatically. 
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `API_TOKEN` | (required) | Bearer token that upload requests must send. Always required. |
+| `API_KEY` | (required) | Bearer token that upload requests must send. Always required. `API_TOKEN` is accepted as an alias if `API_KEY` is unset. |
 | `SESSION_SECRET` | (required unless auth disabled) | HMAC key used to sign session cookies. Use a long random string, e.g. `openssl rand -hex 32`. |
 | `GOOGLE_CLIENT_ID` | (required unless auth disabled) | Google OAuth 2.0 client ID. |
 | `GOOGLE_CLIENT_SECRET` | (required unless auth disabled) | Google OAuth 2.0 client secret. |

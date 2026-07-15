@@ -13,7 +13,12 @@ export const config = {
   baseUrl: (process.env.BASE_URL ?? `http://localhost:${process.env.PORT ?? 3000}`).replace(/\/$/, ""),
   dataDir: process.env.DATA_DIR ?? "./data",
 
-  apiToken: required("API_TOKEN"),
+  // Accept API_KEY (preferred) or API_TOKEN. Agents send this as the bearer token.
+  apiToken: (() => {
+    const value = process.env.API_KEY ?? process.env.API_TOKEN;
+    if (!value) throw new Error("Missing required environment variable: API_KEY (or API_TOKEN)");
+    return value;
+  })(),
 
   // Viewer auth (Google OIDC). AUTH_DISABLED=true skips it entirely — local dev only.
   authDisabled,
