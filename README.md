@@ -158,11 +158,14 @@ All configuration is via environment variables. Bun loads `.env` automatically. 
 
 Seer keeps state on local disk (SQLite database and zip files), so it must run as a **single instance** with a persistent volume. Do not scale it horizontally.
 
-1. Create a new service from this repository. Railway detects Bun and runs `bun run start`.
-2. Attach a **volume** and mount it at `/data`. Set `DATA_DIR=/data` so the database, zips, and cache live on the volume and survive redeploys.
-3. Set the environment variables from the configuration table: at minimum `API_TOKEN`, `SESSION_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAILS`, and `BASE_URL`.
-4. Set `BASE_URL` to your public domain (for example `https://seer.up.railway.app`). It must exactly match the domain Google will redirect back to.
-5. Set the healthcheck path to `/healthz` (it returns `200 ok`).
+Build and deploy settings (start command, healthcheck, single replica, restart policy) are committed in [`railway.toml`](./railway.toml), so Railway picks them up automatically. Two things still have to be done in the dashboard because they can't live in the repo: attaching the volume and setting the variables.
+
+1. Create a new service pointed at this repository. Railway reads `railway.toml`, detects Bun, and runs `bun run start`.
+2. Attach a **volume** and mount it at `/data`, then set `DATA_DIR=/data` so the database, zips, and cache live on the volume and survive redeploys.
+3. Set the environment variables from the configuration table: at minimum `API_TOKEN`, `SESSION_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAILS`, and `BASE_URL`. (`PORT` is injected by Railway.)
+4. Deploy once, then set `BASE_URL` to the service's public domain (for example `https://seer.up.railway.app`) and redeploy. It must exactly match the domain Google redirects back to.
+
+The healthcheck path (`/healthz`, returns `200 ok`) is already declared in `railway.toml`.
 
 ### Google OAuth setup
 

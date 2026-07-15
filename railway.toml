@@ -1,0 +1,31 @@
+# Railway deployment config. https://docs.railway.com/reference/config-as-code
+# Nixpacks detects Bun from bun.lock and installs deps automatically.
+#
+# One-time dashboard setup (cannot be expressed here):
+#   1. Attach a Volume to this service, mount path "/data".
+#   2. Set the environment variables listed under "Variables" below.
+#   3. After the first deploy, copy the public domain into BASE_URL and add
+#      "<BASE_URL>/auth/callback" as an authorized redirect URI in the Google
+#      OAuth client, then redeploy.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "bun run start"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+numReplicas = 1
+
+# ---- Variables to set in the Railway dashboard (not read from this file) ----
+# Required:
+#   API_TOKEN         a long random string (agents send it as the bearer token)
+#   SESSION_SECRET    openssl rand -hex 32
+#   GOOGLE_CLIENT_ID
+#   GOOGLE_CLIENT_SECRET
+#   ALLOWED_EMAILS    comma-separated allowlist, e.g. you@example.com
+#   BASE_URL          the service's public https URL (set after first deploy)
+#   DATA_DIR          /data   (must match the mounted volume path)
+# Railway injects PORT automatically; the app reads it.
