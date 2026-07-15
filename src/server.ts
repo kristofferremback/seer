@@ -24,6 +24,13 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+function favicon(name: string, contentType: string): Response {
+  const file = Bun.file(join(import.meta.dir, "..", "assets", name));
+  return new Response(file, {
+    headers: { "content-type": contentType, "cache-control": "public, max-age=604800" },
+  });
+}
+
 function requireApiToken(req: Request): Response | null {
   const auth = req.headers.get("authorization") ?? "";
   // Compare SHA-256 digests so the check is constant-time regardless of input length.
@@ -275,6 +282,13 @@ export function startServer() {
           },
         });
       },
+
+      // The scrying-glass mark as the site icon. SVG for modern browsers,
+      // PNG fallbacks for older ones and iOS home-screen.
+      "/favicon.svg": () => favicon("favicon.svg", "image/svg+xml"),
+      "/favicon.ico": () => favicon("favicon.png", "image/png"),
+      "/favicon.png": () => favicon("favicon.png", "image/png"),
+      "/apple-touch-icon.png": () => favicon("apple-touch-icon.png", "image/png"),
 
       "/api/bundles": {
         GET: (req) => {

@@ -425,6 +425,9 @@ function head(title: string, og: Record<string, string>, extra = ""): string {
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <script>${themeBootstrap()}</script>
 <title>${escapeHtml(title)}</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 ${tags}
 <link rel="preload" href="/fonts/switzer.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/cabinet-grotesk.woff2" as="font" type="font/woff2" crossorigin>${extra ? `\n${extra}` : ""}
