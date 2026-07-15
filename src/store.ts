@@ -84,9 +84,23 @@ export function sweepCache(): void {
   for (const [key, at] of lastAccess) {
     if (at >= cutoff) continue;
     const [slug, version] = key.split("/");
-    rmSync(extractedDir(slug!, Number(version)), { recursive: true, force: true });
-    lastAccess.delete(key);
+    // Per-entry guard: a filesystem error on one dir (e.g. a transient volume
+    // I/O error) must not abort the sweep or bubble out of the interval and
+    // kill the process. Log and move on.
+    try {
+      rmSync(extractedDir(slug!, Number(version)), { recursive: true, force: true });
+      lastAccess.delete(key);
+    } catch (err) {
+      console.error(`[seer] cache sweep failed to evict ${key}:`, err);
+    }
   }
 }
 
-setInterval(sweepCache, 60_000);
+// Never let a throw inside the interval callback take down the server.
+setInterval(() => {
+  try {
+    sweepCache();
+  } catch (err) {
+    console.error("[seer] cache sweep error:", err);
+  }
+}, 60_000);
