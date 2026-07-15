@@ -1,0 +1,29 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="light" cx="50%" cy="-10%" r="80%">
+      <stop offset="0%" stop-color="#fffaee"/>
+      <stop offset="60%" stop-color="#fffaee" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#f4efe3"/>
+  <rect width="1200" height="630" fill="url(#light)"/>
+
+  <!-- the scrying glass, scaled up from the site mark -->
+  <g transform="translate(104,168) scale(2.35)" fill="none" stroke="#211d18">
+    <circle cx="24" cy="21" r="15" stroke-width="1.5"/>
+    <path d="M14 17 Q16 11 23 10" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+    <path d="M11 31 Q24 43 37 31" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M13.5 33 L18 50" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M34.5 33 L30 50" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M16 51 L32 51" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M30 21.6 L30.95 24.05 L33.4 25 L30.95 25.95 L30 28.4 L29.05 25.95 L26.6 25 L29.05 24.05 Z" fill="#6d1f22" stroke="none"/>
+  </g>
+
+  <text x="252" y="308" font-family="Iowan Old Style, Palatino, Georgia, serif" font-size="150" font-weight="600" fill="#211d18" letter-spacing="-1">Seer</text>
+  <text x="256" y="366" font-family="Iowan Old Style, Palatino, Georgia, serif" font-size="34" font-style="italic" fill="#6b6154">A private instrument for previewing HTML bundles.</text>
+
+  <rect x="104" y="474" width="992" height="5" fill="#211d18"/>
+  <rect x="104" y="485" width="992" height="2" fill="#211d18"/>
+
+  <text x="104" y="548" font-family="SF Mono, Menlo, monospace" font-size="25" fill="#6b6154">github.com/kristofferremback/seer</text>
+</svg>

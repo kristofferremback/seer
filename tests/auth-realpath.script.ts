@@ -1,0 +1,263 @@
+// Runs in its OWN process (spawned by auth.test.ts) with AUTH_DISABLED unset,
+// so it exercises the real signed-cookie/OAuth path in src/auth.ts and the
+// auth-enabled server behavior. Config requires Google OIDC vars when auth is
+// enabled, so we provide dummies. Only pre-network OAuth branches are hit —
+// nothing here talks to Google.
+//
+// Exits 0 on success, 1 on the first failed assertion (message on stderr).
+import { createHmac } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { zipSync, strToU8 } from "fflate";
+
+process.env.API_TOKEN = "test-token";
+delete process.env.AUTH_DISABLED;
+process.env.GOOGLE_CLIENT_ID = "dummy-client-id";
+process.env.GOOGLE_CLIENT_SECRET = "dummy-client-secret";
+process.env.SESSION_SECRET = "super-secret-for-tests";
+process.env.ALLOWED_EMAILS = "allowed@example.com";
+process.env.BASE_URL = "http://localhost:3000";
+process.env.PORT = "0";
+// Small cap so the oversize-upload test stays cheap. Bun's maxRequestBodySize is
+// set to this + 1024, so a ~1.5 KB body reaches the handler and gets a 413.
+process.env.MAX_UPLOAD_BYTES = "1024";
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-auth-"));
+
+const { sessionCookie, sessionEmail } = await import("../src/auth");
+const { config } = await import("../src/config");
+const { startServer } = await import("../src/server");
+
+function assert(cond: boolean, msg: string) {
+  if (!cond) {
+    console.error(`ASSERT FAILED: ${msg}`);
+    process.exit(1);
+  }
+}
+
+function reqWithCookie(value: string): Request {
+  return new Request("http://localhost:3000/", { headers: { cookie: `seer_session=${value}` } });
+}
+
+// Pull the raw "seer_session" value out of a Set-Cookie header.
+function cookieValue(setCookie: string): string {
+  const first = setCookie.split(";")[0]!; // seer_session=<payload>.<sig>
+  return first.slice("seer_session=".length);
+}
+
+function hmac(data: string): string {
+  return createHmac("sha256", config.sessionSecret).update(data).digest("base64url");
+}
+
+// ---- session cookie unit tests ----
+
+// 1. round-trip
+{
+  const email = "allowed@example.com";
+  const setCookie = sessionCookie(email);
+  const value = cookieValue(setCookie);
+  const got = sessionEmail(reqWithCookie(value));
+  assert(got === email, `round-trip expected ${email}, got ${got}`);
+}
+
+// 2. tampered signature rejected
+{
+  const value = cookieValue(sessionCookie("allowed@example.com"));
+  const parts = value.split(".");
+  parts[2] = (parts[2] ?? "") + "x"; // corrupt sig
+  const got = sessionEmail(reqWithCookie(parts.join(".")));
+  assert(got === null, `tampered sig should be rejected, got ${got}`);
+}
+
+// 3. tampered email (payload changed, old sig) rejected
+{
+  const value = cookieValue(sessionCookie("allowed@example.com"));
+  const [, exp, sig] = value.split(".");
+  const evil = Buffer.from("attacker@evil.com").toString("base64url");
+  const got = sessionEmail(reqWithCookie(`${evil}.${exp}.${sig}`));
+  assert(got === null, `tampered email should be rejected, got ${got}`);
+}
+
+// 4. expired session rejected (craft a correctly-signed but past-exp cookie)
+{
+  const emailB64 = Buffer.from("allowed@example.com").toString("base64url");
+  const exp = Date.now() - 1000; // already expired
+  const payload = `${emailB64}.${exp}`;
+  const value = `${payload}.${hmac(payload)}`;
+  const got = sessionEmail(reqWithCookie(value));
+  assert(got === null, `expired session should be rejected, got ${got}`);
+}
+
+// 5. no cookie -> null
+{
+  const got = sessionEmail(new Request("http://localhost:3000/"));
+  assert(got === null, `no cookie should be null, got ${got}`);
+}
+
+// 6. malformed cookie -> null
+{
+  const got = sessionEmail(reqWithCookie("garbage"));
+  assert(got === null, `malformed cookie should be null, got ${got}`);
+}
+
+// ---- auth-enabled server: OAuth pre-network branches, WS auth, oversize upload ----
+
+const server = startServer();
+const base = `http://localhost:${server.port}`;
+
+// 7. loginRedirect open-redirect guard: next="//evil.com" must be replaced by "/".
+{
+  const r = await fetch(`${base}/login?next=${encodeURIComponent("//evil.com")}`, {
+    redirect: "manual",
+  });
+  assert(r.status === 302, `/login should 302, got ${r.status}`);
+  const loc = r.headers.get("location") ?? "";
+  assert(loc.startsWith("https://accounts.google.com/"), `login redirects to Google, got ${loc}`);
+  const setCookie = r.headers.get("set-cookie") ?? "";
+  // State cookie format: seer_oauth=<state>:<encodeURIComponent(next)>; the guarded
+  // next must be "/" (%2F), never the protocol-relative //evil.com.
+  assert(setCookie.includes(":%2F;"), `state cookie should carry next="/", got ${setCookie}`);
+  assert(!setCookie.includes("evil.com"), `state cookie must not carry //evil.com: ${setCookie}`);
+  assert(!loc.includes("evil.com"), `Google redirect must not carry //evil.com: ${loc}`);
+}
+
+// 8. safe relative next is preserved.
+{
+  const r = await fetch(`${base}/login?next=${encodeURIComponent("/b/foo/")}`, {
+    redirect: "manual",
+  });
+  const setCookie = r.headers.get("set-cookie") ?? "";
+  assert(
+    setCookie.includes(`:${encodeURIComponent("/b/foo/")};`),
+    `state cookie should carry /b/foo/, got ${setCookie}`,
+  );
+}
+
+// 9. handleCallback: missing code/state -> 400 (before any network call).
+{
+  const r = await fetch(`${base}/auth/callback`, { redirect: "manual" });
+  assert(r.status === 400, `callback without code/state should 400, got ${r.status}`);
+}
+{
+  const r = await fetch(`${base}/auth/callback?code=abc`, {
+    redirect: "manual",
+    headers: { cookie: "seer_oauth=xyz:%2F" },
+  });
+  assert(r.status === 400, `callback without state should 400, got ${r.status}`);
+}
+
+// 10. handleCallback: state mismatch -> 400 (before any network call).
+{
+  const r = await fetch(`${base}/auth/callback?code=abc&state=WRONG`, {
+    redirect: "manual",
+    headers: { cookie: "seer_oauth=expected-state:%2F" },
+  });
+  assert(r.status === 400, `state mismatch should 400, got ${r.status}`);
+  const body = await r.text();
+  assert(body.includes("state mismatch"), `body should mention state mismatch, got ${body}`);
+}
+
+// 11. The public landing page is served without a session (200, not a redirect).
+{
+  const r = await fetch(`${base}/`, { redirect: "manual" });
+  assert(r.status === 200, `/ (public landing) should 200, got ${r.status}`);
+  const html = await r.text();
+  assert(html.includes('property="og:title"'), "landing carries og:title");
+  assert(html.includes("Sign in"), "landing offers a sign-in link when logged out");
+}
+
+// 11b. The signed-in ledger (/bundles) redirects to /login without a session.
+{
+  const r = await fetch(`${base}/bundles`, { redirect: "manual" });
+  assert(r.status === 302, `/bundles without session should 302, got ${r.status}`);
+  assert(
+    (r.headers.get("location") ?? "").startsWith("/login?next="),
+    "/bundles redirects to /login",
+  );
+}
+
+// 11c. Unauthenticated /b/:slug/ returns a 200 OG shell (not a redirect) for an
+// existing bundle: per-bundle OG tags + a sign-in link, and NO bundle file content.
+{
+  const zip = zipSync({ "index.html": strToU8("<!doctype html><body>SECRET-BUNDLE-BODY</body>") });
+  const up = await fetch(`${base}/api/bundles/private-preview`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${config.apiToken}` },
+    body: zip,
+  });
+  assert(up.status === 200, `seeding bundle should 200, got ${up.status}`);
+
+  const r = await fetch(`${base}/b/private-preview/`, { redirect: "manual" });
+  assert(r.status === 200, `unauth /b/:slug/ should return the 200 shell, got ${r.status}`);
+  const html = await r.text();
+  assert(
+    html.includes('property="og:title"') && html.includes("private-preview"),
+    "shell carries per-bundle og:title",
+  );
+  assert(html.includes("/login?next="), "shell links to /login with the return path");
+  assert(!html.includes("SECRET-BUNDLE-BODY"), "shell must NOT leak bundle file content");
+}
+
+// 11d. Unauthenticated sub-asset requests under /b/ still redirect to login
+// (they are re-fetched by the page after sign-in).
+{
+  const r = await fetch(`${base}/b/private-preview/app.js`, { redirect: "manual" });
+  assert(r.status === 302, `unauth /b asset should 302 to login, got ${r.status}`);
+  assert((r.headers.get("location") ?? "").startsWith("/login?next="), "asset redirects to /login");
+}
+
+// 11e. Unknown slug returns the SAME 200 status (no existence leak via status).
+{
+  const r = await fetch(`${base}/b/no-such-bundle/`, { redirect: "manual" });
+  assert(r.status === 200, `unknown slug shell should also 200, got ${r.status}`);
+}
+
+// 12. WS live reload without a session cookie -> 401 (upgrade never happens).
+{
+  const r = await fetch(`${base}/ws/livereload?slug=some-slug`, {
+    headers: { upgrade: "websocket", connection: "Upgrade" },
+  });
+  assert(r.status === 401, `WS without session should 401, got ${r.status}`);
+
+  // And a real WebSocket client connection fails to open.
+  const ws = new WebSocket(`ws://localhost:${server.port}/ws/livereload?slug=some-slug`);
+  const outcome = await new Promise<string>((res) => {
+    ws.onopen = () => res("open");
+    ws.onerror = () => res("error");
+    ws.onclose = () => res("close");
+    setTimeout(() => res("timeout"), 2000);
+  });
+  assert(outcome !== "open" && outcome !== "timeout", `WS should fail to connect, got ${outcome}`);
+}
+
+// 13. WS live reload WITH a valid session cookie succeeds.
+{
+  const cookie = cookieValue(sessionCookie("allowed@example.com"));
+  const ws = new WebSocket(`ws://localhost:${server.port}/ws/livereload?slug=some-slug`, {
+    headers: { cookie: `seer_session=${cookie}` },
+  });
+  const outcome = await new Promise<string>((res) => {
+    ws.onopen = () => res("open");
+    ws.onerror = () => res("error");
+    ws.onclose = () => res("close");
+    setTimeout(() => res("timeout"), 2000);
+  });
+  assert(outcome === "open", `WS with session should connect, got ${outcome}`);
+  ws.close();
+}
+
+// 14. Oversize upload: body > MAX_UPLOAD_BYTES (1024) -> 413. The API uses the
+// bearer token, not sessions, so this works with auth enabled.
+{
+  const big = new Uint8Array(1500); // > 1024, < maxRequestBodySize (1024+1024)
+  const r = await fetch(`${base}/api/bundles/too-big`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${config.apiToken}` },
+    body: big,
+  });
+  assert(r.status === 413, `oversize upload should 413, got ${r.status}`);
+}
+
+server.stop(true);
+console.log("auth-realpath: all assertions passed");
+process.exit(0);
