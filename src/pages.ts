@@ -515,10 +515,10 @@ function styles(): string {
     box-shadow: inset 0 -2px 0 hsl(var(--accent));
   }
 
-  /* inputs */
+  /* inputs — 16px minimum so iOS doesn't zoom the page on focus */
   .input {
     font-family: var(--font-body);
-    font-size: 0.95rem;
+    font-size: 1rem;
     color: hsl(var(--ink));
     background: hsl(var(--paper-sunk));
     border: 1px solid hsl(var(--line));
