@@ -2,6 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { config } from "./config";
 import { db } from "./db";
 import { hashKey, tinyId } from "./ids";
+import { noSeatPage } from "./pages";
 
 function hmac(data: string): string {
   return createHmac("sha256", config.sessionSecret).update(data).digest("base64url");
@@ -274,8 +275,12 @@ export async function handleCallback(req: Request): Promise<Response> {
   const existing = userByEmail(email);
   if (existing) return sessionRedirect(existing.id, next);
 
-  // No seat: not a known user, and no valid invite to earn one.
-  return new Response("This account has no seat at Seer.", { status: 403 });
+  // No seat: not a known user, and no valid invite to earn one. A 403 page in the
+  // site's voice ("This account has no seat at Seer.") rather than a bare string.
+  return new Response(noSeatPage(email), {
+    status: 403,
+    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-cache" },
+  });
 }
 
 /** Redirect browser requests to login; used for all viewer-facing routes. */

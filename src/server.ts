@@ -54,8 +54,9 @@ import {
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // Workspace-scoped bundle path: /<ws_id>/b/<slug>[/v/N][/rest]. Anything under a
-// well-formed /<ws_id>/b/ that doesn't resolve becomes a soft-404.
-const WS_BUNDLE_RE = /^\/(ws_[0-9abcdefghjkmnpqrstvwxyz]{10})\/b\//;
+// well-formed /<ws_id>/b/ that doesn't resolve becomes a soft-404. The ws id class
+// is composed from WS_ID_RE (minus its ^…$ anchors) so the two never drift apart.
+const WS_BUNDLE_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/b/`);
 
 type WSData = { ws: string; slug: string };
 

@@ -687,9 +687,12 @@ to put richer output than a chat reply can carry — dashboards, small apps, int
 reports — instead of pasting a wall of code.
 
 You need two things, which the human has given you (typically as environment
-variables): the base URL of this Seer instance (\`${base}\`) and an API token
-(referred to below as \`$API_TOKEN\`). Keep the token secret; it is the only write
-credential.
+variables): the base URL of this Seer instance (\`${base}\`) and an API key
+(referred to below as \`$API_TOKEN\`). Seer keys look like \`seer_sk_…\`; a human mints
+one from a workspace's settings page (\`${base}/settings/<workspace>\`), where it is
+shown exactly once. The key belongs to one workspace, so every bundle you upload
+with it lands in that workspace — you never name the workspace yourself. Keep the
+key secret; it is the only write credential.
 
 ## 1. Build the zip
 
@@ -697,7 +700,7 @@ credential.
   inside a subdirectory). That is what loads at the bundle URL.
 - Use **relative** asset paths (\`./style.css\`, \`assets/app.js\`, \`img/logo.png\`).
   Absolute paths like \`/style.css\` will not resolve, because the bundle is served
-  under \`/b/<slug>/\`.
+  under \`/<workspace>/b/<slug>/\`.
 - Nested directories are fine. Directory requests fall back to their \`index.html\`.
 - Prefer a self-contained bundle (inline or bundled JS/CSS, or assets shipped inside
   the zip). External network requests are the human's browser's problem, not Seer's.
@@ -735,14 +738,17 @@ A successful upload returns \`200\` with JSON:
 {
   "slug": "<slug>",
   "version": 1,
-  "url": "${base}/b/<slug>/",
-  "versionUrl": "${base}/b/<slug>/v/1/",
+  "workspace": "ws_…",
+  "url": "${base}/ws_…/b/<slug>/",
+  "versionUrl": "${base}/ws_…/b/<slug>/v/1/",
   "bytes": 2048,
   "files": 3,
   "hasIndexHtml": true
 }
 \`\`\`
 
+- \`workspace\` is the \`ws_…\` id your key belongs to; every URL in the response is
+  scoped under it. You do not choose it — the key does.
 - \`url\` is the **latest** URL: it always shows the newest version and live-reloads.
   Hand this one to the human in most cases.
 - \`versionUrl\` is a **pinned** URL for this exact version; it never changes and does
@@ -751,8 +757,8 @@ A successful upload returns \`200\` with JSON:
   bundle URL will 404. Re-zip and re-upload.
 
 Error responses are JSON with an \`error\` field. Notable statuses: \`400\` (invalid
-slug, empty body, or bad zip), \`401\` (invalid or missing token), \`413\` (zip exceeds
-the size limit).
+slug, empty body, or bad zip), \`401\` (invalid, revoked, or missing key), \`413\` (zip
+exceeds the size limit).
 
 ## 4. Iterating
 
@@ -766,16 +772,21 @@ the old one keeps working and updates in place.
 curl -H "Authorization: Bearer $API_TOKEN" ${base}/api/bundles
 \`\`\`
 
-Returns every bundle with its full version history (slugs, versions, sizes,
-timestamps).
+Returns every bundle in your key's workspace with its full version history (slugs,
+versions, sizes, timestamps), each tagged with its \`workspace\` id.
 
 ## Sharing and viewing
 
-Bundle URLs (\`/b/<slug>/\`) are **public** — anyone with the link can open it in a
-browser, no sign-in required. Hand the \`url\` to whoever should see it, or open it
-yourself. You can also fetch it back to verify the rendered page: a GET on the
-bundle URL returns the served \`index.html\` (the latest URL has the live-reload
-script injected before \`</body>\`).
+Whether a bundle link is openable without signing in depends on its workspace's
+visibility. A **public** workspace (the default) serves bundle URLs
+(\`/<workspace>/b/<slug>/\`) to anyone with the link — no sign-in. A **private**
+workspace serves them only to signed-in members; everyone else gets a generic
+Seer 404 that reveals nothing, so a private bundle's title never leaks. The human
+sets visibility per workspace on its settings page.
+
+Hand the \`url\` to whoever should see it, or open it yourself. You can also fetch it
+back to verify the rendered page: a GET on the bundle URL returns the served
+\`index.html\` (the latest URL has the live-reload script injected before \`</body>\`).
 
 When a bundle link is shared in chat, Seer injects OpenGraph tags into the served
 HTML so the link unfurls with your page's \`<title>\`, a description, and a Seer
@@ -783,9 +794,9 @@ card image. If you want full control of the preview, ship your own \`og:\` meta
 tags in \`index.html\` — Seer leaves pages that declare any \`og:\` or \`twitter:\`
 meta untouched.
 
-Only the write side and the inventory are private: uploading needs the API token,
-and the list of every bundle (\`GET /api/bundles\`) needs the token too. Individual
-bundle links do not.
+The write side and the inventory are always private: uploading needs your API key,
+and the list of bundles (\`GET /api/bundles\`, scoped to your key's workspace) needs
+it too. Public bundle links are the only thing viewable without a credential.
 `;
 }
 
@@ -1161,12 +1172,16 @@ export interface InviteData {
 export function invitePage(d: InviteData): string {
   const og = { "og:title": "Invitation · Seer", "og:type": "website", robots: "noindex" };
 
+  // The token is always a validated inv_ id by the time this renders (the route
+  // gates on INV_ID_RE), but escape it anyway — defense in depth, consistent with
+  // every other interpolated string on the page.
+  const token = escapeHtml(d.token);
   const action = d.signedIn
-    ? `<form class="panel-row stack-gap" method="post" action="/invite/${d.token}/accept">
+    ? `<form class="panel-row stack-gap" method="post" action="/invite/${token}/accept">
          <button class="btn primary" type="submit">Take your seat →</button>
        </form>`
     : `<div class="panel-row stack-gap">
-         <a class="btn primary" href="/login?next=/invite/${d.token}">Sign in with Google →</a>
+         <a class="btn primary" href="/login?next=/invite/${token}">Sign in with Google →</a>
        </div>`;
 
   const seatNote = d.signedIn
@@ -1248,6 +1263,53 @@ ${head("Seer", og)}
     <p class="eyebrow">404</p>
     <h1 class="h-display">Nothing here for <span class="accent">you</span> to see.</h1>
     ${variant}
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+</body>
+</html>`;
+}
+
+// ---- no seat (403 on OIDC sign-in) ----
+//
+// Google verified the email, but it belongs to no user and carried no valid invite
+// — so there is nothing to sign in to. A 403 in the site's voice rather than a bare
+// string. The exact line "This account has no seat at Seer." is preserved so the
+// message reads the same whether rendered or scraped. No sign-in affordance: the
+// viewer just authenticated; a seat needs an invite, not another round-trip.
+
+export function noSeatPage(email: string | null): string {
+  const og = {
+    "og:title": "Seer",
+    "og:description": "A private instrument for previewing HTML bundles.",
+    "og:type": "website",
+    "og:site_name": "Seer",
+    "og:image": `${config.baseUrl}/og.png`,
+    robots: "noindex",
+  };
+
+  const who = email
+    ? `<p class="aside stack-gap">You signed in as <span class="email-tag">${escapeHtml(email)}</span>, but
+       that address hasn't been asked in yet. Ask a member for an invite link — it seats you the moment you open it.</p>`
+    : `<p class="aside stack-gap">Ask a member for an invite link — it seats you the moment you open it.</p>`;
+
+  return `<!doctype html>
+<html lang="en">
+${head("Seer", og)}
+<body>
+<div class="frame warm grow">
+  <div class="shell spine">
+    ${navRow(null)}
+    ${markSvg("void-mark")}
+    <p class="eyebrow"><span class="accent">403</span></p>
+    <h1 class="h-display">This account has no seat at Seer.</h1>
+    <p class="subtitle">The glass is closed to this one.</p>
+    ${who}
   </div>
 </div>
 <div class="frame night">

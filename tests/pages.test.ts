@@ -5,6 +5,7 @@ import {
   bundlesPage,
   settingsPage,
   invitePage,
+  noSeatPage,
   type LedgerGroup,
   type SettingsData,
   type InviteData,
@@ -188,6 +189,31 @@ describe("invite affordances", () => {
     expect(html).toContain("&lt;x&gt;");
     expect(html).toContain("a@b.co");
     expect(html).toContain("2026-07-25");
+  });
+});
+
+// ---- no-seat 403 page (OIDC sign-in with no user and no valid invite) ----
+
+describe("no-seat page", () => {
+  test("carries the exact spec line, in the site's voice, with no sign-in affordance", () => {
+    const html = noSeatPage("stranger@example.com");
+    // The exact message must survive contiguously (the plain-text 403 it replaced).
+    expect(html).toContain("This account has no seat at Seer.");
+    expect(html).toContain("403");
+    // The viewer just authenticated — no point offering another sign-in round-trip.
+    expect(html).not.toContain("/login?next=");
+    // Site register: the paper shell and mark, not a bare string.
+    expect(html).toContain("void-mark");
+  });
+
+  test("shows the signed-in email (escaped) when present, omits it otherwise", () => {
+    expect(noSeatPage("a@b.co")).toContain("a@b.co");
+    // A hostile email is escaped: the raw attack sequence never appears verbatim.
+    const escaped = noSeatPage('"><script>alert(1)</script>');
+    expect(escaped).not.toContain('"><script>alert(1)');
+    expect(escaped).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    // A null email still renders without leaking an "undefined".
+    expect(noSeatPage(null)).not.toContain("undefined");
   });
 });
 
