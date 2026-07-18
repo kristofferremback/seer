@@ -2,7 +2,16 @@ import type { Server, WebSocketHandler } from "bun";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { join, normalize, resolve } from "node:path";
 import { config } from "./config";
-import { db, getBundle, getVersion, listBundles, listVersions, createVersion } from "./db";
+import {
+  db,
+  getBundle,
+  getVersion,
+  listBundles,
+  listVersions,
+  createVersion,
+  legacyWorkspaceId,
+} from "./db";
+import { migrate } from "./migrate";
 import { inspectZip, saveZip, ensureExtracted } from "./store";
 import { loginRedirect, handleCallback, requireSession, sessionEmail } from "./auth";
 import {
@@ -16,7 +25,15 @@ import {
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-type WSData = { slug: string };
+type WSData = { ws: string; slug: string };
+
+// Until full workspace routing lands (step 3), every legacy `/b/` and `/api` path
+// resolves to the bootstrap workspace the migration created.
+function legacyWs(): string {
+  const ws = legacyWorkspaceId();
+  if (!ws) throw new Error("No legacy workspace; migration did not run before serving");
+  return ws;
+}
 
 function markdownDoc(): Response {
   return new Response(skillDoc(), {
@@ -56,11 +73,12 @@ function liveReloadScript(slug: string): string {
 // ---- bundle serving ----
 
 async function serveBundleFile(
+  wsId: string,
   meta: BundleMeta,
   filePath: string,
   injectReload: boolean,
 ): Promise<Response> {
-  const dir = await ensureExtracted(meta.slug, meta.version);
+  const dir = await ensureExtracted(wsId, meta.slug, meta.version);
   const clean = normalize(filePath || "index.html");
   if (clean.startsWith("..") || clean.startsWith("/")) {
     return new Response("Not found", { status: 404 });
@@ -101,7 +119,8 @@ async function handleBundleRoute(req: Request): Promise<Response> {
   const [, slug, versionStr, rest] = match;
 
   if (!SLUG_RE.test(slug!)) return new Response("Not found", { status: 404 });
-  const bundle = getBundle(slug!);
+  const ws = legacyWs();
+  const bundle = getBundle(ws, slug!);
   if (!bundle) return new Response("Not found", { status: 404 });
 
   const pinned = versionStr !== undefined;
@@ -118,10 +137,10 @@ async function handleBundleRoute(req: Request): Promise<Response> {
   const meta: BundleMeta = {
     slug: slug!,
     version,
-    updatedAt: getVersion(slug!, version)?.created_at ?? bundle.created_at,
+    updatedAt: getVersion(ws, slug!, version)?.created_at ?? bundle.created_at,
     url: `${config.baseUrl}${url.pathname}`,
   };
-  return serveBundleFile(meta, rest.slice(1), !pinned);
+  return serveBundleFile(ws, meta, rest.slice(1), !pinned);
 }
 
 // ---- upload ----
@@ -146,9 +165,10 @@ async function handleUpload(req: Request, slug: string, server: Server<WSData>):
     return json({ error: `Invalid zip: ${(err as Error).message}` }, 400);
   }
 
-  const version = createVersion(slug, body.length, files.length);
-  await saveZip(slug, version, body);
-  server.publish(`bundle:${slug}`, "reload");
+  const ws = legacyWs();
+  const version = createVersion(ws, slug, body.length, files.length);
+  await saveZip(ws, slug, version, body);
+  server.publish(`bundle:${ws}:${slug}`, "reload");
 
   return json({
     slug,
@@ -164,8 +184,9 @@ async function handleUpload(req: Request, slug: string, server: Server<WSData>):
 // ---- bundle ledger (signed-in view data) ----
 
 function ledgerBundles(): LedgerBundle[] {
-  return listBundles().map((b) => {
-    const versions = listVersions(b.slug);
+  const ws = legacyWs();
+  return listBundles(ws).map((b) => {
+    const versions = listVersions(ws, b.slug);
     const updated = new Date(versions[0]?.created_at ?? b.created_at)
       .toISOString()
       .slice(0, 16)
@@ -182,9 +203,13 @@ function ledgerBundles(): LedgerBundle[] {
 // ---- server ----
 
 export function startServer() {
+  // Bring the database to schema v1 (and bootstrap the root workspace on first boot)
+  // before the server binds — no request may hit an unmigrated db.
+  migrate();
+
   const websocket: WebSocketHandler<WSData> = {
     open(ws) {
-      ws.subscribe(`bundle:${ws.data.slug}`);
+      ws.subscribe(`bundle:${ws.data.ws}:${ws.data.slug}`);
     },
     message() {},
   };
@@ -266,12 +291,13 @@ export function startServer() {
         GET: (req) => {
           const denied = requireApiToken(req);
           if (denied) return denied;
+          const ws = legacyWs();
           return json(
-            listBundles().map((b) => ({
+            listBundles(ws).map((b) => ({
               slug: b.slug,
               latestVersion: b.latest_version,
               url: `${config.baseUrl}/b/${b.slug}/`,
-              versions: listVersions(b.slug).map((v) => ({
+              versions: listVersions(ws, b.slug).map((v) => ({
                 version: v.version,
                 createdAt: new Date(v.created_at).toISOString(),
                 bytes: v.bytes,
@@ -294,7 +320,8 @@ export function startServer() {
         // Public: bundles are viewable by anyone, so their live-reload socket is too.
         const slug = url.searchParams.get("slug") ?? "";
         if (!SLUG_RE.test(slug)) return new Response("Bad slug", { status: 400 });
-        if (srv.upgrade(req, { data: { slug } })) return undefined as unknown as Response;
+        if (srv.upgrade(req, { data: { ws: legacyWs(), slug } }))
+          return undefined as unknown as Response;
         return new Response("WebSocket upgrade failed", { status: 400 });
       }
 

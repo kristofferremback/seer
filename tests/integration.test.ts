@@ -7,6 +7,7 @@ import { zipSync, strToU8 } from "fflate";
 import { startServer } from "../src/server";
 import { sweepCache } from "../src/store";
 import { config } from "../src/config";
+import { legacyWorkspaceId } from "../src/db";
 
 const AUTH = { authorization: `Bearer ${config.apiToken}` };
 
@@ -426,7 +427,7 @@ describe("cache sweep", () => {
     const r1 = await fetch(`${base}/b/${slug}/v/1/`);
     expect(r1.status).toBe(200);
 
-    const extractedPath = join(config.dataDir, "cache", slug, "1");
+    const extractedPath = join(config.dataDir, "cache", legacyWorkspaceId()!, slug, "1");
     expect(existsSync(extractedPath)).toBe(true);
 
     // CACHE_TTL_MS=0 in setup, so this entry is stale; give lastAccess time to be < now.
