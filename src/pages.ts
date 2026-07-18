@@ -8,6 +8,76 @@ export function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 }
 
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  ndash: "–",
+  mdash: "—",
+  hellip: "…",
+  rsquo: "’",
+  lsquo: "‘",
+  rdquo: "”",
+  ldquo: "“",
+};
+
+// Single pass so already-escaped sequences like &amp;lt; decode to &lt;, not <.
+export function decodeHtmlEntities(s: string): string {
+  return s.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|([a-zA-Z]+));/g, (m, dec, hex, name) => {
+    if (dec) return String.fromCodePoint(Number(dec));
+    if (hex) return String.fromCodePoint(parseInt(hex, 16));
+    return NAMED_ENTITIES[name] ?? m;
+  });
+}
+
+// ---- social tags for served bundles ----
+//
+// Bundles are served verbatim, and agent-built pages almost never carry their own
+// OpenGraph tags — so a shared bundle link unfurls as a bare <title>: no
+// description, no image, and the raw hostname where the site name should be.
+// Inject a Seer-branded set into every HTML page served from a bundle. The page's
+// own <title> becomes og:title, entity-decoded then re-escaped once, so unfurlers
+// that read the attribute value get clean text. A bundle that declares any og: or
+// twitter: meta of its own knows what it wants — leave it entirely alone.
+
+export interface BundleMeta {
+  slug: string;
+  version: number;
+  updatedAt: number; // epoch ms of the served version's upload
+  url: string; // canonical absolute URL of the page being served
+}
+
+export function injectBundleMeta(html: string, meta: BundleMeta): string {
+  if (/<meta[^>]+(?:property|name)=["']?(?:og:|twitter:)/i.test(html)) return html;
+
+  const rawTitle = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "";
+  const title = decodeHtmlEntities(rawTitle).replace(/\s+/g, " ").trim() || meta.slug;
+  const updated = new Date(meta.updatedAt).toISOString().slice(0, 10);
+  const description = `An HTML bundle previewed on Seer — v${meta.version}, updated ${updated}.`;
+
+  const tags = [
+    `<meta property="og:title" content="${escapeHtml(title)}">`,
+    `<meta property="og:description" content="${escapeHtml(description)}">`,
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:url" content="${escapeHtml(meta.url)}">`,
+    `<meta property="og:site_name" content="Seer">`,
+    `<meta property="og:image" content="${escapeHtml(`${config.baseUrl}/og.png`)}">`,
+    `<meta property="og:image:width" content="1200">`,
+    `<meta property="og:image:height" content="630">`,
+    `<meta property="og:image:alt" content="Seer — a private instrument for previewing HTML bundles">`,
+    `<meta name="twitter:card" content="summary_large_image">`,
+  ].join("\n");
+
+  // Prefer the real <head>; a head-less page still gets tags where unfurlers'
+  // HTML parsers (which match <meta> anywhere) will find them.
+  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${tags}\n</head>`);
+  if (/<body[^>]*>/i.test(html)) return html.replace(/<body[^>]*>/i, (m) => `${m}\n${tags}`);
+  return `${tags}\n${html}`;
+}
+
 // ---- the scrying glass: one hand-drawn mark, the whole identity ----
 // A crystal ball in its cradle. The ink strokes are the instrument; the single
 // oxblood glint inside is the only accent, and it is the one thing that moves.
@@ -548,6 +618,12 @@ browser, no sign-in required. Hand the \`url\` to whoever should see it, or open
 yourself. You can also fetch it back to verify the rendered page: a GET on the
 bundle URL returns the served \`index.html\` (the latest URL has the live-reload
 script injected before \`</body>\`).
+
+When a bundle link is shared in chat, Seer injects OpenGraph tags into the served
+HTML so the link unfurls with your page's \`<title>\`, a description, and a Seer
+card image. If you want full control of the preview, ship your own \`og:\` meta
+tags in \`index.html\` — Seer leaves pages that declare any \`og:\` or \`twitter:\`
+meta untouched.
 
 Only the write side and the inventory are private: uploading needs the API token,
 and the list of every bundle (\`GET /api/bundles\`) needs the token too. Individual

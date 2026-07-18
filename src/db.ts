@@ -45,6 +45,12 @@ export function listBundles(): Bundle[] {
   return db.query<Bundle, []>("SELECT * FROM bundles ORDER BY created_at DESC").all();
 }
 
+export function getVersion(slug: string, version: number): Version | null {
+  return db
+    .query<Version, [string, number]>("SELECT * FROM versions WHERE slug = ? AND version = ?")
+    .get(slug, version);
+}
+
 export function listVersions(slug: string): Version[] {
   return db
     .query<Version, [string]>("SELECT * FROM versions WHERE slug = ? ORDER BY version DESC")

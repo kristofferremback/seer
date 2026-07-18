@@ -324,6 +324,62 @@ describe("serving", () => {
   });
 });
 
+// ---- social tags on served bundles ----
+
+describe("bundle social tags", () => {
+  test("bundle without og tags gets Seer og tags; title decoded from <title>", async () => {
+    const slug = "og-inject";
+    const page = `<!doctype html><html><head><title>Voice &amp; Video Calls &mdash; Plan</title></head><body>hi</body></html>`;
+    await put(slug, zipSync({ "index.html": strToU8(page) }));
+
+    const html = await (await fetch(`${base}/b/${slug}/`)).text();
+    // Entities decoded once, then escaped once for the attribute: &amp; -> & -> &amp;,
+    // &mdash; -> a literal em dash.
+    expect(html).toContain('<meta property="og:title" content="Voice &amp; Video Calls — Plan">');
+    expect(html).toContain('<meta property="og:site_name" content="Seer">');
+    expect(html).toContain('<meta property="og:image" content="');
+    expect(html).toContain("/og.png");
+    expect(html).toMatch(/og:description" content="An HTML bundle previewed on Seer — v1, updated \d{4}-\d{2}-\d{2}\."/);
+    expect(html).toContain(`<meta property="og:url" content="${config.baseUrl}/b/${slug}/">`);
+    // Injected into the real head.
+    expect(html.indexOf("og:title")).toBeLessThan(html.indexOf("</head>"));
+  });
+
+  test("head-less page still gets tags; empty title falls back to slug", async () => {
+    const slug = "og-headless";
+    await put(slug, htmlZip("no head here"));
+    const html = await (await fetch(`${base}/b/${slug}/`)).text();
+    expect(html).toContain(`<meta property="og:title" content="${slug}">`);
+    expect(html).toContain('<meta property="og:site_name" content="Seer">');
+  });
+
+  test("bundle with its own og tags is left alone", async () => {
+    const slug = "og-own";
+    const page = `<!doctype html><html><head><title>Mine</title><meta property="og:title" content="My Own Title"></head><body>x</body></html>`;
+    await put(slug, zipSync({ "index.html": strToU8(page) }));
+    const html = await (await fetch(`${base}/b/${slug}/`)).text();
+    expect(html).toContain('content="My Own Title"');
+    expect(html).not.toContain('og:site_name');
+    expect(html.match(/og:title/g)?.length).toBe(1);
+  });
+
+  test("pinned URL gets pinned og:url and version in description", async () => {
+    const slug = "og-pinned";
+    const page = (v: string) =>
+      `<!doctype html><html><head><title>Pinned ${v}</title></head><body>${v}</body></html>`;
+    await put(slug, zipSync({ "index.html": strToU8(page("one")) }));
+    await put(slug, zipSync({ "index.html": strToU8(page("two")) }));
+
+    const pinned = await (await fetch(`${base}/b/${slug}/v/1/`)).text();
+    expect(pinned).toContain(`<meta property="og:url" content="${config.baseUrl}/b/${slug}/v/1/">`);
+    expect(pinned).toContain("— v1, updated");
+
+    const latest = await (await fetch(`${base}/b/${slug}/`)).text();
+    expect(latest).toContain(`<meta property="og:url" content="${config.baseUrl}/b/${slug}/">`);
+    expect(latest).toContain("— v2, updated");
+  });
+});
+
 // ---- 8. websocket live reload ----
 
 describe("websocket live reload", () => {

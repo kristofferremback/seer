@@ -2,10 +2,17 @@ import type { Server, WebSocketHandler } from "bun";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { join, normalize, resolve } from "node:path";
 import { config } from "./config";
-import { db, getBundle, listBundles, listVersions, createVersion } from "./db";
+import { db, getBundle, getVersion, listBundles, listVersions, createVersion } from "./db";
 import { inspectZip, saveZip, ensureExtracted } from "./store";
 import { loginRedirect, handleCallback, requireSession, sessionEmail } from "./auth";
-import { landingPage, bundlesPage, skillDoc, type LedgerBundle } from "./pages";
+import {
+  landingPage,
+  bundlesPage,
+  skillDoc,
+  injectBundleMeta,
+  type BundleMeta,
+  type LedgerBundle,
+} from "./pages";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -49,12 +56,11 @@ function liveReloadScript(slug: string): string {
 // ---- bundle serving ----
 
 async function serveBundleFile(
-  slug: string,
-  version: number,
+  meta: BundleMeta,
   filePath: string,
   injectReload: boolean,
 ): Promise<Response> {
-  const dir = await ensureExtracted(slug, version);
+  const dir = await ensureExtracted(meta.slug, meta.version);
   const clean = normalize(filePath || "index.html");
   if (clean.startsWith("..") || clean.startsWith("/")) {
     return new Response("Not found", { status: 404 });
@@ -67,19 +73,22 @@ async function serveBundleFile(
     file = withIndex;
   }
 
-  const isHtml = file.type.startsWith("text/html");
-  if (isHtml && injectReload) {
-    const html = await file.text();
-    const script = liveReloadScript(slug);
-    const body = html.includes("</body>") ? html.replace("</body>", `${script}</body>`) : html + script;
-    return new Response(body, {
-      headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-cache" },
-    });
-  }
   // Latest (unpinned) content changes underneath viewers on every upload, and the
   // live-reload push means a stale-asset window breaks reloads (new HTML, old CSS/JS)
-  // — so everything is no-cache. Pinned /v/N/ content is immutable by construction.
+  // — so everything is no-cache. Pinned /v/N/ content is immutable by construction:
+  // the injected social tags derive only from that version's own fixed data.
   const cacheControl = injectReload ? "no-cache" : "public, max-age=31536000, immutable";
+
+  if (file.type.startsWith("text/html")) {
+    let html = injectBundleMeta(await file.text(), meta);
+    if (injectReload) {
+      const script = liveReloadScript(meta.slug);
+      html = html.includes("</body>") ? html.replace("</body>", `${script}</body>`) : html + script;
+    }
+    return new Response(html, {
+      headers: { "content-type": "text/html;charset=utf-8", "cache-control": cacheControl },
+    });
+  }
   return new Response(file, { headers: { "cache-control": cacheControl } });
 }
 
@@ -106,7 +115,13 @@ async function handleBundleRoute(req: Request): Promise<Response> {
     return Response.redirect(`${url.pathname}/${url.search}`, 302);
   }
 
-  return serveBundleFile(slug!, version, rest.slice(1), !pinned);
+  const meta: BundleMeta = {
+    slug: slug!,
+    version,
+    updatedAt: getVersion(slug!, version)?.created_at ?? bundle.created_at,
+    url: `${config.baseUrl}${url.pathname}`,
+  };
+  return serveBundleFile(meta, rest.slice(1), !pinned);
 }
 
 // ---- upload ----
