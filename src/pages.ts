@@ -443,6 +443,35 @@ function styles(): string {
     0%, 100% { opacity: 0.35; transform: scale(0.82) rotate(0deg); }
     50% { opacity: 1; transform: scale(1.08) rotate(45deg); }
   }
+
+  /* ---- components folded from the mock (buttons, panel rows, the void mark).
+     Step 5 folds the remaining settings/invite component styles. ---- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: hsl(var(--ink-soft));
+    background: transparent;
+    border: 1px solid hsl(var(--line));
+    border-radius: 8px;
+    padding: 0.5rem 0.9rem;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .btn.primary { color: hsl(var(--accent)); border-color: hsl(var(--accent) / 0.45); }
+  @media (hover: hover) and (pointer: fine) {
+    .btn:hover { color: hsl(var(--accent)); border-color: hsl(var(--accent) / 0.6); }
+  }
+  .panel-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.7rem; }
+  .stack-gap { margin-top: 1.6rem; }
+
+  /* the void — soft-404 */
+  .void-mark { width: 74px; height: 90px; margin-bottom: 1.6rem; opacity: 0.85; }
+  .void-mark .glint { animation-duration: 9s; }
 `;
 }
 
@@ -766,6 +795,62 @@ ${head("Bundles · Seer", og)}
 <div class="frame grow">
   <div class="shell spine">
     ${body}
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+</body>
+</html>`;
+}
+
+// ---- soft-404 (the void) ----
+//
+// Served for every denied, missing, unknown, or out-of-range bundle under a
+// workspace path — forbidden and missing are deliberately indistinguishable, so a
+// private workspace leaks nothing to a non-member. HTTP 404, no-cache, a generic
+// Seer OG card. The only branch: signed-out viewers get a sign-in affordance (the
+// link they were sent might resolve once they authenticate); signed-in viewers get
+// no affordance and see their own session email instead.
+
+export function softNotFoundPage(signedInEmail: string | null, currentUrl: string): string {
+  const og = {
+    "og:title": "Seer",
+    "og:description": "A private instrument for previewing HTML bundles.",
+    "og:type": "website",
+    "og:site_name": "Seer",
+    "og:image": `${config.baseUrl}/og.png`,
+    robots: "noindex",
+  };
+
+  const loginNext = `/login?next=${encodeURIComponent(currentUrl)}`;
+
+  const variant = signedInEmail
+    ? `<p class="subtitle">Signed in, and still nothing. The glass is&nbsp;dark.</p>
+       <p class="aside stack-gap">You're <span class="email-tag">${escapeHtml(signedInEmail)}</span>. Whatever
+       lived at this address is not yours to see, or not anywhere at all — Seer honestly can't tell you which.
+       If someone sent you this link, ask them to check their workspace.</p>`
+    : `<p class="subtitle">Try signing in — there might be, who&nbsp;knows?</p>
+       <div class="panel-row stack-gap">
+         <a class="btn primary" href="${escapeHtml(loginNext)}">Sign in</a>
+       </div>
+       <p class="aside stack-gap">Someone sent you this link on purpose, probably. If a sign-in doesn't
+       reveal it, ask them to check their workspace.</p>`;
+
+  return `<!doctype html>
+<html lang="en">
+${head("Seer", og)}
+<body>
+<div class="frame warm grow">
+  <div class="shell spine">
+    ${navRow(signedInEmail ? null : { href: loginNext, label: "Sign in" })}
+    ${markSvg("void-mark")}
+    <p class="eyebrow">404</p>
+    <h1 class="h-display">Nothing here for <span class="accent">you</span> to see.</h1>
+    ${variant}
   </div>
 </div>
 <div class="frame night">

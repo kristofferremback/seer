@@ -13,6 +13,28 @@ db.exec("PRAGMA journal_mode = WAL;");
 // exposes workspace-scoped query helpers; every bundle/version row is keyed by
 // its owning workspace.
 
+export interface Workspace {
+  id: string;
+  name: string;
+  visibility: "public" | "private";
+  created_at: number;
+}
+
+export function getWorkspace(id: string): Workspace | null {
+  return db
+    .query<Workspace, [string]>("SELECT * FROM workspaces WHERE id = ?")
+    .get(id);
+}
+
+/** Membership is the private-workspace access gate; all members are equal. */
+export function isMember(wsId: string, userId: string): boolean {
+  return !!db
+    .query<{ one: number }, [string, string]>(
+      "SELECT 1 AS one FROM memberships WHERE workspace_id = ? AND user_id = ?",
+    )
+    .get(wsId, userId);
+}
+
 export interface Bundle {
   workspace_id: string;
   slug: string;

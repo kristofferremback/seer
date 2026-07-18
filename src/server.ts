@@ -6,24 +6,38 @@ import {
   db,
   getBundle,
   getVersion,
+  getWorkspace,
+  isMember,
   listBundles,
   listVersions,
   createVersion,
   legacyWorkspaceId,
+  type Workspace,
 } from "./db";
 import { migrate } from "./migrate";
 import { inspectZip, saveZip, ensureExtracted } from "./store";
-import { loginRedirect, handleCallback, requireSession, sessionEmail } from "./auth";
+import {
+  loginRedirect,
+  handleCallback,
+  requireSession,
+  sessionEmail,
+  sessionUser,
+} from "./auth";
+import { WS_ID_RE } from "./ids";
 import {
   landingPage,
   bundlesPage,
   skillDoc,
+  softNotFoundPage,
   injectBundleMeta,
   type BundleMeta,
   type LedgerBundle,
 } from "./pages";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// Workspace-scoped bundle path: /<ws_id>/b/<slug>[/v/N][/rest]. Anything under a
+// well-formed /<ws_id>/b/ that doesn't resolve becomes a soft-404.
+const WS_BUNDLE_RE = /^\/(ws_[0-9abcdefghjkmnpqrstvwxyz]{10})\/b\//;
 
 type WSData = { ws: string; slug: string };
 
@@ -64,10 +78,28 @@ function requireApiToken(req: Request): Response | null {
   return json({ error: "Invalid or missing API token" }, 401);
 }
 
+// ---- access ----
+
+// A workspace is viewable by anyone when public; a private workspace only by its
+// members. The same rule gates page serving and the live-reload socket.
+function workspaceViewable(ws: Workspace, req: Request): boolean {
+  if (ws.visibility === "public") return true;
+  const user = sessionUser(req);
+  return user ? isMember(ws.id, user.id) : false;
+}
+
+function softNotFound(req: Request): Response {
+  const url = new URL(req.url);
+  return new Response(softNotFoundPage(sessionEmail(req), url.pathname + url.search), {
+    status: 404,
+    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-cache" },
+  });
+}
+
 // ---- live reload ----
 
-function liveReloadScript(slug: string): string {
-  return `<script>(()=>{const c=()=>{const w=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+"/ws/livereload?slug=${slug}");w.onmessage=e=>{if(e.data==="reload")location.reload()};w.onclose=()=>setTimeout(c,2000)};c()})();</script>`;
+function liveReloadScript(wsId: string, slug: string): string {
+  return `<script>(()=>{const c=()=>{const w=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+"/ws/livereload?ws=${wsId}&slug=${slug}");w.onmessage=e=>{if(e.data==="reload")location.reload()};w.onclose=()=>setTimeout(c,2000)};c()})();</script>`;
 }
 
 // ---- bundle serving ----
@@ -100,7 +132,7 @@ async function serveBundleFile(
   if (file.type.startsWith("text/html")) {
     let html = injectBundleMeta(await file.text(), meta);
     if (injectReload) {
-      const script = liveReloadScript(meta.slug);
+      const script = liveReloadScript(wsId, meta.slug);
       html = html.includes("</body>") ? html.replace("</body>", `${script}</body>`) : html + script;
     }
     return new Response(html, {
@@ -110,37 +142,39 @@ async function serveBundleFile(
   return new Response(file, { headers: { "cache-control": cacheControl } });
 }
 
-// Bundles are public: anyone with the link can view them, no session required.
-async function handleBundleRoute(req: Request): Promise<Response> {
+// Workspace-scoped serving: /<ws_id>/b/<slug>[/v/N][/rest]. Public workspaces serve
+// anyone; private ones only members. Every denial, unknown workspace, unknown bundle,
+// or out-of-range version resolves to the same soft-404 — forbidden and missing are
+// indistinguishable, so a private workspace leaks nothing to a non-member.
+async function handleWorkspaceBundle(req: Request, wsId: string): Promise<Response> {
   const url = new URL(req.url);
-  // /b/:slug[/v/:version]/rest...
-  const match = url.pathname.match(/^\/b\/([^/]+)(?:\/v\/(\d+))?(\/.*)?$/);
-  if (!match) return new Response("Not found", { status: 404 });
-  const [, slug, versionStr, rest] = match;
+  const tail = url.pathname.slice(`/${wsId}/b/`.length);
+  const match = tail.match(/^([^/]+)(?:\/v\/(\d+))?(\/.*)?$/);
 
-  if (!SLUG_RE.test(slug!)) return new Response("Not found", { status: 404 });
-  const ws = legacyWs();
-  const bundle = getBundle(ws, slug!);
-  if (!bundle) return new Response("Not found", { status: 404 });
+  const ws = getWorkspace(wsId);
+  if (!ws || !workspaceViewable(ws, req) || !match) return softNotFound(req);
+  const [, slug, versionStr, rest] = match;
+  if (!SLUG_RE.test(slug!)) return softNotFound(req);
+
+  const bundle = getBundle(wsId, slug!);
+  if (!bundle) return softNotFound(req);
 
   const pinned = versionStr !== undefined;
   const version = pinned ? Number(versionStr) : bundle.latest_version;
-  if (pinned && (version < 1 || version > bundle.latest_version)) {
-    return new Response("Not found", { status: 404 });
-  }
+  if (pinned && (version < 1 || version > bundle.latest_version)) return softNotFound(req);
 
   // Require a trailing slash on the bundle root so relative asset URLs resolve.
   if (rest === undefined) {
-    return Response.redirect(`${url.pathname}/${url.search}`, 302);
+    return new Response(null, { status: 302, headers: { location: `${url.pathname}/${url.search}` } });
   }
 
   const meta: BundleMeta = {
     slug: slug!,
     version,
-    updatedAt: getVersion(ws, slug!, version)?.created_at ?? bundle.created_at,
+    updatedAt: getVersion(wsId, slug!, version)?.created_at ?? bundle.created_at,
     url: `${config.baseUrl}${url.pathname}`,
   };
-  return serveBundleFile(ws, meta, rest.slice(1), !pinned);
+  return serveBundleFile(wsId, meta, rest.slice(1), !pinned);
 }
 
 // ---- upload ----
@@ -317,15 +351,33 @@ export function startServer() {
       const url = new URL(req.url);
 
       if (url.pathname === "/ws/livereload") {
-        // Public: bundles are viewable by anyone, so their live-reload socket is too.
+        const wsId = url.searchParams.get("ws") ?? "";
         const slug = url.searchParams.get("slug") ?? "";
-        if (!SLUG_RE.test(slug)) return new Response("Bad slug", { status: 400 });
-        if (srv.upgrade(req, { data: { ws: legacyWs(), slug } }))
+        if (!WS_ID_RE.test(wsId) || !SLUG_RE.test(slug)) {
+          return new Response("Bad request", { status: 400 });
+        }
+        // Same access rule as serving: only upgrade when the viewer could view it.
+        const ws = getWorkspace(wsId);
+        if (!ws || !workspaceViewable(ws, req)) return new Response("Not found", { status: 404 });
+        if (srv.upgrade(req, { data: { ws: wsId, slug } }))
           return undefined as unknown as Response;
         return new Response("WebSocket upgrade failed", { status: 400 });
       }
 
-      if (url.pathname.startsWith("/b/")) return handleBundleRoute(req);
+      const wsBundle = url.pathname.match(WS_BUNDLE_RE);
+      if (wsBundle) return handleWorkspaceBundle(req, wsBundle[1]!);
+
+      // Legacy /b/<slug>[...] → 301 to the bootstrap workspace, preserving the full
+      // remainder and query. No legacy workspace recorded → a plain 404.
+      if (url.pathname.startsWith("/b/")) {
+        const ws = legacyWorkspaceId();
+        if (!ws) return new Response("Not found", { status: 404 });
+        const remainder = url.pathname.slice("/b/".length);
+        return new Response(null, {
+          status: 301,
+          headers: { location: `/${ws}/b/${remainder}${url.search}` },
+        });
+      }
 
       return new Response("Not found", { status: 404 });
     },
