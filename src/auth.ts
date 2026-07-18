@@ -192,9 +192,24 @@ export const acceptInvite = db.transaction(
 
 // ---- Google OIDC ----
 
+// Confine a post-login `next` to this origin. Resolving against baseUrl with the
+// same URL parser the browser uses for a Location header collapses the tricks a
+// `startsWith("//")` check misses — `/\evil.com`, embedded tabs/newlines — to
+// their true cross-origin form, which we then reject. Returns a same-origin
+// path+query, or "/" for anything that escapes.
+function safeNextPath(next: string): string {
+  try {
+    const resolved = new URL(next, config.baseUrl);
+    if (resolved.origin !== new URL(config.baseUrl).origin) return "/";
+    return resolved.pathname + resolved.search;
+  } catch {
+    return "/";
+  }
+}
+
 export function loginRedirect(next: string): Response {
   const state = randomBytes(16).toString("hex");
-  const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  const safeNext = safeNextPath(next);
   const params = new URLSearchParams({
     client_id: config.googleClientId,
     redirect_uri: `${config.baseUrl}/auth/callback`,
@@ -234,7 +249,9 @@ export async function handleCallback(req: Request): Promise<Response> {
 
   const [expectedState, encodedNext] = stateCookie.split(":");
   if (state !== expectedState) return new Response("OAuth state mismatch", { status: 400 });
-  const next = decodeURIComponent(encodedNext ?? "/");
+  // Re-validate at the sink: the state cookie is not signed, so never trust its
+  // stored path to still be same-origin before using it as a Location.
+  const next = safeNextPath(decodeURIComponent(encodedNext ?? "/"));
 
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
