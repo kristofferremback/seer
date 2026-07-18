@@ -24,9 +24,10 @@ process.env.PORT = "0";
 process.env.MAX_UPLOAD_BYTES = "1024";
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-auth-"));
 
-const { sessionCookie, sessionEmail } = await import("../src/auth");
+const { sessionCookie, sessionEmail, sessionUser } = await import("../src/auth");
 const { config } = await import("../src/config");
 const { startServer } = await import("../src/server");
+const { db } = await import("../src/db");
 
 function assert(cond: boolean, msg: string) {
   if (!cond) {
@@ -49,61 +50,80 @@ function hmac(data: string): string {
   return createHmac("sha256", config.sessionSecret).update(data).digest("base64url");
 }
 
-// ---- session cookie unit tests ----
+// startServer() runs the migration, bootstrapping the root user (email
+// allowed@example.com from ALLOWED_EMAILS). The session cookie now carries the
+// user id, so the round-trip tests need that real user row in the db.
+const server = startServer();
+const base = `http://localhost:${server.port}`;
 
-// 1. round-trip
+const rootUser = db
+  .query<{ id: string; email: string }, []>("SELECT id, email FROM users LIMIT 1")
+  .get()!;
+assert(!!rootUser && rootUser.email === "allowed@example.com", `root user seeded, got ${rootUser?.email}`);
+
+// ---- session cookie unit tests (user-id payload) ----
+
+// 1. round-trip: cookie carries usr_ id, sessionUser resolves the row.
 {
-  const email = "allowed@example.com";
-  const setCookie = sessionCookie(email);
-  const value = cookieValue(setCookie);
-  const got = sessionEmail(reqWithCookie(value));
-  assert(got === email, `round-trip expected ${email}, got ${got}`);
+  const value = cookieValue(sessionCookie(rootUser.id));
+  const su = sessionUser(reqWithCookie(value));
+  assert(su?.id === rootUser.id, `round-trip id expected ${rootUser.id}, got ${su?.id}`);
+  assert(su?.email === rootUser.email, `round-trip email expected ${rootUser.email}, got ${su?.email}`);
+  assert(sessionEmail(reqWithCookie(value)) === rootUser.email, "sessionEmail wraps sessionUser");
 }
 
 // 2. tampered signature rejected
 {
-  const value = cookieValue(sessionCookie("allowed@example.com"));
+  const value = cookieValue(sessionCookie(rootUser.id));
   const parts = value.split(".");
   parts[2] = (parts[2] ?? "") + "x"; // corrupt sig
-  const got = sessionEmail(reqWithCookie(parts.join(".")));
-  assert(got === null, `tampered sig should be rejected, got ${got}`);
+  const got = sessionUser(reqWithCookie(parts.join(".")));
+  assert(got === null, `tampered sig should be rejected, got ${JSON.stringify(got)}`);
 }
 
-// 3. tampered email (payload changed, old sig) rejected
+// 3. tampered payload (id swapped, old sig) rejected
 {
-  const value = cookieValue(sessionCookie("allowed@example.com"));
+  const value = cookieValue(sessionCookie(rootUser.id));
   const [, exp, sig] = value.split(".");
-  const evil = Buffer.from("attacker@evil.com").toString("base64url");
-  const got = sessionEmail(reqWithCookie(`${evil}.${exp}.${sig}`));
-  assert(got === null, `tampered email should be rejected, got ${got}`);
+  const evil = Buffer.from("usr_zzzzzzzzzz").toString("base64url");
+  const got = sessionUser(reqWithCookie(`${evil}.${exp}.${sig}`));
+  assert(got === null, `tampered payload should be rejected, got ${JSON.stringify(got)}`);
 }
 
-// 4. expired session rejected (craft a correctly-signed but past-exp cookie)
+// 4. expired session rejected (correctly-signed but past-exp cookie)
 {
-  const emailB64 = Buffer.from("allowed@example.com").toString("base64url");
+  const idB64 = Buffer.from(rootUser.id).toString("base64url");
   const exp = Date.now() - 1000; // already expired
-  const payload = `${emailB64}.${exp}`;
+  const payload = `${idB64}.${exp}`;
   const value = `${payload}.${hmac(payload)}`;
-  const got = sessionEmail(reqWithCookie(value));
-  assert(got === null, `expired session should be rejected, got ${got}`);
+  const got = sessionUser(reqWithCookie(value));
+  assert(got === null, `expired session should be rejected, got ${JSON.stringify(got)}`);
 }
 
 // 5. no cookie -> null
 {
-  const got = sessionEmail(new Request("http://localhost:3000/"));
-  assert(got === null, `no cookie should be null, got ${got}`);
+  const got = sessionUser(new Request("http://localhost:3000/"));
+  assert(got === null, `no cookie should be null, got ${JSON.stringify(got)}`);
 }
 
 // 6. malformed cookie -> null
 {
-  const got = sessionEmail(reqWithCookie("garbage"));
-  assert(got === null, `malformed cookie should be null, got ${got}`);
+  const got = sessionUser(reqWithCookie("garbage"));
+  assert(got === null, `malformed cookie should be null, got ${JSON.stringify(got)}`);
+}
+
+// 6b. old email-payload cookie: correctly signed, but decodes to an id that is not
+// a real user row -> db miss -> re-login (null).
+{
+  const emailB64 = Buffer.from("allowed@example.com").toString("base64url");
+  const exp = Date.now() + 60_000;
+  const payload = `${emailB64}.${exp}`;
+  const value = `${payload}.${hmac(payload)}`;
+  const got = sessionUser(reqWithCookie(value));
+  assert(got === null, `legacy email-payload cookie should re-login, got ${JSON.stringify(got)}`);
 }
 
 // ---- auth-enabled server: OAuth pre-network branches, WS auth, oversize upload ----
-
-const server = startServer();
-const base = `http://localhost:${server.port}`;
 
 // 7. loginRedirect open-redirect guard: next="//evil.com" must be replaced by "/".
 {
