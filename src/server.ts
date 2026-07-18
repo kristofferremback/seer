@@ -1,37 +1,51 @@
 import type { Server, WebSocketHandler } from "bun";
-import { createHash, timingSafeEqual } from "node:crypto";
 import { join, normalize, resolve } from "node:path";
 import { config } from "./config";
 import {
   db,
+  getApiKey,
   getBundle,
   getVersion,
   getWorkspace,
   isMember,
   listBundles,
+  listMembers,
+  listUserKeys,
   listVersions,
+  createInvite,
   createVersion,
+  createWorkspace,
+  mintApiKey,
+  revokeApiKey,
+  rollApiKey,
+  setWorkspaceName,
+  setWorkspaceVisibility,
   legacyWorkspaceId,
   type Workspace,
 } from "./db";
 import { migrate } from "./migrate";
 import { inspectZip, saveZip, ensureExtracted } from "./store";
 import {
+  acceptInvite,
   loginRedirect,
   handleCallback,
+  requireApiKey,
   requireSession,
   sessionEmail,
   sessionUser,
+  type SessionUser,
 } from "./auth";
-import { WS_ID_RE } from "./ids";
+import { INV_ID_RE, WS_ID_RE } from "./ids";
 import {
   landingPage,
   bundlesPage,
+  settingsPage,
   skillDoc,
   softNotFoundPage,
   injectBundleMeta,
   type BundleMeta,
   type LedgerBundle,
+  type SettingsReveal,
 } from "./pages";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -69,13 +83,78 @@ function favicon(name: string, contentType: string): Response {
   });
 }
 
-function requireApiToken(req: Request): Response | null {
-  const auth = req.headers.get("authorization") ?? "";
-  // Compare SHA-256 digests so the check is constant-time regardless of input length.
-  const expected = createHash("sha256").update(`Bearer ${config.apiToken}`).digest();
-  const actual = createHash("sha256").update(auth).digest();
-  if (timingSafeEqual(actual, expected)) return null;
-  return json({ error: "Invalid or missing API token" }, 401);
+function html(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/html;charset=utf-8" },
+  });
+}
+
+// See other: turn a mutation POST into a plain GET of the redirect target.
+function redirect(location: string): Response {
+  return new Response(null, { status: 303, headers: { location } });
+}
+
+// ---- mutation guards ----
+
+// CSRF posture: SameSite=Lax session cookie + POST-only mutations, plus this
+// origin check. When an Origin/Referer header is present its host must match
+// BASE_URL's; a cross-site form post is refused. Absent headers pass (native
+// tooling, same-origin navigations that omit them). Deliberately slop-tier.
+function originOk(req: Request): boolean {
+  const src = req.headers.get("origin") ?? req.headers.get("referer");
+  if (!src) return true;
+  try {
+    return new URL(src).host === new URL(config.baseUrl).host;
+  } catch {
+    return false;
+  }
+}
+
+// A mutation must come from a signed-in member of the target workspace. No session
+// → 403; unknown ws or non-member → 404 (a non-member learns nothing about the ws).
+function requireMember(req: Request, wsId: string): SessionUser | Response {
+  const user = sessionUser(req);
+  if (!user) return new Response("Sign in required", { status: 403 });
+  if (!WS_ID_RE.test(wsId) || !isMember(wsId, user.id)) {
+    return new Response("Not found", { status: 404 });
+  }
+  return user;
+}
+
+function fmtDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+function fmtDateTime(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+}
+
+// Render the settings page for a member, optionally with a one-time reveal box.
+function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReveal): Response {
+  const ws = getWorkspace(wsId)!;
+  return html(
+    settingsPage({
+      wsId,
+      name: ws.name,
+      visibility: ws.visibility,
+      email: user.email,
+      members: listMembers(wsId).map((m) => ({
+        email: m.email,
+        id: m.id,
+        joined: fmtDate(m.created_at),
+        isYou: m.id === user.id,
+      })),
+      keys: listUserKeys(user.id, wsId).map((k) => ({
+        id: k.id,
+        name: k.name,
+        hint: k.token_hint,
+        created: fmtDate(k.created_at),
+        lastUsed: k.last_used_at ? fmtDateTime(k.last_used_at) : "never",
+        isLegacy: !!k.is_legacy,
+      })),
+      reveal,
+    }),
+  );
 }
 
 // ---- access ----
@@ -180,8 +259,8 @@ async function handleWorkspaceBundle(req: Request, wsId: string): Promise<Respon
 // ---- upload ----
 
 async function handleUpload(req: Request, slug: string, server: Server<WSData>): Promise<Response> {
-  const denied = requireApiToken(req);
-  if (denied) return denied;
+  const auth = requireApiKey(req);
+  if (auth instanceof Response) return auth;
   if (!SLUG_RE.test(slug)) {
     return json({ error: "Slug must match [a-z0-9][a-z0-9-]{0,63}" }, 400);
   }
@@ -199,7 +278,8 @@ async function handleUpload(req: Request, slug: string, server: Server<WSData>):
     return json({ error: `Invalid zip: ${(err as Error).message}` }, 400);
   }
 
-  const ws = legacyWs();
+  // The key resolves the workspace: the upload lands wherever the key belongs.
+  const ws = auth.workspaceId;
   const version = createVersion(ws, slug, body.length, files.length);
   await saveZip(ws, slug, version, body);
   server.publish(`bundle:${ws}:${slug}`, "reload");
@@ -207,8 +287,9 @@ async function handleUpload(req: Request, slug: string, server: Server<WSData>):
   return json({
     slug,
     version,
-    url: `${config.baseUrl}/b/${slug}/`,
-    versionUrl: `${config.baseUrl}/b/${slug}/v/${version}/`,
+    workspace: ws,
+    url: `${config.baseUrl}/${ws}/b/${slug}/`,
+    versionUrl: `${config.baseUrl}/${ws}/b/${slug}/v/${version}/`,
     bytes: body.length,
     files: files.length,
     hasIndexHtml: files.includes("index.html"),
@@ -323,14 +404,15 @@ export function startServer() {
 
       "/api/bundles": {
         GET: (req) => {
-          const denied = requireApiToken(req);
-          if (denied) return denied;
-          const ws = legacyWs();
+          const auth = requireApiKey(req);
+          if (auth instanceof Response) return auth;
+          const ws = auth.workspaceId;
           return json(
             listBundles(ws).map((b) => ({
               slug: b.slug,
               latestVersion: b.latest_version,
-              url: `${config.baseUrl}/b/${b.slug}/`,
+              workspace: ws,
+              url: `${config.baseUrl}/${ws}/b/${b.slug}/`,
               versions: listVersions(ws, b.slug).map((v) => ({
                 version: v.version,
                 createdAt: new Date(v.created_at).toISOString(),
@@ -344,6 +426,120 @@ export function startServer() {
       "/api/bundles/:slug": {
         PUT: (req, srv) => handleUpload(req, req.params.slug, srv),
         POST: (req, srv) => handleUpload(req, req.params.slug, srv),
+      },
+
+      // ---- workspace + settings mutations (session + membership; Origin guard) ----
+
+      "/workspaces": {
+        POST: async (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const user = sessionUser(req);
+          if (!user) return new Response("Sign in required", { status: 403 });
+          const name = String((await req.formData()).get("name") ?? "").trim();
+          if (!name || name.length > 80) return new Response("Invalid workspace name", { status: 400 });
+          const id = createWorkspace(name, user.id);
+          return redirect(`/settings/${id}`);
+        },
+      },
+
+      "/settings/:ws": {
+        GET: (req) => {
+          const wsId = req.params.ws;
+          const user = sessionUser(req);
+          if (!user) return requireSession(req)!;
+          if (!WS_ID_RE.test(wsId) || !isMember(wsId, user.id)) return softNotFound(req);
+          return settingsResponse(wsId, user);
+        },
+      },
+
+      "/settings/:ws/name": {
+        POST: async (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          const name = String((await req.formData()).get("name") ?? "").trim();
+          if (!name || name.length > 80) return new Response("Invalid name", { status: 400 });
+          setWorkspaceName(req.params.ws, name);
+          return redirect(`/settings/${req.params.ws}`);
+        },
+      },
+
+      "/settings/:ws/visibility": {
+        POST: async (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          const v = String((await req.formData()).get("visibility") ?? "");
+          if (v !== "public" && v !== "private") return new Response("Invalid visibility", { status: 400 });
+          setWorkspaceVisibility(req.params.ws, v);
+          return redirect(`/settings/${req.params.ws}`);
+        },
+      },
+
+      "/settings/:ws/invites": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          const { token, expiresAt } = createInvite(req.params.ws, gate.id);
+          return settingsResponse(req.params.ws, gate, {
+            kind: "invite",
+            url: `${config.baseUrl}/invite/${token}`,
+            expires: fmtDate(expiresAt),
+          });
+        },
+      },
+
+      "/settings/:ws/keys": {
+        POST: async (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          const name = String((await req.formData()).get("name") ?? "").trim() || "unnamed key";
+          if (name.length > 80) return new Response("Invalid key name", { status: 400 });
+          const { token } = mintApiKey(gate.id, req.params.ws, name);
+          return settingsResponse(req.params.ws, gate, { kind: "key", token });
+        },
+      },
+
+      "/settings/:ws/keys/:keyId/roll": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          // Ownership is enforced inside rollApiKey (key must be the caller's in this ws).
+          const rolled = rollApiKey(req.params.keyId, gate.id, req.params.ws);
+          if (!rolled) return new Response("Not found", { status: 404 });
+          return settingsResponse(req.params.ws, gate, { kind: "key", token: rolled.token });
+        },
+      },
+
+      "/settings/:ws/keys/:keyId/revoke": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          const key = getApiKey(req.params.keyId);
+          if (!key || key.user_id !== gate.id || key.workspace_id !== req.params.ws) {
+            return new Response("Not found", { status: 404 });
+          }
+          revokeApiKey(req.params.keyId);
+          return redirect(`/settings/${req.params.ws}`);
+        },
+      },
+
+      // A signed-in user accepts an invite (new members join via the OIDC path).
+      "/invite/:token/accept": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const token = req.params.token;
+          if (!INV_ID_RE.test(token)) return softNotFound(req);
+          const user = sessionUser(req);
+          if (!user) return new Response("Sign in required", { status: 403 });
+          // Invalid, expired, or used token is indistinguishable from missing.
+          if (!acceptInvite(token, user.email)) return softNotFound(req);
+          return redirect("/bundles");
+        },
       },
     },
 

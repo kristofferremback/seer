@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "./config";
+import { hashKey, keyHint, newApiKey, tinyId } from "./ids";
 
 mkdirSync(config.dataDir, { recursive: true });
 
@@ -107,6 +108,134 @@ export const createVersion = db.transaction(
     return version;
   },
 );
+
+// ---- workspaces, members (mutations) ----
+
+/** Create a public workspace and seat its creator as a member. Returns the ws id. */
+export const createWorkspace = db.transaction((name: string, userId: string): string => {
+  const id = tinyId("ws");
+  const now = Date.now();
+  db.run("INSERT INTO workspaces (id, name, visibility, created_at) VALUES (?, ?, 'public', ?)", [
+    id,
+    name,
+    now,
+  ]);
+  db.run("INSERT INTO memberships (workspace_id, user_id, created_at) VALUES (?, ?, ?)", [
+    id,
+    userId,
+    now,
+  ]);
+  return id;
+}) as (name: string, userId: string) => string;
+
+export function setWorkspaceName(wsId: string, name: string): void {
+  db.run("UPDATE workspaces SET name = ? WHERE id = ?", [name, wsId]);
+}
+
+export function setWorkspaceVisibility(wsId: string, visibility: "public" | "private"): void {
+  db.run("UPDATE workspaces SET visibility = ? WHERE id = ?", [visibility, wsId]);
+}
+
+export interface Member {
+  id: string;
+  email: string;
+  created_at: number;
+}
+
+export function listMembers(wsId: string): Member[] {
+  return db
+    .query<Member, [string]>(
+      "SELECT u.id, u.email, m.created_at FROM memberships m " +
+        "JOIN users u ON u.id = m.user_id WHERE m.workspace_id = ? ORDER BY m.created_at ASC",
+    )
+    .all(wsId);
+}
+
+// ---- api keys (mutations) ----
+
+export interface ApiKeyRow {
+  id: string;
+  user_id: string;
+  workspace_id: string;
+  name: string;
+  token_hint: string;
+  is_legacy: number;
+  created_at: number;
+  last_used_at: number | null;
+  revoked_at: number | null;
+}
+
+const KEY_COLS =
+  "id, user_id, workspace_id, name, token_hint, is_legacy, created_at, last_used_at, revoked_at";
+
+/** A member's still-live keys in one workspace, newest first. Revoked keys are hidden. */
+export function listUserKeys(userId: string, wsId: string): ApiKeyRow[] {
+  return db
+    .query<ApiKeyRow, [string, string]>(
+      `SELECT ${KEY_COLS} FROM api_keys WHERE user_id = ? AND workspace_id = ? ` +
+        "AND revoked_at IS NULL ORDER BY created_at DESC",
+    )
+    .all(userId, wsId);
+}
+
+export function getApiKey(keyId: string): ApiKeyRow | null {
+  return db
+    .query<ApiKeyRow, [string]>(`SELECT ${KEY_COLS} FROM api_keys WHERE id = ?`)
+    .get(keyId);
+}
+
+/** Mint a fresh key. Only the token_hash and hint are stored; the raw token is
+ *  returned once for a one-time reveal and never recoverable after. */
+export function mintApiKey(
+  userId: string,
+  wsId: string,
+  name: string,
+): { id: string; token: string } {
+  const token = newApiKey();
+  const id = tinyId("key");
+  db.run(
+    "INSERT INTO api_keys (id, user_id, workspace_id, name, token_hash, token_hint, is_legacy, created_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+    [id, userId, wsId, name, hashKey(token), keyHint(token), Date.now()],
+  );
+  return { id, token };
+}
+
+export function revokeApiKey(keyId: string): void {
+  db.run("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", [
+    Date.now(),
+    keyId,
+  ]);
+}
+
+/** Roll a key: revoke it and mint a replacement with the same name in one breath.
+ *  Returns the new key, or null if the key is not the caller's in this workspace. */
+export const rollApiKey = db.transaction(
+  (keyId: string, userId: string, wsId: string): { id: string; token: string } | null => {
+    const key = getApiKey(keyId);
+    if (!key || key.user_id !== userId || key.workspace_id !== wsId) return null;
+    db.run("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", [
+      Date.now(),
+      keyId,
+    ]);
+    return mintApiKey(userId, wsId, key.name);
+  },
+) as (keyId: string, userId: string, wsId: string) => { id: string; token: string } | null;
+
+// ---- invites (mutations) ----
+
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function createInvite(wsId: string, userId: string): { token: string; expiresAt: number } {
+  const token = tinyId("inv");
+  const now = Date.now();
+  const expiresAt = now + INVITE_TTL_MS;
+  db.run(
+    "INSERT INTO invites (token, workspace_id, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+    [token, wsId, userId, now, expiresAt],
+  );
+  return { token, expiresAt };
+}
 
 // ---- meta ----
 

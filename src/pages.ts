@@ -807,6 +807,168 @@ ${themeToggleScript()}
 </html>`;
 }
 
+// ---- workspace settings ----
+//
+// Members-only. Rename, visibility, members + invite mint, and the session user's
+// own keys (mint/roll/revoke). A reveal box — the invite URL or a freshly minted
+// key token — is rendered ONLY on the response to the minting POST, never on a
+// later load: only the token's hash survives in the db. Step 5 folds the mock's
+// component CSS (.panel/.input/.seg/.reveal/.pill/.act) into styles().
+
+export interface SettingsMember {
+  email: string;
+  id: string;
+  joined: string;
+  isYou: boolean;
+}
+export interface SettingsKey {
+  id: string;
+  name: string;
+  hint: string;
+  created: string;
+  lastUsed: string;
+  isLegacy: boolean;
+}
+export type SettingsReveal =
+  | { kind: "key"; token: string }
+  | { kind: "invite"; url: string; expires: string };
+
+export interface SettingsData {
+  wsId: string;
+  name: string;
+  visibility: "public" | "private";
+  email: string;
+  members: SettingsMember[];
+  keys: SettingsKey[];
+  reveal?: SettingsReveal;
+}
+
+export function settingsPage(d: SettingsData): string {
+  const og = { "og:title": `Settings · ${d.name} · Seer`, "og:type": "website", robots: "noindex" };
+  const s = (base: string) => `/settings/${d.wsId}${base}`;
+
+  const memberRows = d.members
+    .map(
+      (m) => `<tr>
+        <td>${escapeHtml(m.email)}${m.isYou ? ` <span class="pill">you</span>` : ""}</td>
+        <td class="mono">${escapeHtml(m.id)}</td>
+        <td class="mono">${escapeHtml(m.joined)}</td>
+      </tr>`,
+    )
+    .join("\n");
+
+  const keyRows =
+    d.keys.length === 0
+      ? `<tr><td colspan="5" class="empty">No keys yet — mint one to upload.</td></tr>`
+      : d.keys
+          .map(
+            (k) => `<tr>
+        <td>${escapeHtml(k.name)}${k.isLegacy ? ` <span class="pill">legacy</span>` : ""}</td>
+        <td class="mono">${escapeHtml(k.hint)}</td>
+        <td class="mono">${escapeHtml(k.created)}</td>
+        <td class="mono">${escapeHtml(k.lastUsed)}</td>
+        <td class="act">
+          <form method="post" action="${s(`/keys/${k.id}/roll`)}"><button type="submit">roll</button></form>
+          <form method="post" action="${s(`/keys/${k.id}/revoke`)}"><button type="submit">revoke</button></form>
+        </td>
+      </tr>`,
+          )
+          .join("\n");
+
+  const inviteReveal =
+    d.reveal?.kind === "invite"
+      ? `<div class="reveal">
+          <pre>${escapeHtml(d.reveal.url)}</pre>
+          <p class="reveal-note">single use · expires ${escapeHtml(d.reveal.expires)} · send it however you like</p>
+        </div>`
+      : "";
+
+  const keyReveal =
+    d.reveal?.kind === "key"
+      ? `<div class="reveal">
+          <pre>${escapeHtml(d.reveal.token)}</pre>
+          <p class="reveal-note">shown once — copy it now; only its hash survives</p>
+        </div>`
+      : "";
+
+  const seg = (v: "public" | "private", label: string) =>
+    `<button type="submit" name="visibility" value="${v}"${d.visibility === v ? ` class="on"` : ""}>${label}</button>`;
+
+  return `<!doctype html>
+<html lang="en">
+${head(`Settings · ${d.name} · Seer`, og)}
+<body>
+<div class="frame warm">
+  <div class="shell spine">
+    ${navRow({ href: "/bundles", label: "bundles" })}
+    <p class="eyebrow"><span class="email-tag">${escapeHtml(d.wsId)} · workspace</span></p>
+    <h1 class="h-section">${escapeHtml(d.name)}</h1>
+    <p class="subtitle">Settings, members, and your keys.</p>
+  </div>
+</div>
+<div class="frame grow">
+  <div class="shell spine">
+
+    <div class="panel">
+      <p class="eyebrow">Name</p>
+      <form class="panel-row" method="post" action="${s("/name")}">
+        <input class="input" type="text" name="name" value="${escapeHtml(d.name)}" maxlength="80" aria-label="Workspace name">
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">Visibility</p>
+      <form class="panel-row" method="post" action="${s("/visibility")}">
+        <div class="seg" role="group" aria-label="Workspace visibility">
+          ${seg("public", "Public")}
+          ${seg("private", "Private")}
+        </div>
+        <span class="pill"><span class="bead"></span>${d.visibility}</span>
+      </form>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">Members</p>
+      <div class="ledger scroll-x">
+        <table>
+          <tr><th>Member</th><th>User</th><th>Joined</th></tr>
+          ${memberRows}
+        </table>
+      </div>
+      <form class="panel-row stack-gap" method="post" action="${s("/invites")}">
+        <button class="btn primary" type="submit">Invite someone</button>
+      </form>
+      ${inviteReveal}
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">Your keys</p>
+      <div class="ledger scroll-x">
+        <table>
+          <tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr>
+          ${keyRows}
+        </table>
+      </div>
+      <form class="panel-row stack-gap" method="post" action="${s("/keys")}">
+        <input class="input" type="text" name="name" placeholder="key name" maxlength="80" aria-label="New key name">
+        <button class="btn primary" type="submit">Mint a new key</button>
+      </form>
+      ${keyReveal}
+    </div>
+
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/bundles">bundles</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+</body>
+</html>`;
+}
+
 // ---- soft-404 (the void) ----
 //
 // Served for every denied, missing, unknown, or out-of-range bundle under a
