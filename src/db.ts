@@ -230,7 +230,11 @@ export function revokeApiKey(keyId: string): void {
 export const rollApiKey = db.transaction(
   (keyId: string, userId: string, wsId: string): { id: string; token: string } | null => {
     const key = getApiKey(keyId);
-    if (!key || key.user_id !== userId || key.workspace_id !== wsId) return null;
+    // A dead key must not be rollable — a double-submitted roll would otherwise
+    // silently mint an extra live key.
+    if (!key || key.user_id !== userId || key.workspace_id !== wsId || key.revoked_at !== null) {
+      return null;
+    }
     db.run("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", [
       Date.now(),
       keyId,
