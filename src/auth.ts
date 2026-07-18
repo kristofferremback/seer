@@ -134,6 +134,7 @@ export interface AcceptedInvite {
 interface InviteRow {
   token: string;
   workspace_id: string;
+  created_by: string;
   expires_at: number;
   accepted_at: number | null;
 }
@@ -142,7 +143,7 @@ interface InviteRow {
 export function lookupValidInvite(token: string): InviteRow | null {
   const inv = db
     .query<InviteRow, [string]>(
-      "SELECT token, workspace_id, expires_at, accepted_at FROM invites WHERE token = ?",
+      "SELECT token, workspace_id, created_by, expires_at, accepted_at FROM invites WHERE token = ?",
     )
     .get(token);
   if (!inv) return null;

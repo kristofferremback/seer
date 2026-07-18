@@ -27,6 +27,23 @@ export function getWorkspace(id: string): Workspace | null {
     .get(id);
 }
 
+/** Every workspace the user belongs to, oldest membership first — the ledger grouping. */
+export function listUserWorkspaces(userId: string): Workspace[] {
+  return db
+    .query<Workspace, [string]>(
+      "SELECT w.id, w.name, w.visibility, w.created_at FROM memberships m " +
+        "JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = ? ORDER BY m.created_at ASC",
+    )
+    .all(userId);
+}
+
+/** A user by id — the inviter behind an invite, for the invite page. */
+export function getUser(id: string): { id: string; email: string } | null {
+  return db
+    .query<{ id: string; email: string }, [string]>("SELECT id, email FROM users WHERE id = ?")
+    .get(id);
+}
+
 /** Membership is the private-workspace access gate; all members are equal. */
 export function isMember(wsId: string, userId: string): boolean {
   return !!db

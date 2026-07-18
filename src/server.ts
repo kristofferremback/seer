@@ -6,11 +6,13 @@ import {
   getApiKey,
   getBundle,
   getVersion,
+  getUser,
   getWorkspace,
   isMember,
   listBundles,
   listMembers,
   listUserKeys,
+  listUserWorkspaces,
   listVersions,
   createInvite,
   createVersion,
@@ -29,6 +31,7 @@ import {
   acceptInvite,
   loginRedirect,
   handleCallback,
+  lookupValidInvite,
   requireApiKey,
   requireSession,
   sessionEmail,
@@ -39,12 +42,13 @@ import { INV_ID_RE, WS_ID_RE } from "./ids";
 import {
   landingPage,
   bundlesPage,
+  invitePage,
   settingsPage,
   skillDoc,
   softNotFoundPage,
   injectBundleMeta,
   type BundleMeta,
-  type LedgerBundle,
+  type LedgerGroup,
   type SettingsReveal,
 } from "./pages";
 
@@ -54,14 +58,6 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const WS_BUNDLE_RE = /^\/(ws_[0-9abcdefghjkmnpqrstvwxyz]{10})\/b\//;
 
 type WSData = { ws: string; slug: string };
-
-// Until full workspace routing lands (step 3), every legacy `/b/` and `/api` path
-// resolves to the bootstrap workspace the migration created.
-function legacyWs(): string {
-  const ws = legacyWorkspaceId();
-  if (!ws) throw new Error("No legacy workspace; migration did not run before serving");
-  return ws;
-}
 
 function markdownDoc(): Response {
   return new Response(skillDoc(), {
@@ -298,21 +294,27 @@ async function handleUpload(req: Request, slug: string, server: Server<WSData>):
 
 // ---- bundle ledger (signed-in view data) ----
 
-function ledgerBundles(): LedgerBundle[] {
-  const ws = legacyWs();
-  return listBundles(ws).map((b) => {
-    const versions = listVersions(ws, b.slug);
-    const updated = new Date(versions[0]?.created_at ?? b.created_at)
-      .toISOString()
-      .slice(0, 16)
-      .replace("T", " ");
-    return {
-      slug: b.slug,
-      latestVersion: b.latest_version,
-      updated,
-      versions: versions.map((v) => v.version),
-    };
-  });
+// The ledger, grouped by the session user's workspaces. Each group carries that
+// workspace's own bundles; the page scopes every URL to the group's ws id.
+function ledgerGroups(userId: string): LedgerGroup[] {
+  return listUserWorkspaces(userId).map((ws) => ({
+    wsId: ws.id,
+    name: ws.name,
+    visibility: ws.visibility,
+    bundles: listBundles(ws.id).map((b) => {
+      const versions = listVersions(ws.id, b.slug);
+      const updated = new Date(versions[0]?.created_at ?? b.created_at)
+        .toISOString()
+        .slice(0, 16)
+        .replace("T", " ");
+      return {
+        slug: b.slug,
+        latestVersion: b.latest_version,
+        updated,
+        versions: versions.map((v) => v.version),
+      };
+    }),
+  }));
 }
 
 // ---- server ----
@@ -354,11 +356,11 @@ export function startServer() {
       "/skill.md": () => markdownDoc(),
       "/llms.txt": () => markdownDoc(),
 
-      // The signed-in ledger of held bundles.
+      // The signed-in ledger of held bundles, grouped by the user's workspaces.
       "/bundles": (req) => {
-        const denied = requireSession(req);
-        if (denied) return denied;
-        return new Response(bundlesPage(sessionEmail(req)!, ledgerBundles()), {
+        const user = sessionUser(req);
+        if (!user) return requireSession(req)!;
+        return new Response(bundlesPage(user.email, ledgerGroups(user.id)), {
           headers: { "content-type": "text/html;charset=utf-8" },
         });
       },
@@ -525,6 +527,31 @@ export function startServer() {
           }
           revokeApiKey(req.params.keyId);
           return redirect(`/settings/${req.params.ws}`);
+        },
+      },
+
+      // Public invite page. A valid, unaccepted, unexpired token renders the invite;
+      // a signed-in viewer gets a one-click accept, a signed-out one a Google sign-in
+      // that carries the invite as `next`. Anything invalid is a soft-404 (an oracle
+      // for used/expired/unknown tokens would leak which workspaces exist).
+      "/invite/:token": {
+        GET: (req) => {
+          const token = req.params.token;
+          if (!INV_ID_RE.test(token)) return softNotFound(req);
+          const inv = lookupValidInvite(token);
+          if (!inv) return softNotFound(req);
+          const ws = getWorkspace(inv.workspace_id);
+          const inviter = getUser(inv.created_by);
+          if (!ws) return softNotFound(req);
+          return html(
+            invitePage({
+              token,
+              workspaceName: ws.name,
+              inviterEmail: inviter?.email ?? "a member",
+              expires: fmtDate(inv.expires_at),
+              signedIn: !!sessionUser(req),
+            }),
+          );
         },
       },
 

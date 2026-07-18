@@ -444,8 +444,13 @@ function styles(): string {
     50% { opacity: 1; transform: scale(1.08) rotate(45deg); }
   }
 
-  /* ---- components folded from the mock (buttons, panel rows, the void mark).
-     Step 5 folds the remaining settings/invite component styles. ---- */
+  /* ---- components folded from the mock — the settings/invite/ledger register.
+     Buttons, pills, the segmented visibility switch, inputs, panels, the one-time
+     reveal box, workspace group heads, table action links, and the void mark.
+     Mock-only scaffolding (.mock-tag, anatomy tokens, the screens directory, the
+     viewer toggle) is deliberately left behind. ---- */
+
+  /* buttons — quiet mono, bordered; primary borrows the accent */
   .btn {
     display: inline-flex;
     align-items: center;
@@ -466,7 +471,131 @@ function styles(): string {
   @media (hover: hover) and (pointer: fine) {
     .btn:hover { color: hsl(var(--accent)); border-color: hsl(var(--accent) / 0.6); }
   }
+
+  /* pills — state markers in the reference register; .public lights the accent */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: hsl(var(--muted));
+    border: 1px solid hsl(var(--line));
+    border-radius: 999px;
+    padding: 2px 9px;
+    vertical-align: middle;
+  }
+  .pill .bead {
+    width: 5px; height: 5px;
+    transform: rotate(45deg);
+    background: hsl(var(--muted) / 0.5);
+  }
+  .pill.public .bead { background: hsl(var(--accent)); }
+  .pill.public { color: hsl(var(--accent-soft)); border-color: hsl(var(--accent) / 0.3); }
+
+  /* segmented control — the visibility switch */
+  .seg { display: inline-flex; border: 1px solid hsl(var(--line)); border-radius: 8px; overflow: hidden; }
+  .seg button {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: hsl(var(--muted));
+    background: transparent;
+    border: 0;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+  }
+  .seg button + button { border-left: 1px solid hsl(var(--line)); }
+  .seg button.on {
+    color: hsl(var(--ink));
+    background: hsl(var(--paper-sunk));
+    box-shadow: inset 0 -2px 0 hsl(var(--accent));
+  }
+
+  /* inputs */
+  .input {
+    font-family: var(--font-body);
+    font-size: 0.95rem;
+    color: hsl(var(--ink));
+    background: hsl(var(--paper-sunk));
+    border: 1px solid hsl(var(--line));
+    border-radius: 8px;
+    padding: 0.55rem 0.8rem;
+    width: 100%;
+    max-width: 24rem;
+  }
+
+  /* settings panels — same substrate as .specimen */
+  .panel {
+    background: hsl(var(--paper-warm));
+    border: 1px solid hsl(var(--line));
+    border-radius: 14px;
+    padding: 1.15rem 1.25rem 1.3rem;
+    margin-top: 1.1rem;
+  }
+  .frame.warm .panel { background: hsl(var(--paper)); }
+  .panel .eyebrow { margin-bottom: 0.7rem; }
   .panel-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.7rem; }
+  .panel-note { font-size: 0.9rem; color: hsl(var(--ink-soft)); max-width: 52ch; margin: 0.8rem 0 0; }
+  .panel-note.dim { color: hsl(var(--muted)); }
+
+  /* one-time reveal — freshly minted key / invite link. Shown once, never again. */
+  .reveal {
+    border: 1px solid hsl(var(--accent) / 0.35);
+    background: hsl(var(--accent) / 0.05);
+    border-radius: 10px;
+    padding: 0.9rem 1rem;
+    margin-top: 0.95rem;
+  }
+  .reveal pre {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.6;
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: hsl(var(--ink));
+  }
+  .reveal .reveal-note {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: hsl(var(--accent-soft));
+    margin: 0.55rem 0 0;
+  }
+
+  /* workspace group heads on the grouped ledger */
+  .ws-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.35rem 0.85rem;
+    margin: 2.4rem 0 0.2rem;
+  }
+  .ws-head:first-child { margin-top: 0; }
+  .ws-head h2 {
+    font-family: var(--font-display);
+    font-weight: 300;
+    font-size: clamp(22px, 3.4vw, 28px);
+    letter-spacing: -0.015em;
+    margin: 0;
+  }
+  .ws-head .mono-id { font-family: var(--font-mono); font-size: 0.78rem; color: hsl(var(--muted)); }
+  .ws-head .spacer { flex: 1; }
+
+  /* table action links (roll / revoke) */
+  .act { font-family: var(--font-mono); font-size: 0.78rem; white-space: nowrap; }
+  .act form { display: inline; }
+  .act button {
+    background: none; border: 0; padding: 0; margin-right: 0.7rem;
+    font: inherit; color: hsl(var(--muted)); cursor: pointer;
+  }
+  @media (hover: hover) and (pointer: fine) { .act button:hover { color: hsl(var(--accent)); } }
+
   .stack-gap { margin-top: 1.6rem; }
 
   /* the void — soft-404 */
@@ -700,11 +829,12 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
     <div class="prose">
       <p class="lede">An agent builds a page, zips it, and pushes it here. Seer keeps every
       version and hands back a URL that reloads itself the moment a new build lands.</p>
-      <p>One person's tool. Pushing a bundle needs the API key and the list of what's
-      here stays private, but the bundle links themselves are public — hand one to
-      anyone and they can open it, no sign-in. No accounts, no dashboard, no product.
-      Just a place for half-finished pages to be looked at.</p>
-      <p class="aside">It is a slop site, for sure. It also works.</p>
+      <p>Bundles live inside a workspace now, and a workspace can have more than one
+      pair of hands — invite someone and they mint their own keys. Pushing a bundle
+      needs a key and the ledger stays members-only, but public bundle links are still
+      public: hand one to anyone and they can open it, no sign-in. No dashboard, no
+      product. Just a place for half-finished pages to be looked at.</p>
+      <p class="aside">Still a slop site. Now a slop site with guests.</p>
     </div>
   </div>
 </div>
@@ -747,38 +877,70 @@ export interface LedgerBundle {
   versions: number[];
 }
 
-export function bundlesPage(email: string, bundles: LedgerBundle[]): string {
-  const og = { "og:title": "Bundles · Seer", "og:type": "website", "robots": "noindex" };
+// The ledger is grouped by the session user's workspaces: one group head per
+// workspace (name, ws_ id, visibility pill, settings link) over that workspace's
+// own bundle table. Bundle URLs are workspace-scoped.
+export interface LedgerGroup {
+  wsId: string;
+  name: string;
+  visibility: "public" | "private";
+  bundles: LedgerBundle[];
+}
 
-  const rows = bundles
-    .map((b) => {
-      const history = b.versions
-        .map((v) => `<a href="/b/${encodeURIComponent(b.slug)}/v/${v}/">v${v}</a>`)
-        .join("");
-      return `<tr>
-        <td class="slug"><a href="/b/${encodeURIComponent(b.slug)}/">${escapeHtml(b.slug)}</a></td>
-        <td class="mono">v${b.latestVersion}</td>
-        <td class="mono">${escapeHtml(b.updated)}</td>
-        <td class="history mono">${history}</td>
-      </tr>`;
-    })
-    .join("\n");
+export function bundlesPage(email: string, groups: LedgerGroup[]): string {
+  const og = { "og:title": "Bundles · Seer", "og:type": "website", robots: "noindex" };
+
+  const bundleUrl = (wsId: string, slug: string) => `/${wsId}/b/${encodeURIComponent(slug)}/`;
+
+  const groupBlock = (g: LedgerGroup) => {
+    const pill = `<span class="pill${g.visibility === "public" ? " public" : ""}"><span class="bead"></span>${g.visibility}</span>`;
+    const head = `<div class="ws-head">
+      <h2>${escapeHtml(g.name)}</h2>
+      <span class="mono-id">${escapeHtml(g.wsId)}</span>
+      ${pill}
+      <span class="spacer"></span>
+      <a class="nav-action" href="/settings/${g.wsId}">settings</a>
+    </div>`;
+
+    if (g.bundles.length === 0) {
+      return `${head}
+      <p class="empty">No bundles here yet.</p>`;
+    }
+
+    const rows = g.bundles
+      .map((b) => {
+        const history = b.versions
+          .map((v) => `<a href="${bundleUrl(g.wsId, b.slug)}v/${v}/">v${v}</a>`)
+          .join("");
+        return `<tr>
+          <td class="slug"><a href="${bundleUrl(g.wsId, b.slug)}">${escapeHtml(b.slug)}</a></td>
+          <td class="mono">v${b.latestVersion}</td>
+          <td class="mono">${escapeHtml(b.updated)}</td>
+          <td class="history mono">${history}</td>
+        </tr>`;
+      })
+      .join("\n");
+
+    return `${head}
+    <div class="ledger scroll-x">
+      <table>
+        <tr><th>Bundle</th><th>Latest</th><th>Updated</th><th>History</th></tr>
+        ${rows}
+      </table>
+    </div>`;
+  };
 
   const body =
-    bundles.length === 0
-      ? `<p class="empty">No bundles yet.</p>
-         <div class="specimen">
-           <p class="eyebrow">Push your first one</p>
-           <pre class="cmd scroll-x">curl -X PUT --data-binary @bundle.zip \\
-  <span class="flag">-H "Authorization: Bearer $API_TOKEN"</span> \\
-  ${escapeHtml(config.baseUrl)}/api/bundles/your-slug</pre>
-         </div>`
-      : `<div class="ledger scroll-x">
-          <table>
-            <tr><th>Bundle</th><th>Latest</th><th>Updated</th><th>History</th></tr>
-            ${rows}
-          </table>
-        </div>`;
+    groups.length === 0
+      ? `<p class="empty">No workspaces yet.</p>`
+      : groups.map(groupBlock).join("\n");
+
+  // A member can always spin up another estate. Public by default; visibility is
+  // its own settings toggle.
+  const newWorkspace = `<form class="panel-row stack-gap" method="post" action="/workspaces">
+      <input class="input" type="text" name="name" placeholder="new workspace name" maxlength="80" aria-label="New workspace name">
+      <button class="btn primary" type="submit">New workspace</button>
+    </form>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -789,12 +951,15 @@ ${head("Bundles · Seer", og)}
     ${navRow(null)}
     <p class="eyebrow"><span class="email-tag">${escapeHtml(email)}</span></p>
     <h1 class="h-section">Bundles</h1>
-    <p class="subtitle">Everything Seer is holding.</p>
+    <p class="subtitle">Everything Seer is holding, workspace by workspace.</p>
   </div>
 </div>
 <div class="frame grow">
   <div class="shell spine">
     ${body}
+    ${newWorkspace}
+    <p class="aside stack-gap">You appear here for every workspace you're a member of. Each group is
+    its own little estate — its visibility rides on its sleeve, its settings one click away.</p>
   </div>
 </div>
 <div class="frame night">
@@ -915,6 +1080,7 @@ ${head(`Settings · ${d.name} · Seer`, og)}
         <input class="input" type="text" name="name" value="${escapeHtml(d.name)}" maxlength="80" aria-label="Workspace name">
         <button class="btn" type="submit">Save</button>
       </form>
+      <p class="panel-note dim">Shown on invites and the ledger. The <code>ws_</code> id never changes.</p>
     </div>
 
     <div class="panel">
@@ -924,8 +1090,11 @@ ${head(`Settings · ${d.name} · Seer`, og)}
           ${seg("public", "Public")}
           ${seg("private", "Private")}
         </div>
-        <span class="pill"><span class="bead"></span>${d.visibility}</span>
+        <span class="pill${d.visibility === "public" ? " public" : ""}"><span class="bead"></span>${d.visibility}</span>
       </form>
+      <p class="panel-note">Private: bundle links only resolve for signed-in members. Everyone else
+      gets the polite 404, and shared links unfurl as a plain Seer card — titles never leak.</p>
+      <p class="panel-note dim">Public: anyone with a link can open it. The ledger stays members-only either way.</p>
     </div>
 
     <div class="panel">
@@ -940,6 +1109,8 @@ ${head(`Settings · ${d.name} · Seer`, og)}
         <button class="btn primary" type="submit">Invite someone</button>
       </form>
       ${inviteReveal}
+      <p class="panel-note dim">Every member is equal — anyone can invite, anyone can change settings.
+      Levels and permissions are a later problem.</p>
     </div>
 
     <div class="panel">
@@ -955,6 +1126,9 @@ ${head(`Settings · ${d.name} · Seer`, og)}
         <button class="btn primary" type="submit">Mint a new key</button>
       </form>
       ${keyReveal}
+      <p class="panel-note dim">Keys are yours alone: each member mints and rolls their own.
+      <em>Roll</em> mints a replacement and revokes this one in the same breath. Uploads made with a
+      key land in this workspace and are attributed to you.</p>
     </div>
 
   </div>
@@ -962,6 +1136,67 @@ ${head(`Settings · ${d.name} · Seer`, og)}
 <div class="frame night">
   <div class="shell">
     ${footer([`<a href="/bundles">bundles</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+</body>
+</html>`;
+}
+
+// ---- invite acceptance ----
+//
+// Public GET for a valid, unaccepted, unexpired invite. A signed-in viewer gets a
+// one-click accept (POST); a signed-out viewer is sent through Google, carrying the
+// invite as `next` so acceptance completes on the OIDC callback. Invalid, expired,
+// or used tokens never reach here — the route hands them a soft-404 instead.
+
+export interface InviteData {
+  token: string;
+  workspaceName: string;
+  inviterEmail: string;
+  expires: string;
+  signedIn: boolean;
+}
+
+export function invitePage(d: InviteData): string {
+  const og = { "og:title": "Invitation · Seer", "og:type": "website", robots: "noindex" };
+
+  const action = d.signedIn
+    ? `<form class="panel-row stack-gap" method="post" action="/invite/${d.token}/accept">
+         <button class="btn primary" type="submit">Take your seat →</button>
+       </form>`
+    : `<div class="panel-row stack-gap">
+         <a class="btn primary" href="/login?next=/invite/${d.token}">Sign in with Google →</a>
+       </div>`;
+
+  const seatNote = d.signedIn
+    ? `This link works once and expires ${escapeHtml(d.expires)}. Accepting joins you to the workspace; declining is simply closing this tab.`
+    : `This link works once and expires ${escapeHtml(d.expires)}. No account exists until you sign in; declining is simply closing this tab.`;
+
+  return `<!doctype html>
+<html lang="en">
+${head("Invitation · Seer", og)}
+<body>
+<div class="frame warm grow">
+  <div class="shell spine">
+    ${navRow(null)}
+    <p class="eyebrow">Invitation · <span class="email-tag">${escapeHtml(d.token)}</span></p>
+    <h1 class="h-display">You've been <span class="accent">asked in</span>.</h1>
+    <p class="subtitle"><span class="email-tag">${escapeHtml(d.inviterEmail)}</span> invites you to ${escapeHtml(d.workspaceName)}.</p>
+
+    <div class="prose">
+      <p class="lede">${escapeHtml(d.workspaceName)} is a workspace on Seer — a small, private instrument for
+      previewing what AI agents build. ${d.signedIn ? "Take your seat to join it." : "Sign in with Google to take your seat; your email becomes your account, nothing more is asked of you."}</p>
+    </div>
+
+    ${action}
+
+    <p class="aside stack-gap">${seatNote}</p>
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
   </div>
 </div>
 ${themeToggleScript()}
