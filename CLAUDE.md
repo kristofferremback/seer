@@ -4,6 +4,20 @@ globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
 alwaysApply: false
 ---
 
+## Publishing previews to the deployed Seer
+
+This repo is Seer's source, and a production instance runs at **https://seer.build**. Use it to share anything with the user that reads better rendered than pasted — plans, design mockups, diagrams, reports. The user's Claude artifacts do not render for them; Seer is the replacement. (Voice-transcribed messages sometimes garble "seer" as "CR".)
+
+Auth is `Bearer $SEER_API_KEY`, already set in the environment — never print it.
+
+1. Build in a fresh temp dir (`dir=$(mktemp -d)`) with `index.html` at the root and relative asset paths. Absolute `/fonts/*.woff2` and `/favicon.svg` do resolve — the host serves them — so previews can use the real Seer type (see `src/pages.ts` for the design language).
+2. Zip from inside the build dir: `(cd "$dir" && zip -r bundle.zip . -x bundle.zip)`
+3. Upload: `curl -X PUT --data-binary @"$dir/bundle.zip" -H "Authorization: Bearer $SEER_API_KEY" https://seer.build/api/bundles/<slug>` — slug matches `[a-z0-9][a-z0-9-]{0,63}`; suffix a short random token (e.g. `design-$(openssl rand -hex 3)`) so parallel sessions never clobber each other. Reuse a slug only to deliberately update that preview at its URL.
+
+The response's `url` is the latest version (live-reloads on re-PUT); `versionUrl` is pinned. Hand the user `url`. Full contract: https://seer.build/skill.md
+
+## Bun
+
 Default to using Bun instead of Node.js.
 
 - Use `bun <file>` instead of `node <file>` or `ts-node <file>`

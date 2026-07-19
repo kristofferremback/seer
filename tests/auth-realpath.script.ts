@@ -24,9 +24,10 @@ process.env.PORT = "0";
 process.env.MAX_UPLOAD_BYTES = "1024";
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-auth-"));
 
-const { sessionCookie, sessionEmail } = await import("../src/auth");
+const { sessionCookie, sessionEmail, sessionUser } = await import("../src/auth");
 const { config } = await import("../src/config");
 const { startServer } = await import("../src/server");
+const { db, legacyWorkspaceId } = await import("../src/db");
 
 function assert(cond: boolean, msg: string) {
   if (!cond) {
@@ -49,61 +50,83 @@ function hmac(data: string): string {
   return createHmac("sha256", config.sessionSecret).update(data).digest("base64url");
 }
 
-// ---- session cookie unit tests ----
+// startServer() runs the migration, bootstrapping the root user (email
+// allowed@example.com from ALLOWED_EMAILS). The session cookie now carries the
+// user id, so the round-trip tests need that real user row in the db.
+const server = startServer();
+const base = `http://localhost:${server.port}`;
+const wsId = legacyWorkspaceId()!;
+// Workspace-scoped bundle URL for the (public) bootstrap workspace.
+const wb = (p: string) => `${base}/${wsId}/b/${p}`;
 
-// 1. round-trip
+const rootUser = db
+  .query<{ id: string; email: string }, []>("SELECT id, email FROM users LIMIT 1")
+  .get()!;
+assert(!!rootUser && rootUser.email === "allowed@example.com", `root user seeded, got ${rootUser?.email}`);
+
+// ---- session cookie unit tests (user-id payload) ----
+
+// 1. round-trip: cookie carries usr_ id, sessionUser resolves the row.
 {
-  const email = "allowed@example.com";
-  const setCookie = sessionCookie(email);
-  const value = cookieValue(setCookie);
-  const got = sessionEmail(reqWithCookie(value));
-  assert(got === email, `round-trip expected ${email}, got ${got}`);
+  const value = cookieValue(sessionCookie(rootUser.id));
+  const su = sessionUser(reqWithCookie(value));
+  assert(su?.id === rootUser.id, `round-trip id expected ${rootUser.id}, got ${su?.id}`);
+  assert(su?.email === rootUser.email, `round-trip email expected ${rootUser.email}, got ${su?.email}`);
+  assert(sessionEmail(reqWithCookie(value)) === rootUser.email, "sessionEmail wraps sessionUser");
 }
 
 // 2. tampered signature rejected
 {
-  const value = cookieValue(sessionCookie("allowed@example.com"));
+  const value = cookieValue(sessionCookie(rootUser.id));
   const parts = value.split(".");
   parts[2] = (parts[2] ?? "") + "x"; // corrupt sig
-  const got = sessionEmail(reqWithCookie(parts.join(".")));
-  assert(got === null, `tampered sig should be rejected, got ${got}`);
+  const got = sessionUser(reqWithCookie(parts.join(".")));
+  assert(got === null, `tampered sig should be rejected, got ${JSON.stringify(got)}`);
 }
 
-// 3. tampered email (payload changed, old sig) rejected
+// 3. tampered payload (id swapped, old sig) rejected
 {
-  const value = cookieValue(sessionCookie("allowed@example.com"));
+  const value = cookieValue(sessionCookie(rootUser.id));
   const [, exp, sig] = value.split(".");
-  const evil = Buffer.from("attacker@evil.com").toString("base64url");
-  const got = sessionEmail(reqWithCookie(`${evil}.${exp}.${sig}`));
-  assert(got === null, `tampered email should be rejected, got ${got}`);
+  const evil = Buffer.from("usr_zzzzzzzzzz").toString("base64url");
+  const got = sessionUser(reqWithCookie(`${evil}.${exp}.${sig}`));
+  assert(got === null, `tampered payload should be rejected, got ${JSON.stringify(got)}`);
 }
 
-// 4. expired session rejected (craft a correctly-signed but past-exp cookie)
+// 4. expired session rejected (correctly-signed but past-exp cookie)
 {
-  const emailB64 = Buffer.from("allowed@example.com").toString("base64url");
+  const idB64 = Buffer.from(rootUser.id).toString("base64url");
   const exp = Date.now() - 1000; // already expired
-  const payload = `${emailB64}.${exp}`;
+  const payload = `${idB64}.${exp}`;
   const value = `${payload}.${hmac(payload)}`;
-  const got = sessionEmail(reqWithCookie(value));
-  assert(got === null, `expired session should be rejected, got ${got}`);
+  const got = sessionUser(reqWithCookie(value));
+  assert(got === null, `expired session should be rejected, got ${JSON.stringify(got)}`);
 }
 
 // 5. no cookie -> null
 {
-  const got = sessionEmail(new Request("http://localhost:3000/"));
-  assert(got === null, `no cookie should be null, got ${got}`);
+  const got = sessionUser(new Request("http://localhost:3000/"));
+  assert(got === null, `no cookie should be null, got ${JSON.stringify(got)}`);
 }
 
 // 6. malformed cookie -> null
 {
-  const got = sessionEmail(reqWithCookie("garbage"));
-  assert(got === null, `malformed cookie should be null, got ${got}`);
+  const got = sessionUser(reqWithCookie("garbage"));
+  assert(got === null, `malformed cookie should be null, got ${JSON.stringify(got)}`);
+}
+
+// 6b. old email-payload cookie: correctly signed, but decodes to an id that is not
+// a real user row -> db miss -> re-login (null).
+{
+  const emailB64 = Buffer.from("allowed@example.com").toString("base64url");
+  const exp = Date.now() + 60_000;
+  const payload = `${emailB64}.${exp}`;
+  const value = `${payload}.${hmac(payload)}`;
+  const got = sessionUser(reqWithCookie(value));
+  assert(got === null, `legacy email-payload cookie should re-login, got ${JSON.stringify(got)}`);
 }
 
 // ---- auth-enabled server: OAuth pre-network branches, WS auth, oversize upload ----
-
-const server = startServer();
-const base = `http://localhost:${server.port}`;
 
 // 7. loginRedirect open-redirect guard: next="//evil.com" must be replaced by "/".
 {
@@ -189,8 +212,9 @@ const base = `http://localhost:${server.port}`;
   );
 }
 
-// 11c. Bundles are PUBLIC: unauthenticated /b/:slug/ serves the real bundle
-// index.html (200), content and all, with the live-reload script injected.
+// 11c. Public workspaces are viewable by anyone: unauthenticated
+// /<ws>/b/:slug/ serves the real bundle index.html (200), content and all, with
+// the workspace-scoped live-reload script injected. A legacy /b/:slug/ 301s here.
 {
   const zip = zipSync({
     "index.html": strToU8("<!doctype html><body>PUBLIC-BUNDLE-BODY</body>"),
@@ -203,19 +227,30 @@ const base = `http://localhost:${server.port}`;
   });
   assert(up.status === 200, `seeding bundle should 200, got ${up.status}`);
 
-  const r = await fetch(`${base}/b/public-preview/`, { redirect: "manual" });
-  assert(r.status === 200, `unauth /b/:slug/ should serve the bundle (200), got ${r.status}`);
+  // Legacy path 301s to the workspace-scoped URL, preserving the remainder.
+  const legacy = await fetch(`${base}/b/public-preview/`, { redirect: "manual" });
+  assert(legacy.status === 301, `legacy /b/:slug/ should 301, got ${legacy.status}`);
+  assert(
+    (legacy.headers.get("location") ?? "") === `/${wsId}/b/public-preview/`,
+    `legacy redirect target should be workspace-scoped, got ${legacy.headers.get("location")}`,
+  );
+
+  const r = await fetch(wb("public-preview/"), { redirect: "manual" });
+  assert(r.status === 200, `unauth /<ws>/b/:slug/ should serve the bundle (200), got ${r.status}`);
   const html = await r.text();
   assert(html.includes("PUBLIC-BUNDLE-BODY"), "public bundle serves its real index.html content");
-  assert(html.includes("/ws/livereload?slug=public-preview"), "latest bundle carries live-reload script");
+  assert(
+    html.includes(`/ws/livereload?ws=${wsId}&slug=public-preview`),
+    "latest bundle carries the workspace-scoped live-reload script",
+  );
   assert(!html.includes("/login?next="), "public bundle must NOT redirect to sign-in");
 }
 
-// 11d. Unauthenticated sub-asset requests under /b/ are served directly (200,
-// not a login redirect), with a sensible content-type.
+// 11d. Unauthenticated sub-asset requests are served directly (200, not a login
+// redirect), with a sensible content-type.
 {
-  const r = await fetch(`${base}/b/public-preview/style.css`, { redirect: "manual" });
-  assert(r.status === 200, `unauth /b asset should 200, got ${r.status}`);
+  const r = await fetch(wb("public-preview/style.css"), { redirect: "manual" });
+  assert(r.status === 200, `unauth /<ws>/b asset should 200, got ${r.status}`);
   assert(
     (r.headers.get("content-type") ?? "").includes("text/css"),
     `asset should carry text/css content-type, got ${r.headers.get("content-type")}`,
@@ -223,14 +258,15 @@ const base = `http://localhost:${server.port}`;
   assert((await r.text()).includes("color: teal"), "asset serves its real content");
 }
 
-// 11e. Unknown slug -> 404 (a real bundle 404, not a shell).
+// 11e. Unknown slug -> soft-404 (HTTP 404, the void page, no-cache).
 {
-  const r = await fetch(`${base}/b/no-such-bundle/`, { redirect: "manual" });
-  assert(r.status === 404, `unknown slug should 404, got ${r.status}`);
+  const r = await fetch(wb("no-such-bundle/"), { redirect: "manual" });
+  assert(r.status === 404, `unknown slug should soft-404, got ${r.status}`);
+  assert((r.headers.get("cache-control") ?? "") === "no-cache", "soft-404 is no-cache");
 }
 
-// 12. WS live reload without a session cookie -> PUBLIC: it upgrades and receives
-// "reload" when a new version is uploaded (previously this was gated to 401).
+// 12. WS live reload without a session cookie against a PUBLIC workspace: it
+// upgrades and receives "reload" when a new version is uploaded.
 {
   const slug = "ws-public";
   const seed = await fetch(`${base}/api/bundles/${slug}`, {
@@ -241,7 +277,7 @@ const base = `http://localhost:${server.port}`;
   assert(seed.status === 200, `seeding ws bundle should 200, got ${seed.status}`);
 
   // No cookie header -> unauthenticated.
-  const ws = new WebSocket(`ws://localhost:${server.port}/ws/livereload?slug=${slug}`);
+  const ws = new WebSocket(`ws://localhost:${server.port}/ws/livereload?ws=${wsId}&slug=${slug}`);
   const opened = await new Promise<string>((res) => {
     ws.onopen = () => res("open");
     ws.onerror = () => res("error");

@@ -443,6 +443,164 @@ function styles(): string {
     0%, 100% { opacity: 0.35; transform: scale(0.82) rotate(0deg); }
     50% { opacity: 1; transform: scale(1.08) rotate(45deg); }
   }
+
+  /* ---- components folded from the mock — the settings/invite/ledger register.
+     Buttons, pills, the segmented visibility switch, inputs, panels, the one-time
+     reveal box, workspace group heads, table action links, and the void mark.
+     Mock-only scaffolding (.mock-tag, anatomy tokens, the screens directory, the
+     viewer toggle) is deliberately left behind. ---- */
+
+  /* buttons — quiet mono, bordered; primary borrows the accent */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: hsl(var(--ink-soft));
+    background: transparent;
+    border: 1px solid hsl(var(--line));
+    border-radius: 8px;
+    padding: 0.5rem 0.9rem;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .btn.primary { color: hsl(var(--accent)); border-color: hsl(var(--accent) / 0.45); }
+  @media (hover: hover) and (pointer: fine) {
+    .btn:hover { color: hsl(var(--accent)); border-color: hsl(var(--accent) / 0.6); }
+  }
+
+  /* pills — state markers in the reference register; .public lights the accent */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: hsl(var(--muted));
+    border: 1px solid hsl(var(--line));
+    border-radius: 999px;
+    padding: 2px 9px;
+    vertical-align: middle;
+  }
+  .pill .bead {
+    width: 5px; height: 5px;
+    transform: rotate(45deg);
+    background: hsl(var(--muted) / 0.5);
+  }
+  .pill.public .bead { background: hsl(var(--accent)); }
+  .pill.public { color: hsl(var(--accent-soft)); border-color: hsl(var(--accent) / 0.3); }
+
+  /* segmented control — the visibility switch */
+  .seg { display: inline-flex; border: 1px solid hsl(var(--line)); border-radius: 8px; overflow: hidden; }
+  .seg button {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: hsl(var(--muted));
+    background: transparent;
+    border: 0;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+  }
+  .seg button + button { border-left: 1px solid hsl(var(--line)); }
+  .seg button.on {
+    color: hsl(var(--ink));
+    background: hsl(var(--paper-sunk));
+    box-shadow: inset 0 -2px 0 hsl(var(--accent));
+  }
+
+  /* inputs — 16px minimum so iOS doesn't zoom the page on focus */
+  .input {
+    font-family: var(--font-body);
+    font-size: 1rem;
+    color: hsl(var(--ink));
+    background: hsl(var(--paper-sunk));
+    border: 1px solid hsl(var(--line));
+    border-radius: 8px;
+    padding: 0.55rem 0.8rem;
+    width: 100%;
+    max-width: 24rem;
+  }
+
+  /* settings panels — same substrate as .specimen */
+  .panel {
+    background: hsl(var(--paper-warm));
+    border: 1px solid hsl(var(--line));
+    border-radius: 14px;
+    padding: 1.15rem 1.25rem 1.3rem;
+    margin-top: 1.1rem;
+  }
+  .frame.warm .panel { background: hsl(var(--paper)); }
+  .panel .eyebrow { margin-bottom: 0.7rem; }
+  .panel-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.7rem; }
+  .panel-note { font-size: 0.9rem; color: hsl(var(--ink-soft)); max-width: 52ch; margin: 0.8rem 0 0; }
+  .panel-note.dim { color: hsl(var(--muted)); }
+
+  /* one-time reveal — freshly minted key / invite link. Shown once, never again. */
+  .reveal {
+    border: 1px solid hsl(var(--accent) / 0.35);
+    background: hsl(var(--accent) / 0.05);
+    border-radius: 10px;
+    padding: 0.9rem 1rem;
+    margin-top: 0.95rem;
+  }
+  .reveal pre {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.6;
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: hsl(var(--ink));
+  }
+  .reveal .reveal-note {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: hsl(var(--accent-soft));
+    margin: 0.55rem 0 0;
+  }
+
+  /* workspace group heads on the grouped ledger */
+  .ws-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.35rem 0.85rem;
+    margin: 2.4rem 0 0.2rem;
+  }
+  .ws-head:first-child { margin-top: 0; }
+  .ws-head h2 {
+    font-family: var(--font-display);
+    font-weight: 300;
+    font-size: clamp(22px, 3.4vw, 28px);
+    letter-spacing: -0.015em;
+    margin: 0;
+  }
+  .ws-head .mono-id { font-family: var(--font-mono); font-size: 0.78rem; color: hsl(var(--muted)); }
+  .ws-head .spacer { flex: 1; }
+
+  /* table action links (roll / revoke) */
+  .act { font-family: var(--font-mono); font-size: 0.78rem; white-space: nowrap; }
+  .act form { display: inline; }
+  .act button {
+    background: none; border: 0; padding: 0; margin-right: 0.7rem;
+    font: inherit; color: hsl(var(--muted)); cursor: pointer;
+  }
+  @media (hover: hover) and (pointer: fine) { .act button:hover { color: hsl(var(--accent)); } }
+
+  .stack-gap { margin-top: 1.6rem; }
+
+  /* the void — soft-404 */
+  .void-mark { width: 74px; height: 90px; margin-bottom: 1.6rem; opacity: 0.85; }
+  .void-mark .glint { animation-duration: 9s; }
 `;
 }
 
@@ -529,9 +687,14 @@ to put richer output than a chat reply can carry — dashboards, small apps, int
 reports — instead of pasting a wall of code.
 
 You need two things, which the human has given you (typically as environment
-variables): the base URL of this Seer instance (\`${base}\`) and an API token
-(referred to below as \`$API_TOKEN\`). Keep the token secret; it is the only write
-credential.
+variables): the base URL of this Seer instance (\`${base}\`) and an API key
+(referred to below as \`$API_TOKEN\`). Seer keys look like \`seer_sk_…\`; a human mints
+one from a workspace's settings page (\`${base}/settings/<workspace>\`), where it is
+shown exactly once. The key belongs to one workspace, so every bundle you upload
+with it lands in that workspace — you never name the workspace yourself. A person
+who belongs to several workspaces therefore holds one key per workspace: which key
+you send is which workspace you publish to. Keep the key secret; it is the only
+write credential.
 
 ## 1. Build the zip
 
@@ -539,7 +702,7 @@ credential.
   inside a subdirectory). That is what loads at the bundle URL.
 - Use **relative** asset paths (\`./style.css\`, \`assets/app.js\`, \`img/logo.png\`).
   Absolute paths like \`/style.css\` will not resolve, because the bundle is served
-  under \`/b/<slug>/\`.
+  under \`/<workspace>/b/<slug>/\`.
 - Nested directories are fine. Directory requests fall back to their \`index.html\`.
 - Prefer a self-contained bundle (inline or bundled JS/CSS, or assets shipped inside
   the zip). External network requests are the human's browser's problem, not Seer's.
@@ -577,14 +740,17 @@ A successful upload returns \`200\` with JSON:
 {
   "slug": "<slug>",
   "version": 1,
-  "url": "${base}/b/<slug>/",
-  "versionUrl": "${base}/b/<slug>/v/1/",
+  "workspace": "ws_…",
+  "url": "${base}/ws_…/b/<slug>/",
+  "versionUrl": "${base}/ws_…/b/<slug>/v/1/",
   "bytes": 2048,
   "files": 3,
   "hasIndexHtml": true
 }
 \`\`\`
 
+- \`workspace\` is the \`ws_…\` id your key belongs to; every URL in the response is
+  scoped under it. You do not choose it — the key does.
 - \`url\` is the **latest** URL: it always shows the newest version and live-reloads.
   Hand this one to the human in most cases.
 - \`versionUrl\` is a **pinned** URL for this exact version; it never changes and does
@@ -593,8 +759,8 @@ A successful upload returns \`200\` with JSON:
   bundle URL will 404. Re-zip and re-upload.
 
 Error responses are JSON with an \`error\` field. Notable statuses: \`400\` (invalid
-slug, empty body, or bad zip), \`401\` (invalid or missing token), \`413\` (zip exceeds
-the size limit).
+slug, empty body, or bad zip), \`401\` (invalid, revoked, or missing key), \`413\` (zip
+exceeds the size limit).
 
 ## 4. Iterating
 
@@ -608,16 +774,21 @@ the old one keeps working and updates in place.
 curl -H "Authorization: Bearer $API_TOKEN" ${base}/api/bundles
 \`\`\`
 
-Returns every bundle with its full version history (slugs, versions, sizes,
-timestamps).
+Returns every bundle in your key's workspace with its full version history (slugs,
+versions, sizes, timestamps), each tagged with its \`workspace\` id.
 
 ## Sharing and viewing
 
-Bundle URLs (\`/b/<slug>/\`) are **public** — anyone with the link can open it in a
-browser, no sign-in required. Hand the \`url\` to whoever should see it, or open it
-yourself. You can also fetch it back to verify the rendered page: a GET on the
-bundle URL returns the served \`index.html\` (the latest URL has the live-reload
-script injected before \`</body>\`).
+Whether a bundle link is openable without signing in depends on its workspace's
+visibility. A **public** workspace (the default) serves bundle URLs
+(\`/<workspace>/b/<slug>/\`) to anyone with the link — no sign-in. A **private**
+workspace serves them only to signed-in members; everyone else gets a generic
+Seer 404 that reveals nothing, so a private bundle's title never leaks. The human
+sets visibility per workspace on its settings page.
+
+Hand the \`url\` to whoever should see it, or open it yourself. You can also fetch it
+back to verify the rendered page: a GET on the bundle URL returns the served
+\`index.html\` (the latest URL has the live-reload script injected before \`</body>\`).
 
 When a bundle link is shared in chat, Seer injects OpenGraph tags into the served
 HTML so the link unfurls with your page's \`<title>\`, a description, and a Seer
@@ -625,9 +796,9 @@ card image. If you want full control of the preview, ship your own \`og:\` meta
 tags in \`index.html\` — Seer leaves pages that declare any \`og:\` or \`twitter:\`
 meta untouched.
 
-Only the write side and the inventory are private: uploading needs the API token,
-and the list of every bundle (\`GET /api/bundles\`) needs the token too. Individual
-bundle links do not.
+The write side and the inventory are always private: uploading needs your API key,
+and the list of bundles (\`GET /api/bundles\`, scoped to your key's workspace) needs
+it too. Public bundle links are the only thing viewable without a credential.
 `;
 }
 
@@ -671,11 +842,12 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
     <div class="prose">
       <p class="lede">An agent builds a page, zips it, and pushes it here. Seer keeps every
       version and hands back a URL that reloads itself the moment a new build lands.</p>
-      <p>One person's tool. Pushing a bundle needs the API key and the list of what's
-      here stays private, but the bundle links themselves are public — hand one to
-      anyone and they can open it, no sign-in. No accounts, no dashboard, no product.
-      Just a place for half-finished pages to be looked at.</p>
-      <p class="aside">It is a slop site, for sure. It also works.</p>
+      <p>Bundles live inside a workspace now, and a workspace can have more than one
+      pair of hands — invite someone and they mint their own keys. Pushing a bundle
+      needs a key and the ledger stays members-only, but public bundle links are still
+      public: hand one to anyone and they can open it, no sign-in. No dashboard, no
+      product. Just a place for half-finished pages to be looked at.</p>
+      <p class="aside">Still a slop site. Now a slop site with guests.</p>
     </div>
   </div>
 </div>
@@ -718,38 +890,70 @@ export interface LedgerBundle {
   versions: number[];
 }
 
-export function bundlesPage(email: string, bundles: LedgerBundle[]): string {
-  const og = { "og:title": "Bundles · Seer", "og:type": "website", "robots": "noindex" };
+// The ledger is grouped by the session user's workspaces: one group head per
+// workspace (name, ws_ id, visibility pill, settings link) over that workspace's
+// own bundle table. Bundle URLs are workspace-scoped.
+export interface LedgerGroup {
+  wsId: string;
+  name: string;
+  visibility: "public" | "private";
+  bundles: LedgerBundle[];
+}
 
-  const rows = bundles
-    .map((b) => {
-      const history = b.versions
-        .map((v) => `<a href="/b/${encodeURIComponent(b.slug)}/v/${v}/">v${v}</a>`)
-        .join("");
-      return `<tr>
-        <td class="slug"><a href="/b/${encodeURIComponent(b.slug)}/">${escapeHtml(b.slug)}</a></td>
-        <td class="mono">v${b.latestVersion}</td>
-        <td class="mono">${escapeHtml(b.updated)}</td>
-        <td class="history mono">${history}</td>
-      </tr>`;
-    })
-    .join("\n");
+export function bundlesPage(email: string, groups: LedgerGroup[]): string {
+  const og = { "og:title": "Bundles · Seer", "og:type": "website", robots: "noindex" };
+
+  const bundleUrl = (wsId: string, slug: string) => `/${wsId}/b/${encodeURIComponent(slug)}/`;
+
+  const groupBlock = (g: LedgerGroup) => {
+    const pill = `<span class="pill${g.visibility === "public" ? " public" : ""}"><span class="bead"></span>${g.visibility}</span>`;
+    const head = `<div class="ws-head">
+      <h2>${escapeHtml(g.name)}</h2>
+      <span class="mono-id">${escapeHtml(g.wsId)}</span>
+      ${pill}
+      <span class="spacer"></span>
+      <a class="nav-action" href="/settings/${g.wsId}">settings</a>
+    </div>`;
+
+    if (g.bundles.length === 0) {
+      return `${head}
+      <p class="empty">No bundles here yet.</p>`;
+    }
+
+    const rows = g.bundles
+      .map((b) => {
+        const history = b.versions
+          .map((v) => `<a href="${bundleUrl(g.wsId, b.slug)}v/${v}/">v${v}</a>`)
+          .join("");
+        return `<tr>
+          <td class="slug"><a href="${bundleUrl(g.wsId, b.slug)}">${escapeHtml(b.slug)}</a></td>
+          <td class="mono">v${b.latestVersion}</td>
+          <td class="mono">${escapeHtml(b.updated)}</td>
+          <td class="history mono">${history}</td>
+        </tr>`;
+      })
+      .join("\n");
+
+    return `${head}
+    <div class="ledger scroll-x">
+      <table>
+        <tr><th>Bundle</th><th>Latest</th><th>Updated</th><th>History</th></tr>
+        ${rows}
+      </table>
+    </div>`;
+  };
 
   const body =
-    bundles.length === 0
-      ? `<p class="empty">No bundles yet.</p>
-         <div class="specimen">
-           <p class="eyebrow">Push your first one</p>
-           <pre class="cmd scroll-x">curl -X PUT --data-binary @bundle.zip \\
-  <span class="flag">-H "Authorization: Bearer $API_TOKEN"</span> \\
-  ${escapeHtml(config.baseUrl)}/api/bundles/your-slug</pre>
-         </div>`
-      : `<div class="ledger scroll-x">
-          <table>
-            <tr><th>Bundle</th><th>Latest</th><th>Updated</th><th>History</th></tr>
-            ${rows}
-          </table>
-        </div>`;
+    groups.length === 0
+      ? `<p class="empty">No workspaces yet.</p>`
+      : groups.map(groupBlock).join("\n");
+
+  // A member can always spin up another estate. Public by default; visibility is
+  // its own settings toggle.
+  const newWorkspace = `<form class="panel-row stack-gap" method="post" action="/workspaces">
+      <input class="input" type="text" name="name" placeholder="new workspace name" maxlength="80" aria-label="New workspace name">
+      <button class="btn primary" type="submit">New workspace</button>
+    </form>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -760,12 +964,354 @@ ${head("Bundles · Seer", og)}
     ${navRow(null)}
     <p class="eyebrow"><span class="email-tag">${escapeHtml(email)}</span></p>
     <h1 class="h-section">Bundles</h1>
-    <p class="subtitle">Everything Seer is holding.</p>
+    <p class="subtitle">Everything Seer is holding, workspace by workspace.</p>
   </div>
 </div>
 <div class="frame grow">
   <div class="shell spine">
     ${body}
+    ${newWorkspace}
+    <p class="aside stack-gap">You appear here for every workspace you're a member of. Each group is
+    its own little estate — its visibility rides on its sleeve, its settings one click away.</p>
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+</body>
+</html>`;
+}
+
+// ---- workspace settings ----
+//
+// Members-only. Rename, visibility, members + invite mint, and the session user's
+// own keys (mint/roll/revoke). A reveal box — the invite URL or a freshly minted
+// key token — is rendered ONLY on the response to the minting POST, never on a
+// later load: only the token's hash survives in the db. Step 5 folds the mock's
+// component CSS (.panel/.input/.seg/.reveal/.pill/.act) into styles().
+
+export interface SettingsMember {
+  email: string;
+  id: string;
+  joined: string;
+  isYou: boolean;
+}
+export interface SettingsKey {
+  id: string;
+  name: string;
+  hint: string;
+  created: string;
+  lastUsed: string;
+  isLegacy: boolean;
+}
+export type SettingsReveal =
+  | { kind: "key"; token: string }
+  | { kind: "invite"; url: string; expires: string };
+
+export interface SettingsData {
+  wsId: string;
+  name: string;
+  visibility: "public" | "private";
+  email: string;
+  members: SettingsMember[];
+  keys: SettingsKey[];
+  reveal?: SettingsReveal;
+}
+
+export function settingsPage(d: SettingsData): string {
+  const og = { "og:title": `Settings · ${d.name} · Seer`, "og:type": "website", robots: "noindex" };
+  const s = (base: string) => `/settings/${d.wsId}${base}`;
+
+  const memberRows = d.members
+    .map(
+      (m) => `<tr>
+        <td>${escapeHtml(m.email)}${m.isYou ? ` <span class="pill">you</span>` : ""}</td>
+        <td class="mono">${escapeHtml(m.id)}</td>
+        <td class="mono">${escapeHtml(m.joined)}</td>
+      </tr>`,
+    )
+    .join("\n");
+
+  const keyRows =
+    d.keys.length === 0
+      ? `<tr><td colspan="5" class="empty">No keys yet — mint one to upload.</td></tr>`
+      : d.keys
+          .map(
+            (k) => `<tr>
+        <td>${escapeHtml(k.name)}${k.isLegacy ? ` <span class="pill">legacy</span>` : ""}</td>
+        <td class="mono">${escapeHtml(k.hint)}</td>
+        <td class="mono">${escapeHtml(k.created)}</td>
+        <td class="mono">${escapeHtml(k.lastUsed)}</td>
+        <td class="act">
+          <form method="post" action="${s(`/keys/${k.id}/roll`)}"><button type="submit">roll</button></form>
+          <form method="post" action="${s(`/keys/${k.id}/revoke`)}"><button type="submit">revoke</button></form>
+        </td>
+      </tr>`,
+          )
+          .join("\n");
+
+  const inviteReveal =
+    d.reveal?.kind === "invite"
+      ? `<div class="reveal">
+          <pre>${escapeHtml(d.reveal.url)}</pre>
+          <p class="reveal-note">single use · expires ${escapeHtml(d.reveal.expires)} · send it however you like</p>
+        </div>`
+      : "";
+
+  const keyReveal =
+    d.reveal?.kind === "key"
+      ? `<div class="reveal">
+          <pre>${escapeHtml(d.reveal.token)}</pre>
+          <p class="reveal-note">shown once — copy it now; only its hash survives</p>
+        </div>`
+      : "";
+
+  const seg = (v: "public" | "private", label: string) =>
+    `<button type="submit" name="visibility" value="${v}"${d.visibility === v ? ` class="on"` : ""}>${label}</button>`;
+
+  return `<!doctype html>
+<html lang="en">
+${head(`Settings · ${d.name} · Seer`, og)}
+<body>
+<div class="frame warm">
+  <div class="shell spine">
+    ${navRow({ href: "/bundles", label: "bundles" })}
+    <p class="eyebrow"><span class="email-tag">${escapeHtml(d.wsId)} · workspace</span></p>
+    <h1 class="h-section">${escapeHtml(d.name)}</h1>
+    <p class="subtitle">Settings, members, and your keys.</p>
+  </div>
+</div>
+<div class="frame grow">
+  <div class="shell spine">
+
+    <div class="panel">
+      <p class="eyebrow">Name</p>
+      <form class="panel-row" method="post" action="${s("/name")}">
+        <input class="input" type="text" name="name" value="${escapeHtml(d.name)}" maxlength="80" aria-label="Workspace name">
+        <button class="btn" type="submit">Save</button>
+      </form>
+      <p class="panel-note dim">Shown on invites and the ledger. The <code>ws_</code> id never changes.</p>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">Visibility</p>
+      <form class="panel-row" method="post" action="${s("/visibility")}">
+        <div class="seg" role="group" aria-label="Workspace visibility">
+          ${seg("public", "Public")}
+          ${seg("private", "Private")}
+        </div>
+        <span class="pill${d.visibility === "public" ? " public" : ""}"><span class="bead"></span>${d.visibility}</span>
+      </form>
+      <p class="panel-note">Private: bundle links only resolve for signed-in members. Everyone else
+      gets the polite 404, and shared links unfurl as a plain Seer card — titles never leak.</p>
+      <p class="panel-note dim">Public: anyone with a link can open it. The ledger stays members-only either way.</p>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">Members</p>
+      <div class="ledger scroll-x">
+        <table>
+          <tr><th>Member</th><th>User</th><th>Joined</th></tr>
+          ${memberRows}
+        </table>
+      </div>
+      <form class="panel-row stack-gap" method="post" action="${s("/invites")}">
+        <button class="btn primary" type="submit">Invite someone</button>
+      </form>
+      ${inviteReveal}
+      <p class="panel-note dim">Every member is equal — anyone can invite, anyone can change settings.
+      Levels and permissions are a later problem.</p>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">Your keys</p>
+      <div class="ledger scroll-x">
+        <table>
+          <tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr>
+          ${keyRows}
+        </table>
+      </div>
+      <form class="panel-row stack-gap" method="post" action="${s("/keys")}">
+        <input class="input" type="text" name="name" placeholder="key name" maxlength="80" aria-label="New key name">
+        <button class="btn primary" type="submit">Mint a new key</button>
+      </form>
+      ${keyReveal}
+      <p class="panel-note dim">Keys are yours alone: each member mints and rolls their own.
+      <em>Roll</em> mints a replacement and revokes this one in the same breath. Uploads made with a
+      key land in this workspace and are attributed to you.</p>
+    </div>
+
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/bundles">bundles</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+</body>
+</html>`;
+}
+
+// ---- invite acceptance ----
+//
+// Public GET for a valid, unaccepted, unexpired invite. A signed-in viewer gets a
+// one-click accept (POST); a signed-out viewer is sent through Google, carrying the
+// invite as `next` so acceptance completes on the OIDC callback. Invalid, expired,
+// or used tokens never reach here — the route hands them a soft-404 instead.
+
+export interface InviteData {
+  token: string;
+  workspaceName: string;
+  inviterEmail: string;
+  expires: string;
+  signedIn: boolean;
+}
+
+export function invitePage(d: InviteData): string {
+  const og = { "og:title": "Invitation · Seer", "og:type": "website", robots: "noindex" };
+
+  // The token is always a validated inv_ id by the time this renders (the route
+  // gates on INV_ID_RE), but escape it anyway — defense in depth, consistent with
+  // every other interpolated string on the page.
+  const token = escapeHtml(d.token);
+  const action = d.signedIn
+    ? `<form class="panel-row stack-gap" method="post" action="/invite/${token}/accept">
+         <button class="btn primary" type="submit">Take your seat →</button>
+       </form>`
+    : `<div class="panel-row stack-gap">
+         <a class="btn primary" href="/login?next=/invite/${token}">Sign in with Google →</a>
+       </div>`;
+
+  const seatNote = d.signedIn
+    ? `This link works once and expires ${escapeHtml(d.expires)}. Accepting joins you to the workspace; declining is simply closing this tab.`
+    : `This link works once and expires ${escapeHtml(d.expires)}. No account exists until you sign in; declining is simply closing this tab.`;
+
+  return `<!doctype html>
+<html lang="en">
+${head("Invitation · Seer", og)}
+<body>
+<div class="frame warm grow">
+  <div class="shell spine">
+    ${navRow(null)}
+    <p class="eyebrow">Invitation · <span class="email-tag">${escapeHtml(d.token)}</span></p>
+    <h1 class="h-display">You've been <span class="accent">asked in</span>.</h1>
+    <p class="subtitle"><span class="email-tag">${escapeHtml(d.inviterEmail)}</span> invites you to ${escapeHtml(d.workspaceName)}.</p>
+
+    <div class="prose">
+      <p class="lede">${escapeHtml(d.workspaceName)} is a workspace on Seer — a small, private instrument for
+      previewing what AI agents build. ${d.signedIn ? "Take your seat to join it." : "Sign in with Google to take your seat; your email becomes your account, nothing more is asked of you."}</p>
+    </div>
+
+    ${action}
+
+    <p class="aside stack-gap">${seatNote}</p>
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+</body>
+</html>`;
+}
+
+// ---- soft-404 (the void) ----
+//
+// Served for every denied, missing, unknown, or out-of-range bundle under a
+// workspace path — forbidden and missing are deliberately indistinguishable, so a
+// private workspace leaks nothing to a non-member. HTTP 404, no-cache, a generic
+// Seer OG card. The only branch: signed-out viewers get a sign-in affordance (the
+// link they were sent might resolve once they authenticate); signed-in viewers get
+// no affordance and see their own session email instead.
+
+export function softNotFoundPage(signedInEmail: string | null, currentUrl: string): string {
+  const og = {
+    "og:title": "Seer",
+    "og:description": "A private instrument for previewing HTML bundles.",
+    "og:type": "website",
+    "og:site_name": "Seer",
+    "og:image": `${config.baseUrl}/og.png`,
+    robots: "noindex",
+  };
+
+  const loginNext = `/login?next=${encodeURIComponent(currentUrl)}`;
+
+  const variant = signedInEmail
+    ? `<p class="subtitle">Signed in, and still nothing. The glass is&nbsp;dark.</p>
+       <p class="aside stack-gap">You're <span class="email-tag">${escapeHtml(signedInEmail)}</span>. Whatever
+       lived at this address is not yours to see, or not anywhere at all — Seer honestly can't tell you which.
+       If someone sent you this link, ask them to check their workspace.</p>`
+    : `<p class="subtitle">Try signing in — there might be, who&nbsp;knows?</p>
+       <div class="panel-row stack-gap">
+         <a class="btn primary" href="${escapeHtml(loginNext)}">Sign in</a>
+       </div>
+       <p class="aside stack-gap">Someone sent you this link on purpose, probably. If a sign-in doesn't
+       reveal it, ask them to check their workspace.</p>`;
+
+  return `<!doctype html>
+<html lang="en">
+${head("Seer", og)}
+<body>
+<div class="frame warm grow">
+  <div class="shell spine">
+    ${navRow(signedInEmail ? null : { href: loginNext, label: "Sign in" })}
+    ${markSvg("void-mark")}
+    <p class="eyebrow">404</p>
+    <h1 class="h-display">Nothing here for <span class="accent">you</span> to see.</h1>
+    ${variant}
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+</body>
+</html>`;
+}
+
+// ---- no seat (403 on OIDC sign-in) ----
+//
+// Google verified the email, but it belongs to no user and carried no valid invite
+// — so there is nothing to sign in to. A 403 in the site's voice rather than a bare
+// string. The exact line "This account has no seat at Seer." is preserved so the
+// message reads the same whether rendered or scraped. No sign-in affordance: the
+// viewer just authenticated; a seat needs an invite, not another round-trip.
+
+export function noSeatPage(email: string | null): string {
+  const og = {
+    "og:title": "Seer",
+    "og:description": "A private instrument for previewing HTML bundles.",
+    "og:type": "website",
+    "og:site_name": "Seer",
+    "og:image": `${config.baseUrl}/og.png`,
+    robots: "noindex",
+  };
+
+  const who = email
+    ? `<p class="aside stack-gap">You signed in as <span class="email-tag">${escapeHtml(email)}</span>, but
+       that address hasn't been asked in yet. Ask a member for an invite link — it seats you the moment you open it.</p>`
+    : `<p class="aside stack-gap">Ask a member for an invite link — it seats you the moment you open it.</p>`;
+
+  return `<!doctype html>
+<html lang="en">
+${head("Seer", og)}
+<body>
+<div class="frame warm grow">
+  <div class="shell spine">
+    ${navRow(null)}
+    ${markSvg("void-mark")}
+    <p class="eyebrow"><span class="accent">403</span></p>
+    <h1 class="h-display">This account has no seat at Seer.</h1>
+    <p class="subtitle">The glass is closed to this one.</p>
+    ${who}
   </div>
 </div>
 <div class="frame night">

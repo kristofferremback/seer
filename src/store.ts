@@ -11,12 +11,12 @@ mkdirSync(zipsDir, { recursive: true });
 rmSync(cacheDir, { recursive: true, force: true });
 mkdirSync(cacheDir, { recursive: true });
 
-export function zipPath(slug: string, version: number): string {
-  return join(zipsDir, slug, `${version}.zip`);
+export function zipPath(wsId: string, slug: string, version: number): string {
+  return join(zipsDir, wsId, slug, `${version}.zip`);
 }
 
-function extractedDir(slug: string, version: number): string {
-  return join(cacheDir, slug, String(version));
+function extractedDir(wsId: string, slug: string, version: number): string {
+  return join(cacheDir, wsId, slug, String(version));
 }
 
 /** Validates zip contents and returns the sanitized file list. Throws on bad archives. */
@@ -36,9 +36,14 @@ export function inspectZip(data: Uint8Array): string[] {
   return files;
 }
 
-export async function saveZip(slug: string, version: number, data: Uint8Array): Promise<void> {
-  mkdirSync(join(zipsDir, slug), { recursive: true });
-  await Bun.write(zipPath(slug, version), data);
+export async function saveZip(
+  wsId: string,
+  slug: string,
+  version: number,
+  data: Uint8Array,
+): Promise<void> {
+  mkdirSync(join(zipsDir, wsId, slug), { recursive: true });
+  await Bun.write(zipPath(wsId, slug, version), data);
 }
 
 // ---- extraction cache with freshness bumping ----
@@ -47,18 +52,22 @@ const lastAccess = new Map<string, number>(); // "slug/version" -> ms
 const inflight = new Map<string, Promise<string>>();
 
 /** Returns the extracted directory for a version, extracting from the zip if needed. Bumps freshness. */
-export async function ensureExtracted(slug: string, version: number): Promise<string> {
-  const key = `${slug}/${version}`;
+export async function ensureExtracted(
+  wsId: string,
+  slug: string,
+  version: number,
+): Promise<string> {
+  const key = `${wsId}/${slug}/${version}`;
   lastAccess.set(key, Date.now());
 
-  const dir = extractedDir(slug, version);
+  const dir = extractedDir(wsId, slug, version);
   if (existsSync(dir)) return dir;
 
   const pending = inflight.get(key);
   if (pending) return pending;
 
   const promise = (async () => {
-    const zip = await Bun.file(zipPath(slug, version)).bytes();
+    const zip = await Bun.file(zipPath(wsId, slug, version)).bytes();
     const entries = unzipSync(zip);
     const tmp = `${dir}.tmp`;
     rmSync(tmp, { recursive: true, force: true });
@@ -83,12 +92,12 @@ export function sweepCache(): void {
   const cutoff = Date.now() - config.cacheTtlMs;
   for (const [key, at] of lastAccess) {
     if (at >= cutoff) continue;
-    const [slug, version] = key.split("/");
+    const [wsId, slug, version] = key.split("/");
     // Per-entry guard: a filesystem error on one dir (e.g. a transient volume
     // I/O error) must not abort the sweep or bubble out of the interval and
     // kill the process. Log and move on.
     try {
-      rmSync(extractedDir(slug!, Number(version)), { recursive: true, force: true });
+      rmSync(extractedDir(wsId!, slug!, Number(version)), { recursive: true, force: true });
       lastAccess.delete(key);
     } catch (err) {
       console.error(`[seer] cache sweep failed to evict ${key}:`, err);

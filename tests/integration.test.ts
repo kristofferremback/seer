@@ -7,11 +7,15 @@ import { zipSync, strToU8 } from "fflate";
 import { startServer } from "../src/server";
 import { sweepCache } from "../src/store";
 import { config } from "../src/config";
+import { legacyWorkspaceId } from "../src/db";
 
 const AUTH = { authorization: `Bearer ${config.apiToken}` };
 
 let server: ReturnType<typeof startServer>;
 let base: string;
+let wsId: string;
+// Workspace-scoped bundle URL for the bootstrap workspace uploads land in.
+const wb = (p: string) => `${base}/${wsId}/b/${p}`;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function readJson(r: Response): Promise<any> {
@@ -21,6 +25,7 @@ async function readJson(r: Response): Promise<any> {
 beforeAll(() => {
   server = startServer();
   base = `http://localhost:${server.port}`;
+  wsId = legacyWorkspaceId()!;
 });
 
 afterAll(() => {
@@ -242,18 +247,18 @@ describe("serving", () => {
     await put(slug, htmlZip("NEW-V2-CONTENT", { "style.css": "body { color: blue; }" }));
   });
 
-  test("GET /b/:slug/ serves latest index.html with live-reload script", async () => {
-    const r = await fetch(`${base}/b/${slug}/`);
+  test("GET /<ws>/b/:slug/ serves latest index.html with scoped live-reload script", async () => {
+    const r = await fetch(wb(`${slug}/`));
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toContain("text/html");
     const html = await r.text();
     expect(html).toContain("NEW-V2-CONTENT");
-    expect(html).toContain("/ws/livereload?slug=" + slug);
+    expect(html).toContain(`/ws/livereload?ws=${wsId}&slug=${slug}`);
     expect(html).toContain("WebSocket");
   });
 
-  test("pinned /b/:slug/v/1/ serves OLD content WITHOUT script", async () => {
-    const r = await fetch(`${base}/b/${slug}/v/1/`);
+  test("pinned /<ws>/b/:slug/v/1/ serves OLD content WITHOUT script", async () => {
+    const r = await fetch(wb(`${slug}/v/1/`));
     expect(r.status).toBe(200);
     const html = await r.text();
     expect(html).toContain("OLD-V1-CONTENT");
@@ -261,7 +266,7 @@ describe("serving", () => {
   });
 
   test("nested css asset served with sensible content-type", async () => {
-    const r = await fetch(`${base}/b/${slug}/v/1/style.css`);
+    const r = await fetch(wb(`${slug}/v/1/style.css`));
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toContain("text/css");
     expect(await r.text()).toContain("color: red");
@@ -270,9 +275,9 @@ describe("serving", () => {
   test("latest (unpinned) files are all no-cache, assets included", async () => {
     // Live reload pushes fresh HTML on upload; assets cached with max-age would give
     // the reloaded page stale CSS/JS, so latest serves everything with no-cache.
-    const html = await fetch(`${base}/b/${slug}/`);
+    const html = await fetch(wb(`${slug}/`));
     expect(html.headers.get("cache-control")).toBe("no-cache");
-    const css = await fetch(`${base}/b/${slug}/style.css`);
+    const css = await fetch(wb(`${slug}/style.css`));
     expect(css.status).toBe(200);
     expect(css.headers.get("cache-control")).toBe("no-cache");
     expect(await css.text()).toContain("color: blue");
@@ -280,27 +285,27 @@ describe("serving", () => {
 
   test("pinned /v/N/ files are immutable, HTML included", async () => {
     const immutable = "public, max-age=31536000, immutable";
-    const html = await fetch(`${base}/b/${slug}/v/1/`);
+    const html = await fetch(wb(`${slug}/v/1/`));
     expect(html.headers.get("cache-control")).toBe(immutable);
-    const css = await fetch(`${base}/b/${slug}/v/1/style.css`);
+    const css = await fetch(wb(`${slug}/v/1/style.css`));
     expect(css.headers.get("cache-control")).toBe(immutable);
   });
 
   test("directory request falls back to index.html", async () => {
-    const r = await fetch(`${base}/b/${slug}/v/1/sub/`);
+    const r = await fetch(wb(`${slug}/v/1/sub/`));
     expect(r.status).toBe(200);
     expect(await r.text()).toContain("SUB");
   });
 
   test("missing file -> 404", async () => {
-    const r = await fetch(`${base}/b/${slug}/v/1/nope.html`);
+    const r = await fetch(wb(`${slug}/v/1/nope.html`));
     expect(r.status).toBe(404);
   });
 
   test("no trailing slash -> 302 to trailing slash", async () => {
-    const r = await fetch(`${base}/b/${slug}`, { redirect: "manual" });
+    const r = await fetch(wb(slug), { redirect: "manual" });
     expect(r.status).toBe(302);
-    expect(r.headers.get("location")).toContain(`/b/${slug}/`);
+    expect(r.headers.get("location")).toContain(`/${wsId}/b/${slug}/`);
   });
 
   test("path traversal attempt -> 404", async () => {
@@ -309,18 +314,46 @@ describe("serving", () => {
     // below arrives intact; the server does not percent-decode paths, so it 404s as
     // a nonexistent file rather than via serveBundleFile's startsWith("..") guard —
     // the guard itself is belt-and-suspenders behind URL normalization.
-    const r = await fetch(`${base}/b/${slug}/v/1/%2e%2e%2f%2e%2e%2fsecret`, { redirect: "manual" });
+    const r = await fetch(wb(`${slug}/v/1/%2e%2e%2f%2e%2e%2fsecret`), { redirect: "manual" });
     expect(r.status).toBe(404);
   });
 
-  test("unknown slug -> 404", async () => {
-    const r = await fetch(`${base}/b/does-not-exist/`);
+  test("unknown slug -> soft-404", async () => {
+    const r = await fetch(wb("does-not-exist/"));
     expect(r.status).toBe(404);
   });
 
-  test("version pinning /b/:slug/v/999/ -> 404", async () => {
-    const r = await fetch(`${base}/b/${slug}/v/999/`);
+  test("version pinning /<ws>/b/:slug/v/999/ -> soft-404", async () => {
+    const r = await fetch(wb(`${slug}/v/999/`));
     expect(r.status).toBe(404);
+  });
+});
+
+// ---- legacy /b/ 301 redirects ----
+
+describe("legacy /b/ redirects", () => {
+  test("301 to the legacy workspace, preserving version, path, and query", async () => {
+    const r = await fetch(`${base}/b/serve-me/v/2/style.css?x=1&y=two`, { redirect: "manual" });
+    expect(r.status).toBe(301);
+    expect(r.headers.get("location")).toBe(`/${wsId}/b/serve-me/v/2/style.css?x=1&y=two`);
+  });
+
+  test("301 for the bare bundle root, preserving the trailing slash", async () => {
+    const r = await fetch(`${base}/b/serve-me/`, { redirect: "manual" });
+    expect(r.status).toBe(301);
+    expect(r.headers.get("location")).toBe(`/${wsId}/b/serve-me/`);
+  });
+
+  test("301 even for an unknown slug (the workspace, not the bundle, is resolved)", async () => {
+    const r = await fetch(`${base}/b/no-such-bundle/`, { redirect: "manual" });
+    expect(r.status).toBe(301);
+    expect(r.headers.get("location")).toBe(`/${wsId}/b/no-such-bundle/`);
+  });
+
+  test("following the redirect lands on the served bundle", async () => {
+    const r = await fetch(`${base}/b/serve-me/`);
+    expect(r.status).toBe(200);
+    expect(await r.text()).toContain("NEW-V2-CONTENT");
   });
 });
 
@@ -332,7 +365,7 @@ describe("bundle social tags", () => {
     const page = `<!doctype html><html><head><title>Voice &amp; Video Calls &mdash; Plan</title></head><body>hi</body></html>`;
     await put(slug, zipSync({ "index.html": strToU8(page) }));
 
-    const html = await (await fetch(`${base}/b/${slug}/`)).text();
+    const html = await (await fetch(wb(`${slug}/`))).text();
     // Entities decoded once, then escaped once for the attribute: &amp; -> & -> &amp;,
     // &mdash; -> a literal em dash.
     expect(html).toContain('<meta property="og:title" content="Voice &amp; Video Calls — Plan">');
@@ -340,7 +373,7 @@ describe("bundle social tags", () => {
     expect(html).toContain('<meta property="og:image" content="');
     expect(html).toContain("/og.png");
     expect(html).toMatch(/og:description" content="An HTML bundle previewed on Seer — v1, updated \d{4}-\d{2}-\d{2}\."/);
-    expect(html).toContain(`<meta property="og:url" content="${config.baseUrl}/b/${slug}/">`);
+    expect(html).toContain(`<meta property="og:url" content="${config.baseUrl}/${wsId}/b/${slug}/">`);
     // Injected into the real head.
     expect(html.indexOf("og:title")).toBeLessThan(html.indexOf("</head>"));
   });
@@ -348,7 +381,7 @@ describe("bundle social tags", () => {
   test("head-less page still gets tags; empty title falls back to slug", async () => {
     const slug = "og-headless";
     await put(slug, htmlZip("no head here"));
-    const html = await (await fetch(`${base}/b/${slug}/`)).text();
+    const html = await (await fetch(wb(`${slug}/`))).text();
     expect(html).toContain(`<meta property="og:title" content="${slug}">`);
     expect(html).toContain('<meta property="og:site_name" content="Seer">');
   });
@@ -357,7 +390,7 @@ describe("bundle social tags", () => {
     const slug = "og-own";
     const page = `<!doctype html><html><head><title>Mine</title><meta property="og:title" content="My Own Title"></head><body>x</body></html>`;
     await put(slug, zipSync({ "index.html": strToU8(page) }));
-    const html = await (await fetch(`${base}/b/${slug}/`)).text();
+    const html = await (await fetch(wb(`${slug}/`))).text();
     expect(html).toContain('content="My Own Title"');
     expect(html).not.toContain('og:site_name');
     expect(html.match(/og:title/g)?.length).toBe(1);
@@ -370,12 +403,12 @@ describe("bundle social tags", () => {
     await put(slug, zipSync({ "index.html": strToU8(page("one")) }));
     await put(slug, zipSync({ "index.html": strToU8(page("two")) }));
 
-    const pinned = await (await fetch(`${base}/b/${slug}/v/1/`)).text();
-    expect(pinned).toContain(`<meta property="og:url" content="${config.baseUrl}/b/${slug}/v/1/">`);
+    const pinned = await (await fetch(wb(`${slug}/v/1/`))).text();
+    expect(pinned).toContain(`<meta property="og:url" content="${config.baseUrl}/${wsId}/b/${slug}/v/1/">`);
     expect(pinned).toContain("— v1, updated");
 
-    const latest = await (await fetch(`${base}/b/${slug}/`)).text();
-    expect(latest).toContain(`<meta property="og:url" content="${config.baseUrl}/b/${slug}/">`);
+    const latest = await (await fetch(wb(`${slug}/`))).text();
+    expect(latest).toContain(`<meta property="og:url" content="${config.baseUrl}/${wsId}/b/${slug}/">`);
     expect(latest).toContain("— v2, updated");
   });
 });
@@ -387,7 +420,7 @@ describe("websocket live reload", () => {
     const slug = "ws-reload";
     await put(slug, htmlZip("initial"));
 
-    const wsUrl = `ws://localhost:${server.port}/ws/livereload?slug=${slug}`;
+    const wsUrl = `ws://localhost:${server.port}/ws/livereload?ws=${wsId}&slug=${slug}`;
     const ws = new WebSocket(wsUrl);
 
     const opened = new Promise<void>((res, rej) => {
@@ -426,7 +459,7 @@ describe("cache sweep", () => {
     const r1 = await fetch(`${base}/b/${slug}/v/1/`);
     expect(r1.status).toBe(200);
 
-    const extractedPath = join(config.dataDir, "cache", slug, "1");
+    const extractedPath = join(config.dataDir, "cache", legacyWorkspaceId()!, slug, "1");
     expect(existsSync(extractedPath)).toBe(true);
 
     // CACHE_TTL_MS=0 in setup, so this entry is stale; give lastAccess time to be < now.
