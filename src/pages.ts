@@ -777,6 +777,55 @@ curl -H "Authorization: Bearer $API_TOKEN" ${base}/api/bundles
 Returns every bundle in your key's workspace with its full version history (slugs,
 versions, sizes, timestamps), each tagged with its \`workspace\` id.
 
+## 6. Images (screenshots in GitHub PRs, and anywhere else)
+
+Besides zipped bundles, Seer hosts single **image files** — the main use is giving a
+screenshot a URL you can embed in a GitHub PR, issue, or README, which is otherwise
+hard to do programmatically. Upload the raw image bytes (no zip, no multipart) to
+\`/api/images/<filename>\`:
+
+\`\`\`sh
+curl -X PUT --data-binary @screenshot.png \\
+  -H "Authorization: Bearer $API_TOKEN" \\
+  ${base}/api/images/screenshot.png
+\`\`\`
+
+The filename must match \`[a-z0-9][a-z0-9._-]*\` (max 64 chars) and end in \`.png\`,
+\`.jpg\`, \`.jpeg\`, \`.gif\`, \`.webp\`, \`.avif\`, or \`.svg\` — the extension names the
+format, and the body is sanity-checked against it.
+
+Seer compresses on upload: orientation is baked in, the longest edge is capped at
+2000px, metadata (EXIF, GPS) is stripped, and the image is re-encoded as WebP
+(animated GIFs stay animated). When the WebP is no smaller than your original —
+tiny icons, already-tight AVIF — the image is re-encoded in its own format
+instead, with the same cap and metadata strip. SVGs are the one passthrough,
+stored as-is. The response tells you what was stored — note the filename (and
+URL) may end \`.webp\` even though you uploaded a \`.png\`:
+
+\`\`\`json
+{
+  "id": "img_…",
+  "filename": "screenshot.webp",
+  "workspace": "ws_…",
+  "url": "${base}/ws_…/i/img_…/screenshot.webp",
+  "markdown": "![screenshot](${base}/ws_…/i/img_…/screenshot.webp)",
+  "bytes": 48213,
+  "originalBytes": 231970,
+  "contentType": "image/webp"
+}
+\`\`\`
+
+Paste \`markdown\` straight into a PR body. Every upload mints a fresh random
+\`img_…\` id, so images are immutable — re-uploading the same filename gives a new
+URL, and old URLs keep serving their bytes forever (with long-lived caching).
+\`GET /api/images\` lists your key's workspace's images.
+
+Image visibility follows the workspace, like bundles — with one exception:
+**GitHub's image proxy (camo) is always served**, so an image embedded in a PR
+renders for everyone who can see the PR even when its workspace is private. The
+image URL itself contains an unguessable random id, so treat it like a capability
+link: private means "only people who have the URL", not "only members".
+
 ## Sharing and viewing
 
 Whether a bundle link is openable without signing in depends on its workspace's
@@ -797,8 +846,9 @@ tags in \`index.html\` — Seer leaves pages that declare any \`og:\` or \`twitt
 meta untouched.
 
 The write side and the inventory are always private: uploading needs your API key,
-and the list of bundles (\`GET /api/bundles\`, scoped to your key's workspace) needs
-it too. Public bundle links are the only thing viewable without a credential.
+and the lists (\`GET /api/bundles\`, \`GET /api/images\`, scoped to your key's
+workspace) need it too. Public bundle and image links are the only thing viewable
+without a credential.
 `;
 }
 

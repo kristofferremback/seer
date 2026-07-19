@@ -5,15 +5,18 @@ import {
   db,
   getApiKey,
   getBundle,
+  getImage,
   getVersion,
   getUser,
   getWorkspace,
   isMember,
   listBundles,
+  listImages,
   listMembers,
   listUserKeys,
   listUserWorkspaces,
   listVersions,
+  createImage,
   createInvite,
   createVersion,
   createWorkspace,
@@ -26,7 +29,8 @@ import {
   type Workspace,
 } from "./db";
 import { migrate } from "./migrate";
-import { inspectZip, saveZip, ensureExtracted } from "./store";
+import { inspectZip, saveZip, ensureExtracted, imagePath, saveImage } from "./store";
+import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
 import {
   acceptInvite,
   loginRedirect,
@@ -38,7 +42,7 @@ import {
   sessionUser,
   type SessionUser,
 } from "./auth";
-import { INV_ID_RE, WS_ID_RE } from "./ids";
+import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
 import {
   landingPage,
   bundlesPage,
@@ -57,6 +61,8 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // well-formed /<ws_id>/b/ that doesn't resolve becomes a soft-404. The ws id class
 // is composed from WS_ID_RE (minus its ^…$ anchors) so the two never drift apart.
 const WS_BUNDLE_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/b/`);
+// Workspace-scoped image path: /<ws_id>/i/<img_id>/<filename>.
+const WS_IMG_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/i/`);
 
 type WSData = { ws: string; slug: string };
 
@@ -293,6 +299,105 @@ async function handleUpload(req: Request, slug: string, server: Server<WSData>):
   });
 }
 
+// ---- images ----
+
+// GitHub fetches every image embedded in a PR, issue, or README through its camo
+// asset proxy, which sends no credentials — only this User-Agent. The UA is
+// spoofable, so treat this as an availability carve-out, not an auth boundary:
+// the unguessable img id in the path is what actually protects a private image.
+function isGithubCamo(req: Request): boolean {
+  return (req.headers.get("user-agent") ?? "").toLowerCase().includes("github-camo");
+}
+
+async function handleImageUpload(req: Request, filename: string): Promise<Response> {
+  const auth = requireApiKey(req);
+  if (auth instanceof Response) return auth;
+  const match = filename.match(IMG_NAME_RE);
+  if (!match) {
+    return json(
+      {
+        error:
+          "Filename must match [a-z0-9][a-z0-9._-]* (max 64 chars) and end in " +
+          ".png, .jpg, .jpeg, .gif, .webp, .avif, or .svg",
+      },
+      400,
+    );
+  }
+  const ext = match[1]!;
+
+  const body = new Uint8Array(await req.arrayBuffer());
+  if (body.length === 0) return json({ error: "Empty body; send the image bytes as the request body" }, 400);
+  if (body.length > config.maxUploadBytes) {
+    return json({ error: `Image exceeds max size of ${config.maxUploadBytes} bytes` }, 413);
+  }
+  if (!sniffOk(ext, body)) {
+    return json({ error: `Body does not look like a .${ext} file (magic bytes mismatch)` }, 400);
+  }
+
+  let img: ProcessedImage;
+  try {
+    img = await processImage(ext, filename, body);
+  } catch (err) {
+    return json({ error: `Could not decode image: ${(err as Error).message}` }, 400);
+  }
+
+  // Same ordering as bundles: row first, then bytes. The key resolves the workspace.
+  const ws = auth.workspaceId;
+  const id = createImage(ws, img.filename, img.contentType, img.data.length);
+  await saveImage(ws, id, img.data);
+
+  const url = `${config.baseUrl}/${ws}/i/${id}/${img.filename}`;
+  return json({
+    id,
+    filename: img.filename,
+    workspace: ws,
+    url,
+    markdown: `![${img.filename.replace(/\.[^.]+$/, "")}](${url})`,
+    bytes: img.data.length,
+    originalBytes: body.length,
+    contentType: img.contentType,
+  });
+}
+
+// Workspace-scoped image serving: /<ws_id>/i/<img_id>/<filename>. Same soft-404
+// posture as bundles — denial, unknown id, and filename mismatch are all
+// indistinguishable — with one deliberate exception: GitHub's camo proxy is always
+// served, so an image pasted into a PR renders even from a private workspace.
+async function handleWorkspaceImage(req: Request, wsId: string): Promise<Response> {
+  const url = new URL(req.url);
+  const [id, filename, ...extra] = url.pathname.slice(`/${wsId}/i/`.length).split("/");
+
+  const ws = getWorkspace(wsId);
+  if (!ws || !id || !filename || extra.length > 0 || !IMG_ID_RE.test(id)) {
+    return softNotFound(req);
+  }
+  const image = getImage(id);
+  if (!image || image.workspace_id !== wsId || image.filename !== filename) {
+    return softNotFound(req);
+  }
+  if (!workspaceViewable(ws, req) && !isGithubCamo(req)) return softNotFound(req);
+
+  const file = Bun.file(imagePath(wsId, image.id));
+  if (!(await file.exists())) {
+    // A db row without its blob is corruption (or a mispointed DATA_DIR) — say so.
+    console.error(`[seer] image ${image.id} has a db row but no file at ${imagePath(wsId, image.id)}`);
+    return softNotFound(req);
+  }
+
+  const headers: Record<string, string> = {
+    "content-type": image.content_type,
+    // An img id is minted once and never rewritten, so the URL is immutable.
+    "cache-control": "public, max-age=31536000, immutable",
+    "x-content-type-options": "nosniff",
+  };
+  // SVG can carry script; as an <img> it never runs, but this URL opened as a
+  // top-level document would execute it on this origin. Neuter that.
+  if (image.content_type === "image/svg+xml") {
+    headers["content-security-policy"] = "default-src 'none'; style-src 'unsafe-inline'";
+  }
+  return new Response(file, { headers });
+}
+
 // ---- bundle ledger (signed-in view data) ----
 
 // The ledger, grouped by the session user's workspaces. Each group carries that
@@ -321,8 +426,8 @@ function ledgerGroups(userId: string): LedgerGroup[] {
 // ---- server ----
 
 export function startServer() {
-  // Bring the database to schema v1 (and bootstrap the root workspace on first boot)
-  // before the server binds — no request may hit an unmigrated db.
+  // Bring the database to the current schema (v2; bootstrapping the root workspace
+  // on first boot) before the server binds — no request may hit an unmigrated db.
   migrate();
 
   const websocket: WebSocketHandler<WSData> = {
@@ -429,6 +534,29 @@ export function startServer() {
       "/api/bundles/:slug": {
         PUT: (req, srv) => handleUpload(req, req.params.slug, srv),
         POST: (req, srv) => handleUpload(req, req.params.slug, srv),
+      },
+
+      "/api/images": {
+        GET: (req) => {
+          const auth = requireApiKey(req);
+          if (auth instanceof Response) return auth;
+          const ws = auth.workspaceId;
+          return json(
+            listImages(ws).map((i) => ({
+              id: i.id,
+              filename: i.filename,
+              workspace: ws,
+              url: `${config.baseUrl}/${ws}/i/${i.id}/${i.filename}`,
+              bytes: i.bytes,
+              contentType: i.content_type,
+              createdAt: new Date(i.created_at).toISOString(),
+            })),
+          );
+        },
+      },
+      "/api/images/:filename": {
+        PUT: (req) => handleImageUpload(req, req.params.filename),
+        POST: (req) => handleImageUpload(req, req.params.filename),
       },
 
       // ---- workspace + settings mutations (session + membership; Origin guard) ----
@@ -590,6 +718,9 @@ export function startServer() {
 
       const wsBundle = url.pathname.match(WS_BUNDLE_RE);
       if (wsBundle) return handleWorkspaceBundle(req, wsBundle[1]!);
+
+      const wsImage = url.pathname.match(WS_IMG_RE);
+      if (wsImage) return handleWorkspaceImage(req, wsImage[1]!);
 
       // Legacy /b/<slug>[...] → 301 to the bootstrap workspace, preserving the full
       // remainder and query. No legacy workspace recorded → a plain 404.

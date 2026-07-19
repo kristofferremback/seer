@@ -58,7 +58,7 @@ if (SCENARIO === "v0") {
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 1, `user_version should be 1, got ${uv}`);
+  assert(uv === 2, `user_version should be 2, got ${uv}`);
 
   const user = db.query("SELECT * FROM users").get() as { id: string; email: string } | null;
   assert(!!user, "root user exists");
@@ -121,7 +121,9 @@ if (SCENARIO === "fresh") {
   const wsId = getMeta("legacy_workspace_id")!;
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 1, `user_version should be 1, got ${uv}`);
+  assert(uv === 2, `user_version should be 2, got ${uv}`);
+  const iCount = (db.query("SELECT COUNT(*) c FROM images").get() as { c: number }).c;
+  assert(iCount === 0, `fresh db has an empty images table, got ${iCount}`);
   const user = db.query("SELECT * FROM users").get() as { email: string } | null;
   assert(!!user && user.email === "dev@localhost", `fresh root is dev@localhost, got ${user?.email}`);
   const ws = db.query("SELECT * FROM workspaces WHERE id = ?").get(wsId) as { name: string } | null;
