@@ -16,6 +16,8 @@ Auth is `Bearer $SEER_API_KEY`, already set in the environment — never print i
 
 The response's `url` is the latest version (live-reloads on re-PUT); `versionUrl` is pinned. Hand the user `url`. Full contract: https://seer.build/skill.md
 
+Seer also hosts single images — the way to get a screenshot into a GitHub PR body: `curl -X PUT --data-binary @shot.png -H "Authorization: Bearer $SEER_API_KEY" https://seer.build/api/images/shot.png` returns a `markdown` field to paste straight into the PR. Images are compressed to WebP on upload and always render on GitHub (camo is allowed through) even when the workspace is private.
+
 ## Bun
 
 Default to using Bun instead of Node.js.

@@ -19,8 +19,8 @@ process.env.PORT = "0";
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-serving-"));
 
 const { sessionCookie } = await import("../src/auth");
-const { db, legacyWorkspaceId, createVersion } = await import("../src/db");
-const { saveZip } = await import("../src/store");
+const { db, legacyWorkspaceId, createVersion, createImage } = await import("../src/db");
+const { saveZip, saveImage } = await import("../src/store");
 const { tinyId } = await import("../src/ids");
 const { startServer } = await import("../src/server");
 
@@ -114,6 +114,47 @@ for (const [who, headers] of [
   const r = await get(`/${privWs}/b/priv-bundle/`, headers);
   assert(r.status === 404, `private ws as ${who} should soft-404, got ${r.status}`);
   assert((r.headers.get("cache-control") ?? "") === "no-cache", `private ${who} 404 is no-cache`);
+}
+
+// ---- image visibility matrix + the github-camo carve-out ----
+// Serving never decodes, so seeded bytes can be arbitrary.
+const IMG_BYTES = new Uint8Array([1, 2, 3, 4]);
+async function seedImage(wsId: string): Promise<string> {
+  const id = createImage(wsId, "pic.webp", "image/webp", IMG_BYTES.length);
+  await saveImage(wsId, id, IMG_BYTES);
+  return `/${wsId}/i/${id}/pic.webp`;
+}
+const pubImg = await seedImage(pubWs);
+const privImg = await seedImage(privWs);
+const camo = { "user-agent": "github-camo (asset-proxy)" };
+
+// public ws image: anyone.
+for (const [who, headers] of [
+  ["anon", anon],
+  ["member", asMember],
+  ["stranger", asStranger],
+] as const) {
+  const r = await get(pubImg, headers);
+  assert(r.status === 200, `public image as ${who} should 200, got ${r.status}`);
+}
+// private ws image: member yes; anon & non-member soft-404 — but the github-camo
+// UA is always served, so images render inside GitHub PRs regardless.
+{
+  const r = await get(privImg, asMember);
+  assert(r.status === 200, `private image as member should 200, got ${r.status}`);
+  assert(
+    r.headers.get("cache-control") === "public, max-age=31536000, immutable",
+    "served image is immutable-cached",
+  );
+}
+for (const [who, headers] of [
+  ["anon", anon],
+  ["stranger", asStranger],
+] as const) {
+  const r = await get(privImg, headers);
+  assert(r.status === 404, `private image as ${who} should soft-404, got ${r.status}`);
+  const c = await get(privImg, { ...headers, ...camo });
+  assert(c.status === 200, `private image as ${who} via github-camo should 200, got ${c.status}`);
 }
 
 // ---- soft-404 affordance branch ----

@@ -5,8 +5,10 @@ import { config } from "./config";
 
 const zipsDir = join(config.dataDir, "zips");
 const cacheDir = join(config.dataDir, "cache");
+const imagesDir = join(config.dataDir, "images");
 
 mkdirSync(zipsDir, { recursive: true });
+mkdirSync(imagesDir, { recursive: true });
 // Zips are the source of truth; the extraction cache is disposable, so start clean.
 rmSync(cacheDir, { recursive: true, force: true });
 mkdirSync(cacheDir, { recursive: true });
@@ -44,6 +46,20 @@ export async function saveZip(
 ): Promise<void> {
   mkdirSync(join(zipsDir, wsId, slug), { recursive: true });
   await Bun.write(zipPath(wsId, slug, version), data);
+}
+
+// ---- images ----
+
+// Images are single files, stored raw and served straight from disk — no zip, no
+// extraction cache. The blob is keyed by the img id alone; filename and
+// content-type live in the db row.
+export function imagePath(wsId: string, imageId: string): string {
+  return join(imagesDir, wsId, imageId);
+}
+
+export async function saveImage(wsId: string, imageId: string, data: Uint8Array): Promise<void> {
+  mkdirSync(join(imagesDir, wsId), { recursive: true });
+  await Bun.write(imagePath(wsId, imageId), data);
 }
 
 // ---- extraction cache with freshness bumping ----

@@ -4,17 +4,19 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 1.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 2.
 //
-// Two entry states must both work:
+// v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
 //     version), zips at DATA_DIR/zips/<slug>/<version>.zip).
 //   - fresh/empty db: new deployments create the v1 schema and bootstrap a root user.
 //
-// The migration is idempotent across a crash mid-run: the bootstrap workspace id is
-// persisted first (so a partial re-run reuses it), zip dirs move before the version
-// bump, and all db mutations commit in one transaction that ends with the bump — a
-// crash before that leaves user_version at 0 and re-runs cleanly.
+// The v1 migration is idempotent across a crash mid-run: the bootstrap workspace id
+// is persisted first (so a partial re-run reuses it), zip dirs move before the
+// version bump, and all db mutations commit in one transaction that ends with the
+// bump — a crash before that leaves user_version at 0 and re-runs cleanly.
+//
+// v2 adds the images table (single-file image uploads). Purely additive.
 
 const V1_SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
@@ -125,10 +127,34 @@ function moveLegacyZips(wsId: string): void {
   }
 }
 
+const V2_IMAGES = `
+  CREATE TABLE IF NOT EXISTS images (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_images_workspace ON images (workspace_id);
+`;
+
 export function migrate(): void {
   const uv = userVersion();
-  if (uv >= 1) return; // already at v1 — no-op
-  if (uv !== 0) throw new Error(`Unexpected database user_version ${uv}; expected 0 or 1`);
+  if (uv > 2) throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, or 2`);
+  if (uv === 0) migrateToV1();
+  if (userVersion() < 2) migrateToV2();
+}
+
+function migrateToV2(): void {
+  db.transaction(() => {
+    db.exec(V2_IMAGES);
+    db.run("PRAGMA user_version = 2");
+  })();
+  console.log("[seer] migrated to schema v2 (images).");
+}
+
+function migrateToV1(): void {
 
   const email = resolveRootEmail();
   const localPart = email.split("@")[0] || email;

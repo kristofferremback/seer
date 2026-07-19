@@ -126,6 +126,45 @@ export const createVersion = db.transaction(
   },
 );
 
+// ---- images ----
+
+// A single immutable image file. The id doubles as the URL capability: 50 random
+// bits, never reused, so a private workspace's image URL is unguessable.
+export interface Image {
+  id: string;
+  workspace_id: string;
+  filename: string;
+  content_type: string;
+  bytes: number;
+  created_at: number;
+}
+
+export function getImage(id: string): Image | null {
+  return db.query<Image, [string]>("SELECT * FROM images WHERE id = ?").get(id);
+}
+
+export function listImages(wsId: string): Image[] {
+  return db
+    .query<Image, [string]>(
+      "SELECT * FROM images WHERE workspace_id = ? ORDER BY created_at DESC",
+    )
+    .all(wsId);
+}
+
+export function createImage(
+  wsId: string,
+  filename: string,
+  contentType: string,
+  bytes: number,
+): string {
+  const id = tinyId("img");
+  db.run(
+    "INSERT INTO images (id, workspace_id, filename, content_type, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    [id, wsId, filename, contentType, bytes, Date.now()],
+  );
+  return id;
+}
+
 // ---- workspaces, members (mutations) ----
 
 /** Create a public workspace and seat its creator as a member. Returns the ws id. */
