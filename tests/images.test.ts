@@ -11,7 +11,7 @@ import { startServer } from "../src/server";
 import { config } from "../src/config";
 import { db, legacyWorkspaceId, createWorkspace, mintApiKey } from "../src/db";
 
-let server: ReturnType<typeof startServer>;
+let server: Awaited<ReturnType<typeof startServer>>;
 let base: string;
 let rootWs: string;
 let rootUser: string;
@@ -42,7 +42,7 @@ async function blobPng(width: number, height: number): Promise<Uint8Array> {
 }
 
 beforeAll(async () => {
-  server = startServer();
+  server = await startServer();
   base = `http://localhost:${server.port}`;
   rootWs = legacyWorkspaceId()!;
   rootUser = db

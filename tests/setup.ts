@@ -13,3 +13,5 @@ process.env.DATA_DIR = dataDir;
 process.env.PORT = "0";
 // TTL 0 makes every cached extraction immediately eligible for sweepCache().
 process.env.CACHE_TTL_MS = "0";
+// Tests always run against the disk blob store, whatever the developer's shell has.
+delete process.env.S3_BUCKET;

@@ -224,12 +224,12 @@ describe("no-seat page", () => {
 // POST can never reappear on a later load.
 
 describe("reveal never survives to a plain GET", () => {
-  let server: ReturnType<typeof startServer>;
+  let server: Awaited<ReturnType<typeof startServer>>;
   let base: string;
   let rootWs: string;
 
-  beforeAll(() => {
-    server = startServer();
+  beforeAll(async () => {
+    server = await startServer();
     base = `http://localhost:${server.port}`;
     rootWs = legacyWorkspaceId()!;
   });

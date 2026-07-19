@@ -29,7 +29,8 @@ import {
   type Workspace,
 } from "./db";
 import { migrate } from "./migrate";
-import { inspectZip, saveZip, ensureExtracted, imagePath, saveImage } from "./store";
+import { inspectZip, saveZip, ensureExtracted, openImage, imageLocation, saveImage, s3 } from "./store";
+import { migrateBlobsToS3 } from "./migrate-blobs";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
 import {
   acceptInvite,
@@ -377,15 +378,16 @@ async function handleWorkspaceImage(req: Request, wsId: string): Promise<Respons
   }
   if (!workspaceViewable(ws, req) && !isGithubCamo(req)) return softNotFound(req);
 
-  const file = Bun.file(imagePath(wsId, image.id));
-  if (!(await file.exists())) {
-    // A db row without its blob is corruption (or a mispointed DATA_DIR) — say so.
-    console.error(`[seer] image ${image.id} has a db row but no file at ${imagePath(wsId, image.id)}`);
+  const body = await openImage(wsId, image.id);
+  if (body === null) {
+    // A db row without its blob is corruption (or a mispointed store) — say so.
+    console.error(`[seer] image ${image.id} has a db row but no blob at ${imageLocation(wsId, image.id)}`);
     return softNotFound(req);
   }
 
   const headers: Record<string, string> = {
     "content-type": image.content_type,
+    "content-length": String(image.bytes),
     // An img id is minted once and never rewritten, so the URL is immutable.
     "cache-control": "public, max-age=31536000, immutable",
     "x-content-type-options": "nosniff",
@@ -395,7 +397,7 @@ async function handleWorkspaceImage(req: Request, wsId: string): Promise<Respons
   if (image.content_type === "image/svg+xml") {
     headers["content-security-policy"] = "default-src 'none'; style-src 'unsafe-inline'";
   }
-  return new Response(file, { headers });
+  return new Response(body, { headers });
 }
 
 // ---- bundle ledger (signed-in view data) ----
@@ -425,10 +427,13 @@ function ledgerGroups(userId: string): LedgerGroup[] {
 
 // ---- server ----
 
-export function startServer() {
+export async function startServer() {
   // Bring the database to the current schema (v2; bootstrapping the root workspace
   // on first boot) before the server binds — no request may hit an unmigrated db.
   migrate();
+  // Then move any local blobs into S3 (no-op when already done or disk-only).
+  // Runs before the server binds so requests never race a half-moved store.
+  await migrateBlobsToS3();
 
   const websocket: WebSocketHandler<WSData> = {
     open(ws) {
@@ -743,7 +748,12 @@ export function startServer() {
   console.log(`Seer listening on ${config.baseUrl} (port ${server.port})`);
   // Log the absolute data path so a Railway volume's mount path can be verified
   // against it — they must match, or writes land on ephemeral disk.
-  console.log(`Data dir: ${resolve(config.dataDir)} (mount your persistent volume here)`);
+  console.log(`Data dir: ${resolve(config.dataDir)} (SQLite + extraction cache)`);
+  console.log(
+    s3
+      ? `Blob store: s3://${config.s3!.bucket} (${config.s3!.region ?? config.s3!.endpoint})`
+      : "Blob store: local disk (set S3_BUCKET to use S3)",
+  );
 
   // Graceful shutdown. Railway (and most platforms) send SIGTERM to the old
   // container on every redeploy. Without a handler the process is terminated

@@ -31,7 +31,7 @@ function assert(cond: boolean, msg: string) {
   }
 }
 
-const server = startServer();
+const server = await startServer();
 const base = `http://localhost:${server.port}`;
 const now = Date.now();
 

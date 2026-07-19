@@ -53,7 +53,7 @@ function hmac(data: string): string {
 // startServer() runs the migration, bootstrapping the root user (email
 // allowed@example.com from ALLOWED_EMAILS). The session cookie now carries the
 // user id, so the round-trip tests need that real user row in the db.
-const server = startServer();
+const server = await startServer();
 const base = `http://localhost:${server.port}`;
 const wsId = legacyWorkspaceId()!;
 // Workspace-scoped bundle URL for the (public) bootstrap workspace.

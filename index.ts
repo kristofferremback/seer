@@ -14,4 +14,6 @@ process.on("uncaughtException", (err) => {
   process.exit(1);
 });
 
-startServer();
+// Top-level await: a failed boot (bad S3 config, failed blob migration) must exit
+// non-zero, not linger serverless behind the unhandledRejection log-and-continue.
+await startServer();
