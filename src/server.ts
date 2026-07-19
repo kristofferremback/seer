@@ -426,8 +426,8 @@ function ledgerGroups(userId: string): LedgerGroup[] {
 // ---- server ----
 
 export function startServer() {
-  // Bring the database to schema v1 (and bootstrap the root workspace on first boot)
-  // before the server binds — no request may hit an unmigrated db.
+  // Bring the database to the current schema (v2; bootstrapping the root workspace
+  // on first boot) before the server binds — no request may hit an unmigrated db.
   migrate();
 
   const websocket: WebSocketHandler<WSData> = {

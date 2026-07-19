@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll, describe } from "bun:test";
-import sharp from "sharp";
+import sharp, { type Sharp } from "sharp";
 
 // Env is set by tests/setup.ts (AUTH_DISABLED=true → sessionUser resolves to the
 // root user). Everything here runs as the root user against root-owned
@@ -19,23 +19,26 @@ let png: Uint8Array; // 400x400 blobby PNG — smooth interpolated noise, WebP w
 
 const SVG = new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`);
 
-function noise(width: number, height: number): Buffer {
+function noise(width: number, height: number, seed = 0): Buffer {
   const raw = Buffer.alloc(width * height * 3);
-  for (let i = 0; i < raw.length; i++) raw[i] = (i * 2654435761) % 256;
+  for (let i = 0; i < raw.length; i++) raw[i] = ((i + seed) * 2654435761) % 256;
   return raw;
 }
 
 // Low-frequency noise upscaled smooth: expensive for lossless PNG, trivial for
 // lossy WebP — so "the WebP re-encode wins" is deterministic, not luck.
-async function blobPng(width: number, height: number): Promise<Uint8Array> {
+function blob(width: number, height: number, seed = 0): Sharp {
   const sw = Math.max(2, Math.round(width / 16));
   const sh = Math.max(2, Math.round(height / 16));
-  return new Uint8Array(
-    await sharp(noise(sw, sh), { raw: { width: sw, height: sh, channels: 3 } })
-      .resize(width, height, { fit: "fill" })
-      .png()
-      .toBuffer(),
+  return sharp(noise(sw, sh, seed), { raw: { width: sw, height: sh, channels: 3 } }).resize(
+    width,
+    height,
+    { fit: "fill" },
   );
+}
+
+async function blobPng(width: number, height: number): Promise<Uint8Array> {
+  return new Uint8Array(await blob(width, height).png().toBuffer());
 }
 
 beforeAll(async () => {
@@ -117,6 +120,49 @@ describe("image upload", () => {
     expect(a.id).not.toBe(b.id);
     expect((await fetch(local(a.url))).status).toBe(200);
     expect((await fetch(local(b.url))).status).toBe(200);
+  });
+
+  test("animated gif stays animated through the webp re-encode", async () => {
+    // Frames must differ (seed varies) or the gif encoder collapses them.
+    const frames: Buffer[] = [];
+    for (let i = 0; i < 6; i++) frames.push(await blob(200, 200, i * 7).png().toBuffer());
+    const gif = new Uint8Array(
+      await sharp(frames, { join: { animated: true } }).gif().toBuffer(),
+    );
+    const j = await readJson(await put("anim.gif", LEGACY, gif));
+    expect(j.contentType).toBe("image/webp"); // big noisy gif → webp wins
+    const served = new Uint8Array(await (await fetch(local(j.url))).arrayBuffer());
+    const meta = await sharp(served, { animated: true }).metadata();
+    expect(meta.pages).toBe(6);
+  });
+
+  test("avif keeps its own format when the webp re-encode loses", async () => {
+    // AVIF out-compresses WebP q82 on smooth content, so the same-format
+    // fallback wins deterministically — and it too is re-encoded, never raw.
+    const avif = new Uint8Array(await blob(400, 400).avif({ quality: 50 }).toBuffer());
+    const j = await readJson(await put("tight.avif", LEGACY, avif));
+    expect(j.contentType).toBe("image/avif");
+    expect(j.filename).toBe("tight.avif");
+    const served = await fetch(local(j.url));
+    expect(served.headers.get("content-type")).toBe("image/avif");
+    const meta = await sharp(new Uint8Array(await served.arrayBuffer())).metadata();
+    expect(meta.format).toBe("heif"); // sharp reports avif as heif
+    expect(meta.width).toBe(400);
+  });
+
+  test("exif orientation is baked in and metadata stripped", async () => {
+    // Orientation 6 = rotate 90° CW on display: a 320x240 sensor image shows as
+    // 240x320. The served image must be physically rotated with the tag gone.
+    const jpg = new Uint8Array(
+      await blob(320, 240).jpeg().withMetadata({ orientation: 6 }).toBuffer(),
+    );
+    const j = await readJson(await put("rotated.jpg", LEGACY, jpg));
+    const served = new Uint8Array(await (await fetch(local(j.url))).arrayBuffer());
+    const meta = await sharp(served).metadata();
+    expect(meta.width).toBe(240);
+    expect(meta.height).toBe(320);
+    expect(meta.orientation).toBeUndefined();
+    expect(meta.exif).toBeUndefined();
   });
 
   test("svg passes through untouched, served with a script-neutering CSP", async () => {

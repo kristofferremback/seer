@@ -795,11 +795,12 @@ The filename must match \`[a-z0-9][a-z0-9._-]*\` (max 64 chars) and end in \`.pn
 format, and the body is sanity-checked against it.
 
 Seer compresses on upload: orientation is baked in, the longest edge is capped at
-2000px, metadata is stripped, and the image is re-encoded as WebP (animated GIFs
-stay animated). When the WebP is no smaller than your original, the original is
-stored untouched; SVGs always pass through as-is. The response tells you what was
-stored — note the filename (and URL) may end \`.webp\` even though you uploaded a
-\`.png\`:
+2000px, metadata (EXIF, GPS) is stripped, and the image is re-encoded as WebP
+(animated GIFs stay animated). When the WebP is no smaller than your original —
+tiny icons, already-tight AVIF — the image is re-encoded in its own format
+instead, with the same cap and metadata strip. SVGs are the one passthrough,
+stored as-is. The response tells you what was stored — note the filename (and
+URL) may end \`.webp\` even though you uploaded a \`.png\`:
 
 \`\`\`json
 {
