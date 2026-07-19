@@ -10,7 +10,7 @@ Seer is multi-user. Bundles live inside a **workspace**; a workspace can have mo
 
 - **Uploads** go to `PUT`/`POST /api/bundles/:slug` with a bearer API key (`seer_sk_…`). Each upload is a new immutable version (`v1`, `v2`, ...). The key resolves the workspace, so the upload lands wherever the key belongs — the API path is unchanged.
 - **Images** are single-file uploads to `PUT /api/images/:filename` (raw bytes, same bearer key), made for embedding screenshots in GitHub PRs. Uploads are compressed (longest edge capped at 2000px, metadata stripped, re-encoded to WebP or — when that loses — the source format; only SVG passes through verbatim) and served immutably at `/<workspace>/i/<img_id>/<filename>` — the `img_id` is random, so the URL is unguessable. Visibility follows the workspace, except GitHub's camo image proxy is always served so images render in PRs even from a private workspace (camo is identified by User-Agent, so treat private image URLs as capability links, not secrets).
-- **Storage**: the raw zip is written to disk under `DATA_DIR/zips/<workspace>/<slug>`. Metadata (users, workspaces, memberships, keys, invites, slugs, versions) goes into `bun:sqlite`. The zip is the source of truth.
+- **Storage**: the raw zip is the source of truth. With `S3_BUCKET` set it lives in S3 under `zips/<workspace>/<slug>/<version>.zip` (images under `images/<workspace>/<img_id>`); otherwise on disk under `DATA_DIR/zips/<workspace>/<slug>`. Metadata (users, workspaces, memberships, keys, invites, slugs, versions, images) goes into `bun:sqlite`. Serving always goes through Seer — S3 is never exposed to viewers, so workspace visibility keeps working unchanged.
 - **Serving**: `/<workspace>/b/:slug/` serves the latest version, `/<workspace>/b/:slug/v/N/` serves a pinned version. A legacy `/b/:slug/...` URL `301`s to its workspace-scoped equivalent. Bundles are extracted on demand into a disposable cache.
 - **Live reload**: a tiny WebSocket script is injected into HTML served from the latest URL. When a new version lands, open viewers reload themselves.
 - **Auth**: writes need an API key that a member mints from a workspace's settings. A public workspace's bundle links are viewable by anyone with the URL; a private workspace's are members-only (everyone else gets a generic 404). The inventory (`/bundles` and `GET /api/bundles`) is always private.
@@ -179,14 +179,17 @@ All configuration is via environment variables. Bun loads `.env` automatically. 
 | `AUTH_DISABLED` | `false` | Set to `true` to skip Google sign-in entirely. Local dev only. When true, `GOOGLE_*`, `SESSION_SECRET`, and `ALLOWED_EMAILS` are not required (the root user is `dev@localhost`). |
 | `BASE_URL` | `http://localhost:$PORT` | Public base URL of the deployment. Used to build OAuth redirects and the URLs returned from uploads. Cookies are `Secure` when this is `https`. A trailing slash is stripped. |
 | `PORT` | `3000` | Port to listen on. |
-| `DATA_DIR` | `./data` | Directory for the SQLite database, uploaded zips, and the extraction cache. Point this at a mounted volume in production. |
+| `DATA_DIR` | `./data` | Directory for the SQLite database and the extraction cache (and, without S3, the uploaded blobs). Point this at a mounted volume in production. |
+| `S3_BUCKET` | (optional) | When set, bundle zips and images are stored in this S3 bucket instead of on disk; the only durable local state left is the SQLite database. On the first boot with a bucket configured, existing local blobs are copied into it (idempotent, marker-gated; local files are left in place). |
+| `S3_REGION` | (required with `S3_BUCKET`) | Bucket region, e.g. `eu-north-1`. `AWS_REGION` is accepted as an alias. Alternatively set `S3_ENDPOINT` for S3-compatible stores (R2, MinIO, ...). |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | (required with `S3_BUCKET`) | Credentials for an IAM user scoped to the bucket (`GetObject`, `PutObject`, `DeleteObject`, `ListBucket`). `AWS_*` names are accepted as aliases. |
 | `MAX_UPLOAD_BYTES` | `52428800` (50 MiB) | Maximum upload size in bytes. Larger uploads get `413`. |
 | `CACHE_TTL_MS` | `1800000` (30 min) | How long an extracted bundle stays in the cache after its last access. |
 | `SESSION_TTL_MS` | `2592000000` (30 days) | Session cookie lifetime in milliseconds. |
 
 ## Deploying on Railway
 
-Seer keeps state on local disk (SQLite database and zip files), so it must run as a **single instance** with a persistent volume. Do not scale it horizontally.
+Seer keeps its metadata in a local SQLite database, so it must run as a **single instance** with a persistent volume. Do not scale it horizontally. With `S3_BUCKET` set, blobs (zips and images) live in S3 and the volume only has to hold the database and the disposable extraction cache.
 
 Build and deploy settings (start command, healthcheck, single replica, restart policy) are committed in [`railway.toml`](./railway.toml), so Railway picks them up automatically. Two things still have to be done in the dashboard because they can't live in the repo: attaching the volume and setting the variables.
 

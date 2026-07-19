@@ -11,7 +11,7 @@ import { legacyWorkspaceId } from "../src/db";
 
 const AUTH = { authorization: `Bearer ${config.apiToken}` };
 
-let server: ReturnType<typeof startServer>;
+let server: Awaited<ReturnType<typeof startServer>>;
 let base: string;
 let wsId: string;
 // Workspace-scoped bundle URL for the bootstrap workspace uploads land in.
@@ -22,8 +22,8 @@ async function readJson(r: Response): Promise<any> {
   return r.json();
 }
 
-beforeAll(() => {
-  server = startServer();
+beforeAll(async () => {
+  server = await startServer();
   base = `http://localhost:${server.port}`;
   wsId = legacyWorkspaceId()!;
 });

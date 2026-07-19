@@ -1,4 +1,5 @@
 import { unzipSync } from "fflate";
+import { S3Client, type BunFile, type S3File } from "bun";
 import { mkdirSync, rmSync, existsSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { config } from "./config";
@@ -13,12 +14,32 @@ mkdirSync(imagesDir, { recursive: true });
 rmSync(cacheDir, { recursive: true, force: true });
 mkdirSync(cacheDir, { recursive: true });
 
-export function zipPath(wsId: string, slug: string, version: number): string {
-  return join(zipsDir, wsId, slug, `${version}.zip`);
+// ---- blob store ----
+
+// Two backends behind one surface: S3 when configured (durable blobs live in the
+// bucket; local disk holds only SQLite and the disposable extraction cache), plain
+// disk otherwise (local dev, tests). Everything downstream — serving, extraction,
+// upload — goes through these helpers and never branches on the backend itself.
+export const s3: S3Client | null = config.s3
+  ? new S3Client({
+      bucket: config.s3.bucket,
+      region: config.s3.region,
+      endpoint: config.s3.endpoint,
+      accessKeyId: config.s3.accessKeyId,
+      secretAccessKey: config.s3.secretAccessKey,
+    })
+  : null;
+
+export function zipKey(wsId: string, slug: string, version: number): string {
+  return `zips/${wsId}/${slug}/${version}.zip`;
 }
 
-function extractedDir(wsId: string, slug: string, version: number): string {
-  return join(cacheDir, wsId, slug, String(version));
+export function imageKey(wsId: string, imageId: string): string {
+  return `images/${wsId}/${imageId}`;
+}
+
+export function zipPath(wsId: string, slug: string, version: number): string {
+  return join(zipsDir, wsId, slug, `${version}.zip`);
 }
 
 /** Validates zip contents and returns the sanitized file list. Throws on bad archives. */
@@ -44,28 +65,66 @@ export async function saveZip(
   version: number,
   data: Uint8Array,
 ): Promise<void> {
+  if (s3) {
+    await s3.write(zipKey(wsId, slug, version), data);
+    return;
+  }
   mkdirSync(join(zipsDir, wsId, slug), { recursive: true });
   await Bun.write(zipPath(wsId, slug, version), data);
 }
 
+async function loadZip(wsId: string, slug: string, version: number): Promise<Uint8Array> {
+  if (s3) return new Uint8Array(await s3.file(zipKey(wsId, slug, version)).arrayBuffer());
+  return Bun.file(zipPath(wsId, slug, version)).bytes();
+}
+
 // ---- images ----
 
-// Images are single files, stored raw and served straight from disk — no zip, no
-// extraction cache. The blob is keyed by the img id alone; filename and
-// content-type live in the db row.
+// Images are single blobs keyed by the img id alone; filename and content-type
+// live in the db row. Serving always streams through Seer — an S3File is never
+// handed to Response directly (that would redirect to a presigned AWS URL and
+// give up our access control).
 export function imagePath(wsId: string, imageId: string): string {
   return join(imagesDir, wsId, imageId);
 }
 
 export async function saveImage(wsId: string, imageId: string, data: Uint8Array): Promise<void> {
+  if (s3) {
+    await s3.write(imageKey(wsId, imageId), data);
+    return;
+  }
   mkdirSync(join(imagesDir, wsId), { recursive: true });
   await Bun.write(imagePath(wsId, imageId), data);
+}
+
+/** The image blob for serving, or null if it's missing from the store. */
+export async function openImage(
+  wsId: string,
+  imageId: string,
+): Promise<BunFile | ReadableStream<Uint8Array> | null> {
+  if (s3) {
+    const file: S3File = s3.file(imageKey(wsId, imageId));
+    if (!(await file.exists())) return null;
+    return file.stream();
+  }
+  const file: BunFile = Bun.file(imagePath(wsId, imageId));
+  if (!(await file.exists())) return null;
+  return file;
+}
+
+/** Where the image blob lives, for corruption logging. */
+export function imageLocation(wsId: string, imageId: string): string {
+  return s3 ? `s3://${config.s3!.bucket}/${imageKey(wsId, imageId)}` : imagePath(wsId, imageId);
 }
 
 // ---- extraction cache with freshness bumping ----
 
 const lastAccess = new Map<string, number>(); // "slug/version" -> ms
 const inflight = new Map<string, Promise<string>>();
+
+function extractedDir(wsId: string, slug: string, version: number): string {
+  return join(cacheDir, wsId, slug, String(version));
+}
 
 /** Returns the extracted directory for a version, extracting from the zip if needed. Bumps freshness. */
 export async function ensureExtracted(
@@ -83,7 +142,7 @@ export async function ensureExtracted(
   if (pending) return pending;
 
   const promise = (async () => {
-    const zip = await Bun.file(zipPath(wsId, slug, version)).bytes();
+    const zip = await loadZip(wsId, slug, version);
     const entries = unzipSync(zip);
     const tmp = `${dir}.tmp`;
     rmSync(tmp, { recursive: true, force: true });

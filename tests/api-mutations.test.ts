@@ -11,13 +11,13 @@ import { startServer } from "../src/server";
 import { config } from "../src/config";
 import { db, legacyWorkspaceId, createWorkspace, mintApiKey } from "../src/db";
 
-let server: ReturnType<typeof startServer>;
+let server: Awaited<ReturnType<typeof startServer>>;
 let base: string;
 let rootWs: string;
 let rootUser: string;
 
-beforeAll(() => {
-  server = startServer();
+beforeAll(async () => {
+  server = await startServer();
   base = `http://localhost:${server.port}`;
   rootWs = legacyWorkspaceId()!;
   rootUser = db.query<{ id: string }, []>("SELECT id FROM users LIMIT 1").get()!.id;

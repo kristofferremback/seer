@@ -25,4 +25,12 @@ numReplicas = 1
 #   ALLOWED_EMAILS    comma-separated allowlist, e.g. you@example.com
 #   BASE_URL          the service's public https URL (set after first deploy)
 #   DATA_DIR          /data   (must match the mounted volume path)
+# Blob store (bundle zips + images) in S3 — set all of these together. On the
+# first boot with S3_BUCKET set, the app copies every existing blob from the
+# volume into the bucket (idempotent; local files are left in place). SQLite
+# stays on the volume; everything else lives in S3.
+#   S3_BUCKET             the bucket name
+#   S3_REGION             e.g. eu-north-1 (or S3_ENDPOINT for non-AWS stores)
+#   S3_ACCESS_KEY_ID      IAM user scoped to that bucket
+#   S3_SECRET_ACCESS_KEY
 # Railway injects PORT automatically; the app reads it.
