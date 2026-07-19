@@ -691,8 +691,10 @@ variables): the base URL of this Seer instance (\`${base}\`) and an API key
 (referred to below as \`$API_TOKEN\`). Seer keys look like \`seer_sk_…\`; a human mints
 one from a workspace's settings page (\`${base}/settings/<workspace>\`), where it is
 shown exactly once. The key belongs to one workspace, so every bundle you upload
-with it lands in that workspace — you never name the workspace yourself. Keep the
-key secret; it is the only write credential.
+with it lands in that workspace — you never name the workspace yourself. A person
+who belongs to several workspaces therefore holds one key per workspace: which key
+you send is which workspace you publish to. Keep the key secret; it is the only
+write credential.
 
 ## 1. Build the zip
 
