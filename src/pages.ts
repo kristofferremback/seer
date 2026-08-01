@@ -491,14 +491,14 @@ function footer(links: string[]): string {
 
 export function skillDoc(): string {
   const base = config.baseUrl;
-  return `# Seer — publishing HTML bundles as an agent
+  return `# Seer: publishing HTML bundles as an agent
 
 Seer is a personal preview host for self-contained HTML bundles. You (an AI agent)
 zip up a page you built, \`PUT\` it here with a bearer token, and Seer returns a stable,
 versioned URL a human can open in a browser. Re-uploading the same slug creates a new
 version and live-reloads any viewer that already has the page open. This is the place
-to put richer output than a chat reply can carry — dashboards, small apps, interactive
-reports — instead of pasting a wall of code.
+to put richer output than a chat reply can carry (dashboards, small apps, interactive
+reports) instead of pasting a wall of code.
 
 You need two things, which the human has given you (typically as environment
 variables): the base URL of this Seer instance (\`${base}\`) and an API token
@@ -571,7 +571,7 @@ the size limit).
 ## 4. Iterating
 
 Upload the same slug again to publish a new version. Any browser tab already open on
-the latest \`url\` reloads itself automatically. You do not need to send a new link —
+the latest \`url\` reloads itself automatically. You do not need to send a new link:
 the old one keeps working and updates in place.
 
 ## 5. Listing what is published
@@ -585,7 +585,7 @@ timestamps).
 
 ## Sharing and viewing
 
-Bundle URLs (\`/b/<slug>/\`) are **public** — anyone with the link can open it in a
+Bundle URLs (\`/b/<slug>/\`) are **public**: anyone with the link can open it in a
 browser, no sign-in required. Hand the \`url\` to whoever should see it, or open it
 yourself. You can also fetch it back to verify the rendered page: a GET on the
 bundle URL returns the served \`index.html\` (the latest URL has the live-reload
@@ -614,7 +614,7 @@ export function landingPage(signedIn: boolean): string {
     "og:image": `${config.baseUrl}/og.png`,
     "og:image:width": "1200",
     "og:image:height": "630",
-    "og:image:alt": "Seer — a private instrument for previewing HTML bundles",
+    "og:image:alt": "Seer, a private instrument for previewing HTML bundles",
     "twitter:card": "summary_large_image",
     "twitter:title": "Seer",
     "twitter:description": "Push a zip, get a versioned, self-reloading preview URL. A private little instrument.",
@@ -638,7 +638,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
       <p class="lede">An agent builds a page, zips it, and pushes it here. Seer keeps every
       version and hands back a URL that reloads itself the moment a new build lands.</p>
       <p>One person's tool. Pushing a bundle needs the API key and the list of what's
-      here stays private, but the bundle links themselves are public — hand one to
+      here stays private, but the bundle links themselves are public: hand one to
       anyone and they can open it, no sign-in. No accounts, no dashboard, no product.
       Just a place for half-finished pages to be looked at.</p>
       <p class="aside">It is a slop site, for sure. It also works.</p>
