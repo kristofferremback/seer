@@ -9,9 +9,11 @@ export function escapeHtml(s: string): string {
 }
 
 // ---- the scrying glass: one hand-drawn mark, the whole identity ----
-// A crystal ball in its cradle. The ink strokes are the instrument; the single
-// glint inside carries the accent. It only animates where the mark is the
-// subject (the figure), never where it is furniture (masthead, footer).
+// A crystal ball in its cradle. Drawn in one ink that it inherits from wherever
+// it sits: strokes for the glass and the cradle, and one filled glint inside,
+// which is the only solid shape in the mark and reads as the highlight without
+// needing a colour of its own. It animates only where the mark is the subject
+// (the figure), never where it is furniture (masthead, footer).
 function markSvg(cls = "mark"): string {
   return `<svg class="${cls}" viewBox="0 0 48 58" role="img" aria-label="A crystal ball on a small stand" fill="none" xmlns="http://www.w3.org/2000/svg">
   <circle cx="24" cy="21" r="15" stroke="currentColor" stroke-width="1.5"/>
@@ -20,7 +22,7 @@ function markSvg(cls = "mark"): string {
   <path d="M13.5 33 L18 50" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
   <path d="M34.5 33 L30 50" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
   <path d="M16 51 L32 51" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-  <path class="glint" d="M30 21.6 L30.95 24.05 L33.4 25 L30.95 25.95 L30 28.4 L29.05 25.95 L26.6 25 L29.05 24.05 Z" fill="hsl(var(--accent))"/>
+  <path class="glint" d="M30 21.6 L30.95 24.05 L33.4 25 L30.95 25.95 L30 28.4 L29.05 25.95 L26.6 25 L29.05 24.05 Z" fill="currentColor"/>
 </svg>`;
 }
 
@@ -28,13 +30,26 @@ function markSvg(cls = "mark"): string {
 // Design language, shared with Witness: the substrate is an oxblood-black, Seer's
 // red taken down to near-black, and it is designed dark first. The light theme is
 // derived from it rather than inverted into it, and holds the same cast at the
-// other end of the scale. The accent is a signal cyan sitting across from the
-// substrate, and it means one thing: this is tappable. Structure comes from
-// hairline rules plus a two-step surface (paper / paper-sunk), because tone alone
-// stops separating anything once the page is near-black. Type is Cabinet Grotesk
-// (display), Switzer (body), Commit Mono (real data only: slugs, versions,
-// timestamps, curl). Tokens are HSL triplets so hsl(var(--x)/0.3) gives alpha
-// variants. Both themes fully defined; the theme resolves pre-paint.
+// other end of the scale.
+//
+// Colour law: hue is reserved for meaning, and the only families allowed to carry
+// it are change semantics (add / change / remove / keep), review-note kinds, and
+// syntax classes on a code surface. Seer has none of those, so Seer is monochrome.
+// The accent is hueless: a warm near-white in dark, a near-black in light, in both
+// cases a value step past body ink rather than a colour. Every token is held under
+// 8% chroma so the whole palette reads as one cast rather than as tints, which is
+// the same bar the enforcement pass applies to the rendered pages.
+//
+// Life comes from value, rule and spacing instead: a two-step surface (paper /
+// paper-sunk), hairline rules at every boundary, a three-step ink ramp
+// (ink / ink-soft / muted), and the mark. Interactivity is structural: links carry
+// a permanent underline and step toward the extreme of the value ramp, ambient
+// navigation stays muted with its underline drawn in the rule colour, and the
+// focus ring is the accent at full strength.
+//
+// Type is Cabinet Grotesk (display), Switzer (body), Commit Mono (real data only:
+// slugs, versions, timestamps, curl). Tokens are HSL triplets so hsl(var(--x)/0.3)
+// gives alpha variants. Both themes fully defined; the theme resolves pre-paint.
 function styles(): string {
   return `
   @font-face {
@@ -64,7 +79,10 @@ function styles(): string {
   }
 
   /* The light theme: a faint blush stone carrying the substrate's cast, verified
-     on its own terms rather than assumed to work because dark does. */
+     on its own terms rather than assumed to work because dark does. The accent
+     here is DARKER than body ink, not lighter: in a hueless system a link has to
+     be at least as strong as the text around it, so it steps past the ink toward
+     black and carries an underline. */
   :root {
     color-scheme: light;
     --paper: 8 30% 96.5%;
@@ -72,8 +90,8 @@ function styles(): string {
     --ink: 8 20% 10%;
     --ink-soft: 8 15% 23%;
     --line: 6 20% 81%;
-    --muted: 8 13% 31%;
-    --accent: 193 94% 24%;
+    --muted: 8 12% 31%;
+    --accent: 10 20% 6%;
 
     --font-display: "Cabinet Grotesk", "Switzer", system-ui, -apple-system, sans-serif;
     --font-body: "Switzer", system-ui, -apple-system, sans-serif;
@@ -81,16 +99,18 @@ function styles(): string {
 
     --pad-x: 56px;
   }
-  /* The primary theme. */
+  /* The primary theme. The accent is a warm near-white: it sits above the prose
+     ink it is set in, and below the display ink, so a link is a lift rather than
+     a colour. */
   :root[data-theme="dark"] {
     color-scheme: dark;
     --paper: 356 28% 10%;
     --paper-sunk: 356 34% 6.5%;
     --ink: 18 22% 92%;
     --ink-soft: 14 15% 78%;
-    --line: 356 22% 24%;
-    --muted: 14 13% 67%;
-    --accent: 189 72% 64%;
+    --line: 356 16% 24%;
+    --muted: 14 11% 67%;
+    --accent: 28 20% 87%;
   }
   @media (max-width: 880px) {
     :root { --pad-x: 28px; }
@@ -104,9 +124,9 @@ function styles(): string {
       --paper-sunk: 356 34% 6.5%;
       --ink: 18 22% 92%;
       --ink-soft: 14 15% 78%;
-      --line: 356 22% 24%;
-      --muted: 14 13% 67%;
-      --accent: 189 72% 64%;
+      --line: 356 16% 24%;
+      --muted: 14 11% 67%;
+      --accent: 28 20% 87%;
     }
   }
 
@@ -154,11 +174,11 @@ function styles(): string {
 
   /* ---- thread spine ----
      A hairline down the content's left margin that says where the band starts and
-     how far it runs. It used to be drawn in the accent with a rotated diamond
-     bead floating on it; the bead was ornament and an accent line reads as
-     something you can click. Now the line is a rule like every other rule, and
-     only its first 28px carry the accent, as a tick marking the top of the band.
-     Hidden on narrow, where there is no margin to hang it in. */
+     how far it runs. It used to carry a rotated diamond bead, which was ornament.
+     Now the line is a rule like every other rule, and only its first 28px step up
+     to the accent, as a tick marking the top of the band. On a monochrome page
+     that value jump is doing the work a colour would have done. Hidden on narrow,
+     where there is no margin to hang it in. */
   .spine::before {
     content: "";
     position: absolute;
@@ -212,16 +232,18 @@ function styles(): string {
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: hsl(var(--muted));
-    text-decoration: none;
+    text-decoration-color: hsl(var(--line));
   }
 
   /* The theme control is the surface state itself, drawn as Lucide's contrast
      mark: half the disc inked, and which half flips with the theme. Same control
-     as Witness carries. Bare icon, no pill, 44px target. */
+     as Witness carries. Bare icon, no pill, 44px target. It sits in the masthead
+     register at muted, one step under the wordmark beside it, and resolves to
+     full ink on hover. */
   .theme-toggle {
     background: none; border: 0; margin: 0 -10px 0 0; padding: 10px;
     min-width: 44px; min-height: 44px;
-    color: hsl(var(--accent));
+    color: hsl(var(--muted));
     cursor: pointer; line-height: 0;
     display: inline-flex; align-items: center; justify-content: center;
     border-radius: 6px;
@@ -239,6 +261,7 @@ function styles(): string {
   .theme-toggle:active { background: hsl(var(--ink) / 0.07); }
   @media (hover: hover) and (pointer: fine) {
     .theme-toggle .tt-mark { transition: transform 220ms cubic-bezier(0.2, 0.9, 0.25, 1); }
+    .theme-toggle:hover { color: hsl(var(--ink)); }
   }
   @media (prefers-reduced-motion: reduce) { .theme-toggle .tt-mark { transition: none; } }
 
@@ -252,7 +275,10 @@ function styles(): string {
     margin: 0;
     max-width: 15ch;
   }
-  .h-display .accent { color: hsl(var(--accent)); font-weight: 500; }
+  /* Emphasis in the display line is weight, not colour. A single word tinted a
+     different colour inside a headline is the two-tone move, and with a hueless
+     accent it would only read as the word going dimmer. */
+  .h-display em { font-style: normal; font-weight: 600; }
   .h-section {
     font-family: var(--font-display);
     font-weight: 300;
@@ -285,16 +311,26 @@ function styles(): string {
   .prose p { max-width: 48ch; }
   .aside { color: hsl(var(--muted)); font-size: 0.95rem; }
 
-  /* One interactivity rule, shared with Witness: the accent means tappable.
-     Underline on hover and press only, so a run of links is not a fence of
-     rules. Ambient navigation (masthead, footer, the mark) stays muted and takes
-     the accent on hover; the accent is spent on the things you go to. */
-  a { color: hsl(var(--accent)); text-decoration: none; }
-  a:active { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  /* One interactivity rule, shared with Witness, and it carries no hue: a link is
+     a value step plus a rule under it. In prose the accent steps past the ink it
+     sits in (up in dark, down in light) and the underline is always drawn, so the
+     affordance survives even where a link is the only word in a line. Press
+     thickens the rule instead of moving anything. Ambient navigation (masthead,
+     footer, version history) stays muted with its underline drawn in the line
+     colour, so a row of links is a quiet ruled row and not a fence, and it
+     resolves to full ink on hover. */
+  a {
+    color: hsl(var(--accent));
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+    text-decoration-color: hsl(var(--accent) / 0.5);
+  }
+  a:active { text-decoration-color: currentColor; text-decoration-thickness: 2px; }
   @media (hover: hover) and (pointer: fine) {
     a { transition: color 150ms ease; }
-    a:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
-    .nav-action:hover, .brand:hover { color: hsl(var(--accent)); }
+    a:hover { text-decoration-color: currentColor; }
+    .nav-action:hover, .brand:hover, .footer a:hover, .history a:hover { color: hsl(var(--ink)); }
   }
   :focus-visible { outline: 2px solid hsl(var(--accent)); outline-offset: 2px; border-radius: 3px; }
 
@@ -339,8 +375,12 @@ function styles(): string {
   /* On a phone the command ran off the right edge and was cut mid-glyph inside a
      nested scroller. It already carries its own line continuations, so let it
      wrap there instead: the whole thing is readable without a sideways drag. */
+  /* The upload URL is one unbroken token, so pre-wrap alone still ran it under
+     the card's right padding and left the last glyph sitting on the border.
+     Let it break anywhere on a narrow screen: the whole command stays inside
+     the box with its gutter intact. */
   @media (max-width: 560px) {
-    pre.cmd { white-space: pre-wrap; }
+    pre.cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
   }
   .specimen-note { font-size: 0.9rem; color: hsl(var(--ink-soft)); max-width: none; margin: 0.85rem 0 0; }
 
@@ -370,11 +410,11 @@ function styles(): string {
   tr:last-child td { border-bottom: 0; }
   @media (max-width: 560px) { th, td { padding: 0.65rem 0.7rem; } }
   .mono { font-family: var(--font-mono); font-size: 0.82rem; color: hsl(var(--ink-soft)); }
-  /* The slug is the one thing on this page you go to, so it carries the accent.
-     The version history beside it is a secondary route and stays muted. */
+  /* The slug is the one thing in this row you go to, so it is the strongest ink
+     on the row and the only underline drawn at full strength. The version history
+     beside it is a secondary route: same underline, drawn in the rule colour. */
   .slug a { font-weight: 500; }
-  .history a { margin-right: 0.6rem; color: hsl(var(--muted)); }
-  @media (hover: hover) and (pointer: fine) { .history a:hover { color: hsl(var(--accent)); } }
+  .history a { margin-right: 0.6rem; color: hsl(var(--muted)); text-decoration-color: hsl(var(--line)); }
   .empty { color: hsl(var(--muted)); margin-bottom: 1.4rem; }
 
   /* ---- footer ---- */
@@ -397,8 +437,7 @@ function styles(): string {
   .footer .brand, .footer .brand .wordmark { color: hsl(var(--ink)); }
   .footer .brand .mark { width: 18px; height: 22px; }
   .footer-links { display: flex; flex-wrap: wrap; gap: 0.7rem 1.4rem; }
-  .footer a { color: hsl(var(--muted)); }
-  @media (hover: hover) and (pointer: fine) { .footer a:hover { color: hsl(var(--accent)); } }
+  .footer a { color: hsl(var(--muted)); text-decoration-color: hsl(var(--line)); }
   .footer code { font-size: 0.95em; text-transform: none; letter-spacing: 0; }
 
   /* The glint animates only where the mark is the subject of the page, which is
@@ -632,7 +671,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
 <div class="frame">
   <div class="shell spine">
     ${navRow(action)}
-    <h1 class="h-display">Preview what your <span class="accent">agents</span> build.</h1>
+    <h1 class="h-display">Preview what your <em>agents</em> build.</h1>
     <p class="subtitle">A private instrument for previewing HTML&nbsp;bundles.</p>
     <div class="prose">
       <p class="lede">An agent builds a page, zips it, and pushes it here. Seer keeps every

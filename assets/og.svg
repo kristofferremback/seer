@@ -1,14 +1,14 @@
 <!-- Source for assets/og.png (1200x630). Rendered in a browser so the site's own
      faces are used; the font stack below falls back sanely anywhere else.
      Colours are the dark theme's tokens, because dark is the primary theme:
-     paper 356 28% 10%, ink 18 22% 92%, muted 14 13% 67%, line 356 22% 24%,
-     accent 189 72% 64%. -->
+     paper 356 28% 10%, ink 18 22% 92%, muted 14 11% 67%, line 356 16% 24%,
+     accent 28 20% 87%, which is hueless: a warm near-white, not a colour. -->
 <svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
   <rect width="1200" height="630" fill="#211213"/>
 
   <!-- the spine tick, the same device the pages carry in their left margin -->
-  <rect x="104" y="0" width="1" height="630" fill="#4b3032"/>
-  <rect x="104" y="0" width="1" height="86" fill="#61d1e5"/>
+  <rect x="104" y="0" width="1" height="630" fill="#473335"/>
+  <rect x="104" y="0" width="1" height="86" fill="#e4ddd7"/>
 
   <!-- the scrying glass, scaled up from the site mark -->
   <g transform="translate(152,168) scale(2.35)" fill="none" stroke="#efe9e6">
@@ -18,13 +18,13 @@
     <path d="M13.5 33 L18 50" stroke-width="1.5" stroke-linecap="round"/>
     <path d="M34.5 33 L30 50" stroke-width="1.5" stroke-linecap="round"/>
     <path d="M16 51 L32 51" stroke-width="1.6" stroke-linecap="round"/>
-    <path d="M30 21.6 L30.95 24.05 L33.4 25 L30.95 25.95 L30 28.4 L29.05 25.95 L26.6 25 L29.05 24.05 Z" fill="#61d1e5" stroke="none"/>
+    <path d="M30 21.6 L30.95 24.05 L33.4 25 L30.95 25.95 L30 28.4 L29.05 25.95 L26.6 25 L29.05 24.05 Z" fill="#efe9e6" stroke="none"/>
   </g>
 
   <text x="300" y="306" font-family="Cabinet Grotesk, Switzer, Helvetica Neue, Arial, sans-serif" font-size="142" font-weight="300" fill="#efe9e6" letter-spacing="-3">Seer</text>
-  <text x="304" y="368" font-family="Switzer, Helvetica Neue, Arial, sans-serif" font-size="32" font-weight="400" fill="#b6a5a0">A private instrument for previewing HTML bundles.</text>
+  <text x="304" y="368" font-family="Switzer, Helvetica Neue, Arial, sans-serif" font-size="32" font-weight="400" fill="#b4a6a2">A private instrument for previewing HTML bundles.</text>
 
-  <rect x="152" y="476" width="944" height="1" fill="#4b3032"/>
+  <rect x="152" y="476" width="944" height="1" fill="#473335"/>
 
-  <text x="152" y="548" font-family="Commit Mono, SF Mono, Menlo, monospace" font-size="24" fill="#b6a5a0">github.com/kristofferremback/seer</text>
+  <text x="152" y="548" font-family="Commit Mono, SF Mono, Menlo, monospace" font-size="24" fill="#b4a6a2">github.com/kristofferremback/seer</text>
 </svg>
