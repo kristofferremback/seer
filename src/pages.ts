@@ -155,8 +155,12 @@ function styles(): string {
      collapse, so the boundary is drawn as a hairline and the tone step only says
      which side is the workbench. */
   .frame { width: 100%; background: hsl(var(--paper)); position: relative; z-index: 1; }
-  /* The content band grows to fill any leftover viewport height so the footer
-     always pins to the bottom, even on a short page. */
+  /* The LAST band takes up any leftover viewport height, so on a short page the
+     footer sits immediately under the content and the slack falls below it, on
+     the same sunk surface the footer already stands on. Growing the content band
+     instead (which is what this used to do) opened a tall empty field between the
+     last thing on the page and the footer, which read as a hole rather than as an
+     ending. */
   .frame.grow { flex: 1 0 auto; }
   .frame.sunk { background: hsl(var(--paper-sunk)); border-top: 1px solid hsl(var(--line)); }
 
@@ -394,8 +398,8 @@ function styles(): string {
   }
   table { width: 100%; border-collapse: collapse; }
   /* Cells never wrap. A slug broken across three lines and a timestamp broken
-     across three more is not a table; the .ledger wrapper scrolls sideways
-     instead, which is what it was already built to do. */
+     across three more is not a table; the .ledger-wide wrapper scrolls sideways
+     instead, for the rare slug long enough to need it. */
   th, td { padding: 0.7rem 1rem; vertical-align: baseline; text-align: left; white-space: nowrap; }
   th {
     font-family: var(--font-mono);
@@ -416,6 +420,24 @@ function styles(): string {
   .slug a { font-weight: 500; }
   .history a { margin-right: 0.6rem; color: hsl(var(--muted)); text-decoration-color: hsl(var(--line)); }
   .empty { color: hsl(var(--muted)); margin-bottom: 1.4rem; }
+
+  /* ---- ledger, stacked ----
+     Four columns need about 480px of run before the last one starts leaving the
+     card, so on a phone the table stops being a table. Each bundle becomes a
+     block: the slug on its own line as the thing you go to, then the version and
+     the timestamp under it in mono, then the version history. Nothing is clipped
+     and nothing has to be dragged sideways to be read. The real table survives
+     at desktop widths, where it is correct and dense. */
+  .ledger-stack { display: none; list-style: none; margin: 0; padding: 0; }
+  .ledger-stack > li { padding: 0.8rem 0.9rem; border-bottom: 1px solid hsl(var(--line) / 0.6); }
+  .ledger-stack > li:last-child { border-bottom: 0; }
+  .stack-slug { font-weight: 500; overflow-wrap: anywhere; }
+  .stack-meta { max-width: none; margin: 0.3rem 0 0; }
+  .stack-history { max-width: none; margin: 0.35rem 0 0; }
+  @media (max-width: 700px) {
+    .ledger-wide { display: none; }
+    .ledger-stack { display: block; }
+  }
 
   /* ---- footer ---- */
   /* It used to sit on a full-bleed night band, which was a slab of near-black on
@@ -684,7 +706,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
     </div>
   </div>
 </div>
-<div class="frame sunk grow">
+<div class="frame sunk">
   <div class="shell spine">
     <div class="specimen-grid">
       <div class="specimen">
@@ -699,7 +721,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
     </div>
   </div>
 </div>
-<div class="frame sunk">
+<div class="frame sunk grow">
   <div class="shell">
     ${footer([
       `<a href="${GITHUB_URL}">github</a>`,
@@ -726,18 +748,32 @@ export interface LedgerBundle {
 export function bundlesPage(email: string, bundles: LedgerBundle[]): string {
   const og = { "og:title": "Bundles · Seer", "og:type": "website", "robots": "noindex" };
 
+  const history = (b: LedgerBundle) =>
+    b.versions.map((v) => `<a href="/b/${encodeURIComponent(b.slug)}/v/${v}/">v${v}</a>`).join("");
+
   const rows = bundles
-    .map((b) => {
-      const history = b.versions
-        .map((v) => `<a href="/b/${encodeURIComponent(b.slug)}/v/${v}/">v${v}</a>`)
-        .join("");
-      return `<tr>
+    .map(
+      (b) => `<tr>
         <td class="slug"><a href="/b/${encodeURIComponent(b.slug)}/">${escapeHtml(b.slug)}</a></td>
         <td class="mono">v${b.latestVersion}</td>
         <td class="mono">${escapeHtml(b.updated)}</td>
-        <td class="history mono">${history}</td>
-      </tr>`;
-    })
+        <td class="history mono">${history(b)}</td>
+      </tr>`,
+    )
+    .join("\n");
+
+  // The same ledger as blocks, for widths where four columns do not fit. Only one
+  // of the two is ever rendered (the other is display:none, so it is out of the
+  // accessibility tree too), which keeps a real table at desktop and a real list
+  // on a phone rather than a table pretending to be either.
+  const blocks = bundles
+    .map(
+      (b) => `<li>
+        <a class="stack-slug" href="/b/${encodeURIComponent(b.slug)}/">${escapeHtml(b.slug)}</a>
+        <p class="stack-meta mono">v${b.latestVersion} &middot; ${escapeHtml(b.updated)}</p>
+        <p class="stack-history history mono">${history(b)}</p>
+      </li>`,
+    )
     .join("\n");
 
   const body =
@@ -749,11 +785,16 @@ export function bundlesPage(email: string, bundles: LedgerBundle[]): string {
   <span class="flag">-H "Authorization: Bearer $API_TOKEN"</span> \\
   ${escapeHtml(config.baseUrl)}/api/bundles/your-slug</pre>
          </div>`
-      : `<div class="ledger scroll-x">
-          <table>
-            <tr><th>Bundle</th><th>Latest</th><th>Updated</th><th>History</th></tr>
-            ${rows}
-          </table>
+      : `<div class="ledger">
+          <div class="ledger-wide scroll-x">
+            <table>
+              <tr><th>Bundle</th><th>Latest</th><th>Updated</th><th>History</th></tr>
+              ${rows}
+            </table>
+          </div>
+          <ul class="ledger-stack">
+            ${blocks}
+          </ul>
         </div>`;
 
   return `<!doctype html>
@@ -768,12 +809,12 @@ ${head("Bundles · Seer", og)}
     <p class="subtitle">Everything Seer is holding.</p>
   </div>
 </div>
-<div class="frame sunk grow">
+<div class="frame sunk">
   <div class="shell spine">
     ${body}
   </div>
 </div>
-<div class="frame sunk">
+<div class="frame sunk grow">
   <div class="shell">
     ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
   </div>
