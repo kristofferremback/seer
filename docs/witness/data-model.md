@@ -73,7 +73,7 @@ The atom of the overview, and the thing the whole page hangs on.
 ```
 statement
   id
-  kind        add | change | remove | keep
+  kind        add | change | remove
   text        authored, <= 120 chars, one line, no markup
   prs[]       which pull requests realize it
   refs[]      pointers backing the claim
@@ -83,7 +83,9 @@ statement
 
 `body` is prose, and it is where the reader opts in. It should cover why the change exists, what it does, and how it is built. Those are areas to cover, never labels to print. The prototype tried printing them as labels and it read as a form.
 
-Constraint: a statement of kind `add`, `change` or `remove` must carry at least one ref. `keep` is the only kind allowed to stand on its own, because it is a claim about absence.
+Constraint: every statement carries at least one ref. A claim with nothing behind it does not belong on the page.
+
+The prototype also had a fourth kind, `keep`, for stating what a change deliberately does not touch. It is cut. It was the only kind that could carry no evidence, which made it the only place a claim could be unfalsifiable, and it is not needed to ship a first review. If the blast radius is worth stating, it belongs in the summary or in the body of the statement whose scope it bounds. This can come back later on evidence that reviews are worse without it, and the renderer should treat the kind list as closed until then.
 
 ### Note
 
@@ -112,14 +114,18 @@ A walkthrough group is a set of hunks that changed for one reason. Hunks, not fi
 group
   id
   title         authored, <= 60 chars
-  significance  int, 1 = most significant, unique within review
+  significance  float, ascending, 1.0 = most significant
   paragraph     authored, <= 600 chars
   hunks[]       hunk ids
   file_notes[]  { path, text <= 120 chars }
   kind          derived: the dominant kind across its hunks
 ```
 
-Ordering is by `significance`, which the skill sets. There are no rules for what counts as significant beyond a convention that behavior outranks mechanism outranks tests outranks chore, and that is deliberate: the judgment is the product.
+Ordering is by `significance` ascending, ties broken by `id` so the order is always deterministic. It is a float rather than a rank so that moving one group means writing one value: to put something between 2.0 and 3.0, write 2.5. With integer ranks every group below the insertion point has to be rewritten, which is a whole-document edit to express a one-line judgment.
+
+The known cost of float ordering is precision decay after many insertions in the same gap. It does not bite here, because a review has at most eight groups and is published in one shot, but the write path should reindex to evenly spaced values when the gap between two neighbours falls below a threshold, so a long-lived review that gets reordered repeatedly cannot drift into equal values.
+
+There are no rules for what counts as significant beyond a convention that behavior outranks mechanism outranks tests outranks chore, and that is deliberate: the judgment is the product.
 
 ### Hunk
 
@@ -202,10 +208,10 @@ The counts that matter: 3 to 6 statements, at most 6 notes, 2 to 8 groups, and h
 - every ref resolves at its SHA, otherwise 422 with the path and range
 - every hunk id exists in that pull request's diff
 - every `prs[]` entry is in the review
-- `significance` is unique within the review
 - caps
-- a non-`keep` statement has at least one ref
+- every statement has at least one ref
 - a `risk` note has checks or a ref into a changed hunk
+- every pull request and every ref in one review names the same repo, until multi-repo is actually built
 
 ## Endpoints
 
@@ -223,9 +229,14 @@ A review is authored in one shot. The skill reads the pull requests, forms its v
 
 Seer bundles are public by link, because a bundle is something you want to hand to someone. A review contains private source code, so reviews are private by default and need a session. If sharing is ever wanted it should be an explicit, revocable share token per review rather than a guessable slug.
 
+## Deliberately not built yet
+
+**Multi-repo.** Every pull request and every ref already carries its own repo, so the model can express a review spanning several, and nothing here needs to change to allow it later. Nothing supports it: the rendered chain assumes one repo in its labels, and the write path rejects a review that mixes them. That rejection is the point. An unenforced capability that no renderer honours is a trap for the first person who tries it, and the constraint is one line to lift on the day it is real.
+
+**Non-code references.** Linear issues and their kin were in the original brief and are deferred. When they arrive the shape is a ref with a different kind and its own resolver, which is why `ref` is already a resolved pointer rather than a code-specific record. No further preparation is warranted now.
+
+**The `keep` statement kind.** Cut, see the statement section.
+
 ## Open questions
 
-1. Is `keep` worth keeping? It is the only statement kind that can have no evidence, and in the prototype it carried real weight ("uploads, storage, version semantics and live reload are untouched") because a reviewer wants the blast radius stated. Keeping it for now.
-2. Should `significance` be a float to make reordering cheap, or an int with a reindex on write?
-3. Multi-repo reviews are expressible, since every pr and ref carries its own repo, but the rendered chain assumes one repo in its labels. Worth deciding before it is load-bearing.
-4. Linear issues and other non-code refs were in the original brief. A ref with a different `kind` and its own resolver would fit without disturbing anything above.
+None outstanding. The next decision is where the skill lives and what its instructions are, which is a separate document.
