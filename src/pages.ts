@@ -10,7 +10,8 @@ export function escapeHtml(s: string): string {
 
 // ---- the scrying glass: one hand-drawn mark, the whole identity ----
 // A crystal ball in its cradle. The ink strokes are the instrument; the single
-// oxblood glint inside is the only accent, and it is the one thing that moves.
+// glint inside carries the accent. It only animates where the mark is the
+// subject (the figure), never where it is furniture (masthead, footer).
 function markSvg(cls = "mark"): string {
   return `<svg class="${cls}" viewBox="0 0 48 58" role="img" aria-label="A crystal ball on a small stand" fill="none" xmlns="http://www.w3.org/2000/svg">
   <circle cx="24" cy="21" r="15" stroke="currentColor" stroke-width="1.5"/>
@@ -23,15 +24,17 @@ function markSvg(cls = "mark"): string {
 </svg>`;
 }
 
-// ---- shared paper substrate + type ----
-// Design language: a warm-paper world shared with the Threa marketing site, but
-// carrying Seer's own oxblood accent instead of gold. The page is a stack of
-// full-bleed tonal bands (paper / paper-warm / night) that touch with no borders
-// — separation by tone alone. Type is Cabinet Grotesk (display, light weight),
-// Switzer (body), Commit Mono (real data only: slugs, versions, timestamps,
-// curl). Oxblood carries interactive meaning: link hover, focus rings, the mark's
-// glint, one thread spine. Tokens are HSL triplets so hsl(var(--x)/0.3) gives
-// alpha variants. Light and dark both fully defined; theme resolved pre-paint.
+// ---- shared substrate + type ----
+// Design language, shared with Witness: the substrate is an oxblood-black, Seer's
+// red taken down to near-black, and it is designed dark first. The light theme is
+// derived from it rather than inverted into it, and holds the same cast at the
+// other end of the scale. The accent is a signal cyan sitting across from the
+// substrate, and it means one thing: this is tappable. Structure comes from
+// hairline rules plus a two-step surface (paper / paper-sunk), because tone alone
+// stops separating anything once the page is near-black. Type is Cabinet Grotesk
+// (display), Switzer (body), Commit Mono (real data only: slugs, versions,
+// timestamps, curl). Tokens are HSL triplets so hsl(var(--x)/0.3) gives alpha
+// variants. Both themes fully defined; the theme resolves pre-paint.
 function styles(): string {
   return `
   @font-face {
@@ -60,19 +63,17 @@ function styles(): string {
     font-weight: 700; font-display: swap; font-style: normal;
   }
 
+  /* The light theme: a faint blush stone carrying the substrate's cast, verified
+     on its own terms rather than assumed to work because dark does. */
   :root {
     color-scheme: light;
-    --paper: 40 22% 98%;
-    --paper-warm: 38 16% 94%;
-    --paper-sunk: 40 14% 93%;
-    --ink: 30 10% 12%;
-    --ink-soft: 30 9% 26%;
-    --line: 35 15% 88%;
-    --muted: 30 8% 45%;
-    --night: 26 16% 10%;
-    /* Oxblood — Seer's accent, in place of Threa's gold. */
-    --accent: 356 55% 27%;
-    --accent-soft: 356 40% 42%;
+    --paper: 8 30% 96.5%;
+    --paper-sunk: 6 21% 90.5%;
+    --ink: 8 20% 10%;
+    --ink-soft: 8 15% 23%;
+    --line: 6 20% 81%;
+    --muted: 8 13% 31%;
+    --accent: 193 94% 24%;
 
     --font-display: "Cabinet Grotesk", "Switzer", system-ui, -apple-system, sans-serif;
     --font-body: "Switzer", system-ui, -apple-system, sans-serif;
@@ -80,22 +81,33 @@ function styles(): string {
 
     --pad-x: 56px;
   }
+  /* The primary theme. */
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --paper: 26 12% 13%;
-    --paper-warm: 26 14% 11%;
-    --paper-sunk: 26 15% 9%;
-    --ink: 38 16% 90%;
-    --ink-soft: 35 11% 74%;
-    --line: 26 8% 24%;
-    --muted: 32 7% 57%;
-    --night: 26 16% 7%;
-    /* Lifted so oxblood reads on espresso. */
-    --accent: 356 45% 62%;
-    --accent-soft: 356 38% 52%;
+    --paper: 356 28% 10%;
+    --paper-sunk: 356 34% 6.5%;
+    --ink: 18 22% 92%;
+    --ink-soft: 14 15% 78%;
+    --line: 356 22% 24%;
+    --muted: 14 13% 67%;
+    --accent: 189 72% 64%;
   }
   @media (max-width: 880px) {
     :root { --pad-x: 28px; }
+  }
+  /* The inline script in <head> resolves the theme before first paint. This is
+     the no-JS floor: a system-dark visitor still lands on the primary surface. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper: 356 28% 10%;
+      --paper-sunk: 356 34% 6.5%;
+      --ink: 18 22% 92%;
+      --ink-soft: 14 15% 78%;
+      --line: 356 22% 24%;
+      --muted: 14 13% 67%;
+      --accent: 189 72% 64%;
+    }
   }
 
   * { box-sizing: border-box; }
@@ -106,7 +118,7 @@ function styles(): string {
     min-height: 100dvh;
     display: flex;
     flex-direction: column;
-    background: hsl(var(--paper-warm));
+    background: hsl(var(--paper));
     color: hsl(var(--ink));
     font-family: var(--font-body);
     font-size: 16px;
@@ -115,32 +127,18 @@ function styles(): string {
     text-rendering: optimizeLegibility;
     touch-action: manipulation;
   }
-  /* Paper grain — a fixed film of fractal noise behind the content. Multiply on
-     light so it reads as paper tooth; screen on dark so it lifts rather than
-     muddies the espresso. pointer-events none, low opacity: felt, not seen. */
-  body::after {
-    content: "";
-    position: fixed;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-    mix-blend-mode: multiply;
-    opacity: 0.05;
-  }
-  :root[data-theme="dark"] body::after {
-    mix-blend-mode: screen;
-    opacity: 0.04;
-  }
-  ::selection { background: hsl(var(--accent) / 0.22); }
+  ::selection { background: hsl(var(--accent) / 0.2); }
 
-  /* ---- tonal bands ---- */
+  /* ---- surfaces ----
+     Two steps and a rule. The old three-band tonal stack separated bands by tone
+     alone, which needs a paper white to work; on a near-black substrate the steps
+     collapse, so the boundary is drawn as a hairline and the tone step only says
+     which side is the workbench. */
   .frame { width: 100%; background: hsl(var(--paper)); position: relative; z-index: 1; }
-  /* The content band grows to fill any leftover viewport height so the night
-     footer always pins to the bottom, even on a short page. */
+  /* The content band grows to fill any leftover viewport height so the footer
+     always pins to the bottom, even on a short page. */
   .frame.grow { flex: 1 0 auto; }
-  .frame.warm { background: hsl(var(--paper-warm)); }
-  .frame.night { background: hsl(var(--night)); color: hsl(38 14% 80%); }
+  .frame.sunk { background: hsl(var(--paper-sunk)); border-top: 1px solid hsl(var(--line)); }
 
   .shell {
     max-width: 52rem;
@@ -154,48 +152,55 @@ function styles(): string {
     position: relative;
   }
 
-  /* ---- thread spine: a 1px oxblood line down the content's left margin, with a
-     small rotated diamond bead where the section begins. Hidden on narrow. ---- */
+  /* ---- thread spine ----
+     A hairline down the content's left margin that says where the band starts and
+     how far it runs. It used to be drawn in the accent with a rotated diamond
+     bead floating on it; the bead was ornament and an accent line reads as
+     something you can click. Now the line is a rule like every other rule, and
+     only its first 28px carry the accent, as a tick marking the top of the band.
+     Hidden on narrow, where there is no margin to hang it in. */
   .spine::before {
     content: "";
     position: absolute;
     left: calc(var(--pad-x) / 2);
     top: 0; bottom: 0;
     width: 1px;
-    background: hsl(var(--accent) / 0.22);
+    background: hsl(var(--line));
     pointer-events: none;
   }
   .spine::after {
     content: "";
     position: absolute;
     left: calc(var(--pad-x) / 2);
-    top: clamp(2.4rem, 6vw, 4.5rem);
-    width: 7px; height: 7px;
-    transform: translate(-3.5px, 6px) rotate(45deg);
-    background: hsl(var(--paper));
-    border: 1px solid hsl(var(--accent));
+    top: 0;
+    width: 1px; height: 28px;
+    background: hsl(var(--accent));
     pointer-events: none;
   }
-  .frame.warm .spine::after { background: hsl(var(--paper-warm)); }
-  .frame.night .spine::after { background: hsl(var(--night)); }
   @media (max-width: 880px) {
     .spine::before, .spine::after { display: none; }
   }
 
-  /* ---- masthead / nav row ---- */
+  /* ---- masthead / nav row ----
+     A rule under the row closes the identity band, so the mark, the wordmark and
+     the title below read as one object instead of three stray lines floating on
+     a dark field. */
   .nav-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    margin-bottom: clamp(2.2rem, 6vw, 3.6rem);
+    min-height: 44px;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid hsl(var(--line));
+    margin-bottom: clamp(2rem, 5vw, 3rem);
   }
   .brand { display: flex; align-items: center; gap: 0.65rem; text-decoration: none; color: inherit; }
   .brand .mark { width: 22px; height: 27px; flex: none; }
   .wordmark {
     font-family: var(--font-display);
-    font-weight: 300;
-    font-size: 12px;
+    font-weight: 400;
+    font-size: 12.5px;
     letter-spacing: 0.15em;
     text-transform: uppercase;
     color: hsl(var(--ink));
@@ -210,19 +215,32 @@ function styles(): string {
     text-decoration: none;
   }
 
-  /* quiet theme toggle — a bare icon, no pill. Shows the icon for the mode a
-     click switches TO (moon in light, sun in dark). */
+  /* The theme control is the surface state itself, drawn as Lucide's contrast
+     mark: half the disc inked, and which half flips with the theme. Same control
+     as Witness carries. Bare icon, no pill, 44px target. */
   .theme-toggle {
-    background: none; border: 0; padding: 4px; margin: 0;
-    color: hsl(var(--muted));
+    background: none; border: 0; margin: 0 -10px 0 0; padding: 10px;
+    min-width: 44px; min-height: 44px;
+    color: hsl(var(--accent));
     cursor: pointer; line-height: 0;
-    display: inline-flex; align-items: center;
-    border-radius: 4px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 6px;
+    flex: none;
   }
-  .theme-toggle .tt-sun { display: none; }
-  .theme-toggle .tt-moon { display: block; }
-  :root[data-theme="dark"] .theme-toggle .tt-sun { display: block; }
-  :root[data-theme="dark"] .theme-toggle .tt-moon { display: none; }
+  .theme-toggle .tt-mark {
+    display: block; width: 17px; height: 17px;
+    transform: rotate(0deg);
+    transform-origin: 50% 50%;
+  }
+  :root[data-theme="dark"] .theme-toggle .tt-mark { transform: rotate(180deg); }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .theme-toggle .tt-mark { transform: rotate(180deg); }
+  }
+  .theme-toggle:active { background: hsl(var(--ink) / 0.07); }
+  @media (hover: hover) and (pointer: fine) {
+    .theme-toggle .tt-mark { transition: transform 220ms cubic-bezier(0.2, 0.9, 0.25, 1); }
+  }
+  @media (prefers-reduced-motion: reduce) { .theme-toggle .tt-mark { transition: none; } }
 
   /* ---- display + body type ---- */
   .h-display {
@@ -267,13 +285,16 @@ function styles(): string {
   .prose p { max-width: 48ch; }
   .aside { color: hsl(var(--muted)); font-size: 0.95rem; }
 
-  a { color: inherit; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; text-decoration-color: hsl(var(--line)); }
+  /* One interactivity rule, shared with Witness: the accent means tappable.
+     Underline on hover and press only, so a run of links is not a fence of
+     rules. Ambient navigation (masthead, footer, the mark) stays muted and takes
+     the accent on hover; the accent is spent on the things you go to. */
+  a { color: hsl(var(--accent)); text-decoration: none; }
+  a:active { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
   @media (hover: hover) and (pointer: fine) {
-    a { transition: color 150ms ease, text-decoration-color 150ms ease; }
-    a:hover { color: hsl(var(--accent)); text-decoration-color: hsl(var(--accent)); }
+    a { transition: color 150ms ease; }
+    a:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
     .nav-action:hover, .brand:hover { color: hsl(var(--accent)); }
-    .theme-toggle:hover { color: hsl(var(--accent)); }
-    .frame.night a:hover, .frame.night .nav-action:hover { color: hsl(var(--accent)); }
   }
   :focus-visible { outline: 2px solid hsl(var(--accent)); outline-offset: 2px; border-radius: 3px; }
 
@@ -293,39 +314,49 @@ function styles(): string {
   .fig .mark-fig { width: 66px; height: 80px; }
   .fig figcaption { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: hsl(var(--muted)); }
 
+  /* Cards are raised off the sunk band by one step of paper and a hairline.
+     The corner radius came down from 14px: a soft product card sat oddly against
+     a page whose other edges are all 1px rules. */
   .specimen {
-    background: hsl(var(--paper-warm));
+    background: hsl(var(--paper));
     border: 1px solid hsl(var(--line));
-    border-radius: 14px;
+    border-radius: 8px;
     padding: 1.1rem 1.2rem 1.2rem;
   }
-  .frame.warm .specimen { background: hsl(var(--paper)); }
   pre.cmd {
     font-family: var(--font-mono);
     font-size: 0.76rem;
     line-height: 1.7;
     margin: 0.7rem 0 0;
     padding: 0.85rem 0.95rem;
-    background: hsl(var(--paper-sunk));
+    background: hsl(var(--ink) / 0.045);
     border: 1px solid hsl(var(--line));
-    border-radius: 8px;
+    border-radius: 6px;
     white-space: pre;
     color: hsl(var(--ink));
   }
   pre.cmd .flag { color: hsl(var(--muted)); }
+  /* On a phone the command ran off the right edge and was cut mid-glyph inside a
+     nested scroller. It already carries its own line continuations, so let it
+     wrap there instead: the whole thing is readable without a sideways drag. */
+  @media (max-width: 560px) {
+    pre.cmd { white-space: pre-wrap; }
+  }
   .specimen-note { font-size: 0.9rem; color: hsl(var(--ink-soft)); max-width: none; margin: 0.85rem 0 0; }
 
   /* ---- ledger table ---- */
   .ledger {
-    background: hsl(var(--paper-warm));
+    background: hsl(var(--paper));
     border: 1px solid hsl(var(--line));
-    border-radius: 14px;
+    border-radius: 8px;
     overflow: hidden;
     margin-top: 0.6rem;
   }
-  .frame.warm .ledger { background: hsl(var(--paper)); }
   table { width: 100%; border-collapse: collapse; }
-  th, td { padding: 0.7rem 1rem; vertical-align: baseline; text-align: left; }
+  /* Cells never wrap. A slug broken across three lines and a timestamp broken
+     across three more is not a table; the .ledger wrapper scrolls sideways
+     instead, which is what it was already built to do. */
+  th, td { padding: 0.7rem 1rem; vertical-align: baseline; text-align: left; white-space: nowrap; }
   th {
     font-family: var(--font-mono);
     font-weight: 500;
@@ -337,14 +368,20 @@ function styles(): string {
   }
   td { border-bottom: 1px solid hsl(var(--line) / 0.6); }
   tr:last-child td { border-bottom: 0; }
+  @media (max-width: 560px) { th, td { padding: 0.65rem 0.7rem; } }
   .mono { font-family: var(--font-mono); font-size: 0.82rem; color: hsl(var(--ink-soft)); }
-  .slug a { text-decoration: none; font-weight: 500; color: hsl(var(--ink)); }
-  @media (hover: hover) and (pointer: fine) { .slug a:hover { color: hsl(var(--accent)); } }
-  .history a { margin-right: 0.6rem; color: hsl(var(--muted)); text-decoration: none; }
+  /* The slug is the one thing on this page you go to, so it carries the accent.
+     The version history beside it is a secondary route and stays muted. */
+  .slug a { font-weight: 500; }
+  .history a { margin-right: 0.6rem; color: hsl(var(--muted)); }
   @media (hover: hover) and (pointer: fine) { .history a:hover { color: hsl(var(--accent)); } }
   .empty { color: hsl(var(--muted)); margin-bottom: 1.4rem; }
 
   /* ---- footer ---- */
+  /* It used to sit on a full-bleed night band, which was a slab of near-black on
+     a page that is already near-black in the primary theme, and a hard black bar
+     under a blush page in the other. Now it is the sunk surface with a rule over
+     it, like every other boundary here. */
   .footer {
     display: flex;
     flex-wrap: wrap;
@@ -355,22 +392,24 @@ function styles(): string {
     font-size: 11px;
     letter-spacing: 0.13em;
     text-transform: uppercase;
-    color: hsl(38 12% 62%);
+    color: hsl(var(--muted));
   }
-  .frame.night .footer { color: hsl(38 12% 62%); }
-  .footer .brand { color: hsl(38 14% 80%); }
-  .footer .brand .wordmark { color: hsl(38 14% 80%); }
+  .footer .brand, .footer .brand .wordmark { color: hsl(var(--ink)); }
   .footer .brand .mark { width: 18px; height: 22px; }
   .footer-links { display: flex; flex-wrap: wrap; gap: 0.7rem 1.4rem; }
-  .footer a { color: inherit; text-decoration: none; }
+  .footer a { color: hsl(var(--muted)); }
+  @media (hover: hover) and (pointer: fine) { .footer a:hover { color: hsl(var(--accent)); } }
   .footer code { font-size: 0.95em; text-transform: none; letter-spacing: 0; }
 
+  /* The glint animates only where the mark is the subject of the page, which is
+     the figure. In the masthead and the footer the mark is furniture, and a
+     sparkle that pulses forever in the corner of every page is decoration. */
   .glint { transform-box: fill-box; transform-origin: center; }
   @media (prefers-reduced-motion: no-preference) {
-    .glint { animation: glint 5.5s ease-in-out infinite; }
+    .mark-fig .glint { animation: glint 5.5s ease-in-out infinite; }
   }
   @keyframes glint {
-    0%, 100% { opacity: 0.35; transform: scale(0.82) rotate(0deg); }
+    0%, 100% { opacity: 0.55; transform: scale(0.86) rotate(0deg); }
     50% { opacity: 1; transform: scale(1.08) rotate(45deg); }
   }
 `;
@@ -387,6 +426,8 @@ function head(title: string, og: Record<string, string>, extra = ""): string {
   return `<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#211213">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f9f4f3">
 <script>${themeBootstrap()}</script>
 <title>${escapeHtml(title)}</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
@@ -412,9 +453,10 @@ function themeToggleScript(): string {
 }
 
 function themeToggle(): string {
+  // Lucide's contrast mark: half the disc inked, and which half flips with the
+  // theme. The control shows the surface state rather than naming the next one.
   return `<button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle light and dark mode">
-    <svg class="tt-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-    <svg class="tt-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+    <svg class="tt-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 18a6 6 0 0 0 0-12v12z"/></svg>
   </button>`;
 }
 
@@ -587,7 +629,7 @@ export function landingPage(signedIn: boolean): string {
 <html lang="en">
 ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">`)}
 <body>
-<div class="frame warm">
+<div class="frame">
   <div class="shell spine">
     ${navRow(action)}
     <h1 class="h-display">Preview what your <span class="accent">agents</span> build.</h1>
@@ -603,7 +645,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
     </div>
   </div>
 </div>
-<div class="frame grow">
+<div class="frame sunk grow">
   <div class="shell spine">
     <div class="specimen-grid">
       <div class="specimen">
@@ -618,7 +660,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
     </div>
   </div>
 </div>
-<div class="frame night">
+<div class="frame sunk">
   <div class="shell">
     ${footer([
       `<a href="${GITHUB_URL}">github</a>`,
@@ -679,7 +721,7 @@ export function bundlesPage(email: string, bundles: LedgerBundle[]): string {
 <html lang="en">
 ${head("Bundles · Seer", og)}
 <body>
-<div class="frame warm">
+<div class="frame">
   <div class="shell spine">
     ${navRow(null)}
     <p class="eyebrow"><span class="email-tag">${escapeHtml(email)}</span></p>
@@ -687,12 +729,12 @@ ${head("Bundles · Seer", og)}
     <p class="subtitle">Everything Seer is holding.</p>
   </div>
 </div>
-<div class="frame grow">
+<div class="frame sunk grow">
   <div class="shell spine">
     ${body}
   </div>
 </div>
-<div class="frame night">
+<div class="frame sunk">
   <div class="shell">
     ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
   </div>
