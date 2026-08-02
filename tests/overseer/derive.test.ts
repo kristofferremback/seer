@@ -6,6 +6,7 @@ import {
   deriveOrigin,
   derivePrs,
   deriveReviewKind,
+  hunksOf,
   kindsForPr,
   prKey,
   refResolver,
@@ -90,6 +91,14 @@ function countingClient(
 
 const REPO = "acme/app";
 
+/** A fixture sha shaped like a real one. The resolver refuses a ref whose sha is not 40
+ *  hex characters, so a readable label is expanded into one rather than used raw. */
+function sha(label: string): string {
+  let hex = "";
+  for (const ch of label) hex += ch.charCodeAt(0).toString(16).padStart(2, "0");
+  return `${hex}${"f".repeat(40)}`.slice(0, 40);
+}
+
 function commit(sha: string, message: string): GithubCommit {
   return {
     sha,
@@ -125,8 +134,8 @@ function fakePull(
       body: `body of ${number}`,
       state: "open",
       user: { login: "ada" },
-      head: { sha: `sha${number}`, ref: headRef },
-      base: { sha: `base${number}`, ref: baseRef },
+      head: { sha: sha(`sha${number}`), ref: headRef },
+      base: { sha: sha(`base${number}`), ref: baseRef },
     },
     commits: [commit(`c${number}`, `commit for ${number}`)],
     files: [file(`src/f${number}.ts`, PATCH)],
@@ -236,8 +245,8 @@ describe("pull request facts", () => {
     const review = await derivePrs(client, POINTERS);
     const pr = review.prs[1]!;
     expect(pr.title).toBe("pull 102");
-    expect(pr.headSha).toBe("sha102");
-    expect(pr.baseSha).toBe("base102");
+    expect(pr.headSha).toBe(sha("sha102"));
+    expect(pr.baseSha).toBe(sha("base102"));
     expect(pr.baseRef).toBe("feat/a");
     expect(pr.headRef).toBe("feat/b");
     expect(pr.author).toBe("ada");
@@ -249,10 +258,13 @@ describe("pull request facts", () => {
     const review = await derivePrs(client, POINTERS);
     const pr = review.prs[0]!;
     expect(pr.files.map((f) => f.path)).toEqual(["src/f101.ts"]);
-    expect(pr.hunks.length).toBe(1);
-    expect(pr.hunks[0]!.id).toBe("pr101:src/f101.ts:@@1,2+1,3");
-    expect(pr.hunks[0]!.sha).toBe("sha101");
-    expect(pr.hunks[0]!.lines.map((l) => l.kind)).toEqual(["ctx", "add", "ctx"]);
+    const hunks = hunksOf(pr);
+    expect(hunks.length).toBe(1);
+    // The flattened list is derived from files, so it cannot drift from them.
+    expect(hunks).toEqual(pr.files.flatMap((f) => f.hunks));
+    expect(hunks[0]!.id).toBe("pr101:src/f101.ts:@@1,2+1,3");
+    expect(hunks[0]!.sha).toBe(sha("sha101"));
+    expect(hunks[0]!.lines.map((l) => l.kind)).toEqual(["ctx", "add", "ctx"]);
   });
 
   test("review comments are collected into the skill context, in pointer order", async () => {
@@ -264,7 +276,7 @@ describe("pull request facts", () => {
           path: "src/f102.ts",
           body: "why here?",
           user: { login: "bob" },
-          commit_id: "sha102",
+          commit_id: sha("sha102"),
           line: 3,
           start_line: null,
           created_at: "2026-01-01T00:00:00Z",
@@ -378,27 +390,73 @@ describe("refs", () => {
   }
 
   test("a ref in range resolves exactly the lines it names", async () => {
-    const { resolver } = await fixture({ [`sha101:src/f101.ts`]: FILE });
+    const { resolver } = await fixture({ [`${sha("sha101")}:src/f101.ts`]: FILE });
     const ref = await resolver.resolve({
       repo: REPO,
-      sha: "sha101",
+      sha: sha("sha101"),
       path: "src/f101.ts",
       startLine: 2,
       endLine: 4,
-      highlight: [3, 99],
+      highlight: [3],
     });
     expect(ref.snippet).toBe("bravo\ncharlie\ndelta");
     expect(ref.startLine).toBe(2);
     expect(ref.endLine).toBe(4);
-    // A highlight outside the range would be a line the snippet cannot show.
     expect(ref.highlight).toEqual([3]);
   });
 
+  test("a highlight outside the range is a loud failure, not a dropped line", async () => {
+    const { client, resolver } = await fixture({ [`${sha("sha101")}:src/f101.ts`]: FILE });
+    const err = await resolver
+      .resolve({
+        repo: REPO,
+        sha: sha("sha101"),
+        path: "src/f101.ts",
+        startLine: 2,
+        endLine: 4,
+        highlight: [3, 99],
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RefResolveError);
+    expect((err as RefResolveError).message).toContain("99");
+    expect((err as RefResolveError).path).toBe("src/f101.ts");
+    expect((err as RefResolveError).startLine).toBe(2);
+    expect((err as RefResolveError).endLine).toBe(4);
+    // Refused before anything is fetched, so a drifted ref costs no GitHub call.
+    expect(client.calls.getFileAtSha).toBe(0);
+  });
+
+  test("a ref whose sha is not a sha is refused before it can poison the cache", async () => {
+    const { client, resolver } = await fixture({ [`main:src/f101.ts`]: FILE });
+    for (const bad of ["main", "v1.2.0", sha("sha101").slice(0, 7), `${sha("sha101")}x`]) {
+      const err = await resolver
+        .resolve({ repo: REPO, sha: bad, path: "src/f101.ts", startLine: 1, endLine: 1 })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(RefResolveError);
+      expect((err as RefResolveError).sha).toBe(bad);
+      expect((err as RefResolveError).path).toBe("src/f101.ts");
+      expect((err as RefResolveError).message).toContain("src/f101.ts:1-1");
+      // Nothing fetched, so nothing mutable can reach the shared table.
+      expect(getSnippet(REPO, bad, "src/f101.ts")).toBeNull();
+    }
+    expect(client.calls.getFileAtSha).toBe(0);
+  });
+
+  test("a sha in capitals resolves as the same cache key, not a second row", async () => {
+    const { client, resolver } = await fixture({ [`${sha("sha101")}:src/case.ts`]: FILE });
+    const pointer = { repo: REPO, path: "src/case.ts", startLine: 1, endLine: 1 };
+    expect((await resolver.resolve({ ...pointer, sha: sha("sha101") })).snippet).toBe("alpha");
+    const upper = await resolver.resolve({ ...pointer, sha: sha("sha101").toUpperCase() });
+    expect(upper.sha).toBe(sha("sha101"));
+    expect(upper.origin).toBe("outside");
+    expect(client.calls.getFileAtSha).toBe(1);
+  });
+
   test("the last line resolves even without a trailing newline", async () => {
-    const { resolver } = await fixture({ [`sha101:src/nonewline.ts`]: "a\nb\nc" });
+    const { resolver } = await fixture({ [`${sha("sha101")}:src/nonewline.ts`]: "a\nb\nc" });
     const ref = await resolver.resolve({
       repo: REPO,
-      sha: "sha101",
+      sha: sha("sha101"),
       path: "src/nonewline.ts",
       startLine: 3,
       endLine: 3,
@@ -407,10 +465,10 @@ describe("refs", () => {
   });
 
   test("a second resolve of the same file costs zero client calls", async () => {
-    const { client, resolver } = await fixture({ [`sha101:src/cached.ts`]: FILE });
+    const { client, resolver } = await fixture({ [`${sha("sha101")}:src/cached.ts`]: FILE });
     const pointer = {
       repo: REPO,
-      sha: "sha101",
+      sha: sha("sha101"),
       path: "src/cached.ts",
       startLine: 1,
       endLine: 2,
@@ -434,11 +492,11 @@ describe("refs", () => {
 
   test("the cache is not read for a repository this review has not fetched", async () => {
     // Another workspace resolved this file already, so the shared table holds it.
-    putSnippet("private/secrets", "shaX", "src/keys.ts", FILE);
+    putSnippet("private/secrets", sha("shaX"), "src/keys.ts", FILE);
     const { client, resolver } = await fixture({});
     const pointer = {
       repo: "private/secrets",
-      sha: "shaX",
+      sha: sha("shaX"),
       path: "src/keys.ts",
       startLine: 1,
       endLine: 1,
@@ -451,10 +509,10 @@ describe("refs", () => {
   });
 
   test("a repository the caller's token has read opens the cache for later refs", async () => {
-    const { client, resolver } = await fixture({ [`shaY:src/other.ts`]: FILE });
+    const { client, resolver } = await fixture({ [`${sha("shaY")}:src/other.ts`]: FILE });
     const pointer = {
       repo: "other/app",
-      sha: "shaY",
+      sha: sha("shaY"),
       path: "src/other.ts",
       startLine: 1,
       endLine: 1,
@@ -470,28 +528,33 @@ describe("refs", () => {
 
   test("a file above the cache bound resolves but is never stored", async () => {
     const big = `${"x".repeat(600 * 1024)}\nsecond line\n`;
-    const { client, resolver } = await fixture({ [`sha101:src/huge.ts`]: big });
+    const { client, resolver } = await fixture({ [`${sha("sha101")}:src/huge.ts`]: big });
     const pointer = {
       repo: REPO,
-      sha: "sha101",
+      sha: sha("sha101"),
       path: "src/huge.ts",
       startLine: 2,
       endLine: 2,
     };
     expect((await resolver.resolve(pointer)).snippet).toBe("second line");
-    expect(getSnippet(REPO, "sha101", "src/huge.ts")).toBeNull();
+    expect(getSnippet(REPO, sha("sha101"), "src/huge.ts")).toBeNull();
     expect(client.calls.getFileAtSha).toBe(1);
     // No row, so the second resolve fetches again rather than serving from nowhere.
     await resolver.resolve(pointer);
     expect(client.calls.getFileAtSha).toBe(2);
   });
 
-  test("stale cached files are swept by age", async () => {
-    putSnippet(REPO, "shaOld", "src/old.ts", FILE);
-    expect(getSnippet(REPO, "shaOld", "src/old.ts")).toBe(FILE);
-    // A sweep run far enough in the future than the row's time to live.
-    sweepSnippetCache(Date.now() + 400 * 24 * 60 * 60 * 1000);
-    expect(getSnippet(REPO, "shaOld", "src/old.ts")).toBeNull();
+  test("stale cached files are swept by age, and fresh ones are left alone", async () => {
+    const TTL = 30 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    // One row fetched long ago and one fetched just now, so the sweep has to choose
+    // between them rather than emptying the shared table.
+    putSnippet(REPO, sha("shaOld"), "src/old.ts", FILE, now - TTL - 60_000);
+    putSnippet(REPO, sha("shaNew"), "src/new.ts", FILE, now);
+    expect(getSnippet(REPO, sha("shaOld"), "src/old.ts")).toBe(FILE);
+    expect(sweepSnippetCache(now)).toBeGreaterThanOrEqual(1);
+    expect(getSnippet(REPO, sha("shaOld"), "src/old.ts")).toBeNull();
+    expect(getSnippet(REPO, sha("shaNew"), "src/new.ts")).toBe(FILE);
   });
 
   test("a transport failure keeps its cause and status instead of reading as a bad ref", async () => {
@@ -504,7 +567,7 @@ describe("refs", () => {
       },
     };
     const err = await refResolver(failing, review)
-      .resolve({ repo: REPO, sha: "sha101", path: "src/token.ts", startLine: 1, endLine: 1 })
+      .resolve({ repo: REPO, sha: sha("sha101"), path: "src/token.ts", startLine: 1, endLine: 1 })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RefResolveError);
     expect((err as RefResolveError).status).toBe(401);
@@ -512,16 +575,16 @@ describe("refs", () => {
     // A ref that genuinely does not resolve carries no misleading status.
     const { resolver } = await fixture({});
     const plain = await resolver
-      .resolve({ repo: REPO, sha: "sha101", path: "src/gone.ts", startLine: 1, endLine: 1 })
+      .resolve({ repo: REPO, sha: sha("sha101"), path: "src/gone.ts", startLine: 1, endLine: 1 })
       .catch((e: unknown) => e);
     expect((plain as RefResolveError).status).toBe(null);
   });
 
   test("a range past the end is a structured error naming the path and the range", async () => {
-    const { resolver } = await fixture({ [`sha101:src/f101.ts`]: FILE });
+    const { resolver } = await fixture({ [`${sha("sha101")}:src/f101.ts`]: FILE });
     const pointer = {
       repo: REPO,
-      sha: "sha101",
+      sha: sha("sha101"),
       path: "src/f101.ts",
       startLine: 4,
       endLine: 9,
@@ -534,7 +597,7 @@ describe("refs", () => {
     expect(structured.startLine).toBe(4);
     expect(structured.endLine).toBe(9);
     expect(structured.repo).toBe(REPO);
-    expect(structured.sha).toBe("sha101");
+    expect(structured.sha).toBe(sha("sha101"));
     expect(structured.message).toContain("src/f101.ts:4-9");
   });
 
@@ -546,7 +609,7 @@ describe("refs", () => {
       { startLine: 0, endLine: 2 },
     ]) {
       const err = await resolver
-        .resolve({ repo: REPO, sha: "sha101", path: "src/f101.ts", ...range })
+        .resolve({ repo: REPO, sha: sha("sha101"), path: "src/f101.ts", ...range })
         .catch((e: unknown) => e);
       expect(err).toBeInstanceOf(RefResolveError);
     }
@@ -556,7 +619,7 @@ describe("refs", () => {
   test("a file that does not resolve at its sha names the path and the range too", async () => {
     const { resolver } = await fixture({});
     const err = await resolver
-      .resolve({ repo: REPO, sha: "sha101", path: "src/gone.ts", startLine: 1, endLine: 2 })
+      .resolve({ repo: REPO, sha: sha("sha101"), path: "src/gone.ts", startLine: 1, endLine: 2 })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RefResolveError);
     expect((err as RefResolveError).message).toContain("src/gone.ts:1-2");
@@ -564,17 +627,17 @@ describe("refs", () => {
 
   test("a changed file at a head sha is in_stack, an untouched file is outside", async () => {
     const { resolver } = await fixture({
-      [`sha101:src/f101.ts`]: FILE,
-      [`sha101:src/auth.ts`]: FILE,
-      [`base101:src/f101.ts`]: FILE,
+      [`${sha("sha101")}:src/f101.ts`]: FILE,
+      [`${sha("sha101")}:src/auth.ts`]: FILE,
+      [`${sha("base101")}:src/f101.ts`]: FILE,
     });
-    const at = async (path: string, sha: string) =>
-      (await resolver.resolve({ repo: REPO, sha, path, startLine: 1, endLine: 1 })).origin;
-    expect(await at("src/f101.ts", "sha101")).toBe("in_stack");
+    const at = async (path: string, atSha: string) =>
+      (await resolver.resolve({ repo: REPO, sha: atSha, path, startLine: 1, endLine: 1 })).origin;
+    expect(await at("src/f101.ts", sha("sha101"))).toBe("in_stack");
     // The same file before the change is still inside the change.
-    expect(await at("src/f101.ts", "base101")).toBe("in_stack");
+    expect(await at("src/f101.ts", sha("base101"))).toBe("in_stack");
     // Untouched by any pull request in the review.
-    expect(await at("src/auth.ts", "sha101")).toBe("outside");
+    expect(await at("src/auth.ts", sha("sha101"))).toBe("outside");
   });
 
   test("origin is derived per review, not per file name", async () => {
@@ -582,7 +645,7 @@ describe("refs", () => {
     expect(
       deriveOrigin(review.prs, {
         repo: REPO,
-        sha: "sha103",
+        sha: sha("sha103"),
         path: "src/f103.ts",
         startLine: 1,
         endLine: 1,
@@ -592,7 +655,7 @@ describe("refs", () => {
     expect(
       deriveOrigin(review.prs, {
         repo: REPO,
-        sha: "unrelated",
+        sha: sha("unrelated"),
         path: "src/f103.ts",
         startLine: 1,
         endLine: 1,
@@ -602,7 +665,7 @@ describe("refs", () => {
     expect(
       deriveOrigin(review.prs, {
         repo: "other/app",
-        sha: "sha103",
+        sha: sha("sha103"),
         path: "src/f103.ts",
         startLine: 1,
         endLine: 1,
@@ -622,7 +685,7 @@ describe("refs", () => {
     });
     const client = countingClient(pulls, {});
     const review = await derivePrs(client, POINTERS);
-    const pointer = { repo: REPO, sha: "sha101", startLine: 1, endLine: 1 };
+    const pointer = { repo: REPO, sha: sha("sha101"), startLine: 1, endLine: 1 };
     expect(deriveOrigin(review.prs, { ...pointer, path: "src/new.ts" })).toBe("in_stack");
     expect(deriveOrigin(review.prs, { ...pointer, path: "src/old.ts" })).toBe("in_stack");
   });

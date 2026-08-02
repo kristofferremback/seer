@@ -387,7 +387,8 @@ export function setFreshness(
 // ---- ref snippet cache ----
 
 // Refs are SHA-pinned, so a cached file at (repo, sha, path) can never go stale:
-// the same key always names the same bytes. A put on an existing key replaces it,
+// the same key always names the same bytes. The resolver is what holds that true, by
+// refusing a ref whose sha is not a full sha before it ever reaches this table. A put on an existing key replaces it,
 // which writes back identical bytes and keeps two concurrent fetches of the same file
 // from colliding on the primary key.
 export function getSnippet(repo: string, sha: string, path: string): string | null {
@@ -399,10 +400,19 @@ export function getSnippet(repo: string, sha: string, path: string): string | nu
   return row?.content ?? null;
 }
 
-export function putSnippet(repo: string, sha: string, path: string, content: string): void {
+/** `fetchedAt` is when the bytes came off GitHub, which is what the sweep ages rows by.
+ *  It defaults to now and is passed explicitly only by a caller holding an older
+ *  reading of the clock. */
+export function putSnippet(
+  repo: string,
+  sha: string,
+  path: string,
+  content: string,
+  fetchedAt = Date.now(),
+): void {
   db.run(
     "INSERT OR REPLACE INTO ref_snippets (repo, sha, path, content, fetched_at) VALUES (?, ?, ?, ?, ?)",
-    [repo, sha, path, content, Date.now()],
+    [repo, sha, path, content, fetchedAt],
   );
 }
 

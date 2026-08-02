@@ -212,9 +212,12 @@ const V3_REVIEWS = `
   );
   -- Process-global cache of SHA-pinned source files. The key is deliberately
   -- (repo, sha, path) with no workspace column: the same key always names the same
-  -- bytes. That makes it a shared cache of private source, so the resolver must only
-  -- ever look up keys it derived from a ref it already fetched under the caller's own
-  -- GitHub token, never a key taken from a request parameter. There is no size bound
+  -- bytes. That makes it a shared cache of private source, so the resolver may only
+  -- read a key whose repository the caller's own GitHub token has already been proved
+  -- against in this derivation: a request naming any other repository pays a real
+  -- fetch first, and a request naming one it may read still supplies its own sha and
+  -- path. The sha must be a full sha, or the key would name mutable bytes and the
+  -- entry really could go stale. There is no size bound
   -- or eviction here either; both belong with the resolver that fills it.
   CREATE TABLE IF NOT EXISTS ref_snippets (
     repo TEXT NOT NULL,

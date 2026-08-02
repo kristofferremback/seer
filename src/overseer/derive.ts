@@ -6,7 +6,9 @@
 // Nothing in this module talks to GitHub directly. It takes a GithubClient, so a test
 // drives it with a fake and the whole derivation runs without a socket. File contents
 // go through the (repo, sha, path) snippet cache from step 3, which can never go stale
-// because refs are SHA-pinned, so resolving the same file twice costs one fetch.
+// because refs are SHA-pinned, so resolving the same file twice costs one fetch. That
+// pinning is enforced here rather than assumed: a ref whose sha is not a full sha is
+// refused before anything is fetched or cached under it.
 
 import { getSnippet, putSnippet, sweepSnippets } from "./db";
 import { collectPullDiff, type FileDiff } from "./diff";
@@ -57,7 +59,12 @@ export interface DerivedPr {
   coAuthors: string[];
   body: string;
   files: FileDiff[];
-  hunks: Hunk[];
+}
+
+/** Every hunk of a pull request, in file order. Derived from `files` rather than stored
+ *  beside it, so a publish path that filters files cannot leave the two disagreeing. */
+export function hunksOf(pr: { files: FileDiff[] }): Hunk[] {
+  return pr.files.flatMap((f) => f.hunks);
 }
 
 export interface DerivedReview {
@@ -156,14 +163,13 @@ export function deriveReviewKind(
     if (p.parent === null) continue;
     const key = prKey(p.repo, p.parent);
     if (!present.has(key)) continue;
-    // Two children on one parent is a fan.
-    if (children.has(key)) return "set";
     children.set(key, prKey(p.repo, p.number));
   }
-  // Walk the chain from the root: a stack visits every pull request exactly once. The
-  // repeat-visit guard below is belt and braces: pull request keys are unique and a
-  // parent with two children already returned above, so a cycle has no root and leaves
-  // by the `roots.length !== 1` return before the walk begins.
+  // Walk the chain from the root: a stack visits every pull request exactly once. A fan
+  // needs no separate check, because one of its branches is dropped from `children` and
+  // the walk then falls short of every pull request. The repeat-visit guard below is
+  // belt and braces: a cycle has no root and leaves by the `roots.length !== 1` return
+  // before the walk begins.
   let cursor = prKey(roots[0]!.repo, roots[0]!.number);
   const walked = new Set<string>([cursor]);
   for (;;) {
@@ -235,7 +241,6 @@ export async function derivePrs(
       coAuthors: coAuthorsOf(commits.map((c) => c.commit.message)),
       body: pull.body ?? "",
       files: diff.files,
-      hunks: diff.files.flatMap((f) => f.hunks),
     });
   }
 
@@ -286,6 +291,14 @@ export class RefResolveError extends Error {
   }
 }
 
+/** A full commit sha and nothing else. The snippet cache keys on (repo, sha, path) with
+ *  no expiry short enough to matter, which is only sound while the sha names one
+ *  immutable tree: a branch name, a tag or an abbreviated sha would freeze whatever the
+ *  first fetch happened to see and serve it to every later reader. So a ref that is not
+ *  SHA-pinned is refused rather than cached. Case is folded, because GitHub answers to
+ *  either and two spellings of one sha must not become two rows. */
+const FULL_SHA = /^[0-9a-f]{40}$/i;
+
 function refRange(pointer: RefPointer): string {
   return `${pointer.path}:${pointer.startLine}-${pointer.endLine}`;
 }
@@ -324,7 +337,9 @@ export function deriveOrigin(prs: DerivedPr[], pointer: RefPointer): RefOrigin {
 }
 
 function originIn(touched: Map<string, Set<string>>, pointer: RefPointer): RefOrigin {
-  return touched.get(`${pointer.repo}@${pointer.sha}`)?.has(pointer.path) ? "in_stack" : "outside";
+  return touched.get(`${pointer.repo}@${pointer.sha.toLowerCase()}`)?.has(pointer.path)
+    ? "in_stack"
+    : "outside";
 }
 
 /** Resolves refs against one review: shared touched-path index, shared file cache. */
@@ -332,9 +347,10 @@ export interface RefResolver {
   resolve(pointer: RefPointer): Promise<Ref>;
 }
 
-/** Files above this are cached in memory for the resolve that needs them and never
- *  stored. A lockfile or a generated bundle would otherwise sit in the shared table
- *  forever, and no useful ref points at thousands of lines of it. */
+/** Files above this are never cached: they are fetched for the resolve that needs them
+ *  and dropped, so a second resolve of one pays a second fetch. A lockfile or a
+ *  generated bundle would otherwise sit in the shared table forever, and no useful ref
+ *  points at thousands of lines of it. */
 const MAX_CACHED_BYTES = 512 * 1024;
 /** Cached bytes are SHA-pinned, so they never go stale; they only go unwanted. A row
  *  nothing has re-fetched in this long is from a review no one is reading. */
@@ -394,8 +410,19 @@ export function refResolver(client: GithubClient, review: DerivedReview): RefRes
   }
 
   return {
-    async resolve(pointer) {
-      const { startLine, endLine } = pointer;
+    async resolve(authored) {
+      const { startLine, endLine } = authored;
+      if (!FULL_SHA.test(authored.sha)) {
+        throw new RefResolveError(
+          `Ref ${refRange(authored)} names ${authored.sha}, which is not a commit sha: a ref is pinned to a full 40 character sha.`,
+          authored.repo,
+          authored.sha,
+          authored.path,
+          startLine,
+          endLine,
+        );
+      }
+      const pointer: RefPointer = { ...authored, sha: authored.sha.toLowerCase() };
       if (
         !Number.isInteger(startLine) ||
         !Number.isInteger(endLine) ||
@@ -404,6 +431,21 @@ export function refResolver(client: GithubClient, review: DerivedReview): RefRes
       ) {
         throw new RefResolveError(
           `Ref ${refRange(pointer)} is not a line range: expected 1 <= start_line <= end_line.`,
+          pointer.repo,
+          pointer.sha,
+          pointer.path,
+          startLine,
+          endLine,
+        );
+      }
+      // A highlight the snippet cannot show is line-number drift, which is the one
+      // thing the write path exists to catch. Dropping it quietly would leave the ref
+      // looking right and pointing at nothing.
+      const highlight = pointer.highlight ?? [];
+      const stray = highlight.find((n) => n < startLine || n > endLine);
+      if (stray !== undefined) {
+        throw new RefResolveError(
+          `Ref ${refRange(pointer)} highlights line ${stray}, which is outside its range.`,
           pointer.repo,
           pointer.sha,
           pointer.path,
@@ -426,7 +468,6 @@ export function refResolver(client: GithubClient, review: DerivedReview): RefRes
           endLine,
         );
       }
-      const highlight = (pointer.highlight ?? []).filter((n) => n >= startLine && n <= endLine);
       return {
         id: pointer.id ?? `${pointer.repo}@${pointer.sha}:${refRange(pointer)}`,
         repo: pointer.repo,
