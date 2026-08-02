@@ -332,14 +332,29 @@ function paragraphsOf(source: string): number {
   return paragraphs;
 }
 
-/** Sentence terminators followed by a break or the end of the field. Abbreviations
- *  ending in a period followed by a space would count as a sentence here, which the
- *  cap of two makes tolerable and nothing else depends on. */
+/** Sentence terminators followed by a break, the end of the field, or the start of the
+ *  next sentence written without a space. Abbreviations ending in a period followed by a
+ *  space would count as a sentence here, which the cap of two makes tolerable and
+ *  nothing else depends on. */
 function sentencesOf(source: string): number {
   const text = source.trim();
   if (text === "") return 0;
-  const ends = text.match(/[.!?]+(\s+|$)/g);
+  const ends = text.match(/[.!?]+(?:\s+|$|(?=["'(\[]|[A-Z]))/g);
   return ends ? ends.length : 1;
+}
+
+/** A path as authored: one line, no control characters. It renders as a filename, so a
+ *  newline or a tab in it is a layout break rather than a path. */
+function checkPath(errors: ValidationError[], field: string, value: string, cap: number): void {
+  if (!required(errors, field, value)) return;
+  capText(errors, field, value, cap);
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    errors.push({
+      field,
+      rule: "path_invalid",
+      message: `${field} contains a control character, and a path is one line of plain text`,
+    });
+  }
 }
 
 /** `pr<number>:<path>:@@<old>,<n>+<new>,<n>`, per diff.hunkId(). */
@@ -491,7 +506,10 @@ export function validatePublish(
 
   // ---- single repo, until multi-repo is actually built ----
 
-  const homeRepo = payload.prs[0]?.repo ?? null;
+  // Only a repo that is actually text can anchor the rule; an absent one is reported by
+  // the required guard on prs[0].repo below rather than quietly disabling it here.
+  const firstRepo = payload.prs[0]?.repo;
+  const homeRepo = typeof firstRepo === "string" && firstRepo !== "" ? firstRepo : null;
   payload.prs.forEach((pr, i) => {
     if (homeRepo !== null && pr.repo !== homeRepo) {
       errors.push({
@@ -516,6 +534,16 @@ export function validatePublish(
         field: at,
         rule: "pr_not_derived",
         message: `${prKey(pr.repo, pr.number)} is in the review but Overseer derived no facts for it; its diff cannot be accounted for`,
+      });
+    }
+    // repo and number are the identity every other rule keys off, including the single
+    // repo rule and prKey(); an absent repo would silently disable both.
+    required(errors, `${at}.repo`, pr.repo);
+    if (!Number.isInteger(pr.number)) {
+      errors.push({
+        field: `${at}.number`,
+        rule: "pr_number_invalid",
+        message: `${at}.number is ${pr.number === undefined ? "absent" : JSON.stringify(pr.number)}, and a pull request number is a whole number`,
       });
     }
     if (required(errors, `${at}.gist`, pr.gist)) {
@@ -717,6 +745,8 @@ export function validatePublish(
       });
     }
     g.fileNotes.forEach((fn, j) => {
+      // The path is the filename the walkthrough prints above the note.
+      checkPath(errors, `${at}.fileNotes[${j}].path`, fn.path, BUDGETS.chars.fileNote);
       if (!isText(errors, `${at}.fileNotes[${j}].text`, fn.text)) return;
       capText(errors, `${at}.fileNotes[${j}].text`, fn.text, BUDGETS.chars.fileNote);
       checkLine(errors, `${at}.fileNotes[${j}].text`, fn.text);
@@ -894,13 +924,16 @@ function checkRef(
     errors.push({ field, rule: "required", message: `${field} is required` });
     return;
   }
-  if (homeRepo !== null && ref.repo !== homeRepo) {
+  if (required(errors, `${field}.repo`, ref.repo) && homeRepo !== null && ref.repo !== homeRepo) {
     errors.push({
       field: `${field}.repo`,
       rule: "single_repo",
       message: `${field} points at ${ref.repo}, and this review is about ${homeRepo}; a review spans one repo until multi-repo is built`,
     });
   }
+  // A ref renders as a file path over a snippet, so an absent one would print as
+  // "undefined:40-48" in the ref_range message below and as nothing on the page.
+  checkPath(errors, `${field}.path`, ref.path, BUDGETS.chars.fileNote);
   if (!/^[0-9a-f]{40}$/i.test(ref.sha)) {
     errors.push({
       field: `${field}.sha`,
@@ -995,6 +1028,17 @@ function checkEvidence(
         if (isText(errors, `${at}.payload.after`, p.after)) {
           capText(errors, `${at}.payload.after`, p.after, BUDGETS.chars.payloadSide);
         }
+        // The keys or line numbers the renderer marks on both sides. A scalar here, or
+        // an entry that is neither, marks nothing and would reach the renderer as it is.
+        const highlight = requireList(errors, `${at}.payload.highlight`, p.highlight);
+        highlight.forEach((h, j) => {
+          if (typeof h === "string" || Number.isInteger(h)) return;
+          errors.push({
+            field: `${at}.payload.highlight[${j}]`,
+            rule: "payload_highlight_invalid",
+            message: `${at}.payload.highlight[${j}] is ${h === undefined ? "absent" : JSON.stringify(h)}, and a highlight is a key or a line number`,
+          });
+        });
         break;
       }
       case "figure": {
@@ -1006,23 +1050,31 @@ function checkEvidence(
         // renderer would have to defend against, so it never reaches storage.
         const nodeIds = new Set(nodes.map((n) => n.id));
         nodes.forEach((n, j) => {
-          capText(
-            errors,
-            `${at}.figure.nodes[${j}].label`,
-            n.label,
-            BUDGETS.chars.figureNodeLabel,
-          );
-          checkLine(errors, `${at}.figure.nodes[${j}].label`, n.label);
+          // An unnamed node is an edge target nothing can point at, and a box the
+          // renderer would draw empty.
+          required(errors, `${at}.figure.nodes[${j}].id`, n.id);
+          if (required(errors, `${at}.figure.nodes[${j}].label`, n.label)) {
+            capText(
+              errors,
+              `${at}.figure.nodes[${j}].label`,
+              n.label,
+              BUDGETS.chars.figureNodeLabel,
+            );
+            checkLine(errors, `${at}.figure.nodes[${j}].label`, n.label);
+          }
           checkKind(errors, `${at}.figure.nodes[${j}].state`, n.state, FIGURE_NODE_STATES);
         });
         edges.forEach((edge, j) => {
-          capText(
-            errors,
-            `${at}.figure.edges[${j}].label`,
-            edge.label,
-            BUDGETS.chars.figureEdgeLabel,
-          );
-          checkLine(errors, `${at}.figure.edges[${j}].label`, edge.label);
+          // An edge label may be empty, a plain arrow, but it cannot be a number.
+          if (isText(errors, `${at}.figure.edges[${j}].label`, edge.label)) {
+            capText(
+              errors,
+              `${at}.figure.edges[${j}].label`,
+              edge.label,
+              BUDGETS.chars.figureEdgeLabel,
+            );
+            checkLine(errors, `${at}.figure.edges[${j}].label`, edge.label);
+          }
           for (const end of ["from", "to"] as const) {
             if (nodeIds.has(edge[end])) continue;
             errors.push({
@@ -1037,6 +1089,15 @@ function checkEvidence(
       case "example": {
         const x = e.example;
         if (!requireObject(errors, `${at}.example`, x)) break;
+        // The lang is a syntax tag the renderer puts in a class name, not prose: a
+        // short token, never an absent field and never a paragraph.
+        if (required(errors, `${at}.example.lang`, x.lang) && !/^[A-Za-z0-9+#.-]{1,20}$/.test(x.lang)) {
+          errors.push({
+            field: `${at}.example.lang`,
+            rule: "lang_invalid",
+            message: `${at}.example.lang is ${JSON.stringify(x.lang)}, and a language tag is a short token such as "ts"`,
+          });
+        }
         if (isText(errors, `${at}.example.text`, x.text)) {
           capText(errors, `${at}.example.text`, x.text, BUDGETS.chars.exampleText);
         }

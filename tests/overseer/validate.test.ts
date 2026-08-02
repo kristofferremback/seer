@@ -207,13 +207,71 @@ describe("count caps scale with decomposition", () => {
     expect(warning?.rule).toBe("decomposition");
   });
 
-  test("13 statements on four pull requests hits the absolute ceiling of 12", () => {
+  test("13 statements on four pull requests overruns the budget of 12", () => {
     const { payload, derived } = synth({ prCount: 4, statements: 13 });
     const result = validatePublish(payload, derived, null, {});
     const err = find(result.errors, "cap_count");
     expect(err.field).toBe("statements");
     expect(err.overage).toBe(1);
     expect(err.message).toContain("12");
+  });
+
+  test("the statement budget stops climbing at the ceiling of 12", () => {
+    // The linear formula would give 6 + 5*2 = 16 on six pull requests. The ceiling binds.
+    const { payload, derived } = synth({ prCount: 6, statements: 13 });
+    const result = validatePublish(payload, derived, null, {});
+    const err = result.errors.find((e) => e.field === "statements" && e.rule === "cap_count");
+    expect(err?.overage).toBe(1);
+    expect(err?.message).toContain("12");
+  });
+
+  test("9 groups on one pull request is an error with overage 1", () => {
+    const { payload, derived } = synth({ prCount: 1, statements: 3, groups: 9 });
+    const result = validatePublish(payload, derived, null, {});
+    const err = result.errors.find((e) => e.field === "groups" && e.rule === "cap_count");
+    expect(err?.overage).toBe(1);
+    expect(err?.message).toContain("8");
+  });
+
+  test("12 groups on two pull requests is clean but warns about decomposition", () => {
+    const { payload, derived } = synth({ prCount: 2, statements: 3, groups: 12 });
+    const result = validatePublish(payload, derived, null, {});
+    expect(result.errors).toEqual([]);
+    const warning = result.warnings.find((w) => w.field === "groups");
+    expect(warning?.rule).toBe("decomposition");
+    expect(warning?.message).toContain("12");
+  });
+
+  test("11 groups on two pull requests is clean and unwarned about groups", () => {
+    const { payload, derived } = synth({ prCount: 2, statements: 3, groups: 11 });
+    const result = validatePublish(payload, derived, null, {});
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.find((w) => w.field === "groups")).toBeUndefined();
+  });
+
+  test("one group is below the floor, by a shortfall of one", () => {
+    const { payload, derived } = synth({ prCount: 1, statements: 3, groups: 1 });
+    const result = validatePublish(payload, derived, null, {});
+    const err = result.errors.find((e) => e.field === "groups" && e.rule === "below_minimum");
+    expect(err?.shortfall).toBe(1);
+    expect(err?.overage).toBeUndefined();
+  });
+
+  test("the group budget stops climbing at the ceiling of 16", () => {
+    // The linear formula would give 8 + 3*4 = 20 on four pull requests. The ceiling binds.
+    const { payload, derived } = synth({ prCount: 4, statements: 4, groups: 17 });
+    const result = validatePublish(payload, derived, null, {});
+    const err = result.errors.find((e) => e.field === "groups" && e.rule === "cap_count");
+    expect(err?.overage).toBe(1);
+    expect(err?.message).toContain("16");
+  });
+
+  test("a review with no pull request is below the floor of one", () => {
+    const { payload, derived } = synth({ prCount: 1, statements: 3 });
+    payload.prs = [];
+    const result = validatePublish(payload, derived, null, {});
+    const err = result.errors.find((e) => e.field === "prs" && e.rule === "below_minimum");
+    expect(err?.shortfall).toBe(1);
   });
 
   test("two statements is below the floor, by a shortfall of one", () => {
@@ -997,10 +1055,32 @@ function leaves(value: unknown, path: string, out: Leaf[]): void {
   }
 }
 
-function scalarPaths(): string[] {
+function scalarLeaves(): { path: string; original: unknown }[] {
   const out: Leaf[] = [];
   leaves(golden(), "", out);
-  return out.map((l) => l.path);
+  return out.map((l) => ({
+    path: l.path,
+    original: (l.parent as Record<string | number, unknown>)[l.key],
+  }));
+}
+
+type Mutation = "deleting" | "replacing with a number" | "replacing with null";
+
+/** A leaf that is genuinely allowed to hold this value. Everything else has to come
+ *  back as an error: a leaf that validates clean when it is absent or mistyped reaches
+ *  storage and then the renderer, unchecked. */
+function mayHold(path: string, mutation: Mutation, original: unknown): boolean {
+  // pr.parent is optional: most pull requests sit at the root of the stack.
+  if (path.endsWith(".parent")) return true;
+  // Deleting an array element leaves a hole rather than an entry, and JSON.parse cannot
+  // produce one: forEach skips it, so there is nothing to report.
+  if (mutation === "deleting" && /\[\d+\]$/.test(path)) return true;
+  if (mutation === "replacing with a number" && typeof original === "number") return true;
+  // A payload highlight is a key or a line number, so a number is one of its two shapes.
+  if (mutation === "replacing with a number" && path.includes(".payload.highlight[")) return true;
+  // A bundle at a null version is the bundle at latest.
+  if (mutation === "replacing with null" && path.endsWith(".version")) return true;
+  return false;
 }
 
 function mutate(path: string, apply: (leaf: Leaf) => void): PublishPayload {
@@ -1014,33 +1094,42 @@ function mutate(path: string, apply: (leaf: Leaf) => void): PublishPayload {
 }
 
 describe("a payload with a missing or mistyped scalar", () => {
-  const paths = scalarPaths();
+  const scalars = scalarLeaves();
+
+  const APPLY: Record<Mutation, (leaf: Leaf) => void> = {
+    deleting: (leaf) => {
+      delete (leaf.parent as Record<string | number, unknown>)[leaf.key];
+    },
+    "replacing with a number": (leaf) => {
+      (leaf.parent as Record<string | number, unknown>)[leaf.key] = 5;
+    },
+    "replacing with null": (leaf) => {
+      (leaf.parent as Record<string | number, unknown>)[leaf.key] = null;
+    },
+  };
 
   test("the golden payload has scalars at every depth to mutate", () => {
-    expect(paths.length).toBeGreaterThan(100);
+    expect(scalars.length).toBeGreaterThan(100);
   });
 
-  for (const path of paths) {
-    test(`deleting ${path} returns errors rather than throwing`, () => {
-      const payload = mutate(path, (leaf) => {
-        delete (leaf.parent as Record<string | number, unknown>)[leaf.key];
+  for (const { path, original } of scalars) {
+    for (const mutation of Object.keys(APPLY) as Mutation[]) {
+      const allowed = mayHold(path, mutation, original);
+      const expectation = allowed ? "is a value it may hold" : "is named as an error";
+      test(`${mutation} ${path} ${expectation}`, () => {
+        const payload = mutate(path, APPLY[mutation]);
+        // A crash is a 500 the publish route cannot answer with, whichever way it goes.
+        let result!: ReturnType<typeof run>;
+        expect(() => {
+          result = run(payload);
+        }).not.toThrow();
+        if (allowed) return;
+        expect(
+          result.errors.length,
+          `${mutation} ${path} returned no error, so it reaches storage unchecked`,
+        ).toBeGreaterThan(0);
       });
-      expect(() => run(payload)).not.toThrow();
-    });
-
-    test(`replacing ${path} with a number returns errors rather than throwing`, () => {
-      const payload = mutate(path, (leaf) => {
-        (leaf.parent as Record<string | number, unknown>)[leaf.key] = 5;
-      });
-      expect(() => run(payload)).not.toThrow();
-    });
-
-    test(`replacing ${path} with null returns errors rather than throwing`, () => {
-      const payload = mutate(path, (leaf) => {
-        (leaf.parent as Record<string | number, unknown>)[leaf.key] = null;
-      });
-      expect(() => run(payload)).not.toThrow();
-    });
+    }
   }
 
   test("deleting a whole entity from a list does not throw", () => {
@@ -1116,5 +1205,183 @@ describe("a statement naming one pull request twice", () => {
     const err = find(run(payload).errors, "pr_duplicated");
     expect(err.field).toBe("statements[0].prs[1]");
     expect(err.message).toContain(s.prs[0]!);
+  });
+});
+
+// ---- rules on the leaves a sub-object carries ----
+
+describe("a leaf that reaches the renderer", () => {
+  test("a group's significance that is not a number is named", () => {
+    const payload = golden();
+    (payload.groups[0] as { significance: unknown }).significance = "high";
+    const err = find(run(payload).errors, "significance_invalid");
+    expect(err.field).toBe("groups[0].significance");
+  });
+
+  test("a statement naming no pull request is unattributed", () => {
+    const payload = golden();
+    payload.statements[0]!.prs = [];
+    const err = find(run(payload).errors, "statement_unattributed");
+    expect(err.field).toBe("statements[0].prs");
+  });
+
+  test("a file note without a path is a required error", () => {
+    const payload = golden();
+    const i = payload.groups.findIndex((g) => g.fileNotes.length > 0);
+    delete (payload.groups[i]!.fileNotes[0] as { path?: string }).path;
+    const err = run(payload).errors.find((e) => e.field === `groups[${i}].fileNotes[0].path`);
+    expect(err?.rule).toBe("required");
+  });
+
+  test("a file note path over 120 characters is capped", () => {
+    const payload = golden();
+    const i = payload.groups.findIndex((g) => g.fileNotes.length > 0);
+    payload.groups[i]!.fileNotes[0]!.path = `src/${"a".repeat(120)}.ts`;
+    const err = run(payload).errors.find((e) => e.field === `groups[${i}].fileNotes[0].path`);
+    expect(err?.rule).toBe("cap_chars");
+    expect(err?.overage).toBe(7);
+  });
+
+  test("a file note path carrying a newline is a path_invalid error", () => {
+    const payload = golden();
+    const i = payload.groups.findIndex((g) => g.fileNotes.length > 0);
+    payload.groups[i]!.fileNotes[0]!.path = "src/a.ts\nsrc/b.ts";
+    const err = find(run(payload).errors, "path_invalid");
+    expect(err.field).toBe(`groups[${i}].fileNotes[0].path`);
+  });
+
+  test("a ref without a path is a required error, not an undefined in a message", () => {
+    const payload = golden();
+    delete (payload.prs[0]!.detailRef as { path?: string }).path;
+    const errors = run(payload).errors;
+    expect(errors.find((e) => e.field === "prs[0].detailRef.path")?.rule).toBe("required");
+  });
+
+  test("a ref pointing at no repo is a required error", () => {
+    const payload = golden();
+    delete (payload.statements[0]!.refs[0] as { repo?: string }).repo;
+    expect(
+      run(payload).errors.find((e) => e.field === "statements[0].refs[0].repo")?.rule,
+    ).toBe("required");
+  });
+
+  test("a pull request number that is a string is named", () => {
+    const payload = golden();
+    (payload.prs[0] as { number: unknown }).number = "12";
+    const err = find(run(payload).errors, "pr_number_invalid");
+    expect(err.field).toBe("prs[0].number");
+  });
+
+  test("a pull request without a repo is a required error", () => {
+    const payload = golden();
+    delete (payload.prs[0] as { repo?: string }).repo;
+    expect(run(payload).errors.find((e) => e.field === "prs[0].repo")?.rule).toBe("required");
+  });
+
+  test("a figure node without a label is a required error", () => {
+    const payload = golden();
+    const at = figureAt(payload);
+    const figure = evidenceFigure(payload, at);
+    delete (figure.nodes[0] as { label?: string }).label;
+    const field = `statements[${at[0]}].evidence[${at[1]}].figure.nodes[0].label`;
+    expect(run(payload).errors.find((e) => e.field === field)?.rule).toBe("required");
+  });
+
+  test("a figure node without an id is a required error", () => {
+    const payload = golden();
+    const at = figureAt(payload);
+    const figure = evidenceFigure(payload, at);
+    delete (figure.nodes[0] as { id?: string }).id;
+    const field = `statements[${at[0]}].evidence[${at[1]}].figure.nodes[0].id`;
+    expect(run(payload).errors.find((e) => e.field === field)?.rule).toBe("required");
+  });
+
+  test("a figure edge label that is a number is a not_text error", () => {
+    const payload = golden();
+    const at = figureAt(payload);
+    const figure = evidenceFigure(payload, at);
+    (figure.edges[0] as { label: unknown }).label = 7;
+    const field = `statements[${at[0]}].evidence[${at[1]}].figure.edges[0].label`;
+    expect(run(payload).errors.find((e) => e.field === field)?.rule).toBe("not_text");
+  });
+
+  test("an example without a lang is a required error", () => {
+    const payload = golden();
+    const at = exampleAt(payload);
+    delete (evidenceExample(payload, at) as { lang?: string }).lang;
+    const field = `statements[${at[0]}].evidence[${at[1]}].example.lang`;
+    expect(run(payload).errors.find((e) => e.field === field)?.rule).toBe("required");
+  });
+
+  test("an example lang that is prose rather than a tag is a lang_invalid error", () => {
+    const payload = golden();
+    const at = exampleAt(payload);
+    evidenceExample(payload, at).lang = "x".repeat(400);
+    const err = find(run(payload).errors, "lang_invalid");
+    expect(err.field).toBe(`statements[${at[0]}].evidence[${at[1]}].example.lang`);
+  });
+
+  test("a payload highlight that is a scalar rather than a list is a required error", () => {
+    const payload = golden();
+    const at = payloadAt(payload);
+    (evidencePayload(payload, at) as { highlight: unknown }).highlight = 5;
+    const field = `statements[${at[0]}].evidence[${at[1]}].payload.highlight`;
+    expect(run(payload).errors.find((e) => e.field === field)?.rule).toBe("required");
+  });
+
+  test("a payload highlight entry that is neither a key nor a line is named", () => {
+    const payload = golden();
+    const at = payloadAt(payload);
+    (evidencePayload(payload, at).highlight as unknown[])[0] = true;
+    const err = find(run(payload).errors, "payload_highlight_invalid");
+    expect(err.field).toBe(`statements[${at[0]}].evidence[${at[1]}].payload.highlight[0]`);
+  });
+});
+
+function evidenceAt(payload: PublishPayload, type: string): readonly [number, number] {
+  const at = payload.statements
+    .flatMap((s, i) => s.evidence.map((e, j) => (e.type === type ? ([i, j] as const) : null)))
+    .find((x) => x !== null);
+  expect(at, `the golden payload carries no ${type} evidence on a statement`).toBeDefined();
+  return at!;
+}
+
+const figureAt = (p: PublishPayload) => evidenceAt(p, "figure");
+const exampleAt = (p: PublishPayload) => evidenceAt(p, "example");
+const payloadAt = (p: PublishPayload) => evidenceAt(p, "payload");
+
+function evidenceFigure(payload: PublishPayload, at: readonly [number, number]) {
+  const e = payload.statements[at[0]]!.evidence[at[1]]!;
+  if (e.type !== "figure") throw new Error("not a figure");
+  return e.figure;
+}
+
+function evidenceExample(payload: PublishPayload, at: readonly [number, number]) {
+  const e = payload.statements[at[0]]!.evidence[at[1]]!;
+  if (e.type !== "example") throw new Error("not an example");
+  return e.example;
+}
+
+function evidencePayload(payload: PublishPayload, at: readonly [number, number]) {
+  const e = payload.statements[at[0]]!.evidence[at[1]]!;
+  if (e.type !== "payload") throw new Error("not a payload");
+  return e.payload;
+}
+
+// ---- rule: a pull request's detail is at most two sentences ----
+
+describe("sentence counting", () => {
+  test("counts sentences run together without a space", () => {
+    const payload = golden();
+    payload.prs[0]!.detail = "First thing.Second thing.Third thing.";
+    const err = find(run(payload).errors, "cap_sentences");
+    expect(err.field).toBe("prs[0].detail");
+    expect(err.overage).toBe(1);
+  });
+
+  test("does not count a decimal point as a sentence end", () => {
+    const payload = golden();
+    payload.prs[0]!.detail = "The timeout moves from 1.5 seconds to 2.5 seconds.";
+    expect(rules(run(payload).errors)).not.toContain("cap_sentences");
   });
 });
