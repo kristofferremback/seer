@@ -22,7 +22,27 @@ import type {
  *  so a version row redraws the walkthrough on its own. Both land in this one `doc`
  *  column; the alternative, a second column, would let a version row exist with its
  *  lines missing. Nothing else may be added to `review_versions`. */
-export type ReviewDoc = Omit<Review, "annotations" | "freshness">;
+export type ReviewDoc = Omit<Review, "annotations" | "freshness"> & {
+  /** The attachments this version stores, in the order the document declared them.
+   *  Evidence names the minted `att_` id, and only this list also keeps the handle the
+   *  skill authored: attachments share the id namespace with statements, notes and
+   *  groups, and that rule spans versions, so the next publish has to be able to see
+   *  which handles the prior version spent. */
+  attachments: StoredAttachment[];
+};
+
+/** An attachment as the document records it. The row in `review_attachments` is the
+ *  same facts keyed for lookup; this is the copy the renderer reads with the document. */
+export interface StoredAttachment {
+  /** The minted `att_` id: the blob's name in the store and the id evidence points at. */
+  id: string;
+  /** The handle the skill wrote in the publish body, e.g. `att_gate`. */
+  authoredId: string;
+  mediaType: string;
+  bytes: number;
+  alt: string;
+  caption: string;
+}
 
 export interface ReviewRow {
   workspace_id: string;

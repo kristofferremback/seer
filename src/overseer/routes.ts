@@ -20,6 +20,7 @@ import { requireApiKey } from "../auth";
 import { createAttachment, createReviewVersion, getReview, getReviewVersion, type ReviewDoc } from "./db";
 import {
   derivePrs,
+  PrPointerError,
   hunksOf,
   kindsForPr,
   refResolver,
@@ -32,6 +33,7 @@ import { GithubError, githubClient } from "./github";
 import {
   validatePublish,
   type EvidenceInput,
+  type PriorDoc,
   type PublishPayload,
   type RefPointerInput,
   type ValidationError,
@@ -69,6 +71,10 @@ function unprocessable(errors: ValidationError[], warnings: ValidationWarning[] 
 interface PublishBody {
   slug: unknown;
   payload: PublishPayload;
+  /** The bytes actually read, document part and attachment parts together. The route
+   *  measures the upload against this rather than against a declared content-length,
+   *  which a chunked request does not send and a lying one gets wrong. */
+  bytes: number;
   /** Part name (an authored attachment id) to its bytes. Empty for a bare JSON body. */
   parts: Map<string, { bytes: Uint8Array; filename: string; type: string }>;
 }
@@ -88,7 +94,12 @@ async function readBody(req: Request): Promise<PublishBody> {
     } catch (err) {
       throw new BadBody(`Body is not JSON: ${(err as Error).message}`);
     }
-    return { slug: slugOf(parsed), payload: parsed as PublishPayload, parts: new Map() };
+    return {
+      slug: slugOf(parsed),
+      payload: parsed as PublishPayload,
+      parts: new Map(),
+      bytes: Buffer.byteLength(text, "utf8"),
+    };
   }
 
   // The runtime FormData, whose values are string | File. Spelled off the method so
@@ -112,6 +123,7 @@ async function readBody(req: Request): Promise<PublishBody> {
   }
 
   const parts = new Map<string, { bytes: Uint8Array; filename: string; type: string }>();
+  let bytes = Buffer.byteLength(text, "utf8");
   for (const [name, value] of form.entries()) {
     if (name === DOCUMENT_PART) continue;
     if (typeof value === "string") {
@@ -120,13 +132,15 @@ async function readBody(req: Request): Promise<PublishBody> {
     if (parts.has(name)) {
       throw new BadBody(`Part "${name}" appears more than once`);
     }
+    const partBytes = new Uint8Array(await value.arrayBuffer());
+    bytes += partBytes.length;
     parts.set(name, {
-      bytes: new Uint8Array(await value.arrayBuffer()),
+      bytes: partBytes,
       filename: value.name ?? "",
       type: value.type ?? "",
     });
   }
-  return { slug: slugOf(parsed), payload: parsed as PublishPayload, parts };
+  return { slug: slugOf(parsed), payload: parsed as PublishPayload, parts, bytes };
 }
 
 function slugOf(parsed: unknown): unknown {
@@ -208,10 +222,15 @@ async function resolveRefs(
       refs.set(key, await resolver.resolve(site.pointer));
     } catch (err) {
       if (!(err instanceof RefResolveError)) throw err;
-      // Per RefResolveError.status: a 404, a client-side refusal (0) and a pointer this
-      // module refused before fetching (null) are the skill's fault. Anything else is
-      // Overseer's, and answering 422 would make the skill rewrite a correct ref.
-      if (err.status !== null && err.status !== 0 && err.status !== 404) {
+      // Per RefResolveError.status: a 404 and a client-side refusal (0) are the skill's
+      // fault. Anything else GitHub answered is Overseer's, and answering 422 would make
+      // the skill rewrite a correct ref. A null status is ambiguous on its own: the
+      // deriver refuses a malformed pointer before fetching with no cause at all, but a
+      // transport failure (DNS, a reset connection, `fetch failed`) also arrives as a
+      // plain Error carried as the cause. So the cause decides: a failure the client
+      // threw that is not a GithubError never reached GitHub, and is upstream.
+      const upstreamCause = err.cause !== undefined && !(err.cause instanceof GithubError);
+      if (upstreamCause || (err.status !== null && err.status !== 0 && err.status !== 404)) {
         throw new UpstreamError(err.message);
       }
       errors.push({ field: site.field, rule: "ref_unresolved", message: err.message });
@@ -237,7 +256,9 @@ interface ResolvedAttachment {
  *  second. Null when neither names an image format Seer processes. */
 function extOf(filename: string, type: string): string | null {
   const named = /\.([a-z0-9]+)$/i.exec(filename)?.[1]?.toLowerCase();
-  if (named && named in IMAGE_TYPES) return named;
+  // Own keys only: IMAGE_TYPES is a plain object, so `in` would accept a part named
+  // "shot.constructor" as an image format and hand it to a pipeline that cannot read it.
+  if (named && Object.hasOwn(IMAGE_TYPES, named)) return named;
   for (const [ext, mime] of Object.entries(IMAGE_TYPES)) {
     if (mime === type.toLowerCase().split(";")[0]?.trim()) return ext;
   }
@@ -295,6 +316,11 @@ async function resolveAttachments(
     const part = body.parts.get(a.id)!;
     const ext = extOf(part.filename, part.type)!;
     try {
+      // The same pipeline /api/images uses, SVG passthrough included: an SVG is text,
+      // so its bytes are stored verbatim under image/svg+xml. Whichever route serves an
+      // attachment blob must send the header the image route sends for that media type
+      // (`content-security-policy: default-src 'none'; style-src 'unsafe-inline'`), or
+      // an uploaded SVG is stored script inside the workspace.
       const image = await processImage(ext, `attachment.${ext}`, part.bytes);
       attachments.push({
         authoredId: a.id,
@@ -348,8 +374,36 @@ function resolveEvidence(
             caption: e.bundle.caption,
           },
         };
-      default:
-        return e as Evidence;
+      // The three authored kinds carry no derived half, but they are still picked field
+      // by field: a stored document is a known shape, never whatever keys the body had.
+      case "payload":
+        return {
+          type: "payload",
+          payload: {
+            lang: e.payload.lang,
+            before: e.payload.before,
+            after: e.payload.after,
+            highlight: e.payload.highlight,
+          },
+        };
+      case "figure":
+        return {
+          type: "figure",
+          figure: {
+            kind: e.figure.kind,
+            nodes: e.figure.nodes.map((n) => ({ id: n.id, label: n.label, state: n.state })),
+            edges: e.figure.edges.map((edge) => ({
+              from: edge.from,
+              to: edge.to,
+              label: edge.label,
+            })),
+          },
+        };
+      case "example":
+        return {
+          type: "example",
+          example: { lang: e.example.lang, text: e.example.text, caption: e.example.caption },
+        };
     }
   });
 }
@@ -442,6 +496,20 @@ function buildDocument(args: {
   return {
     title: payload.title,
     kind: review.kind,
+    // The authored handle travels with the minted id: the next publish to this slug
+    // reads it back as the prior version's attachment ids, which is what keeps the
+    // id namespace shared across versions rather than only within one.
+    attachments: payload.attachments.map((a) => {
+      const stored = attachments.get(a.id)!;
+      return {
+        id: stored.id,
+        authoredId: stored.authoredId,
+        mediaType: stored.mediaType,
+        bytes: stored.bytes.length,
+        alt: stored.alt,
+        caption: stored.caption,
+      };
+    }),
     summary: payload.summary,
     prs,
     statements,
@@ -461,10 +529,13 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   if (auth instanceof Response) return auth;
   const ws = auth.workspaceId;
 
+  const tooBig = (): Response =>
+    json({ error: `Review exceeds max size of ${config.maxUploadBytes} bytes` }, 413);
+
+  // A declared size over the limit is refused before the body is read at all. It is
+  // only a hint: a chunked request declares nothing, so the real check is on the bytes.
   const declared = Number(req.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > config.maxUploadBytes) {
-    return json({ error: `Review exceeds max size of ${config.maxUploadBytes} bytes` }, 413);
-  }
+  if (Number.isFinite(declared) && declared > config.maxUploadBytes) return tooBig();
 
   // Every fact half of a review comes off the GitHub API, so publishing without a
   // token is a misconfiguration and not a smaller review. Bundles and images are
@@ -487,6 +558,7 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     if (!(err instanceof BadBody)) throw err;
     return json({ error: err.message }, 400);
   }
+  if (body.bytes > config.maxUploadBytes) return tooBig();
   if (typeof body.slug !== "string" || !SLUG_RE.test(body.slug)) {
     return json({ error: "slug is required and must match [a-z0-9][a-z0-9-]{0,63}" }, 400);
   }
@@ -503,6 +575,16 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   if (!pointers) {
     // Unusable pointers: the validator answers with the fields that are wrong.
     const { errors, warnings } = validatePublish(payload, { prs: [] }, null, { bundleExists });
+    if (errors.length === 0) {
+      // Unreachable while the validator reports a pull request list it has no derived
+      // facts for, which it does today. A 422 carrying nothing would leave the skill
+      // with no field to fix, so this says what happened instead of shipping an empty one.
+      errors.push({
+        field: "prs",
+        rule: "pr_not_derivable",
+        message: "prs could not be read as pull request pointers",
+      });
+    }
     return unprocessable(errors, warnings);
   }
 
@@ -510,17 +592,33 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   try {
     review = await derivePrs(githubClient(), pointers);
   } catch (err) {
-    if (err instanceof GithubError) {
-      return json({ error: `Overseer could not read the pull requests from GitHub: ${err.message}` }, 502);
+    // Only the pointers themselves are the skill's to fix. GitHub answering badly, or
+    // not answering at all, is Overseer's: telling the skill its pull requests are
+    // invalid would have it re-author correct content against a network fault.
+    if (err instanceof PrPointerError) {
+      return unprocessable([{ field: "prs", rule: "pr_not_derivable", message: err.message }]);
     }
-    return unprocessable([
-      { field: "prs", rule: "pr_not_derivable", message: (err as Error).message },
-    ]);
+    return json(
+      { error: `Overseer could not read the pull requests from GitHub: ${(err as Error).message}` },
+      502,
+    );
   }
 
   const existing = getReview(ws, slug);
   const priorVersion = existing ? getReviewVersion(ws, slug, existing.latest_version) : null;
-  const prior = priorVersion ? priorVersion.doc : null;
+  // The prior document as the validator reads it. Attachments are mapped back to the
+  // handles the prior publish authored, because those are the ids this payload's
+  // statements, notes and groups share a namespace with; the minted `att_` ids are
+  // Overseer's own and no payload ever names them.
+  const priorDoc = priorVersion ? priorVersion.doc : null;
+  const prior: PriorDoc | null = priorDoc
+    ? {
+        statements: priorDoc.statements,
+        notes: priorDoc.notes,
+        groups: priorDoc.groups,
+        attachments: (priorDoc.attachments ?? []).map((a) => ({ id: a.authoredId })),
+      }
+    : null;
 
   const result = validatePublish(
     payload,
@@ -556,7 +654,7 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     refs,
     attachments,
     significance: result.significance,
-    createdAt: prior?.createdAt ?? now,
+    createdAt: priorDoc?.createdAt ?? now,
     updatedAt: now,
   });
 

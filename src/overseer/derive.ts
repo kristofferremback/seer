@@ -190,6 +190,17 @@ export function deriveReviewKind(
 
 // ---- derivation ----
 
+/** The authored pointers themselves are wrong: none of them, or the same pull request
+ *  twice. These are the only failures of derivePrs() that belong to the caller, and
+ *  they are thrown before any request goes out. Everything else out of this function
+ *  came off the network and is Overseer's problem, never the skill's. */
+export class PrPointerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PrPointerError";
+  }
+}
+
 /**
  * Derive the fact half of a review from its authored pointers. One pass per pull
  * request: the pull request itself, its commits, its diff, and its review comments.
@@ -199,7 +210,7 @@ export async function derivePrs(
   pointers: PrPointer[],
 ): Promise<DerivedReview> {
   if (pointers.length === 0) {
-    throw new Error("A review needs at least one pull request.");
+    throw new PrPointerError("A review needs at least one pull request.");
   }
   // The same pull request twice would duplicate its hunk ids, which the publish path
   // needs unique, and would look like two roots to the shape derivation.
@@ -207,7 +218,7 @@ export async function derivePrs(
   for (const pointer of pointers) {
     const key = prKey(pointer.repo, pointer.number);
     if (pointed.has(key)) {
-      throw new Error(`A review names ${key} more than once.`);
+      throw new PrPointerError(`A review names ${key} more than once.`);
     }
     pointed.add(key);
   }

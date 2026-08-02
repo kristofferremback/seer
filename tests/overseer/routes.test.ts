@@ -10,8 +10,15 @@ import { config } from "../../src/config";
 import { createVersion, createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
 import { getAttachment, getReviewVersion, listAttachments } from "../../src/overseer/db";
 import { attachmentPath } from "../../src/store";
-import { setGithubClient, type GithubClient, type GithubFile, type GithubPull } from "../../src/overseer/github";
-import { validatePublish, type PublishPayload } from "../../src/overseer/validate";
+import {
+  GithubError,
+  setGithubClient,
+  type GithubClient,
+  type GithubFile,
+  type GithubPull,
+} from "../../src/overseer/github";
+import { REINDEX_EPSILON, validatePublish, type PublishPayload } from "../../src/overseer/validate";
+import { maxStatements } from "../../src/overseer/types";
 import { ATT_ID_RE } from "../../src/ids";
 import {
   GOLDEN_ATTACHMENT_BYTES,
@@ -83,6 +90,7 @@ function blob(path: string): string {
 }
 
 let missingBlob: string | null = null;
+let unreachable = false;
 
 const fake: GithubClient = {
   async getPull(_repo, number) {
@@ -116,7 +124,13 @@ const fake: GithubClient = {
   },
   async getFileAtSha(_repo, path, sha) {
     if (missingBlob !== null && path === missingBlob) {
-      throw new Error(`GitHub 404 for ${sha}:${path}`);
+      // What the real client throws for a path GitHub does not have: a 404 is the
+      // pointer's fault, and only that is answered as a 422.
+      throw new GithubError(`GitHub 404 for ${sha}:${path}`, 404, path);
+    }
+    if (unreachable) {
+      // What a dead network throws: no status, no GithubError, never the skill's fault.
+      throw new TypeError("fetch failed");
     }
     return blob(path);
   },
@@ -461,6 +475,113 @@ describe("without GITHUB_TOKEN", () => {
       expect((await readJson(zip)).version).toBe(1);
     } finally {
       config.githubToken = held;
+    }
+  });
+});
+
+// ---- what the response carries back ----
+
+describe("the publish response and the stored document", () => {
+  test("a review that spends its whole statement budget publishes with the warning", async () => {
+    const payload = noAttachments();
+    const cap = maxStatements(2);
+    const first = payload.statements[0]!;
+    while (payload.statements.length < cap) {
+      const clone = structuredClone(first);
+      clone.id = `st_clone_${payload.statements.length}`;
+      clone.text = `Cloned claim ${payload.statements.length}`;
+      payload.statements.push(clone);
+    }
+    const res = await publish("at-the-cap", payload);
+    expect(res.status).toBe(200);
+    const json = await readJson(res);
+    // Verbatim, the same way errors are: the validator's warnings, not a summary of them.
+    const expected = validatePublish(payload, goldenDerived(), null, {
+      bundleExists: () => true,
+    }).warnings;
+    expect(expected.length).toBeGreaterThan(0);
+    expect(json.warnings).toEqual(expected);
+    expect(json.warnings[0].rule).toBe("decomposition");
+    expect(json.warnings[0].field).toBe("statements");
+  });
+
+  test("crowded significance is respaced in the stored document", async () => {
+    const payload = noAttachments();
+    payload.groups[0]!.significance = 4;
+    payload.groups[1]!.significance = 4 + REINDEX_EPSILON / 2;
+    const res = await publish("crowded", payload);
+    expect(res.status).toBe(200);
+    const doc = getReviewVersion(wsA, "crowded", 1)!.doc;
+    expect(doc.groups.map((g) => ({ id: g.id, significance: g.significance }))).toEqual([
+      { id: payload.groups[0]!.id, significance: 1 },
+      { id: payload.groups[1]!.id, significance: 2 },
+    ]);
+  });
+
+  test("authored significance that is already spread is stored as authored", async () => {
+    const payload = noAttachments();
+    payload.groups[0]!.significance = 3;
+    payload.groups[1]!.significance = 9;
+    const res = await publish("spread", payload);
+    expect(res.status).toBe(200);
+    const doc = getReviewVersion(wsA, "spread", 1)!.doc;
+    expect(doc.groups.map((g) => g.significance)).toEqual([3, 9]);
+  });
+
+  test("the stored document records each attachment's authored handle", async () => {
+    const doc = getReviewVersion(wsA, "with-image", 1)!.doc;
+    expect(doc.attachments.length).toBe(1);
+    const a = doc.attachments[0]!;
+    expect(a.authoredId).toBe("att_gate");
+    expect(a.id).toMatch(ATT_ID_RE);
+    expect(a.alt).toBe(goldenPayload().attachments[0]!.alt);
+    expect(a.bytes).toBe(listAttachments(wsA, "with-image")[0]!.bytes);
+  });
+
+  test("an id that named an attachment cannot come back as a statement -> 422", async () => {
+    const before = counts();
+    const payload = noAttachments();
+    payload.statements[0]!.id = "att_gate";
+    const res = await publish("with-image", payload);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    const err = json.errors.find((e: { rule: string }) => e.rule === "id_type_changed");
+    expect(err.field).toBe("statements[0].id");
+    expect(err.message).toContain("att_gate");
+    expect(counts()).toEqual(before);
+  });
+});
+
+// ---- upstream failures are not the skill's fault ----
+
+describe("when GitHub cannot be reached", () => {
+  test("a transport failure resolving a ref -> 502, not a 422 about the ref", async () => {
+    const before = counts();
+    // A path nothing has fetched before, so the snippet cache cannot answer for it.
+    const payload = noAttachments();
+    payload.statements[0]!.refs[0]!.path = "src/only-here.ts";
+    unreachable = true;
+    try {
+      const res = await publish("gh-down", payload);
+      expect(res.status).toBe(502);
+      expect((await readJson(res)).error).toContain("ref");
+    } finally {
+      unreachable = false;
+    }
+    expect(counts()).toEqual(before);
+  });
+
+  test("GitHub refusing the pull requests -> 502, not a 422 about prs", async () => {
+    const held = fake.getPull;
+    fake.getPull = async () => {
+      throw new GithubError("GitHub 403 for /repos", 403, "/repos");
+    };
+    try {
+      const res = await publish("gh-403", noAttachments());
+      expect(res.status).toBe(502);
+      expect((await readJson(res)).error).toContain("403");
+    } finally {
+      fake.getPull = held;
     }
   });
 });
