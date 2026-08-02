@@ -1,21 +1,23 @@
-# Witness data model
+# Overseer data model
 
-Witness is a tool for a human to run a review. A hosted skill, running on the user's own inference, reads the pull requests and prepares the briefing: what changed, what matters, where to look closely. Witness stores that briefing and renders it. Neither of them is the reviewer. The reader is, and every entity below exists to put the reader in a position to judge.
+Overseer is a tool for a human to run a review. A hosted skill, running on the user's own inference, reads the pull requests and prepares the briefing: what changed, what matters, where to look closely. Overseer stores that briefing and renders it. Neither of them is the reviewer. The reader is, and every entity below exists to put the reader in a position to judge.
+
+The name splits the roles. Overseer is the tool through which the reader oversees, and it sits over Seer, whose deployment it shares. The sub-agent that authors a review is the witness: it testifies to what it observed, and the reader judges. This project was called Witness until the better name arrived; the old name survives as the agent's, where it was always most accurate.
 
 This model is derived from the prototype, not from theory. Every field exists because the rendered page needed it, and several constraints exist because the prototype got them wrong first.
 
 ## The dividing line
 
-**Witness owns facts. The skill owns judgment.**
+**Overseer owns facts. The skill owns judgment.**
 
-Witness derives from the GitHub API and the skill may not author:
+Overseer derives from the GitHub API and the skill may not author:
 
 - pull request titles, head and base SHAs, base refs
 - the file list, the hunks, every line number, every `@@` range, the `+n -n` stats
 - whether a ref points inside or outside the reviewed change
 - whether the review is behind the branch
 
-The skill authors and Witness may not invent:
+The skill authors and Overseer may not invent:
 
 - the summary
 - statements: what changed, of what kind, and why it matters
@@ -72,7 +74,7 @@ pr
 
 `kinds[]` is derived on purpose. The marks on a pull request card are then provably tied to real claims, instead of being a second thing the skill can get out of step with the first.
 
-`author` and `co_authors[]` are how attribution survives: agent-written changes already announce themselves through Co-Authored-By trailers, so who wrote what, human or agent, is a derivable fact and Witness derives it. `body` is the description the author actually published, rendered behind a disclosure on the card so it is available without being re-summarized. Review comments and threads are also derived and handed to the skill as context, but rendering them is deferred, see the end of this document.
+`author` and `co_authors[]` are how attribution survives: agent-written changes already announce themselves through Co-Authored-By trailers, so who wrote what, human or agent, is a derivable fact and Overseer derives it. `body` is the description the author actually published, rendered behind a disclosure on the card so it is available without being re-summarized. Review comments and threads are also derived and handed to the skill as context, but rendering them is deferred, see the end of this document.
 
 ### Statement
 
@@ -149,7 +151,7 @@ hunk
 
 ### Ref
 
-A pointer, resolved and cached by Witness. The skill writes the pointer, never the code.
+A pointer, resolved and cached by Overseer. The skill writes the pointer, never the code.
 
 ```
 ref
@@ -165,11 +167,11 @@ ref
 
 Refs are SHA-pinned, so a force push cannot rot them.
 
-A ref renders its snippet and links out to GitHub at the pinned SHA. The snippet is the bounded view and the link is the unbounded one; Witness never grows a code browser. The point of the page is that the reader should not have to read code to review, and the point of the evidence is that they always can: every claim stays one tap from the lines it stands on, which is what keeps the skill honest even on the days nobody taps.
+A ref renders its snippet and links out to GitHub at the pinned SHA. The snippet is the bounded view and the link is the unbounded one; Overseer never grows a code browser. The point of the page is that the reader should not have to read code to review, and the point of the evidence is that they always can: every claim stays one tap from the lines it stands on, which is what keeps the skill honest even on the days nobody taps.
 
 ### Figure
 
-The one drawing on the page. Not free-form: a constrained graph that Witness renders in the house style.
+The one drawing on the page. Not free-form: a constrained graph that Overseer renders in the house style.
 
 ```
 figure
@@ -259,7 +261,7 @@ Breadth scales with decomposition, not with diff size. Each additional pull requ
 
 A monolithic pull request that exhausts its budget is not an error, and the write path does not refuse it. The publish response carries a warning naming the pressure: this change may have warranted further decomposition. The compression is the system telling the truth about reviewability, and the summary should say it out loud.
 
-## What Witness validates on write
+## What Overseer validates on write
 
 - every ref resolves at its SHA, otherwise 422 with the path and range
 - every hunk id exists in that pull request's diff
@@ -291,6 +293,14 @@ One shot does not mean one pass. Publishing to an existing slug creates the next
 
 Annotations belong to the review, not to a version, and each records the version it was filed against, so a question asked on pass one is still open on pass three and its quote still resolves against the version that produced it.
 
+## The delta is first class
+
+The delta between versions is computed, never written, and no language model is in the loop. Overseer derives it on three levels: entities by id, so a row is new, revised, or removed, and an annotation is answered; authored text by word-level diff wherever an id survives, so a revised 600-word body shows its dozen changed words instead of asking to be reread; code by the head SHAs, so the timeline states whether the branch itself moved between passes. Removed entities stay visible in the delta view rather than vanishing, because an absence you cannot see is not reviewable.
+
+The renderer gives every review a revision menu: the versions as a timeline, each entry carrying its derived counts and whether code moved. Delta marks on the page are measured against a base version the reader can pick, and the default is the version this reader last opened, falling back to the previous one. The goal is mechanical: a returning reader should never have to reread the whole account to discover what they would have needed to read.
+
+The same machinery covers derived text. A pull request description that changed between passes is word-diffed like any authored body, which is how "the agent improved the description" stops meaning "read all 600 words again."
+
 Viewing is the refresh trigger. Opening `/r/:slug` compares the stored head SHAs against GitHub, rate limited to once a minute per review, and kicks an asynchronous re-derivation when a head has moved. The page renders the stored document immediately and updates its freshness marks when the refresh lands, over the same live channel Seer already uses for bundles. `POST /api/reviews/:slug/refresh` stays for explicit calls, but nothing depends on remembering to make one: a review someone is looking at cannot silently claim `current` while the branch moves underneath it, because looking at it is what checks.
 
 ## Privacy differs from Seer
@@ -309,7 +319,7 @@ Seer bundles are public by link, because a bundle is something you want to hand 
 
 **Attachment formats beyond images.** The `media_type` field is already there; each new format is a renderer decision made when a real review needs it.
 
-**Mirroring annotations to GitHub.** The review should ultimately still live on GitHub, with Witness as the better view of it. The shape is already implied by the model: an annotation whose target carries a ref is expressible as a GitHub review comment, because a SHA, a path and a line range are exactly what that API wants, and one without a code anchor is an issue comment on the pull request. One way, Witness to GitHub, storing the mirrored comment id on the annotation. Not built until annotations themselves are, and two-way sync is deliberately not planned: pulling GitHub's conversation back in re-hosts it, which the comment-threads entry above already declines.
+**Mirroring annotations to GitHub.** The review should ultimately still live on GitHub, with Overseer as the better view of it. The shape is already implied by the model: an annotation whose target carries a ref is expressible as a GitHub review comment, because a SHA, a path and a line range are exactly what that API wants, and one without a code anchor is an issue comment on the pull request. One way, Overseer to GitHub, storing the mirrored comment id on the annotation. Not built until annotations themselves are, and two-way sync is deliberately not planned: pulling GitHub's conversation back in re-hosts it, which the comment-threads entry above already declines.
 
 ## Open questions
 
