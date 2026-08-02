@@ -6,6 +6,11 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+// Bun auto-loads the repo's .env in this child process, which can reintroduce a
+// developer's real API_KEY and outrank the API_TOKEN a scenario sets. Scenarios own
+// their auth env, so drop it before any app module reads config.
+delete process.env.API_KEY;
+
 const SCENARIO = process.env.SCENARIO!;
 const dataDir = process.env.DATA_DIR!;
 

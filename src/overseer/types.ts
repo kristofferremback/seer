@@ -142,7 +142,12 @@ export interface Group {
   /** Hunk ids. Every hunk in every pr belongs to exactly one group. */
   hunks: string[];
   fileNotes: { path: string; text: string }[];
-  /** Derived: the dominant kind across its hunks. */
+  /**
+   * Derived: the dominant kind across its hunks. Resolved deliberately as
+   * StatementKind (add|change|remove), not HunkLineKind: a group's mark reads
+   * next to statement marks, and a group whose hunks contain both adds and
+   * deletions is a change, which HunkLineKind cannot express.
+   */
   kind: StatementKind;
 }
 
@@ -264,7 +269,7 @@ export const BUDGETS = {
   checks: { max: 5 },
   chars: {
     reviewTitle: 80, // review.title
-    summary: 600, // review.summary, also <= 2 paragraphs
+    summary: 600, // review.summary, also <= BUDGETS.paragraphs.summary paragraphs
     prGist: 100, // pr.gist, one line
     statementText: 120, // statement.text, one line, no markup
     statementBody: 1200, // statement.body
@@ -280,6 +285,9 @@ export const BUDGETS = {
     exampleText: 800, // example.text
     caption: 120, // example.caption, attachment.caption, bundle.caption
     alt: 140, // attachment.alt
+  },
+  paragraphs: {
+    summary: 2, // review.summary, <= 2 paragraphs
   },
 } as const;
 

@@ -13,6 +13,9 @@ process.env.DATA_DIR = dataDir;
 process.env.PORT = "0";
 // TTL 0 makes every cached extraction immediately eligible for sweepCache().
 process.env.CACHE_TTL_MS = "0";
+// Tests authenticate with API_TOKEN above; a developer's real API_KEY (from a
+// local .env, which Bun auto-loads) would otherwise win in config.ts.
+delete process.env.API_KEY;
 // Tests always run against the disk blob store, whatever the developer's shell has.
 delete process.env.S3_BUCKET;
 // Tests never reach the real GitHub API, whatever the developer's shell has.
