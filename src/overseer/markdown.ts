@@ -350,6 +350,13 @@ interface InlineOptions {
   emphasis: boolean;
 }
 
+/**
+ * How deep emphasis and link labels may nest before the text is rejected by name. A
+ * stated contract beats letting the JS stack decide: the same input has to reject on
+ * every engine, not wherever that engine happens to run out of frames.
+ */
+const MAX_INLINE_DEPTH = 64;
+
 const FULL_INLINE: InlineOptions = { links: true, emphasis: true };
 const CODE_ONLY: InlineOptions = { links: false, emphasis: false };
 
@@ -429,12 +436,18 @@ function subSpan(span: InlineSpan, start: number, end: number): InlineSpan {
   return { text: span.text.slice(start, end), offsets: span.offsets.slice(start, end) };
 }
 
-function renderInlineInto(span: InlineSpan, starts: number[], options: InlineOptions): string {
+function renderInlineInto(
+  span: InlineSpan,
+  starts: number[],
+  options: InlineOptions,
+  depth = 0,
+): string {
   const text = span.text;
   let out = "";
   let plain = "";
   const at = (i: number) =>
     positionOf(starts, span.offsets[i] ?? (span.offsets[span.offsets.length - 1] ?? 0) + 1);
+  if (depth > MAX_INLINE_DEPTH) reject("nesting too deep", at(0), text.slice(0, 8));
   const flush = () => {
     out += escapeHtml(plain);
     plain = "";
@@ -491,10 +504,12 @@ function renderInlineInto(span: InlineSpan, starts: number[], options: InlineOpt
         if (!options.links) reject("link", at(i), text.slice(i, parsed.end));
         flush();
         const href = renderUrl(parsed.url, at(i + parsed.urlAt));
-        const label = renderInlineInto(subSpan(span, i + 1, i + 1 + parsed.label.length), starts, {
-          links: false,
-          emphasis: options.emphasis,
-        });
+        const label = renderInlineInto(
+          subSpan(span, i + 1, i + 1 + parsed.label.length),
+          starts,
+          { links: false, emphasis: options.emphasis },
+          depth + 1,
+        );
         out += `<a href="${href}">${label}</a>`;
         i = parsed.end;
         continue;
@@ -523,7 +538,12 @@ function renderInlineInto(span: InlineSpan, starts: number[], options: InlineOpt
         // An asterisk that never closes is ordinary text, in every mode.
         if (!options.emphasis) reject("emphasis", at(i), marker);
         flush();
-        const inner = renderInlineInto(subSpan(span, i + marker.length, body), starts, options);
+        const inner = renderInlineInto(
+          subSpan(span, i + marker.length, body),
+          starts,
+          options,
+          depth + 1,
+        );
         out +=
           marker === "***"
             ? `<strong><em>${inner}</em></strong>`
@@ -681,9 +701,11 @@ function normalize(source: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * A validator that throws is a 500 where the author deserved a 422, so exhausting the
- * stack on pathologically nested emphasis is reported as a rejection like any other.
- * Callers should still cap length before validating; this is the floor, not the plan.
+ * Nesting is capped explicitly at `MAX_INLINE_DEPTH`, so pathological input is refused
+ * by name at a stated limit. This RangeError catch is the belt to that braces: if some
+ * other recursion ever exhausts the stack, the author gets a 422 rather than a 500.
+ * Callers must still cap the length of a field before validating. Bun.serve is single
+ * threaded, and this module is the floor, not the plan.
  */
 const TOO_DEEP: Position = { line: 1, column: 1, offset: 0 };
 

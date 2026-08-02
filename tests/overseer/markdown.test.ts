@@ -163,9 +163,16 @@ describe("adversarial input", () => {
 
   test("pathological nesting is a rejection, not a crash", () => {
     const deep = `${"*".repeat(50000)}x${"*".repeat(50000)}`;
-    const result = validate(deep);
-    expect(result.ok).toBe(false);
+    expect(validate(deep)).toMatchObject({ ok: false, construct: "nesting too deep" });
     expect(validateInline(deep).ok).toBe(false);
+
+    // The depth limit is a stated number, not whatever the engine's stack allows, so the
+    // same input has to reject on every runtime and cheaply enough to stay under a test
+    // timeout. Nesting one level under the cap still renders.
+    const under = `${"*".repeat(64)}x${"*".repeat(64)}`;
+    expect(validate(under)).toEqual({ ok: true });
+    const over = `${"*".repeat(400)}x${"*".repeat(400)}`;
+    expect(validate(over)).toMatchObject({ ok: false, construct: "nesting too deep" });
   });
 
   test("near-miss markup either rejects or emits only whitelisted tags", () => {
