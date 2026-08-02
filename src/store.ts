@@ -7,9 +7,11 @@ import { config } from "./config";
 const zipsDir = join(config.dataDir, "zips");
 const cacheDir = join(config.dataDir, "cache");
 const imagesDir = join(config.dataDir, "images");
+const attachmentsDir = join(config.dataDir, "review-attachments");
 
 mkdirSync(zipsDir, { recursive: true });
 mkdirSync(imagesDir, { recursive: true });
+mkdirSync(attachmentsDir, { recursive: true });
 // Zips are the source of truth; the extraction cache is disposable, so start clean.
 rmSync(cacheDir, { recursive: true, force: true });
 mkdirSync(cacheDir, { recursive: true });
@@ -115,6 +117,54 @@ export async function openImage(
 /** Where the image blob lives, for corruption logging. */
 export function imageLocation(wsId: string, imageId: string): string {
   return s3 ? `s3://${config.s3!.bucket}/${imageKey(wsId, imageId)}` : imagePath(wsId, imageId);
+}
+
+// ---- review attachments ----
+
+// Review attachments are single blobs keyed by the att id alone, exactly like
+// images; media type, alt and caption live in the db row. Reviews are private to a
+// workspace, so serving always streams through Seer and never hands out an S3File.
+export function attachmentKey(wsId: string, attachmentId: string): string {
+  return `review-attachments/${wsId}/${attachmentId}`;
+}
+
+export function attachmentPath(wsId: string, attachmentId: string): string {
+  return join(attachmentsDir, wsId, attachmentId);
+}
+
+export async function saveAttachment(
+  wsId: string,
+  attachmentId: string,
+  data: Uint8Array,
+): Promise<void> {
+  if (s3) {
+    await s3.write(attachmentKey(wsId, attachmentId), data);
+    return;
+  }
+  mkdirSync(join(attachmentsDir, wsId), { recursive: true });
+  await Bun.write(attachmentPath(wsId, attachmentId), data);
+}
+
+/** The attachment blob for serving, or null if it's missing from the store. */
+export async function openAttachment(
+  wsId: string,
+  attachmentId: string,
+): Promise<BunFile | ReadableStream<Uint8Array> | null> {
+  if (s3) {
+    const file: S3File = s3.file(attachmentKey(wsId, attachmentId));
+    if (!(await file.exists())) return null;
+    return file.stream();
+  }
+  const file: BunFile = Bun.file(attachmentPath(wsId, attachmentId));
+  if (!(await file.exists())) return null;
+  return file;
+}
+
+/** Where the attachment blob lives, for corruption logging. */
+export function attachmentLocation(wsId: string, attachmentId: string): string {
+  return s3
+    ? `s3://${config.s3!.bucket}/${attachmentKey(wsId, attachmentId)}`
+    : attachmentPath(wsId, attachmentId);
 }
 
 // ---- extraction cache with freshness bumping ----

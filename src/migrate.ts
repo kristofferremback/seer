@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 2.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 3.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -17,6 +17,10 @@ import { hashKey, tinyId } from "./ids";
 // bump — a crash before that leaves user_version at 0 and re-runs cleanly.
 //
 // v2 adds the images table (single-file image uploads). Purely additive.
+//
+// v3 adds the Overseer review tables (reviews, versions, attachments, annotations,
+// read state, freshness, and the ref snippet cache). Purely additive: no existing
+// table is touched, so a v1 or v2 database walks straight up to it.
 
 const V1_SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
@@ -139,11 +143,96 @@ const V2_IMAGES = `
   CREATE INDEX IF NOT EXISTS idx_images_workspace ON images (workspace_id);
 `;
 
+// Overseer reviews. A review is workspace-scoped and versioned exactly like a
+// bundle: `reviews` holds the head pointer, `review_versions` holds one immutable
+// published document per version, stored as the resolved JSON the renderer reads.
+// Annotations belong to the review rather than to a version and record the version
+// they were filed against, so a question asked on pass one is still open on pass
+// three. `ref_snippets` is a pure cache keyed by (repo, sha, path): SHA-pinned, so
+// an entry is never stale and never needs invalidating.
+const V3_REVIEWS = `
+  CREATE TABLE IF NOT EXISTS reviews (
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    latest_version INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, slug)
+  );
+  CREATE TABLE IF NOT EXISTS review_versions (
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    doc TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, slug, version)
+  );
+  CREATE TABLE IF NOT EXISTS review_attachments (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    media_type TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    alt TEXT NOT NULL,
+    caption TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS review_annotations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    target_type TEXT NOT NULL CHECK (target_type IN ('statement','note','group','file','hunk','summary')),
+    target_id TEXT NOT NULL,
+    quote TEXT,
+    body TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','answered')),
+    answer TEXT,
+    version INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS review_reads (
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    opened_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, slug, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS review_freshness (
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    observed_head_sha TEXT NOT NULL,
+    checked_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, slug, pr_number)
+  );
+  CREATE TABLE IF NOT EXISTS ref_snippets (
+    repo TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    PRIMARY KEY (repo, sha, path)
+  );
+  CREATE INDEX IF NOT EXISTS idx_reviews_workspace ON reviews (workspace_id);
+  CREATE INDEX IF NOT EXISTS idx_review_attachments_review ON review_attachments (workspace_id, slug);
+  CREATE INDEX IF NOT EXISTS idx_review_annotations_review ON review_annotations (workspace_id, slug);
+`;
+
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 2) throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, or 2`);
+  if (uv > 3) throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, 2, or 3`);
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
+  if (userVersion() < 3) migrateToV3();
+}
+
+function migrateToV3(): void {
+  db.transaction(() => {
+    db.exec(V3_REVIEWS);
+    db.run("PRAGMA user_version = 3");
+  })();
+  console.log("[seer] migrated to schema v3 (overseer reviews).");
 }
 
 function migrateToV2(): void {
