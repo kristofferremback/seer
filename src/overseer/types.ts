@@ -87,8 +87,9 @@ export interface Pr {
   baseRef: string;
   /** Derived from base_ref when it names another pr in the review, else authored. */
   parent: number | null;
-  /** Derived: the GitHub login. */
-  author: string;
+  /** Derived: the GitHub login, or null when the account is gone. A deleted account
+   *  renders as a visible absence rather than as a blank name. */
+  author: string | null;
   /** Derived: Co-Authored-By trailers across the pr's commits, deduplicated. */
   coAuthors: string[];
   /** Derived: the pull request description, markdown as GitHub holds it. */

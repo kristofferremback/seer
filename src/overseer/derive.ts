@@ -70,7 +70,11 @@ export function hunksOf(pr: { files: FileDiff[] }): Hunk[] {
 export interface DerivedReview {
   kind: ReviewKind;
   prs: DerivedPr[];
-  /** Review comments across every pull request, in pointer order. Stored, never rendered. */
+  /** Review comments across every pull request, in pointer order. Never rendered.
+   *  Destination: `Review.skillContext` on the stored document, so it travels inside
+   *  `review_versions.doc` and no column is added for it. The skill reads it back on
+   *  the next pass through the published document, which is why it is derived once at
+   *  publish rather than re-derived on every read. */
   skillContext: SkillContextComment[];
 }
 
@@ -89,12 +93,17 @@ export function prKey(repo: string, number: number): string {
 //
 // The scan is narrowed the way git narrows it: only the message's last paragraph, and
 // only lines that start with the token, with no indent. co_authors[] is what tells a
-// reader an agent was in the commit, so a trailer quoted inside a fenced example or an
-// indented block in the body must not become a fact on the page.
+// reader an agent was in the commit, so a trailer sitting in an indented block in the
+// body does not become a fact on the page. That is the whole rule: a trailer written
+// flush left in the last paragraph counts, wherever it came from, which matches git's
+// own heuristic and means a fenced example in the last paragraph would still count.
 const COAUTHOR = /^co-authored-by:[ \t]*(.+?)[ \t]*$/gim;
 
 function trailerBlock(message: string): string {
-  const body = message.replace(/\s+$/, "");
+  // Line endings are normalised first: a CRLF message would otherwise be one long
+  // paragraph, losing the last-paragraph narrowing, and every trailer would carry a
+  // trailing carriage return into the co-author string.
+  const body = message.replace(/\r\n?/g, "\n").replace(/\s+$/, "");
   const paragraphs = body.split(/\n[ \t]*\n/);
   return paragraphs[paragraphs.length - 1] ?? "";
 }
@@ -273,8 +282,12 @@ export class RefResolveError extends Error {
   readonly code = "ref_unresolved";
   /** The GitHub status behind this failure, when there was one. A 404 is a ref that
    *  genuinely does not resolve; a 401, a 403 or a 5xx is Overseer's own problem, and
-   *  telling the skill its ref is bad would make it rewrite a correct ref. The route
-   *  reads this rather than answering 422 for everything. */
+   *  telling the skill its ref is bad would make it rewrite a correct ref. A 0 is a
+   *  pointer the client refused before any request went out, a malformed repo, path or
+   *  number, and null is a pointer this module refused the same way, a sha that is not
+   *  a full sha or a range that is not a range. Both are the skill's fault and a 422,
+   *  the same as a 404, so only a non-zero status other than 404 is Overseer's. The
+   *  route reads this rather than answering 422 for everything. */
   readonly status: number | null;
   constructor(
     message: string,
@@ -308,7 +321,9 @@ function refRange(pointer: RefPointer): string {
 function touchedIndex(prs: DerivedPr[]): Map<string, Set<string>> {
   const index = new Map<string, Set<string>>();
   const add = (repo: string, sha: string, path: string) => {
-    const key = `${repo}@${sha}`;
+    // Lowercased on the way in, because lookups lowercase the pointer's sha: GitHub
+    // answers to either spelling and the two sides must not be able to disagree.
+    const key = `${repo}@${sha.toLowerCase()}`;
     let set = index.get(key);
     if (!set) index.set(key, (set = new Set<string>()));
     set.add(path);
@@ -355,30 +370,25 @@ const MAX_CACHED_BYTES = 512 * 1024;
 /** Cached bytes are SHA-pinned, so they never go stale; they only go unwanted. A row
  *  nothing has re-fetched in this long is from a review no one is reading. */
 const SNIPPET_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const SWEEP_EVERY_MS = 60 * 60 * 1000;
-let lastSweep = 0;
 
-/** Evict cached files older than the time to live. Called when a resolver is built,
- *  at most once an hour, because that is the only moment the table grows. */
+/** Evict cached files older than the time to live, and answer how many rows went.
+ *  Called explicitly, by the publish path or a timer: building a resolver must not
+ *  quietly delete rows out of a table shared with every other reader. */
 export function sweepSnippetCache(now = Date.now()): number {
   return sweepSnippets(now - SNIPPET_TTL_MS);
 }
 
 export function refResolver(client: GithubClient, review: DerivedReview): RefResolver {
   const touched = touchedIndex(review.prs);
-  const now = Date.now();
-  if (now - lastSweep >= SWEEP_EVERY_MS) {
-    lastSweep = now;
-    sweepSnippetCache(now);
-  }
 
   // ref_snippets has no workspace column: the same (repo, sha, path) is the same bytes
-  // for everyone, which makes it a shared cache of private source. So it may only be
-  // read for a repository this derivation has already fetched under the caller's own
-  // GitHub token. A pointer naming any other repository pays a real fetch first, and
-  // only once that fetch has proved the token can read the repository does the cache
-  // open for it. Otherwise a publish body naming another workspace's (repo, sha, path)
-  // would be served private code with no GitHub call at all.
+  // for everyone, which makes it a shared cache of private source. The gate below is
+  // per-derivation, against the server's single GitHub token: the cache opens for a
+  // repository only once this derivation has actually fetched from it, so a publish
+  // body naming an unrelated (repo, sha, path) pays a real fetch rather than being
+  // served cached bytes with no GitHub call at all. It is not a per-caller check and
+  // proves nothing about who is publishing; there is one process-global token today,
+  // and if per-workspace tokens ever arrive this gate has to be rebuilt around them.
   const proven = new Set(review.prs.map((pr) => pr.repo));
 
   async function fileAt(pointer: RefPointer): Promise<string> {

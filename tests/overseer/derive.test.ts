@@ -345,6 +345,17 @@ describe("co-authors", () => {
     ]);
   });
 
+  test("a CRLF commit message keeps the last-paragraph rule and a clean value", () => {
+    expect(coAuthorsOf(["subject\r\n\r\nCo-Authored-By: Ada <a@example.com>\r\n"])).toEqual([
+      "Ada <a@example.com>",
+    ]);
+    // Without normalisation the whole message is one paragraph and the body trailer
+    // below would survive the last-paragraph narrowing.
+    expect(
+      coAuthorsOf(["Co-Authored-By: Fake <f@x>\r\n\r\nand then some prose about it\r\n"]),
+    ).toEqual([]);
+  });
+
   test("the word inside prose is not a trailer", () => {
     expect(coAuthorsOf(["mentions co-authored-by: nobody in the middle of a line"])).toEqual([]);
   });
@@ -671,6 +682,29 @@ describe("refs", () => {
         endLine: 1,
       }),
     ).toBe("outside");
+  });
+
+  test("a sha spelled in upper case is the same sha for origin", async () => {
+    const { review } = await fixture({});
+    expect(
+      deriveOrigin(review.prs, {
+        repo: REPO,
+        sha: sha("sha103").toUpperCase(),
+        path: "src/f103.ts",
+        startLine: 1,
+        endLine: 1,
+      }),
+    ).toBe("in_stack");
+  });
+
+  test("building a resolver does not touch the shared cache", async () => {
+    const now = Date.now();
+    const TTL = 30 * 24 * 60 * 60 * 1000;
+    putSnippet(REPO, sha("shaAncient"), "src/ancient.ts", FILE, now - TTL - 60_000);
+    const { review, client } = await fixture({});
+    refResolver(client, review);
+    // The sweep is the caller's to run, so a row old enough to evict is still here.
+    expect(getSnippet(REPO, sha("shaAncient"), "src/ancient.ts")).toBe(FILE);
   });
 
   test("both names of a renamed file are inside the change", async () => {
