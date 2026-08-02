@@ -10,7 +10,10 @@
 // bundle check is an injected predicate, and ref resolution belongs to the resolver in
 // derive.ts, which fetches, and so cannot live behind a pure signature. Note the
 // asymmetry: the bundle predicate is injected here, refResolver() is not, so the
-// publish route has to call it and turn a RefResolveError into a 422 itself. What this
+// publish route has to call it and turn a RefResolveError into a 422 itself. That is
+// the route's obligation, not this module's, and step 7 owes it a test: a payload whose
+// ref does not resolve at its sha is a 422 naming the path and the range, and this
+// function will not catch it because it never fetches. What this
 // module can check about a ref without fetching it, ref_unpinned, ref_range and
 // ref_highlight_outside, it does check.
 
@@ -117,7 +120,8 @@ export interface AttachmentInput {
   id: string;
   mediaType: string;
   alt: string;
-  caption: string;
+  /** Optional: the data model marks alt required and leaves caption to the author. */
+  caption?: string;
 }
 
 /** The whole document the skill publishes, in one shot. */
@@ -391,7 +395,13 @@ function asRecord<T>(entry: T): T {
 
 /** Every list the rules walk, coerced to a list. Shape errors are reported by name so a
  *  malformed body reads as a 422 about a field rather than as a crash. */
-function normalizeLists(errors: ValidationError[], payload: PublishPayload): PublishPayload {
+function normalizeLists(errors: ValidationError[], input: PublishPayload): PublishPayload {
+  // A POST body of `null` parses to null, and an array or a string is a body too. Each
+  // is a 422 naming every absent field, never a crash on the first property read.
+  const payload: PublishPayload =
+    input !== null && typeof input === "object" && !Array.isArray(input)
+      ? input
+      : ({} as PublishPayload);
   const prs = requireList(errors, "prs", payload.prs);
   const statements = requireList(errors, "statements", payload.statements);
   const notes = requireList(errors, "notes", payload.notes);
@@ -815,7 +825,9 @@ export function validatePublish(
       capText(errors, `${at}.alt`, a.alt, BUDGETS.chars.alt);
       checkLine(errors, `${at}.alt`, a.alt);
     }
-    if (isText(errors, `${at}.caption`, a.caption)) {
+    // The data model marks alt required and pointedly does not mark caption so: an
+    // attachment may carry none. A present one is still text.
+    if (a.caption !== undefined && isText(errors, `${at}.caption`, a.caption)) {
       capText(errors, `${at}.caption`, a.caption, BUDGETS.chars.caption);
       checkLine(errors, `${at}.caption`, a.caption);
     }
@@ -839,9 +851,11 @@ export function validatePublish(
 
   if (prior) {
     const typeOfPriorId = new Map<string, string>();
-    for (const s of prior.statements) typeOfPriorId.set(s.id, "statement");
-    for (const n of prior.notes) typeOfPriorId.set(n.id, "note");
-    for (const g of prior.groups) typeOfPriorId.set(g.id, "group");
+    // A prior document read back from storage may be missing a list, and a missing one
+    // reuses no ids: this rule reports nothing rather than crashing on it.
+    for (const s of prior.statements ?? []) typeOfPriorId.set(s.id, "statement");
+    for (const n of prior.notes ?? []) typeOfPriorId.set(n.id, "note");
+    for (const g of prior.groups ?? []) typeOfPriorId.set(g.id, "group");
     for (const a of prior.attachments ?? []) typeOfPriorId.set(a.id, "attachment");
     const check = (id: string, kind: string, field: string) => {
       const was = typeOfPriorId.get(id);
@@ -953,7 +967,14 @@ function checkRef(
       message: `${field} names ${ref.path}:${ref.startLine}-${ref.endLine}, which is not a line range`,
     });
   }
-  for (const line of Array.isArray(ref.highlight) ? ref.highlight : []) {
+  // An absent highlight is legal, a whole range with nothing picked out. A present one
+  // that is not a list is named, not dropped: the renderer indexes into it, so a string
+  // would coerce and highlight the wrong lines and an object would throw on .includes.
+  const highlight =
+    ref.highlight === undefined || ref.highlight === null
+      ? []
+      : requireList(errors, `${field}.highlight`, ref.highlight as number[] | undefined);
+  for (const line of highlight) {
     // Types are erased at runtime and this is the only gate on a POSTed document, so a
     // string or a NaN has to be caught here: both comparisons below are false for it.
     if (!Number.isInteger(line)) {
@@ -1065,15 +1086,17 @@ function checkEvidence(
           checkKind(errors, `${at}.figure.nodes[${j}].state`, n.state, FIGURE_NODE_STATES);
         });
         edges.forEach((edge, j) => {
-          // An edge label may be empty, a plain arrow, but it cannot be a number.
-          if (isText(errors, `${at}.figure.edges[${j}].label`, edge.label)) {
+          // An edge label may be absent or empty, a plain arrow, but it cannot be a
+          // number.
+          const edgeLabel = edge.label as string | undefined;
+          if (edgeLabel !== undefined && isText(errors, `${at}.figure.edges[${j}].label`, edgeLabel)) {
             capText(
               errors,
               `${at}.figure.edges[${j}].label`,
-              edge.label,
+              edgeLabel,
               BUDGETS.chars.figureEdgeLabel,
             );
-            checkLine(errors, `${at}.figure.edges[${j}].label`, edge.label);
+            checkLine(errors, `${at}.figure.edges[${j}].label`, edgeLabel);
           }
           for (const end of ["from", "to"] as const) {
             if (nodeIds.has(edge[end])) continue;

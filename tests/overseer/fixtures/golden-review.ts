@@ -113,11 +113,89 @@ export const GOLDEN_HUNKS = {
   tests: H_TESTS,
 };
 
+/** The validator's narrow view of the derived facts, taken from the full review below
+ *  so the two cannot disagree about which pull request carries which hunk. */
 export function goldenDerived(): DerivedFacts {
   return {
+    prs: goldenDerivedReview().prs.map((pr) => ({
+      repo: pr.repo,
+      number: pr.number,
+      hunks: pr.hunks,
+    })),
+  };
+}
+
+/** The slug and version this review publishes as. */
+export const GOLDEN_SLUG = "reviews-get-a-workspace";
+export const GOLDEN_VERSION = 1;
+/** The bytes stored for `att_gate`: a 1x1 png, small enough to check in. */
+export const GOLDEN_ATTACHMENT_BYTES = Uint8Array.from(
+  atob(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  ),
+  (c) => c.charCodeAt(0),
+);
+
+/** The derived side of a pull request, as the data model specifies it: everything
+ *  Overseer fetches rather than the skill authoring it. `goldenDerived()` is the
+ *  validator's narrow view of this; the publish route, storage and the renderer read
+ *  the whole thing, from here rather than from a second fixture that drifts. */
+export interface GoldenDerivedPr {
+  repo: string;
+  number: number;
+  title: string;
+  headSha: string;
+  baseSha: string;
+  baseRef: string;
+  parent: number | null;
+  author: string | null;
+  coAuthors: string[];
+  body: string;
+  hunks: Hunk[];
+}
+
+export interface GoldenDerivedReview {
+  slug: string;
+  version: number;
+  prs: GoldenDerivedPr[];
+  /** Attachment id to its stored bytes and media type. */
+  attachments: { id: string; mediaType: string; bytes: Uint8Array }[];
+}
+
+export function goldenDerivedReview(): GoldenDerivedReview {
+  return {
+    slug: GOLDEN_SLUG,
+    version: GOLDEN_VERSION,
     prs: [
-      { repo: GOLDEN_REPO, number: 12, hunks: [H_AUTH, H_SERVER_GATE] },
-      { repo: GOLDEN_REPO, number: 13, hunks: [H_SERVER_API, H_ROUTES, H_TESTS] },
+      {
+        repo: GOLDEN_REPO,
+        number: 12,
+        title: "Put reviews behind the workspace session gate",
+        headSha: GOLDEN_HEAD_SHA_12,
+        baseSha: GOLDEN_BASE_SHA,
+        baseRef: "main",
+        parent: null,
+        author: "kremback",
+        coAuthors: ["Claude Fable 5 <noreply@anthropic.com>"],
+        body: "Reuses the bundle `session()` helper for review routes.",
+        hunks: [H_AUTH, H_SERVER_GATE],
+      },
+      {
+        repo: GOLDEN_REPO,
+        number: 13,
+        title: "Add the review publish and read endpoints",
+        headSha: GOLDEN_HEAD_SHA_13,
+        baseSha: GOLDEN_HEAD_SHA_12,
+        baseRef: "reviews-session-gate",
+        parent: 12,
+        author: "kremback",
+        coAuthors: [],
+        body: "Two routes and their tests, on top of the gate in #12.",
+        hunks: [H_SERVER_API, H_ROUTES, H_TESTS],
+      },
+    ],
+    attachments: [
+      { id: "att_gate", mediaType: "image/png", bytes: GOLDEN_ATTACHMENT_BYTES },
     ],
   };
 }

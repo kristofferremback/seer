@@ -17,6 +17,7 @@ import {
   GOLDEN_REPO,
   goldenBundleExists,
   goldenDerived,
+  goldenDerivedReview,
   goldenPayload,
   makeHunk,
 } from "./fixtures/golden-review";
@@ -182,6 +183,29 @@ describe("the golden payload", () => {
 });
 
 // ---- rule: caps, with pull-request scaling ----
+
+describe("the golden derived review", () => {
+  test("carries the derived fields later steps read, for the payload's pull requests", () => {
+    const review = goldenDerivedReview();
+    expect(review.prs.map((p) => p.number)).toEqual(goldenPayload().prs.map((p) => p.number));
+    for (const pr of review.prs) {
+      expect(pr.title.length).toBeGreaterThan(0);
+      expect(pr.headSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(pr.baseSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(pr.baseRef.length).toBeGreaterThan(0);
+      expect(pr.author).not.toBeNull();
+      expect(Array.isArray(pr.coAuthors)).toBe(true);
+      expect(typeof pr.body).toBe("string");
+    }
+    expect(review.prs[1]!.parent).toBe(12);
+    expect(review.slug.length).toBeGreaterThan(0);
+    expect(review.version).toBeGreaterThan(0);
+    expect(review.attachments.map((a) => a.id)).toEqual(
+      goldenPayload().attachments.map((a) => a.id),
+    );
+    expect(review.attachments[0]!.bytes.length).toBeGreaterThan(0);
+  });
+});
 
 describe("count caps scale with decomposition", () => {
   test("7 statements on one pull request is an error with overage 1", () => {
@@ -553,6 +577,20 @@ describe("attachments", () => {
     expect(err?.rule).toBe("required");
   });
 
+  test("an attachment without a caption is legal", () => {
+    const payload = golden();
+    delete (payload.attachments[0] as { caption?: unknown }).caption;
+    const result = run(payload);
+    expect(result.errors).toEqual([]);
+  });
+
+  test("a caption that is not text is still rejected", () => {
+    const payload = golden();
+    (payload.attachments[0] as { caption?: unknown }).caption = 7;
+    const err = run(payload).errors.find((e) => e.field === "attachments[0].caption");
+    expect(err?.rule).toBe("not_text");
+  });
+
   test("alt text over 140 characters names its overage", () => {
     const payload = golden();
     payload.attachments[0]!.alt = "z".repeat(148);
@@ -629,6 +667,27 @@ describe("refs", () => {
     payload.statements[0]!.refs[0]!.highlight = [200];
     const err = find(run(payload).errors, "ref_highlight_outside");
     expect(err.field).toBe("statements[0].refs[0].highlight");
+  });
+
+  test("a highlight that is a string is named, not dropped", () => {
+    const payload = golden();
+    (payload.statements[0]!.refs[0] as { highlight?: unknown }).highlight = "42";
+    const err = run(payload).errors.find((e) => e.field === "statements[0].refs[0].highlight");
+    expect(err?.rule).toBe("required");
+  });
+
+  test("a highlight that is an object is named, not dropped", () => {
+    const payload = golden();
+    (payload.statements[0]!.refs[0] as { highlight?: unknown }).highlight = { a: 1 };
+    const err = run(payload).errors.find((e) => e.field === "statements[0].refs[0].highlight");
+    expect(err?.rule).toBe("required");
+  });
+
+  test("a ref with no highlight at all stays legal", () => {
+    const payload = golden();
+    delete (payload.statements[0]!.refs[0] as { highlight?: unknown }).highlight;
+    const result = run(payload);
+    expect(result.errors).toEqual([]);
   });
 });
 
@@ -915,6 +974,17 @@ describe("a body missing a list", () => {
     expect(err.field).toBe("notes");
   });
 
+  test("a null body is a named 422, not a crash", () => {
+    const result = run(null as unknown as PublishPayload);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors.some((e) => e.rule === "required" && e.field === "prs")).toBe(true);
+  });
+
+  test("a prior document missing its lists does not throw", () => {
+    const result = run(golden(), goldenDerived(), {} as Parameters<typeof validatePublish>[2]);
+    expect(result.errors).toEqual([]);
+  });
+
   test("names an absent list on one entity", () => {
     const payload = golden();
     delete (payload.statements[0] as { refs?: unknown }).refs;
@@ -1072,6 +1142,15 @@ type Mutation = "deleting" | "replacing with a number" | "replacing with null";
 function mayHold(path: string, mutation: Mutation, original: unknown): boolean {
   // pr.parent is optional: most pull requests sit at the root of the stack.
   if (path.endsWith(".parent")) return true;
+  // The data model marks attachment.alt required and leaves attachment.caption to the
+  // author, and gives a figure edge label no requiredness at all: absent is legal for
+  // both, a present one that is not text is not.
+  if (
+    mutation === "deleting" &&
+    (/^\.attachments\[\d+\]\.caption$/.test(path) || /\.figure\.edges\[\d+\]\.label$/.test(path))
+  ) {
+    return true;
+  }
   // Deleting an array element leaves a hole rather than an entry, and JSON.parse cannot
   // produce one: forEach skips it, so there is nothing to report.
   if (mutation === "deleting" && /\[\d+\]$/.test(path)) return true;
