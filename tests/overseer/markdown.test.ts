@@ -58,6 +58,8 @@ describe("forbidden constructs are named, never stripped", () => {
     ["text\n# h", "heading", "#"],
     ["|a|b|", "table", "|a|b|"],
     ["a | b\n--- | ---", "table", "a | b"],
+    ["a|b\n-|-", "table", "a|b"],
+    ["a|b\n:-|-:", "table", "a|b"],
     ["<div>", "raw HTML tag", "<div>"],
     ["<script>alert(1)</script>", "raw HTML tag", "<script>"],
     ["![img](x)", "inline image", "![img](x)"],
@@ -143,6 +145,27 @@ describe("adversarial input", () => {
       const html = render(source);
       for (const tag of emittedTags(html)) expect(WHITELIST.has(tag)).toBe(true);
     }
+  });
+
+  test("an href is escaped, not just filtered", () => {
+    expect(render("[a](/d?e=1&f=2)")).toBe('<p><a href="/d?e=1&amp;f=2">a</a></p>');
+    expect(render("[a](https://x.test/?q=1&r=2)")).toBe(
+      '<p><a href="https://x.test/?q=1&amp;r=2">a</a></p>',
+    );
+  });
+
+  test("a leading tab does not hide markup from the one-line guards", () => {
+    expect(validateInline("\t# h")).toMatchObject({ ok: false, construct: "heading" });
+    expect(validateInline("\t> quote")).toMatchObject({ ok: false, construct: "blockquote" });
+    expect(validateInline("\t- item")).toMatchObject({ ok: false, construct: "list" });
+    expect(renderInline("\tplain words")).toBe("plain words");
+  });
+
+  test("pathological nesting is a rejection, not a crash", () => {
+    const deep = `${"*".repeat(50000)}x${"*".repeat(50000)}`;
+    const result = validate(deep);
+    expect(result.ok).toBe(false);
+    expect(validateInline(deep).ok).toBe(false);
   });
 
   test("near-miss markup either rejects or emits only whitelisted tags", () => {
@@ -324,10 +347,35 @@ describe("stability", () => {
     expect(render(source.replace(/\n/g, "\r\n"))).toBe(render(source));
   });
 
-  test("validate does not mutate its input", () => {
-    const copy = `${source}`;
-    validate(source);
-    expect(source).toBe(copy);
+  test("validate and render agree on every corpus entry", () => {
+    const corpus = [
+      source,
+      "# h",
+      "|a|b|",
+      "a|b\n-|-",
+      "<div>x</div>",
+      "![img](x)",
+      "> quote",
+      "```\nunclosed",
+      "[a](javascript:alert(1))",
+      "plain *emph* and `code`",
+      "- one\n- two",
+    ];
+    for (const entry of corpus) {
+      const result = validate(entry);
+      if (result.ok) {
+        expect(() => render(entry)).not.toThrow();
+        continue;
+      }
+      let thrown: unknown;
+      try {
+        render(entry);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(MarkdownRejection);
+      expect((thrown as MarkdownRejection).construct).toBe(result.construct);
+    }
   });
 });
 

@@ -1,12 +1,11 @@
 import { config } from "./config";
+import { escapeHtml } from "./escape";
+
+export { escapeHtml };
 
 // Where the source lives; kept as a named const so it is trivial to re-point.
 export const GITHUB_URL = "https://github.com/kristofferremback/seer";
 export const CONTACT_EMAIL = "kristoffer.remback@gmail.com";
-
-export function escapeHtml(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
-}
 
 const NAMED_ENTITIES: Record<string, string> = {
   amp: "&",

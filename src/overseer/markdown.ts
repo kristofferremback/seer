@@ -21,7 +21,7 @@
 // A rejection quotes the offending source verbatim, so `message` and `text` are safe in
 // a JSON body but must go through `escapeHtml` before reaching any HTML template.
 
-import { escapeHtml } from "../pages";
+import { escapeHtml } from "../escape";
 
 /**
  * Where a rejected construct sits in the source. `line` and `column` are 1-based.
@@ -111,7 +111,10 @@ const THEMATIC_BREAK = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
 const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*(\S*)[ \t]*$/;
 const UNORDERED = /^ {0,3}([-*+])(?:[ \t]+|$)/;
 const ORDERED = /^ {0,3}(\d{1,9})[.)](?:[ \t]+|$)/;
-const TABLE_DELIMITER = /^ {0,3}\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?$/;
+// GFM's delimiter cell is `:?-+:?`, so a single hyphen is enough. Matching only two or
+// more left `a|b` over `-|-` rendering as a real table everywhere else while this module
+// reflowed it into a paragraph of literal pipes.
+const TABLE_DELIMITER = /^ {0,3}\|?[ \t]*:?-{1,}:?[ \t]*(\|[ \t]*:?-{1,}:?[ \t]*)*\|?$/;
 // The closing `>` is required. Without it `i<n and then exits` reads as a tag the author
 // never wrote, and CommonMark treats an unterminated `<name ...` as literal text anyway.
 // Nothing is lost by the tightening: an unmatched `<` still leaves as `&lt;`.
@@ -139,7 +142,9 @@ function rejectForbiddenLine(line: SourceLine, starts: number[], previousWasText
   }
   if (THEMATIC_BREAK.test(text)) reject("thematic break", at(0), text.trim());
 
-  if (text.trimStart().startsWith("|") || TABLE_DELIMITER.test(text)) {
+  // A delimiter row on its own is only a table if it has a pipe: a bare `-` is an empty
+  // list item, and `---` is a thematic break, already named above.
+  if (text.trimStart().startsWith("|") || (text.includes("|") && TABLE_DELIMITER.test(text))) {
     reject("table", at(text.length - text.trimStart().length), text.trim());
   }
 
@@ -675,6 +680,19 @@ function normalize(source: string): string {
 // Entry points
 // ---------------------------------------------------------------------------
 
+/**
+ * A validator that throws is a 500 where the author deserved a 422, so exhausting the
+ * stack on pathologically nested emphasis is reported as a rejection like any other.
+ * Callers should still cap length before validating; this is the floor, not the plan.
+ */
+const TOO_DEEP: Position = { line: 1, column: 1, offset: 0 };
+
+function fromThrown(err: unknown): ValidationResult {
+  if (err instanceof MarkdownRejection) return fail(err);
+  if (err instanceof RangeError) return fail(new MarkdownRejection("nesting too deep", TOO_DEEP, ""));
+  throw err;
+}
+
 /** Checks a multi-line authored field against the subset. Never throws. */
 export function validate(source: string): ValidationResult {
   try {
@@ -683,8 +701,7 @@ export function validate(source: string): ValidationResult {
     renderBlocks(parseBlocks(text, starts), starts);
     return { ok: true };
   } catch (err) {
-    if (err instanceof MarkdownRejection) return fail(err);
-    throw err;
+    return fromThrown(err);
   }
 }
 
@@ -701,20 +718,24 @@ export function validateInline(source: string): ValidationResult {
     renderInline(source);
     return { ok: true };
   } catch (err) {
-    if (err instanceof MarkdownRejection) return fail(err);
-    throw err;
+    return fromThrown(err);
   }
 }
 
 /** Renders a one-line field. Throws `MarkdownRejection` on any markup beyond inline code. */
 export function renderInline(source: string): string {
-  const text = normalize(source);
-  const starts = lineStarts(text);
-  if (text.includes("\n")) {
-    reject("line break", positionOf(starts, text.indexOf("\n")), "\\n");
+  const whole = normalize(source);
+  const starts = lineStarts(whole);
+  if (whole.includes("\n")) {
+    reject("line break", positionOf(starts, whole.indexOf("\n")), "\\n");
   }
-  rejectForbiddenLine({ text, offset: 0 }, starts, false);
+  // A one-line field has no indentation semantics, so leading whitespace is dropped
+  // before the guards run. Otherwise `\t# h` would slip past the `^ {0,3}#` anchor that
+  // catches `# h` and `  # h`, which is a hole in the reject-by-name contract.
+  const lead = whole.length - whole.trimStart().length;
+  const text = whole.slice(lead);
+  rejectForbiddenLine({ text, offset: lead }, starts, false);
   const list = UNORDERED.exec(text) ?? ORDERED.exec(text);
-  if (list) reject("list", positionOf(starts, 0), list[0]!.trim());
-  return renderInlineInto(spanOfText(text, 0), starts, CODE_ONLY);
+  if (list) reject("list", positionOf(starts, lead), list[0]!.trim());
+  return renderInlineInto(spanOfText(text, lead), starts, CODE_ONLY);
 }
