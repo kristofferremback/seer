@@ -405,3 +405,9 @@ export function putSnippet(repo: string, sha: string, path: string, content: str
     [repo, sha, path, content, Date.now()],
   );
 }
+
+/** Drop cached files fetched before `cutoff`. The eviction policy itself lives with
+ *  the resolver that fills the table; this is only the query. */
+export function sweepSnippets(cutoff: number): number {
+  return db.run("DELETE FROM ref_snippets WHERE fetched_at < ?", [cutoff]).changes;
+}

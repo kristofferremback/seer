@@ -8,9 +8,9 @@
 // go through the (repo, sha, path) snippet cache from step 3, which can never go stale
 // because refs are SHA-pinned, so resolving the same file twice costs one fetch.
 
-import { getSnippet, putSnippet } from "./db";
+import { getSnippet, putSnippet, sweepSnippets } from "./db";
 import { collectPullDiff, type FileDiff } from "./diff";
-import type { GithubClient } from "./github";
+import { GithubError, type GithubClient } from "./github";
 import type { Hunk, Ref, RefOrigin, ReviewKind, StatementKind } from "./types";
 
 /** What the skill authors about a pull request before anything is derived. */
@@ -52,7 +52,8 @@ export interface DerivedPr {
    *  request's `base_ref` names when the two are stacked. */
   headRef: string;
   parent: number | null;
-  author: string;
+  /** Null when the account is gone, which is a visible absence rather than a blank name. */
+  author: string | null;
   coAuthors: string[];
   body: string;
   files: FileDiff[];
@@ -78,7 +79,18 @@ export function prKey(repo: string, number: number): string {
 // keeps its capitalisation, while deduplication is by lowercased email: the same
 // person committing as "Ada <A@Example.com>" and "ada <a@example.com>" is one
 // co-author, and the first spelling seen is the one that survives.
-const COAUTHOR = /^[ \t]*co-authored-by:[ \t]*(.+?)[ \t]*$/gim;
+//
+// The scan is narrowed the way git narrows it: only the message's last paragraph, and
+// only lines that start with the token, with no indent. co_authors[] is what tells a
+// reader an agent was in the commit, so a trailer quoted inside a fenced example or an
+// indented block in the body must not become a fact on the page.
+const COAUTHOR = /^co-authored-by:[ \t]*(.+?)[ \t]*$/gim;
+
+function trailerBlock(message: string): string {
+  const body = message.replace(/\s+$/, "");
+  const paragraphs = body.split(/\n[ \t]*\n/);
+  return paragraphs[paragraphs.length - 1] ?? "";
+}
 
 function coAuthorKey(trailer: string): string {
   const email = /<([^>]*)>/.exec(trailer)?.[1];
@@ -90,7 +102,7 @@ export function coAuthorsOf(messages: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const message of messages) {
-    for (const match of message.matchAll(COAUTHOR)) {
+    for (const match of trailerBlock(message).matchAll(COAUTHOR)) {
       const trailer = match[1]!.trim();
       if (!trailer) continue;
       const key = coAuthorKey(trailer);
@@ -148,7 +160,10 @@ export function deriveReviewKind(
     if (children.has(key)) return "set";
     children.set(key, prKey(p.repo, p.number));
   }
-  // Walk the chain from the root: a stack visits every pull request exactly once.
+  // Walk the chain from the root: a stack visits every pull request exactly once. The
+  // repeat-visit guard below is belt and braces: pull request keys are unique and a
+  // parent with two children already returned above, so a cycle has no root and leaves
+  // by the `roots.length !== 1` return before the walk begins.
   let cursor = prKey(roots[0]!.repo, roots[0]!.number);
   const walked = new Set<string>([cursor]);
   for (;;) {
@@ -173,6 +188,16 @@ export async function derivePrs(
 ): Promise<DerivedReview> {
   if (pointers.length === 0) {
     throw new Error("A review needs at least one pull request.");
+  }
+  // The same pull request twice would duplicate its hunk ids, which the publish path
+  // needs unique, and would look like two roots to the shape derivation.
+  const pointed = new Set<string>();
+  for (const pointer of pointers) {
+    const key = prKey(pointer.repo, pointer.number);
+    if (pointed.has(key)) {
+      throw new Error(`A review names ${key} more than once.`);
+    }
+    pointed.add(key);
   }
   const partial: (Omit<DerivedPr, "parent"> & { authored: number | null })[] = [];
   const skillContext: SkillContextComment[] = [];
@@ -206,7 +231,7 @@ export async function derivePrs(
       baseRef: pull.base.ref,
       headRef: pull.head.ref,
       authored: pointer.parent ?? null,
-      author: pull.user?.login ?? "",
+      author: pull.user?.login ?? null,
       coAuthors: coAuthorsOf(commits.map((c) => c.commit.message)),
       body: pull.body ?? "",
       files: diff.files,
@@ -241,6 +266,11 @@ export interface RefPointer {
  *  parse a message back apart. */
 export class RefResolveError extends Error {
   readonly code = "ref_unresolved";
+  /** The GitHub status behind this failure, when there was one. A 404 is a ref that
+   *  genuinely does not resolve; a 401, a 403 or a 5xx is Overseer's own problem, and
+   *  telling the skill its ref is bad would make it rewrite a correct ref. The route
+   *  reads this rather than answering 422 for everything. */
+  readonly status: number | null;
   constructor(
     message: string,
     readonly repo: string,
@@ -248,9 +278,11 @@ export class RefResolveError extends Error {
     readonly path: string,
     readonly startLine: number,
     readonly endLine: number,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, cause === undefined ? undefined : { cause });
     this.name = "RefResolveError";
+    this.status = cause instanceof GithubError ? cause.status : null;
   }
 }
 
@@ -300,12 +332,44 @@ export interface RefResolver {
   resolve(pointer: RefPointer): Promise<Ref>;
 }
 
+/** Files above this are cached in memory for the resolve that needs them and never
+ *  stored. A lockfile or a generated bundle would otherwise sit in the shared table
+ *  forever, and no useful ref points at thousands of lines of it. */
+const MAX_CACHED_BYTES = 512 * 1024;
+/** Cached bytes are SHA-pinned, so they never go stale; they only go unwanted. A row
+ *  nothing has re-fetched in this long is from a review no one is reading. */
+const SNIPPET_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SWEEP_EVERY_MS = 60 * 60 * 1000;
+let lastSweep = 0;
+
+/** Evict cached files older than the time to live. Called when a resolver is built,
+ *  at most once an hour, because that is the only moment the table grows. */
+export function sweepSnippetCache(now = Date.now()): number {
+  return sweepSnippets(now - SNIPPET_TTL_MS);
+}
+
 export function refResolver(client: GithubClient, review: DerivedReview): RefResolver {
   const touched = touchedIndex(review.prs);
+  const now = Date.now();
+  if (now - lastSweep >= SWEEP_EVERY_MS) {
+    lastSweep = now;
+    sweepSnippetCache(now);
+  }
+
+  // ref_snippets has no workspace column: the same (repo, sha, path) is the same bytes
+  // for everyone, which makes it a shared cache of private source. So it may only be
+  // read for a repository this derivation has already fetched under the caller's own
+  // GitHub token. A pointer naming any other repository pays a real fetch first, and
+  // only once that fetch has proved the token can read the repository does the cache
+  // open for it. Otherwise a publish body naming another workspace's (repo, sha, path)
+  // would be served private code with no GitHub call at all.
+  const proven = new Set(review.prs.map((pr) => pr.repo));
 
   async function fileAt(pointer: RefPointer): Promise<string> {
-    const cached = getSnippet(pointer.repo, pointer.sha, pointer.path);
-    if (cached !== null) return cached;
+    if (proven.has(pointer.repo)) {
+      const cached = getSnippet(pointer.repo, pointer.sha, pointer.path);
+      if (cached !== null) return cached;
+    }
     let content: string;
     try {
       content = await client.getFileAtSha(pointer.repo, pointer.path, pointer.sha);
@@ -319,9 +383,13 @@ export function refResolver(client: GithubClient, review: DerivedReview): RefRes
         pointer.path,
         pointer.startLine,
         pointer.endLine,
+        err,
       );
     }
-    putSnippet(pointer.repo, pointer.sha, pointer.path, content);
+    proven.add(pointer.repo);
+    if (Buffer.byteLength(content, "utf8") <= MAX_CACHED_BYTES) {
+      putSnippet(pointer.repo, pointer.sha, pointer.path, content);
+    }
     return content;
   }
 

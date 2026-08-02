@@ -10,8 +10,11 @@ import {
   prKey,
   refResolver,
   RefResolveError,
+  sweepSnippetCache,
   type PrPointer,
 } from "../../src/overseer/derive";
+import { getSnippet, putSnippet } from "../../src/overseer/db";
+import { GithubError } from "../../src/overseer/github";
 import type {
   GithubClient,
   GithubCommit,
@@ -195,7 +198,7 @@ describe("stack shape", () => {
     ).toBe("set");
   });
 
-  test("a cycle is a set rather than a hang", () => {
+  test("a review with no root is a set", () => {
     expect(
       deriveReviewKind([
         { repo: REPO, number: 1, parent: 2 },
@@ -285,6 +288,26 @@ describe("pull request facts", () => {
   test("a review with no pull requests is a loud failure", async () => {
     await expect(derivePrs(countingClient({}), [])).rejects.toThrow(/at least one/);
   });
+
+  test("the same pull request named twice is a loud failure, before any call", async () => {
+    const client = countingClient(chain());
+    await expect(
+      derivePrs(client, [
+        { repo: REPO, number: 101 },
+        { repo: REPO, number: 101 },
+      ]),
+    ).rejects.toThrow(/acme\/app#101 more than once/);
+    expect(client.total()).toBe(0);
+  });
+
+  test("a deleted account is a null author rather than a blank one", async () => {
+    const pulls = chain();
+    const gone = fakePull(101, "feat/a", "main");
+    gone.pull = { ...gone.pull, user: null };
+    pulls[`${REPO}#101`] = gone;
+    const review = await derivePrs(countingClient(pulls), POINTERS);
+    expect(review.prs[0]!.author).toBe(null);
+  });
 });
 
 describe("co-authors", () => {
@@ -312,6 +335,18 @@ describe("co-authors", () => {
 
   test("the word inside prose is not a trailer", () => {
     expect(coAuthorsOf(["mentions co-authored-by: nobody in the middle of a line"])).toEqual([]);
+  });
+
+  test("a trailer quoted in an example in the body is not a co-author", () => {
+    expect(
+      coAuthorsOf(["see this example:\n\n```\n    Co-Authored-By: Fake <f@x>\n```\n"]),
+    ).toEqual([]);
+    // An indented line in the trailer paragraph is not a trailer either.
+    expect(coAuthorsOf(["m\n\n    Co-Authored-By: Fake <f@x>\n"])).toEqual([]);
+    // A trailer paragraph above prose is body text, not the trailer block.
+    expect(
+      coAuthorsOf(["Co-Authored-By: Fake <f@x>\n\nand then some prose about it\n"]),
+    ).toEqual([]);
   });
 
   test("a pull request with no trailers derives an empty list", async () => {
@@ -395,6 +430,91 @@ describe("refs", () => {
     const cold = await refResolver(fresh, review).resolve(pointer);
     expect(cold.snippet).toBe("alpha\nbravo");
     expect(fresh.calls.getFileAtSha).toBe(0);
+  });
+
+  test("the cache is not read for a repository this review has not fetched", async () => {
+    // Another workspace resolved this file already, so the shared table holds it.
+    putSnippet("private/secrets", "shaX", "src/keys.ts", FILE);
+    const { client, resolver } = await fixture({});
+    const pointer = {
+      repo: "private/secrets",
+      sha: "shaX",
+      path: "src/keys.ts",
+      startLine: 1,
+      endLine: 1,
+    };
+    // The pointer names a repository outside the review, so the cache stays shut and
+    // the fetch under the caller's own token decides it, which here fails.
+    const err = await resolver.resolve(pointer).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RefResolveError);
+    expect(client.calls.getFileAtSha).toBe(1);
+  });
+
+  test("a repository the caller's token has read opens the cache for later refs", async () => {
+    const { client, resolver } = await fixture({ [`shaY:src/other.ts`]: FILE });
+    const pointer = {
+      repo: "other/app",
+      sha: "shaY",
+      path: "src/other.ts",
+      startLine: 1,
+      endLine: 1,
+    };
+    expect((await resolver.resolve(pointer)).snippet).toBe("alpha");
+    expect(client.calls.getFileAtSha).toBe(1);
+    // Proved once under the token, so the second resolve is free.
+    expect((await resolver.resolve({ ...pointer, startLine: 2, endLine: 2 })).snippet).toBe(
+      "bravo",
+    );
+    expect(client.calls.getFileAtSha).toBe(1);
+  });
+
+  test("a file above the cache bound resolves but is never stored", async () => {
+    const big = `${"x".repeat(600 * 1024)}\nsecond line\n`;
+    const { client, resolver } = await fixture({ [`sha101:src/huge.ts`]: big });
+    const pointer = {
+      repo: REPO,
+      sha: "sha101",
+      path: "src/huge.ts",
+      startLine: 2,
+      endLine: 2,
+    };
+    expect((await resolver.resolve(pointer)).snippet).toBe("second line");
+    expect(getSnippet(REPO, "sha101", "src/huge.ts")).toBeNull();
+    expect(client.calls.getFileAtSha).toBe(1);
+    // No row, so the second resolve fetches again rather than serving from nowhere.
+    await resolver.resolve(pointer);
+    expect(client.calls.getFileAtSha).toBe(2);
+  });
+
+  test("stale cached files are swept by age", async () => {
+    putSnippet(REPO, "shaOld", "src/old.ts", FILE);
+    expect(getSnippet(REPO, "shaOld", "src/old.ts")).toBe(FILE);
+    // A sweep run far enough in the future than the row's time to live.
+    sweepSnippetCache(Date.now() + 400 * 24 * 60 * 60 * 1000);
+    expect(getSnippet(REPO, "shaOld", "src/old.ts")).toBeNull();
+  });
+
+  test("a transport failure keeps its cause and status instead of reading as a bad ref", async () => {
+    const client = countingClient(chain(), {});
+    const review = await derivePrs(client, POINTERS);
+    const failing: GithubClient = {
+      ...client,
+      async getFileAtSha() {
+        throw new GithubError("GET /contents failed with 401", 401, "https://api.github.com/x");
+      },
+    };
+    const err = await refResolver(failing, review)
+      .resolve({ repo: REPO, sha: "sha101", path: "src/token.ts", startLine: 1, endLine: 1 })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RefResolveError);
+    expect((err as RefResolveError).status).toBe(401);
+    expect((err as RefResolveError).cause).toBeInstanceOf(GithubError);
+    // A ref that genuinely does not resolve carries no misleading status.
+    const { resolver } = await fixture({});
+    const plain = await resolver
+      .resolve({ repo: REPO, sha: "sha101", path: "src/gone.ts", startLine: 1, endLine: 1 })
+      .catch((e: unknown) => e);
+    expect((plain as RefResolveError).status).toBe(null);
   });
 
   test("a range past the end is a structured error naming the path and the range", async () => {
