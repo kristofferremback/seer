@@ -253,7 +253,11 @@ annotation
 
 Every cap above is enforced on write and returns a 422 naming the field and the overage. A prompt asking for brevity is advice; a schema that refuses a seventh statement is a design.
 
-The counts that matter: 3 to 6 statements, at most 6 notes, 2 to 8 groups, and hard caps on every one-line field. The prototype settled at 5 statements, 5 notes and 6 groups for a three-pull-request stack, which is the right density for a phone screen.
+The counts for a single pull request: 3 to 6 statements, at most 6 notes, 2 to 8 groups, and hard caps on every one-line field. The prototype settled at 5 statements, 5 notes and 6 groups for a three-pull-request stack, comfortably inside even this budget, which is the right density for a phone screen.
+
+Breadth scales with decomposition, not with diff size. Each additional pull request in the review adds 2 to the statement ceiling and 4 to the group ceiling, to absolute ceilings of 12 and 16. Notes stay at 6 regardless: things a reviewer would miss do not multiply with size. Line count is deliberately not the scaler, because 8,000 lines of codegen deserve a smaller review than 800 lines of auth rewrite. The pull request is the unit the author controls, and it is an honest proxy for how many independent judgments the change contains, which is what a review actually scales with. Depth needs no scaling because it is unbounded already: a group can hold five hundred hunks and a statement can stack all the evidence it needs. The top of the page staying one screen is not the review being small, it is the review being sorted.
+
+A monolithic pull request that exhausts its budget is not an error, and the write path does not refuse it. The publish response carries a warning naming the pressure: this change may have warranted further decomposition. The compression is the system telling the truth about reviewability, and the summary should say it out loud.
 
 ## What Witness validates on write
 
@@ -272,7 +276,8 @@ The counts that matter: 3 to 6 statements, at most 6 notes, 2 to 8 groups, and h
 ## Endpoints
 
 ```
-POST  /api/reviews                  publish a review document, returns resolved review or 422
+POST  /api/reviews                  publish a review document, returns the resolved review
+                                    plus any warnings, or 422
 GET   /api/reviews/:slug            the resolved document, for the renderer
 POST  /api/reviews/:slug/refresh    re-derive against GitHub, update freshness
 GET   /r/:slug                      the rendered page, current version
