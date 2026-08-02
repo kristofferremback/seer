@@ -15,3 +15,5 @@ process.env.PORT = "0";
 process.env.CACHE_TTL_MS = "0";
 // Tests always run against the disk blob store, whatever the developer's shell has.
 delete process.env.S3_BUCKET;
+// Tests never reach the real GitHub API, whatever the developer's shell has.
+delete process.env.GITHUB_TOKEN;

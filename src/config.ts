@@ -45,6 +45,10 @@ export const config = {
   // minted keys in the db, not this value.
   apiToken: process.env.API_KEY ?? process.env.API_TOKEN,
 
+  // Optional: Overseer derives pull request facts from the GitHub API. Absent, only
+  // public repositories resolve and the rate limit is the unauthenticated one.
+  githubToken: process.env.GITHUB_TOKEN,
+
   // Viewer auth (Google OIDC). AUTH_DISABLED=true skips it entirely — local dev only.
   authDisabled,
   googleClientId: authDisabled ? "" : required("GOOGLE_CLIENT_ID"),
