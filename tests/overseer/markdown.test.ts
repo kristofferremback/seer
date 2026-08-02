@@ -70,7 +70,7 @@ describe("forbidden constructs are named, never stripped", () => {
     ["[ref]: https://example.com", "link reference definition", "[ref]:"],
     ["    indented", "indented code block", "indented"],
     ["```\nunclosed", "unclosed fenced code", "```"],
-    ["[go](javascript:alert(1))", "javascript: link url", "javascript:alert(1"],
+    ["[go](javascript:alert(1))", "javascript: link url", "javascript:alert(1)"],
     ["[go](data:text/html,x)", "data: link url", "data:text/html,x"],
     ["[go](//evil.example.com)", "protocol-relative link url", "//evil.example.com"],
   ];
@@ -309,4 +309,60 @@ describe("stability", () => {
     validate(source);
     expect(source).toBe(copy);
   });
+});
+
+describe("authored content survives intact", () => {
+  test("a url may carry balanced parentheses", () => {
+    expect(render("see [Foo (bar)](https://en.wikipedia.org/wiki/Foo_(bar))")).toBe(
+      '<p>see <a href="https://en.wikipedia.org/wiki/Foo_(bar)">Foo (bar)</a></p>',
+    );
+    expect(render("[a](/reviews/x(y)/z)")).toBe('<p><a href="/reviews/x(y)/z">a</a></p>');
+  });
+
+  test("an unbalanced destination is not a link, and nothing leaks", () => {
+    expect(render("[a](http://x/y(z)")).toBe("<p>[a](http://x/y(z)</p>");
+  });
+
+  test("an ordered list keeps the number it was written with", () => {
+    expect(render("3. a\n4. b")).toBe('<ol start="3"><li>a</li><li>b</li></ol>');
+    expect(render("1. a\n2. b")).toBe("<ol><li>a</li><li>b</li></ol>");
+  });
+
+  test("a blank line between items does not split the list", () => {
+    expect(render("1. a\n\n2. b")).toBe("<ol><li>a</li><li>b</li></ol>");
+    expect(render("- a\n\n- b")).toBe("<ul><li>a</li><li>b</li></ul>");
+  });
+
+  test("a list still ends when the next block is not an item", () => {
+    expect(render("1. a\n\ntext")).toBe("<ol><li>a</li></ol>\n<p>text</p>");
+  });
+
+  test("a list broken by two blank lines still numbers faithfully", () => {
+    expect(render("1. a\n\n\n2. b")).toBe('<ol><li>a</li></ol>\n<ol start="2"><li>b</li></ol>');
+  });
+});
+
+describe("tabs do not bypass the block guards", () => {
+  const tabbed: [source: string, construct: string][] = [
+    ["\t# h", "indented code block"],
+    ["\t> q", "indented code block"],
+    ["\tcode", "indented code block"],
+    ["  \t# h", "indented code block"],
+  ];
+
+  for (const [source, construct] of tabbed) {
+    test(`${JSON.stringify(source)} is refused as ${construct}`, () => {
+      expect(rejection(source).construct).toBe(construct);
+    });
+  }
+});
+
+describe("link urls carrying control characters are named", () => {
+  for (const control of ["\u0000", "\u0009", "\u001f", "\u007f"]) {
+    test(`${JSON.stringify(control)} in a destination is refused`, () => {
+      const source = `[x](java${control}script:alert(1))`;
+      expect(rejection(source).construct).toBe("link url");
+      expect(() => render(source)).toThrow(MarkdownRejection);
+    });
+  }
 });

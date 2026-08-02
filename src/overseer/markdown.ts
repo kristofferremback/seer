@@ -11,6 +11,9 @@
 // leaves through `escapeHtml`, every tag this file emits is written literally here,
 // and the set of them is closed: p, em, strong, code, a, ul, ol, li, pre. A reader
 // auditing the output for injection has one file to read.
+//
+// A rejection quotes the offending source verbatim, so `message` and `text` are safe in
+// a JSON body but must go through `escapeHtml` before reaching any HTML template.
 
 import { escapeHtml } from "../pages";
 
@@ -89,7 +92,7 @@ interface SourceLine {
 type Block =
   | { kind: "paragraph"; lines: SourceLine[] }
   | { kind: "code"; lang: string; lines: string[] }
-  | { kind: "list"; ordered: boolean; items: SourceLine[][] };
+  | { kind: "list"; ordered: boolean; start: number; items: SourceLine[][] };
 
 const THEMATIC_BREAK = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
 const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*(\S*)[ \t]*$/;
@@ -156,6 +159,14 @@ function isBlank(text: string): boolean {
   return text.trim() === "";
 }
 
+/** True when the line at `index` opens another item of the same list, unindented. */
+function continuesList(lines: SourceLine[], index: number, ordered: boolean): boolean {
+  const next = lines[index];
+  if (!next || isBlank(next.text)) return false;
+  if (next.text.length !== next.text.trimStart().length) return false;
+  return ordered ? ORDERED.test(next.text) : UNORDERED.test(next.text);
+}
+
 /** Splits the source into the blocks the subset knows, rejecting everything else. */
 function parseBlocks(source: string, starts: number[]): Block[] {
   const lines: SourceLine[] = [];
@@ -213,10 +224,16 @@ function parseBlocks(source: string, starts: number[]): Block[] {
     const ordered = ORDERED.exec(line.text);
     if (unordered || ordered) {
       const isOrdered = !unordered;
+      const start = isOrdered ? Number(ordered![1]!) : 1;
       const items: SourceLine[][] = [];
       for (; i < lines.length; i++) {
         const item = lines[i]!;
-        if (isBlank(item.text)) break;
+        if (isBlank(item.text)) {
+          // Blank lines between items are a normal authoring style, so the list carries
+          // on across them rather than splitting into a second list that restarts at 1.
+          if (continuesList(lines, i + 1, isOrdered)) continue;
+          break;
+        }
         rejectForbiddenLine(item, starts, false);
         rejectTableRow(item, lines[i + 1], starts);
         if (FENCE.test(item.text)) {
@@ -246,7 +263,7 @@ function parseBlocks(source: string, starts: number[]): Block[] {
         }
         items[items.length - 1]!.push(item);
       }
-      blocks.push({ kind: "list", ordered: isOrdered, items });
+      blocks.push({ kind: "list", ordered: isOrdered, start, items });
       continue;
     }
 
@@ -289,7 +306,9 @@ const CODE_ONLY: InlineOptions = { links: false, emphasis: false };
 function renderUrl(raw: string, position: Position): string {
   const url = raw.trim();
   if (url === "") reject("empty link url", position, raw);
-  if (/[\s<>"'`\\]/.test(url)) reject("link url", position, url);
+  // Control bytes included: a destination carrying them is neither http(s) nor a clean
+  // same-origin path, and browsers rewrite them rather than refusing.
+  if (/[\s<>"'`\\\u0000-\u001f\u007f]/.test(url)) reject("link url", position, url);
   if (url.startsWith("/") && !url.startsWith("//")) return escapeHtml(url);
   if (url.startsWith("#") || url.startsWith("?")) return escapeHtml(url);
   const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(url);
@@ -522,7 +541,7 @@ interface ParsedLink {
   end: number;
 }
 
-/** `[label](url)` with balanced brackets in the label and no nesting in the url. */
+/** `[label](url)` with balanced brackets in the label and balanced parens in the url. */
 function parseLink(text: string, start: number): ParsedLink | null {
   let depth = 0;
   let i = start;
@@ -539,7 +558,26 @@ function parseLink(text: string, start: number): ParsedLink | null {
     }
   }
   if (depth !== 0 || text[i + 1] !== "(") return null;
-  const close = text.indexOf(")", i + 2);
+  // A url may carry parentheses of its own, as Wikipedia and MSDN links do, so the
+  // destination ends at the paren that balances the opening one rather than at the
+  // first one seen. An unbalanced url is not a link at all, and falls through to text.
+  let close = -1;
+  let parens = 1;
+  for (let j = i + 2; j < text.length; j++) {
+    const c = text[j]!;
+    if (c === "\\") {
+      j++;
+      continue;
+    }
+    if (c === "(") parens++;
+    else if (c === ")") {
+      parens--;
+      if (parens === 0) {
+        close = j;
+        break;
+      }
+    }
+  }
   if (close === -1) return null;
   return {
     label: text.slice(start + 1, i),
@@ -566,10 +604,13 @@ function renderBlocks(blocks: Block[], starts: number[]): string {
     }
     if (block.kind === "list") {
       const tag = block.ordered ? "ol" : "ul";
+      // The author's first number is the list's number: renumbering from 1 would show
+      // the reader a sequence nobody wrote.
+      const attr = block.ordered && block.start !== 1 ? ` start="${block.start}"` : "";
       const items = block.items.map(
         (item) => `<li>${renderInlineInto(spanOfLines(item), starts, FULL_INLINE)}</li>`,
       );
-      out.push(`<${tag}>${items.join("")}</${tag}>`);
+      out.push(`<${tag}${attr}>${items.join("")}</${tag}>`);
       continue;
     }
     out.push(`<p>${renderInlineInto(spanOfLines(block.lines), starts, FULL_INLINE)}</p>`);
@@ -578,7 +619,10 @@ function renderBlocks(blocks: Block[], starts: number[]): string {
 }
 
 function normalize(source: string): string {
-  return source.replace(/\r\n?/g, "\n");
+  // Leading tabs become four spaces so the block guards, which are anchored on spaces,
+  // see the indentation an author wrote with a tab. Without this a tab is a hole in the
+  // reject-by-name contract: `\t# h` would come out as a paragraph.
+  return source.replace(/\r\n?/g, "\n").replace(/^[ \t]+/gm, (run) => run.replace(/\t/g, "    "));
 }
 
 // ---------------------------------------------------------------------------
