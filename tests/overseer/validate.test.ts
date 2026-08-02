@@ -225,6 +225,23 @@ describe("count caps scale with decomposition", () => {
     expect(err.overage).toBeUndefined();
   });
 
+  test("a pull request named twice is an error naming the second entry", () => {
+    const { payload, derived } = synth({ prCount: 2, statements: 7 });
+    payload.prs.push({ ...payload.prs[0]! });
+    const result = validatePublish(payload, derived, null, {});
+    const err = find(result.errors, "pr_duplicated");
+    expect(err.field).toBe("prs[2]");
+  });
+
+  test("a duplicated pointer does not buy budget: 9 statements still overruns 8", () => {
+    const { payload, derived } = synth({ prCount: 2, statements: 9 });
+    payload.prs.push({ ...payload.prs[0]! });
+    const result = validatePublish(payload, derived, null, {});
+    const err = result.errors.find((e) => e.field === "statements" && e.rule === "cap_count");
+    expect(err?.overage).toBe(1);
+    expect(err?.message).toContain("8");
+  });
+
   test("seven notes is an error whatever the decomposition", () => {
     const { payload, derived } = synth({ prCount: 4, statements: 4, notes: 7 });
     const result = validatePublish(payload, derived, null, {});
@@ -263,6 +280,21 @@ describe("character caps name the field and the overage", () => {
     expect(paras.overage).toBe(1);
   });
 
+  test("a blank line inside a fenced block is code, not a paragraph break", () => {
+    const payload = golden();
+    payload.summary = "Intent first.\n\n```ts\nconst a = 1;\n\nconst b = 2;\n```";
+    const errors = run(payload).errors;
+    expect(rules(errors)).not.toContain("cap_paragraphs");
+  });
+
+  test("three real paragraphs around a fenced block still overrun the cap", () => {
+    const payload = golden();
+    payload.summary = "One.\n\n```ts\nconst a = 1;\n```\n\nTwo.\n\nThree.";
+    const err = find(run(payload).errors, "cap_paragraphs");
+    expect(err.field).toBe("summary");
+    expect(err.overage).toBe(2);
+  });
+
   test("a note carrying six checks", () => {
     const payload = golden();
     payload.notes[0]!.checks = Array.from({ length: 6 }, (_, i) => `check ${i}`);
@@ -293,6 +325,17 @@ describe("every hunk belongs to exactly one group", () => {
     expect(err.message).toContain("gr_api");
     expect(err.message).toContain("gr_gate");
     expect(err.message).toContain(GOLDEN_HUNKS.routes.path);
+  });
+
+  test("a hunk repeated inside one group names that group once, with both indices", () => {
+    const payload = golden();
+    const repeated = payload.groups[0]!.hunks[0]!;
+    payload.groups[0]!.hunks.push(repeated);
+    const errors = run(payload).errors;
+    const err = find(errors, "hunk_repeated");
+    expect(err.field).toBe(`groups[0].hunks[${payload.groups[0]!.hunks.length - 1}]`);
+    expect(err.message).toContain("hunks[0]");
+    expect(rules(errors)).not.toContain("hunk_double_claimed");
   });
 
   test("a hunk id that is in no pull request's diff is rejected", () => {
@@ -728,4 +771,23 @@ test("the module imports nothing that touches a database or a network", async ()
   expect(source).not.toMatch(/\bimport\s*\(/);
   expect(source).not.toMatch(/\brequire\s*\(/);
   expect(source).not.toContain("bun:sqlite");
+});
+
+// ---- rule: kinds are closed lists ----
+
+describe("statement and note kinds come from the doc's closed lists", () => {
+  test("the cut `keep` kind is rejected on a statement", () => {
+    const payload = golden();
+    (payload.statements[0] as { kind: string }).kind = "keep";
+    const err = find(run(payload).errors, "kind_unknown");
+    expect(err.field).toBe("statements[0].kind");
+    expect(err.message).toContain("keep");
+  });
+
+  test("an invented note kind is rejected", () => {
+    const payload = golden();
+    (payload.notes[0] as { kind: string }).kind = "warning";
+    const err = find(run(payload).errors, "kind_unknown");
+    expect(err.field).toBe("notes[0].kind");
+  });
 });

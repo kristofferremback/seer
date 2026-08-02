@@ -21,6 +21,8 @@ import {
   maxNotes,
   maxStatements,
   prKey,
+  NOTE_KINDS,
+  STATEMENT_KINDS,
   type Figure,
   type Hunk,
   type NoteKind,
@@ -256,10 +258,45 @@ function checkLine(errors: ValidationError[], field: string, value: string): voi
   }
 }
 
+/** A closed list from the doc: anything outside it is not a kind Overseer renders. */
+function checkKind(
+  errors: ValidationError[],
+  field: string,
+  value: string,
+  allowed: readonly string[],
+): void {
+  if (allowed.includes(value)) return;
+  errors.push({
+    field,
+    rule: "kind_unknown",
+    message: `${field} is "${value}", which is not one of ${allowed.join(", ")}`,
+  });
+}
+
 function paragraphsOf(source: string): number {
   const text = source.replace(/\r\n?/g, "\n").trim();
   if (text === "") return 0;
-  return text.split(/\n[ \t]*\n+/).length;
+  // A blank line inside a fenced code block is code, not a paragraph break; the
+  // constrained subset allows fences, so counting them as breaks is a false rejection.
+  let paragraphs = 1;
+  let inFence = false;
+  let blankRun = false;
+  for (const line of text.split("\n")) {
+    if (/^\s*```/.test(line)) {
+      if (blankRun) paragraphs += 1;
+      blankRun = false;
+      inFence = !inFence;
+      continue;
+    }
+    const blank = line.trim() === "";
+    if (blank && !inFence) {
+      if (!blankRun) blankRun = true;
+    } else if (!blank) {
+      if (blankRun) paragraphs += 1;
+      blankRun = false;
+    }
+  }
+  return paragraphs;
 }
 
 /** Sentence terminators followed by a break or the end of the field. Abbreviations
@@ -288,7 +325,23 @@ export function validatePublish(
   const errors: ValidationError[] = [];
   const warnings: ValidationWarning[] = [];
 
-  const prCount = payload.prs.length;
+  // Budgets scale with distinct pull requests, never with repeated pointers: the same
+  // repo#number twice would otherwise buy breadth for a review that named one change.
+  const seenPrKeys = new Set<string>();
+  payload.prs.forEach((pr, i) => {
+    const key = prKey(pr.repo, pr.number);
+    if (seenPrKeys.has(key)) {
+      errors.push({
+        field: `prs[${i}]`,
+        rule: "pr_duplicated",
+        message: `${key} is named more than once; a review names each pull request once`,
+      });
+      return;
+    }
+    seenPrKeys.add(key);
+  });
+
+  const prCount = seenPrKeys.size;
   const statementCap = maxStatements(prCount);
   const groupCap = maxGroups(prCount);
 
@@ -395,6 +448,7 @@ export function validatePublish(
 
   payload.statements.forEach((s, i) => {
     const at = `statements[${i}]`;
+    checkKind(errors, `${at}.kind`, s.kind, STATEMENT_KINDS);
     if (required(errors, `${at}.text`, s.text)) {
       capText(errors, `${at}.text`, s.text, BUDGETS.chars.statementText);
       checkLine(errors, `${at}.text`, s.text);
@@ -463,6 +517,7 @@ export function validatePublish(
 
   payload.notes.forEach((n, i) => {
     const at = `notes[${i}]`;
+    checkKind(errors, `${at}.kind`, n.kind, NOTE_KINDS);
     if (required(errors, `${at}.text`, n.text)) {
       capText(errors, `${at}.text`, n.text, BUDGETS.chars.noteText);
       checkLine(errors, `${at}.text`, n.text);
@@ -548,6 +603,18 @@ export function validatePublish(
         return;
       }
       const owner = groupOf.get(id);
+      if (owner === g) {
+        const first = g.hunks.indexOf(id);
+        errors.push({
+          field: `${at}.hunks[${j}]`,
+          rule: "hunk_repeated",
+          message:
+            `${hunk.path} ${rangeOf(hunk)} (${id}) is claimed twice by ` +
+            `"${g.title}" (${g.id}), at hunks[${first}] and hunks[${j}]; ` +
+            `every hunk belongs to exactly one group`,
+        });
+        return;
+      }
       if (owner) {
         errors.push({
           field: `${at}.hunks[${j}]`,

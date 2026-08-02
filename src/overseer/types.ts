@@ -5,9 +5,11 @@
 // them. See "The dividing line" in the doc.
 
 /** Statement kinds. Closed list: `keep` was cut, see the doc's Statement section. */
-export type StatementKind = "add" | "change" | "remove";
+export const STATEMENT_KINDS = ["add", "change", "remove"] as const;
+export type StatementKind = (typeof STATEMENT_KINDS)[number];
 
-export type NoteKind = "risk" | "note";
+export const NOTE_KINDS = ["risk", "note"] as const;
+export type NoteKind = (typeof NOTE_KINDS)[number];
 
 /** Derived: one pr is `single`, a chain of bases is `stack`, anything else is `set`. */
 export type ReviewKind = "single" | "stack" | "set";
