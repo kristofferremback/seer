@@ -9,7 +9,10 @@ import {
 } from "../../src/overseer/validate";
 import {
   GOLDEN_BUNDLE_SLUG,
+  GOLDEN_BUNDLE_VERSION,
   GOLDEN_HEAD_SHA_12,
+  GOLDEN_HEAD_SHA_13,
+  GOLDEN_OUTSIDE_PATH,
   GOLDEN_HUNKS,
   GOLDEN_REPO,
   goldenBundleExists,
@@ -150,6 +153,32 @@ describe("the golden payload", () => {
   test("its significance values need no reindex", () => {
     expect(run(golden()).significance).toBeNull();
   });
+
+  test("exercises every statement kind", () => {
+    const kinds = new Set(golden().statements.map((s) => s.kind));
+    for (const kind of ["add", "change", "remove"]) {
+      expect(kinds.has(kind as never)).toBe(true);
+    }
+  });
+
+  test("carries a ref outside the change, so origin has both values", () => {
+    const changed = new Set(
+      goldenDerived().prs.flatMap((pr) => pr.hunks.map((h) => `${h.sha}:${h.path}`)),
+    );
+    const refs = golden().statements.flatMap((s) => s.refs);
+    expect(refs.some((r) => changed.has(`${r.sha}:${r.path}`))).toBe(true);
+    const outside = refs.filter((r) => !changed.has(`${r.sha}:${r.path}`));
+    expect(outside.map((r) => r.path)).toContain(GOLDEN_OUTSIDE_PATH);
+  });
+
+  test("names a bundle at a pinned version as well as at latest", () => {
+    const bundles = golden()
+      .statements.flatMap((s) => s.evidence)
+      .filter((e) => e.type === "bundle")
+      .map((e) => (e.type === "bundle" ? e.bundle.version : undefined));
+    expect(bundles).toContain(null);
+    expect(bundles).toContain(GOLDEN_BUNDLE_VERSION);
+  });
 });
 
 // ---- rule: caps, with pull-request scaling ----
@@ -187,11 +216,13 @@ describe("count caps scale with decomposition", () => {
     expect(err.message).toContain("12");
   });
 
-  test("two statements is below the floor", () => {
+  test("two statements is below the floor, by a shortfall of one", () => {
     const { payload, derived } = synth({ prCount: 1, statements: 2 });
     const result = validatePublish(payload, derived, null, {});
     const err = find(result.errors, "below_minimum");
     expect(err.field).toBe("statements");
+    expect(err.shortfall).toBe(1);
+    expect(err.overage).toBeUndefined();
   });
 
   test("seven notes is an error whatever the decomposition", () => {
@@ -328,6 +359,14 @@ describe("a risk has to point at something falsifiable", () => {
     payload.notes[0]!.refs = [
       { repo: GOLDEN_REPO, sha: SHA, path: "src/untouched.ts", startLine: 1, endLine: 4 },
     ];
+    expect(rules(run(payload).errors)).toContain("risk_unfalsifiable");
+  });
+
+  test("no checks and a ref pinned outside the review is an error", () => {
+    const payload = golden();
+    payload.notes[0]!.checks = [];
+    // The path is touched by this review, the sha is not part of it.
+    payload.notes[0]!.refs[0]!.sha = "4444444444444444444444444444444444444444";
     expect(rules(run(payload).errors)).toContain("risk_unfalsifiable");
   });
 
@@ -564,12 +603,129 @@ describe("significance reindex", () => {
   });
 });
 
+// ---- rule: every pull request in the payload has derived facts ----
+
+describe("a pull request with no derived facts", () => {
+  test("is rejected rather than counting as a fully claimed diff", () => {
+    const payload = golden();
+    payload.prs.push({
+      repo: GOLDEN_REPO,
+      number: 99,
+      gist: "A pull request Overseer never derived",
+      detail: "It has no facts behind it.",
+      detailRef: {
+        repo: GOLDEN_REPO,
+        sha: GOLDEN_HEAD_SHA_13,
+        path: "src/routes/reviews.ts",
+        startLine: 1,
+        endLine: 32,
+      },
+      parent: null,
+    });
+    payload.statements[0]!.prs.push(`${GOLDEN_REPO}#99`);
+    const err = find(run(payload).errors, "pr_not_derived");
+    expect(err.field).toBe("prs[2]");
+    expect(err.message).toContain(`${GOLDEN_REPO}#99`);
+  });
+});
+
+// ---- rule: pr.detail is authored prose, and gated like every other authored field ----
+
+describe("a pull request detail", () => {
+  test("rejects raw html by name", () => {
+    const payload = golden();
+    payload.prs[0]!.detail = "<script>alert(1)</script> is not prose.";
+    const err = run(payload).errors.find((e) => e.field === "prs[0].detail");
+    expect(err?.rule).toBe("markdown_construct");
+    expect(err?.message).toContain("raw HTML");
+  });
+
+  test("rejects a heading by name", () => {
+    const payload = golden();
+    payload.prs[0]!.detail = "## A heading.";
+    const err = run(payload).errors.find((e) => e.field === "prs[0].detail");
+    expect(err?.rule).toBe("markdown_construct");
+    expect(err?.message).toContain("heading");
+  });
+
+  test("caps its characters, so one endless sentence cannot slip through", () => {
+    const payload = golden();
+    payload.prs[0]!.detail = `${"d".repeat(243)}.`;
+    const err = run(payload).errors.find(
+      (e) => e.field === "prs[0].detail" && e.rule === "cap_chars",
+    );
+    expect(err?.overage).toBe(4);
+  });
+
+  test("caps its sentences", () => {
+    const payload = golden();
+    payload.prs[0]!.detail = "One. Two. Three.";
+    const err = find(run(payload).errors, "cap_sentences");
+    expect(err.field).toBe("prs[0].detail");
+    expect(err.overage).toBe(1);
+  });
+});
+
+// ---- rule: ids are unique within a version, attachments included ----
+
+test("two attachments sharing an id is an error", () => {
+  const payload = golden();
+  payload.attachments.push({ ...payload.attachments[0]!, alt: "A second upload" });
+  const err = find(run(payload).errors, "id_duplicated");
+  expect(err.field).toBe("attachments[1].id");
+});
+
+// ---- rule: authored bodies are not blank, and a group is not empty ----
+
+describe("authored prose is present", () => {
+  test("a blank statement body is rejected", () => {
+    const payload = golden();
+    payload.statements[0]!.body = "";
+    const err = run(payload).errors.find((e) => e.field === "statements[0].body");
+    expect(err?.rule).toBe("required");
+  });
+
+  test("a blank note body is rejected", () => {
+    const payload = golden();
+    payload.notes[0]!.body = "   ";
+    const err = run(payload).errors.find((e) => e.field === "notes[0].body");
+    expect(err?.rule).toBe("required");
+  });
+
+  test("a blank group paragraph is rejected", () => {
+    const payload = golden();
+    payload.groups[0]!.paragraph = "";
+    const err = run(payload).errors.find((e) => e.field === "groups[0].paragraph");
+    expect(err?.rule).toBe("required");
+  });
+
+  test("a group claiming no hunk is rejected", () => {
+    const payload = golden();
+    payload.groups.push({
+      id: "gr_empty",
+      title: "Nothing in particular",
+      significance: 3,
+      paragraph: "It claims no hunk.",
+      hunks: [],
+      fileNotes: [],
+    });
+    const err = find(run(payload).errors, "group_empty");
+    expect(err.field).toBe("groups[2].hunks");
+  });
+});
+
 // ---- purity ----
 
 test("the module imports nothing that touches a database or a network", async () => {
-  const source = await Bun.file("src/overseer/validate.ts").text();
+  const source = await Bun.file(`${import.meta.dir}/../../src/overseer/validate.ts`).text();
   const imports = source.match(/^import[\s\S]*?from "[^"]+";$/gm) ?? [];
   const froms = imports.map((i) => /from "([^"]+)";$/.exec(i)![1]!);
   expect(froms.sort()).toEqual(["./markdown", "./types"]);
+  // A side-effect import runs the module for its side effects alone, which is exactly
+  // how `import "./db"` would open SQLite behind a pure signature. A dynamic import
+  // hides the same thing behind a call.
+  expect(source).not.toMatch(/\bimport\s+["\']/);
+  expect(source).not.toMatch(/\bimport\s*\(/);
+  expect(source).not.toMatch(/\brequire\s*\(/);
   expect(source).not.toContain("bun:sqlite");
 });

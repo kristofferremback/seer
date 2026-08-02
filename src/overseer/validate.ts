@@ -8,7 +8,11 @@
 // a file. The two facts this module cannot compute itself, whether a bundle exists in
 // the workspace and whether a ref resolves at its sha, are handled the same way: the
 // bundle check is an injected predicate, and ref resolution belongs to the resolver in
-// derive.ts, which fetches, and so cannot live behind a pure signature.
+// derive.ts, which fetches, and so cannot live behind a pure signature. Note the
+// asymmetry: the bundle predicate is injected here, refResolver() is not, so the
+// publish route has to call it and turn a RefResolveError into a 422 itself. What this
+// module can check about a ref without fetching it, ref_unpinned, ref_range and
+// ref_highlight_outside, it does check.
 
 import { validate as validateMarkdown, validateInline } from "./markdown";
 import {
@@ -16,25 +20,20 @@ import {
   maxGroups,
   maxNotes,
   maxStatements,
+  prKey,
   type Figure,
   type Hunk,
   type NoteKind,
   type Payload,
+  type RefPointer,
   type StatementKind,
 } from "./types";
 
 // ---- what the skill writes ----
 
-/** A ref as authored: a pointer, never the code. Ids are minted when it resolves. */
-export interface RefPointerInput {
-  id?: string;
-  repo: string;
-  sha: string;
-  path: string;
-  startLine: number;
-  endLine: number;
-  highlight?: number[];
-}
+/** A ref as authored. One shape, defined in types.ts, so the deriver and the validator
+ *  cannot drift apart the first time a field is added. */
+export type RefPointerInput = RefPointer;
 
 export interface ExampleInput {
   lang: string;
@@ -144,6 +143,9 @@ export interface ValidationError {
   message: string;
   /** How far past a cap, in the cap's own unit. Only on cap violations. */
   overage?: number;
+  /** How far below a floor, in the floor's own unit. Only on below_minimum. A
+   *  magnitude, kept apart from `overage` so a consumer never renders "over by -1". */
+  shortfall?: number;
 }
 
 export interface ValidationWarning {
@@ -217,7 +219,7 @@ function minCount(
       field,
       rule: "below_minimum",
       message: `${field} has ${count} ${unit}, the minimum is ${min}`,
-      overage: count - min,
+      shortfall: min - count,
     });
   }
 }
@@ -268,10 +270,6 @@ function sentencesOf(source: string): number {
   if (text === "") return 0;
   const ends = text.match(/[.!?]+(\s+|$)/g);
   return ends ? ends.length : 1;
-}
-
-function prKeyOf(repo: string, number: number): string {
-  return `${repo}#${number}`;
 }
 
 /** `pr<number>:<path>:@@<old>,<n>+<new>,<n>`, per diff.hunkId(). */
@@ -341,8 +339,6 @@ export function validatePublish(
 
   // ---- single repo, until multi-repo is actually built ----
 
-  const repos = new Set<string>();
-  for (const pr of payload.prs) repos.add(pr.repo);
   const homeRepo = payload.prs[0]?.repo ?? null;
   payload.prs.forEach((pr, i) => {
     if (homeRepo !== null && pr.repo !== homeRepo) {
@@ -356,16 +352,27 @@ export function validatePublish(
 
   // ---- pull requests ----
 
-  const derivedByKey = new Map(derived.prs.map((p) => [prKeyOf(p.repo, p.number), p]));
-  const payloadKeys = new Set(payload.prs.map((pr) => prKeyOf(pr.repo, pr.number)));
+  const derivedKeys = new Set(derived.prs.map((p) => prKey(p.repo, p.number)));
+  const payloadKeys = new Set(payload.prs.map((pr) => prKey(pr.repo, pr.number)));
 
   payload.prs.forEach((pr, i) => {
     const at = `prs[${i}]`;
+    // Without facts there is no diff to partition, so an underived pull request would
+    // be trivially "fully claimed" and its whole diff would vanish from the account.
+    if (!derivedKeys.has(prKey(pr.repo, pr.number))) {
+      errors.push({
+        field: at,
+        rule: "pr_not_derived",
+        message: `${prKey(pr.repo, pr.number)} is in the review but Overseer derived no facts for it; its diff cannot be accounted for`,
+      });
+    }
     if (required(errors, `${at}.gist`, pr.gist)) {
       capText(errors, `${at}.gist`, pr.gist, BUDGETS.chars.prGist);
       checkLine(errors, `${at}.gist`, pr.gist);
     }
     if (required(errors, `${at}.detail`, pr.detail)) {
+      capText(errors, `${at}.detail`, pr.detail, BUDGETS.chars.prDetail);
+      checkBody(errors, `${at}.detail`, pr.detail);
       const sentences = sentencesOf(pr.detail);
       if (sentences > 2) {
         errors.push({
@@ -392,6 +399,7 @@ export function validatePublish(
       capText(errors, `${at}.text`, s.text, BUDGETS.chars.statementText);
       checkLine(errors, `${at}.text`, s.text);
     }
+    required(errors, `${at}.body`, s.body);
     capText(errors, `${at}.body`, s.body, BUDGETS.chars.statementBody);
     checkBody(errors, `${at}.body`, s.body);
 
@@ -439,7 +447,7 @@ export function validatePublish(
   // ---- every pull request is realized by at least one statement ----
 
   payload.prs.forEach((pr, i) => {
-    const key = prKeyOf(pr.repo, pr.number);
+    const key = prKey(pr.repo, pr.number);
     if (!claimedPrs.has(key)) {
       errors.push({
         field: `prs[${i}]`,
@@ -459,6 +467,7 @@ export function validatePublish(
       capText(errors, `${at}.text`, n.text, BUDGETS.chars.noteText);
       checkLine(errors, `${at}.text`, n.text);
     }
+    required(errors, `${at}.body`, n.body);
     capText(errors, `${at}.body`, n.body, BUDGETS.chars.noteBody);
     checkBody(errors, `${at}.body`, n.body);
     capCount(errors, `${at}.checks`, n.checks.length, BUDGETS.checks.max, "checks");
@@ -505,8 +514,17 @@ export function validatePublish(
       capText(errors, `${at}.title`, g.title, BUDGETS.chars.groupTitle);
       checkLine(errors, `${at}.title`, g.title);
     }
+    required(errors, `${at}.paragraph`, g.paragraph);
     capText(errors, `${at}.paragraph`, g.paragraph, BUDGETS.chars.groupParagraph);
     checkBody(errors, `${at}.paragraph`, g.paragraph);
+    // "a set of hunks that changed for one reason": an empty set is not a group.
+    if (g.hunks.length === 0) {
+      errors.push({
+        field: `${at}.hunks`,
+        rule: "group_empty",
+        message: `${at} claims no hunk; a group is the set of hunks that changed for one reason`,
+      });
+    }
     g.fileNotes.forEach((fn, j) => {
       capText(errors, `${at}.fileNotes[${j}].text`, fn.text, BUDGETS.chars.fileNote);
       checkLine(errors, `${at}.fileNotes[${j}].text`, fn.text);
@@ -621,6 +639,9 @@ export function validatePublish(
   payload.statements.forEach((s, i) => claimId(s.id, "statement", `statements[${i}].id`));
   payload.notes.forEach((n, i) => claimId(n.id, "note", `notes[${i}].id`));
   payload.groups.forEach((g, i) => claimId(g.id, "group", `groups[${i}].id`));
+  // Attachments share the namespace: two attachments under one id would let a single
+  // evidence reference mark both as referenced, and an unreferenced upload would ship.
+  payload.attachments.forEach((a, i) => claimId(a.id, "attachment", `attachments[${i}].id`));
 
   return { errors, warnings, significance: reindexSignificance(payload.groups) };
 }
@@ -699,13 +720,15 @@ function checkRef(
 }
 
 /** Paths a pull request actually changed, per repo, with the line ranges of each
- *  changed hunk on the head side. A risk's ref counts as falsifiable when it lands
- *  inside one of those ranges. */
+ *  changed hunk on the head side, keyed by sha as well as path: a ref pinned to a
+ *  commit outside this review is not evidence about this review, however familiar its
+ *  path looks. A risk's ref counts as falsifiable when it lands inside one of those
+ *  ranges. */
 function changedHunkIndex(derived: DerivedFacts): Map<string, Hunk[]> {
   const index = new Map<string, Hunk[]>();
   for (const pr of derived.prs) {
     for (const h of pr.hunks) {
-      const key = `${h.repo}:${h.path}`;
+      const key = `${h.repo}@${h.sha.toLowerCase()}:${h.path}`;
       const list = index.get(key);
       if (list) list.push(h);
       else index.set(key, [h]);
@@ -715,7 +738,7 @@ function changedHunkIndex(derived: DerivedFacts): Map<string, Hunk[]> {
 }
 
 function refTouchesChange(ref: RefPointerInput, index: Map<string, Hunk[]>): boolean {
-  const hunks = index.get(`${ref.repo}:${ref.path}`);
+  const hunks = index.get(`${ref.repo}@${ref.sha.toLowerCase()}:${ref.path}`);
   if (!hunks) return false;
   return hunks.some((h) => {
     const start = h.newStart;

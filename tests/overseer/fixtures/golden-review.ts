@@ -4,8 +4,11 @@
 // than inventing a second document that drifts from this one.
 //
 // Shape: two pull requests on one repo, a stack (the second is based on the first),
-// five hunks across four files, partitioned into two groups. Three statements, two
-// notes (one risk, one note), one attachment, one bundle.
+// five hunks across four files, partitioned into two groups. Four statements covering
+// all three kinds (add, change, remove), two notes (one risk, one note), one
+// attachment, two bundle references (one latest, one pinned). One ref points at a path
+// no pull request touches, so `origin` derives as `outside` and the renderer's
+// outside-ref label has a case here rather than one invented per step.
 
 import { hunkId } from "../../../src/overseer/diff";
 import type { Hunk, HunkLine } from "../../../src/overseer/types";
@@ -16,6 +19,10 @@ export const GOLDEN_BASE_SHA = "1111111111111111111111111111111111111111";
 export const GOLDEN_HEAD_SHA_12 = "2222222222222222222222222222222222222222";
 export const GOLDEN_HEAD_SHA_13 = "3333333333333333333333333333333333333333";
 export const GOLDEN_BUNDLE_SLUG = "overseer-contact-sheet";
+/** The pinned version the workspace holds, alongside latest. */
+export const GOLDEN_BUNDLE_VERSION = 3;
+/** A path no pull request in the review touches: refs into it derive origin `outside`. */
+export const GOLDEN_OUTSIDE_PATH = "src/session.ts";
 
 function line(kind: HunkLine["kind"], oldNo: number | null, newNo: number | null, content: string): HunkLine {
   return { kind, oldNo, newNo, content, wordRanges: [] };
@@ -117,7 +124,7 @@ export function goldenDerived(): DerivedFacts {
 
 /** The workspace this golden review publishes into holds exactly one bundle. */
 export function goldenBundleExists(slug: string, version: number | null): boolean {
-  return slug === GOLDEN_BUNDLE_SLUG && (version === null || version === 3);
+  return slug === GOLDEN_BUNDLE_SLUG && (version === null || version === GOLDEN_BUNDLE_VERSION);
 }
 
 export function goldenPayload(): PublishPayload {
@@ -275,6 +282,45 @@ export function goldenPayload(): PublishPayload {
           {
             type: "attachment",
             attachment: { id: "att_gate" },
+          },
+        ],
+      },
+      {
+        id: "st_public_link",
+        kind: "remove",
+        text: "Public-by-link access to a review is gone",
+        prs: [`${GOLDEN_REPO}#12`],
+        refs: [
+          {
+            repo: GOLDEN_REPO,
+            sha: GOLDEN_HEAD_SHA_12,
+            path: "src/server.ts",
+            startLine: 120,
+            endLine: 126,
+          },
+          {
+            // Outside the change: the helper the gate leans on, untouched by either
+            // pull request. Its origin derives as `outside`.
+            repo: GOLDEN_REPO,
+            sha: GOLDEN_HEAD_SHA_12,
+            path: GOLDEN_OUTSIDE_PATH,
+            startLine: 8,
+            endLine: 20,
+            highlight: [12],
+          },
+        ],
+        body:
+          "The unauthenticated branch of the review route is deleted rather than " +
+          "narrowed. A reader without a session gets the same 404 a missing review " +
+          "gets, so the existence of a review leaks nothing.",
+        evidence: [
+          {
+            type: "bundle",
+            bundle: {
+              slug: GOLDEN_BUNDLE_SLUG,
+              version: GOLDEN_BUNDLE_VERSION,
+              caption: "The contact sheet as it stood before the gate",
+            },
           },
         ],
       },

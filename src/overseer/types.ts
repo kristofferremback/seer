@@ -191,6 +191,25 @@ export interface Ref {
   snippet: string;
 }
 
+/** What the skill writes for a ref: a pointer, never the code. Ids are minted when it
+ *  resolves. Lives here rather than in derive.ts or validate.ts because both sides of
+ *  the write path read it, and validation cannot import the deriver. */
+export interface RefPointer {
+  id?: string;
+  repo: string;
+  sha: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  /** Line numbers within the range. */
+  highlight?: number[];
+}
+
+/** How a pull request is named in `statement.prs[]` and in `review.freshness`. */
+export function prKey(repo: string, number: number): string {
+  return `${repo}#${number}`;
+}
+
 /** The one drawing on the page: a constrained graph, rendered in the house style. */
 export interface Figure {
   kind: "flow";
@@ -272,6 +291,7 @@ export const BUDGETS = {
     reviewTitle: 80, // review.title
     summary: 600, // review.summary, also <= BUDGETS.paragraphs.summary paragraphs
     prGist: 100, // pr.gist, one line
+    prDetail: 240, // pr.detail, also <= 2 sentences
     statementText: 120, // statement.text, one line, no markup
     statementBody: 1200, // statement.body
     noteText: 140, // note.text

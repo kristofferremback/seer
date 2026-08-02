@@ -13,7 +13,19 @@
 import { getSnippet, putSnippet, sweepSnippets } from "./db";
 import { collectPullDiff, type FileDiff } from "./diff";
 import { GithubError, type GithubClient } from "./github";
-import type { Hunk, Ref, RefOrigin, ReviewKind, StatementKind } from "./types";
+import {
+  prKey,
+  type Hunk,
+  type Ref,
+  type RefOrigin,
+  type RefPointer,
+  type ReviewKind,
+  type StatementKind,
+} from "./types";
+
+// Both live in types.ts: the skill's ref pointer and the pull-request key are read by
+// the pure validator too, which cannot import this module.
+export { prKey, type RefPointer };
 
 /** What the skill authors about a pull request before anything is derived. */
 export interface PrPointer {
@@ -76,11 +88,6 @@ export interface DerivedReview {
    *  the next pass through the published document, which is why it is derived once at
    *  publish rather than re-derived on every read. */
   skillContext: SkillContextComment[];
-}
-
-/** How a pull request is named in `statement.prs[]` and in `review.freshness`. */
-export function prKey(repo: string, number: number): string {
-  return `${repo}#${number}`;
 }
 
 // ---- co-authors ----
@@ -262,18 +269,6 @@ export async function derivePrs(
 }
 
 // ---- refs ----
-
-/** What the skill writes: a pointer, never the code. */
-export interface RefPointer {
-  id?: string;
-  repo: string;
-  sha: string;
-  path: string;
-  startLine: number;
-  endLine: number;
-  /** Line numbers within the range. */
-  highlight?: number[];
-}
 
 /** A ref that does not resolve is a 422 naming the path and the range, per the data
  *  model's write-path rules. The fields are on the error so the route never has to
