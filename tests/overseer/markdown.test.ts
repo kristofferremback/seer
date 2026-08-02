@@ -5,7 +5,17 @@ import {
   validate,
   validateInline,
   MarkdownRejection,
+  MAX_REJECTION_TEXT,
 } from "../../src/overseer/markdown";
+
+test("a rejection does not echo an unbounded slice of the source", () => {
+  const long = "x".repeat(1600);
+  const result = rejection("```js " + long + "\ncode\n```");
+  expect(result.text.length).toBeLessThanOrEqual(MAX_REJECTION_TEXT + 3);
+  expect(result.text.endsWith("...")).toBe(true);
+  expect(result.message.length).toBeLessThan(300);
+  expect(result.message).toContain(result.text);
+});
 
 function rejection(source: string) {
   const result = validate(source);

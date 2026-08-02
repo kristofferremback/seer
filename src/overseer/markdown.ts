@@ -38,16 +38,30 @@ export interface Position {
 }
 
 /** A construct outside the subset. `construct` is the name; `text` is what was written. */
+/**
+ * Longest offending snippet echoed back to the author. A rejected line can be the whole
+ * body of a document, and neither the message nor a 422 body should carry it verbatim.
+ */
+export const MAX_REJECTION_TEXT = 120;
+
+function clampText(text: string): string {
+  return text.length <= MAX_REJECTION_TEXT ? text : `${text.slice(0, MAX_REJECTION_TEXT)}...`;
+}
+
 export class MarkdownRejection extends Error {
+  readonly text: string;
+
   constructor(
     readonly construct: string,
     readonly position: Position,
-    readonly text: string,
+    text: string,
   ) {
+    const clamped = clampText(text);
     super(
       `${construct} is not allowed here (line ${position.line}, column ${position.column})` +
-        (text ? `: ${text}` : ""),
+        (clamped ? `: ${clamped}` : ""),
     );
+    this.text = clamped;
     this.name = "MarkdownRejection";
   }
 }
