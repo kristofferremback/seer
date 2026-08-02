@@ -74,6 +74,8 @@ pr
 
 `kinds[]` is derived on purpose. The marks on a pull request card are then provably tied to real claims, instead of being a second thing the skill can get out of step with the first.
 
+Every pull request in the review is realized by at least one statement. A pull request that warrants no statement warrants a question, namely why it is in the review at all. Its `gist` and `detail` are already mandatory; this closes the other gap, a card the overview never mentions.
+
 `author` and `co_authors[]` are how attribution survives: agent-written changes already announce themselves through Co-Authored-By trailers, so who wrote what, human or agent, is a derivable fact and Overseer derives it. `body` is the description the author actually published, rendered behind a disclosure on the card so it is available without being re-summarized. Review comments and threads are also derived and handed to the skill as context, but rendering them is deferred, see the end of this document.
 
 ### Statement
@@ -136,6 +138,8 @@ Ordering is by `significance` ascending, ties broken by `id` so the order is alw
 The known cost of float ordering is precision decay after many insertions in the same gap. It does not bite here, because a review has at most eight groups and is published in one shot, but the write path should reindex to evenly spaced values when the gap between two neighbours falls below a threshold, so a long-lived review that gets reordered repeatedly cannot drift into equal values.
 
 There are no rules for what counts as significant beyond a convention that behavior outranks mechanism outranks tests outranks chore, and that is deliberate: the judgment is the product.
+
+The walkthrough is a partition of the diff, not a selection from it. Every hunk in every pull request belongs to exactly one group, and a hunk left unclaimed is a 422 naming the path and range. Nothing can be left out of the account by being left out of the walkthrough: mechanical churn does not escape, it gets grouped as the chore it is and ranked last, which costs the skill one line and buys the reader a guarantee, that absence on the page means absence in the diff.
 
 ### Hunk
 
@@ -265,6 +269,8 @@ A monolithic pull request that exhausts its budget is not an error, and the writ
 
 - every ref resolves at its SHA, otherwise 422 with the path and range
 - every hunk id exists in that pull request's diff
+- every hunk in every pull request's diff belongs to exactly one group
+- every pull request is realized by at least one statement
 - every `prs[]` entry is in the review
 - caps
 - every statement has at least one ref
