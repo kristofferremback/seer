@@ -33,6 +33,7 @@ This split is the single most load-bearing decision in the model. In the prototy
 review
   id              string, opaque
   slug            string, url-safe
+  version         derived: int, incremented on each publish to the same slug
   title           authored, <= 80 chars
   kind            derived: single | stack | set
   summary         authored, <= 2 paragraphs, <= 600 chars, constrained markdown
@@ -164,6 +165,8 @@ ref
 
 Refs are SHA-pinned, so a force push cannot rot them.
 
+A ref renders its snippet and links out to GitHub at the pinned SHA. The snippet is the bounded view and the link is the unbounded one; Witness never grows a code browser. The point of the page is that the reader should not have to read code to review, and the point of the evidence is that they always can: every claim stays one tap from the lines it stands on, which is what keeps the skill honest even on the days nobody taps.
+
 ### Figure
 
 The one drawing on the page. Not free-form: a constrained graph that Witness renders in the house style.
@@ -238,6 +241,7 @@ annotation
   body        authored by the human
   status      open | answered
   answer      { body, refs[] } | null
+  version     the review version it was filed against
   created_at
 ```
 
@@ -263,6 +267,7 @@ The counts that matter: 3 to 6 statements, at most 6 notes, 2 to 8 groups, and h
 - markdown outside the allowed subset is a 422 naming the construct
 - every attachment is referenced by some `evidence[]`, carries a required `alt`, and is `image/*`
 - every bundle evidence resolves to a bundle in the same workspace
+- on republish, an id reused from the prior version must name an entity of the same type
 
 ## Endpoints
 
@@ -270,11 +275,16 @@ The counts that matter: 3 to 6 statements, at most 6 notes, 2 to 8 groups, and h
 POST  /api/reviews                  publish a review document, returns resolved review or 422
 GET   /api/reviews/:slug            the resolved document, for the renderer
 POST  /api/reviews/:slug/refresh    re-derive against GitHub, update freshness
-GET   /r/:slug                      the rendered page
+GET   /r/:slug                      the rendered page, current version
+GET   /r/:slug/v/:n                 a prior version, marked as such
 POST  /api/reviews/:slug/annotations
 ```
 
 A review is authored in one shot. The skill reads the pull requests, forms its view, and publishes a whole document with its attachments; it does not build one up over many calls. Annotations are the only thing written afterward.
+
+One shot does not mean one pass. Publishing to an existing slug creates the next version, exactly as uploading a bundle does in Seer, and prior versions stay readable at `/r/:slug/v/:n`. This is how reviewing happens in passes: the branch moves, the skill publishes again, and the reader comes back to the same link. On a second pass the skill is given the prior version and the open annotations, which is published record, not private context, and it keeps the ids of statements, notes and groups whose claims survive. The renderer derives the delta between any two versions from those ids and the text, so a returning reader sees what is new, what was revised, and what was answered, as marks on the rows rather than as a changelog to read. Derived, never authored: the skill does not get to say what changed about its own account.
+
+Annotations belong to the review, not to a version, and each records the version it was filed against, so a question asked on pass one is still open on pass three and its quote still resolves against the version that produced it.
 
 Viewing is the refresh trigger. Opening `/r/:slug` compares the stored head SHAs against GitHub, rate limited to once a minute per review, and kicks an asynchronous re-derivation when a head has moved. The page renders the stored document immediately and updates its freshness marks when the refresh lands, over the same live channel Seer already uses for bundles. `POST /api/reviews/:slug/refresh` stays for explicit calls, but nothing depends on remembering to make one: a review someone is looking at cannot silently claim `current` while the branch moves underneath it, because looking at it is what checks.
 
@@ -293,6 +303,8 @@ Seer bundles are public by link, because a bundle is something you want to hand 
 **Rendering comment threads.** Pull request comments and review threads are derived and handed to the skill as context, so discussion informs the briefing. Rendering the threads themselves re-hosts GitHub's conversation UI, which is a project of its own and not this one. If a comment matters to the review, the skill says so in a statement or note and refs the code it is about.
 
 **Attachment formats beyond images.** The `media_type` field is already there; each new format is a renderer decision made when a real review needs it.
+
+**Mirroring annotations to GitHub.** The review should ultimately still live on GitHub, with Witness as the better view of it. The shape is already implied by the model: an annotation whose target carries a ref is expressible as a GitHub review comment, because a SHA, a path and a line range are exactly what that API wants, and one without a code anchor is an issue comment on the pull request. One way, Witness to GitHub, storing the mirrored comment id on the annotation. Not built until annotations themselves are, and two-way sync is deliberately not planned: pulling GitHub's conversation back in re-hosts it, which the comment-threads entry above already declines.
 
 ## Open questions
 
