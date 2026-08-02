@@ -44,6 +44,7 @@ import {
   type SessionUser,
 } from "./auth";
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
+import { handlePublishReview } from "./overseer/routes";
 import {
   landingPage,
   bundlesPage,
@@ -539,6 +540,11 @@ export async function startServer() {
       "/api/bundles/:slug": {
         PUT: (req, srv) => handleUpload(req, req.params.slug, srv),
         POST: (req, srv) => handleUpload(req, req.params.slug, srv),
+      },
+
+      // Overseer: a review is authored in one shot, so publishing is one POST.
+      "/api/reviews": {
+        POST: (req) => handlePublishReview(req),
       },
 
       "/api/images": {

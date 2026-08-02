@@ -76,6 +76,12 @@ export interface Review {
   groups: Group[];
   /** 0..n, written after publication. */
   annotations: Annotation[];
+  /** Derived: every hunk of every pr, in pull request and file order. The groups
+   *  partition these by id, so the walkthrough can be redrawn from the document alone. */
+  hunks: Hunk[];
+  /** Derived and never rendered: the pull request review comments, handed back to the
+   *  skill on its next pass. See the data model's "Rendering comment threads". */
+  skillContext: ReviewComment[];
   createdAt: number;
   updatedAt: number;
   /** Derived per pr, keyed by `${repo}#${number}`. */
@@ -160,6 +166,23 @@ export interface Group {
    * deletions is a change, which HunkLineKind cannot express.
    */
   kind: StatementKind;
+}
+
+/** One pull request review comment, kept for the skill and never rendered. Lives here
+ *  rather than in derive.ts because it is a field of the stored document; the deriver
+ *  re-exports it under the name it has always used. */
+export interface ReviewComment {
+  repo: string;
+  prNumber: number;
+  id: number;
+  path: string;
+  line: number | null;
+  startLine: number | null;
+  body: string;
+  author: string | null;
+  commitId: string;
+  inReplyTo: number | null;
+  createdAt: string;
 }
 
 /** Fully derived. The skill never writes one. */

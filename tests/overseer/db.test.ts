@@ -53,6 +53,8 @@ function doc(title: string): Omit<ReviewDoc, "id" | "slug" | "version"> {
     statements: [],
     notes: [],
     groups: [],
+    hunks: [],
+    skillContext: [],
     createdAt: 1000,
     updatedAt: 1000,
   };

@@ -18,11 +18,10 @@ import type {
 
 /** What a published version stores: the document minus the parts kept in tables.
  *
- *  `Group.hunks` holds hunk ids, and no field on `Review` holds `Hunk` bodies, so a
- *  version row as typed today cannot redraw the walkthrough on its own. The publish
- *  step resolves this by giving `Review` a `hunks: Hunk[]` field, which lands in this
- *  same `doc` column; the alternative, a second column, would let a version row exist
- *  with its lines missing. Nothing else may be added to `review_versions` until then. */
+ *  `Group.hunks` holds hunk ids, and `Review.hunks` holds the `Hunk` bodies they name,
+ *  so a version row redraws the walkthrough on its own. Both land in this one `doc`
+ *  column; the alternative, a second column, would let a version row exist with its
+ *  lines missing. Nothing else may be added to `review_versions`. */
 export type ReviewDoc = Omit<Review, "annotations" | "freshness">;
 
 export interface ReviewRow {
@@ -168,8 +167,10 @@ export function createAttachment(
   bytes: number,
   alt: string,
   caption: string,
+  /** The publish path mints the id before the document that names it is built, and
+   *  passes it here. Default: minted for a caller that has no document to write into. */
+  id: string = tinyId("att"),
 ): string {
-  const id = tinyId("att");
   db.run(
     "INSERT INTO review_attachments " +
       "(id, workspace_id, slug, version, media_type, bytes, alt, caption, created_at) " +

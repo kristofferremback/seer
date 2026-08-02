@@ -19,6 +19,7 @@ import {
   type Ref,
   type RefOrigin,
   type RefPointer,
+  type ReviewComment,
   type ReviewKind,
   type StatementKind,
 } from "./types";
@@ -38,20 +39,9 @@ export interface PrPointer {
 
 /** One review comment, kept for the skill and never rendered. See the data model's
  *  "Rendering comment threads" entry: discussion informs the briefing, and if a
- *  comment matters the skill says so in a statement or a note. */
-export interface SkillContextComment {
-  repo: string;
-  prNumber: number;
-  id: number;
-  path: string;
-  line: number | null;
-  startLine: number | null;
-  body: string;
-  author: string | null;
-  commitId: string;
-  inReplyTo: number | null;
-  createdAt: string;
-}
+ *  comment matters the skill says so in a statement or a note. Defined in types.ts,
+ *  because it is a field of the stored document, and re-exported under its name here. */
+export type SkillContextComment = ReviewComment;
 
 /** Everything Overseer derives about one pull request. The authored fields (`gist`,
  *  `detail`, `detail_ref`) are merged in by the publish path, not here. */
