@@ -169,6 +169,13 @@ function seedV2() {
       visibility TEXT NOT NULL DEFAULT 'public', created_at INTEGER NOT NULL);
     CREATE TABLE memberships (workspace_id TEXT NOT NULL, user_id TEXT NOT NULL,
       created_at INTEGER NOT NULL, PRIMARY KEY (workspace_id, user_id));
+    CREATE TABLE api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+      name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, token_hint TEXT NOT NULL,
+      is_legacy INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+      last_used_at INTEGER, revoked_at INTEGER);
+    CREATE TABLE invites (token TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+      created_by TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+      accepted_by TEXT, accepted_at INTEGER);
     CREATE TABLE bundles (workspace_id TEXT NOT NULL, slug TEXT NOT NULL, created_at INTEGER NOT NULL,
       latest_version INTEGER NOT NULL, PRIMARY KEY (workspace_id, slug));
     CREATE TABLE versions (workspace_id TEXT NOT NULL, slug TEXT NOT NULL, version INTEGER NOT NULL,

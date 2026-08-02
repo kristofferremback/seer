@@ -16,7 +16,13 @@ import type {
   Review,
 } from "./types";
 
-/** What a published version stores: the document minus the parts kept in tables. */
+/** What a published version stores: the document minus the parts kept in tables.
+ *
+ *  `Group.hunks` holds hunk ids, and no field on `Review` holds `Hunk` bodies, so a
+ *  version row as typed today cannot redraw the walkthrough on its own. The publish
+ *  step resolves this by giving `Review` a `hunks: Hunk[]` field, which lands in this
+ *  same `doc` column; the alternative, a second column, would let a version row exist
+ *  with its lines missing. Nothing else may be added to `review_versions` until then. */
 export type ReviewDoc = Omit<Review, "annotations" | "freshness">;
 
 export interface ReviewRow {
@@ -215,10 +221,15 @@ export function createAnnotation(
   return id;
 }
 
-export function getAnnotation(id: string): Annotation | null {
+/** Read one annotation. Every accessor below takes the owning workspace and slug and
+ *  puts them in the WHERE clause, so a route holding only an id from the URL cannot
+ *  reach across workspaces: the wrong call misses rather than succeeding. */
+export function getAnnotation(wsId: string, slug: string, id: string): Annotation | null {
   const row = db
-    .query<RawAnnotationRow, [string]>("SELECT * FROM review_annotations WHERE id = ?")
-    .get(id);
+    .query<RawAnnotationRow, [string, string, string]>(
+      "SELECT * FROM review_annotations WHERE workspace_id = ? AND slug = ? AND id = ?",
+    )
+    .get(wsId, slug, id);
   return row ? toAnnotation(row) : null;
 }
 
@@ -233,20 +244,34 @@ export function listAnnotations(wsId: string, slug: string): Annotation[] {
 
 /** Answer an open annotation. Answering is what flips the status: `answered` is
  *  never set without an answer body behind it. */
-export function answerAnnotation(id: string, answer: { body: string; refs: Ref[] }): void {
-  db.run("UPDATE review_annotations SET status = 'answered', answer = ? WHERE id = ?", [
-    JSON.stringify(answer),
-    id,
-  ]);
+export function answerAnnotation(
+  wsId: string,
+  slug: string,
+  id: string,
+  answer: { body: string; refs: Ref[] },
+): void {
+  db.run(
+    "UPDATE review_annotations SET status = 'answered', answer = ? " +
+      "WHERE workspace_id = ? AND slug = ? AND id = ?",
+    [JSON.stringify(answer), wsId, slug, id],
+  );
 }
 
 /** Withdraw an answer: back to open, and the answer goes with it. */
-export function reopenAnnotation(id: string): void {
-  db.run("UPDATE review_annotations SET status = 'open', answer = NULL WHERE id = ?", [id]);
+export function reopenAnnotation(wsId: string, slug: string, id: string): void {
+  db.run(
+    "UPDATE review_annotations SET status = 'open', answer = NULL " +
+      "WHERE workspace_id = ? AND slug = ? AND id = ?",
+    [wsId, slug, id],
+  );
 }
 
-export function deleteAnnotation(id: string): void {
-  db.run("DELETE FROM review_annotations WHERE id = ?", [id]);
+export function deleteAnnotation(wsId: string, slug: string, id: string): void {
+  db.run("DELETE FROM review_annotations WHERE workspace_id = ? AND slug = ? AND id = ?", [
+    wsId,
+    slug,
+    id,
+  ]);
 }
 
 // ---- read state ----
@@ -286,24 +311,33 @@ export function setReviewRead(
 export interface FreshnessRow {
   workspace_id: string;
   slug: string;
+  repo: string;
   pr_number: number;
   observed_head_sha: string;
   checked_at: number;
 }
 
-/** The head SHA last seen on GitHub for one pull request in this review. */
-export function getFreshness(wsId: string, slug: string, prNumber: number): FreshnessRow | null {
+/** The head SHA last seen on GitHub for one pull request in this review. Keyed by
+ *  repo as well as number: pull request 12 exists in every repository. */
+export function getFreshness(
+  wsId: string,
+  slug: string,
+  repo: string,
+  prNumber: number,
+): FreshnessRow | null {
   return db
-    .query<FreshnessRow, [string, string, number]>(
-      "SELECT * FROM review_freshness WHERE workspace_id = ? AND slug = ? AND pr_number = ?",
+    .query<FreshnessRow, [string, string, string, number]>(
+      "SELECT * FROM review_freshness " +
+        "WHERE workspace_id = ? AND slug = ? AND repo = ? AND pr_number = ?",
     )
-    .get(wsId, slug, prNumber);
+    .get(wsId, slug, repo, prNumber);
 }
 
 export function listFreshness(wsId: string, slug: string): FreshnessRow[] {
   return db
     .query<FreshnessRow, [string, string]>(
-      "SELECT * FROM review_freshness WHERE workspace_id = ? AND slug = ? ORDER BY pr_number ASC",
+      "SELECT * FROM review_freshness WHERE workspace_id = ? AND slug = ? " +
+        "ORDER BY repo ASC, pr_number ASC",
     )
     .all(wsId, slug);
 }
@@ -311,20 +345,24 @@ export function listFreshness(wsId: string, slug: string): FreshnessRow[] {
 export function setFreshness(
   wsId: string,
   slug: string,
+  repo: string,
   prNumber: number,
   observedHeadSha: string,
 ): void {
   db.run(
     "INSERT OR REPLACE INTO review_freshness " +
-      "(workspace_id, slug, pr_number, observed_head_sha, checked_at) VALUES (?, ?, ?, ?, ?)",
-    [wsId, slug, prNumber, observedHeadSha, Date.now()],
+      "(workspace_id, slug, repo, pr_number, observed_head_sha, checked_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?)",
+    [wsId, slug, repo, prNumber, observedHeadSha, Date.now()],
   );
 }
 
 // ---- ref snippet cache ----
 
 // Refs are SHA-pinned, so a cached file at (repo, sha, path) can never go stale:
-// the same key always names the same bytes. Entries are only ever added.
+// the same key always names the same bytes. A put on an existing key replaces it,
+// which writes back identical bytes and keeps two concurrent fetches of the same file
+// from colliding on the primary key.
 export function getSnippet(repo: string, sha: string, path: string): string | null {
   const row = db
     .query<{ content: string }, [string, string, string]>(

@@ -117,24 +117,24 @@ describe("annotations", () => {
     );
     expect(ANN_ID_RE.test(id)).toBe(true);
 
-    const filed = getAnnotation(id)!;
+    const filed = getAnnotation(WS_A, "annotated", id)!;
     expect(filed.status).toBe("open");
     expect(filed.answer).toBeNull();
     expect(filed.quote).toBe("the quoted span");
     expect(filed.target).toEqual({ type: "statement", id: "st_1" });
     expect(filed.version).toBe(1);
 
-    answerAnnotation(id, { body: "The gate runs first.", refs: [] });
-    const answered = getAnnotation(id)!;
+    answerAnnotation(WS_A, "annotated", id, { body: "The gate runs first.", refs: [] });
+    const answered = getAnnotation(WS_A, "annotated", id)!;
     expect(answered.status).toBe("answered");
     expect(answered.answer?.body).toBe("The gate runs first.");
 
-    reopenAnnotation(id);
-    expect(getAnnotation(id)?.status).toBe("open");
-    expect(getAnnotation(id)?.answer).toBeNull();
+    reopenAnnotation(WS_A, "annotated", id);
+    expect(getAnnotation(WS_A, "annotated", id)?.status).toBe("open");
+    expect(getAnnotation(WS_A, "annotated", id)?.answer).toBeNull();
 
-    deleteAnnotation(id);
-    expect(getAnnotation(id)).toBeNull();
+    deleteAnnotation(WS_A, "annotated", id);
+    expect(getAnnotation(WS_A, "annotated", id)).toBeNull();
   });
 
   test("a question filed against version 1 survives a republish", () => {
@@ -156,7 +156,27 @@ describe("annotations", () => {
 
   test("quote is optional and reads back as null", () => {
     const id = createAnnotation(WS_A, "unquoted", { type: "hunk", id: "h1" }, "no selection", 1);
-    expect(getAnnotation(id)?.quote).toBeNull();
+    expect(getAnnotation(WS_A, "unquoted", id)?.quote).toBeNull();
+  });
+
+  test("every accessor is scoped, so another workspace cannot read or touch one", () => {
+    const id = createAnnotation(WS_A, "guarded", { type: "note", id: "n1" }, "mine", 1);
+
+    expect(getAnnotation(WS_B, "guarded", id)).toBeNull();
+    expect(getAnnotation(WS_A, "other-slug", id)).toBeNull();
+
+    answerAnnotation(WS_B, "guarded", id, { body: "not yours", refs: [] });
+    expect(getAnnotation(WS_A, "guarded", id)?.status).toBe("open");
+
+    answerAnnotation(WS_A, "guarded", id, { body: "mine", refs: [] });
+    reopenAnnotation(WS_B, "guarded", id);
+    expect(getAnnotation(WS_A, "guarded", id)?.status).toBe("answered");
+
+    deleteAnnotation(WS_B, "guarded", id);
+    expect(getAnnotation(WS_A, "guarded", id)).not.toBeNull();
+
+    deleteAnnotation(WS_A, "guarded", id);
+    expect(getAnnotation(WS_A, "guarded", id)).toBeNull();
   });
 });
 
@@ -179,16 +199,25 @@ describe("read state", () => {
 
 describe("freshness", () => {
   test("the observed head sha is per pull request and updates in place", () => {
-    expect(getFreshness(WS_A, "fresh", 12)).toBeNull();
+    expect(getFreshness(WS_A, "fresh", "owner/name", 12)).toBeNull();
 
-    setFreshness(WS_A, "fresh", 12, "aaa111");
-    setFreshness(WS_A, "fresh", 13, "bbb222");
-    expect(getFreshness(WS_A, "fresh", 12)?.observed_head_sha).toBe("aaa111");
+    setFreshness(WS_A, "fresh", "owner/name", 12, "aaa111");
+    setFreshness(WS_A, "fresh", "owner/name", 13, "bbb222");
+    expect(getFreshness(WS_A, "fresh", "owner/name", 12)?.observed_head_sha).toBe("aaa111");
     expect(listFreshness(WS_A, "fresh").map((f) => f.pr_number)).toEqual([12, 13]);
 
-    setFreshness(WS_A, "fresh", 12, "ccc333");
-    expect(getFreshness(WS_A, "fresh", 12)?.observed_head_sha).toBe("ccc333");
+    setFreshness(WS_A, "fresh", "owner/name", 12, "ccc333");
+    expect(getFreshness(WS_A, "fresh", "owner/name", 12)?.observed_head_sha).toBe("ccc333");
     expect(listFreshness(WS_A, "fresh")).toHaveLength(2);
+  });
+
+  test("the same pull request number in two repos stays two rows", () => {
+    setFreshness(WS_A, "multi", "owner/one", 12, "aaa111");
+    setFreshness(WS_A, "multi", "owner/two", 12, "bbb222");
+
+    expect(getFreshness(WS_A, "multi", "owner/one", 12)?.observed_head_sha).toBe("aaa111");
+    expect(getFreshness(WS_A, "multi", "owner/two", 12)?.observed_head_sha).toBe("bbb222");
+    expect(listFreshness(WS_A, "multi")).toHaveLength(2);
   });
 });
 

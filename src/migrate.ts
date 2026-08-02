@@ -149,7 +149,10 @@ const V2_IMAGES = `
 // Annotations belong to the review rather than to a version and record the version
 // they were filed against, so a question asked on pass one is still open on pass
 // three. `ref_snippets` is a pure cache keyed by (repo, sha, path): SHA-pinned, so
-// an entry is never stale and never needs invalidating.
+// an entry is never stale and never needs invalidating. `review_freshness` keys on
+// (repo, pr_number) rather than the number alone: today's write path allows one repo
+// per review, but two pull requests numbered alike in different repos must never
+// collide if that constraint is ever lifted.
 const V3_REVIEWS = `
   CREATE TABLE IF NOT EXISTS reviews (
     workspace_id TEXT NOT NULL,
@@ -201,10 +204,11 @@ const V3_REVIEWS = `
   CREATE TABLE IF NOT EXISTS review_freshness (
     workspace_id TEXT NOT NULL,
     slug TEXT NOT NULL,
+    repo TEXT NOT NULL,
     pr_number INTEGER NOT NULL,
     observed_head_sha TEXT NOT NULL,
     checked_at INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, slug, pr_number)
+    PRIMARY KEY (workspace_id, slug, repo, pr_number)
   );
   CREATE TABLE IF NOT EXISTS ref_snippets (
     repo TEXT NOT NULL,
