@@ -1,6 +1,6 @@
 # Witness data model
 
-Witness stores and renders a review. It does not read code and it does not form opinions. A hosted skill running on the user's own inference does that, then publishes a document here.
+Witness is a tool for a human to run a review. A hosted skill, running on the user's own inference, reads the pull requests and prepares the briefing: what changed, what matters, where to look closely. Witness stores that briefing and renders it. Neither of them is the reviewer. The reader is, and every entity below exists to put the reader in a position to judge.
 
 This model is derived from the prototype, not from theory. Every field exists because the rendered page needed it, and several constraints exist because the prototype got them wrong first.
 
@@ -35,7 +35,7 @@ review
   slug            string, url-safe
   title           authored, <= 80 chars
   kind            derived: single | stack | set
-  summary         authored, <= 2 paragraphs, <= 600 chars
+  summary         authored, <= 2 paragraphs, <= 600 chars, constrained markdown
   prs[]           1..n
   statements[]    3..6
   notes[]         0..6
@@ -46,6 +46,8 @@ review
 ```
 
 `kind` is derived, not declared: one pull request is `single`, several where each is the base of the next is `stack`, anything else is `set`. The renderer draws the same chain either way; the difference is only whether the chain has edges or is a list.
+
+`summary` opens with intent. A reader who stops after the first sentence should know what the change is for; mechanism comes after. The first rendering of this very document buried its own purpose and read, for a moment, as if the tool were the reviewer. That is the failure this rule exists to prevent, and the skill gets graded on it.
 
 ### PullRequest
 
@@ -58,6 +60,9 @@ pr
   base_sha        derived
   base_ref        derived
   parent          number | null         derived from base_ref when it names another pr in the review, else authored
+  author          derived: the GitHub login
+  co_authors[]    derived: Co-Authored-By trailers across the pr's commits, deduplicated
+  body            derived: the pull request description, markdown as GitHub holds it
   gist            authored, <= 100 chars, one line
   detail          authored, <= 2 sentences
   detail_ref      ref id
@@ -65,6 +70,8 @@ pr
 ```
 
 `kinds[]` is derived on purpose. The marks on a pull request card are then provably tied to real claims, instead of being a second thing the skill can get out of step with the first.
+
+`author` and `co_authors[]` are how attribution survives: agent-written changes already announce themselves through Co-Authored-By trailers, so who wrote what, human or agent, is a derivable fact and Witness derives it. `body` is the description the author actually published, rendered behind a disclosure on the card so it is available without being re-summarized. Review comments and threads are also derived and handed to the skill as context, but rendering them is deferred, see the end of this document.
 
 ### Statement
 
@@ -77,8 +84,8 @@ statement
   text        authored, <= 120 chars, one line, no markup
   prs[]       which pull requests realize it
   refs[]      pointers backing the claim
-  body        authored, <= 1200 chars, plain paragraphs
-  evidence[]  ordered: ref | payload | figure
+  body        authored, <= 1200 chars, constrained markdown
+  evidence[]  ordered: ref | payload | figure | example | attachment | bundle
 ```
 
 `body` is prose, and it is where the reader opts in. It should cover why the change exists, what it does, and how it is built. Those are areas to cover, never labels to print. The prototype tried printing them as labels and it read as a form.
@@ -96,7 +103,7 @@ note
   id
   kind      risk | note
   text      authored, <= 140 chars
-  body      authored, <= 1600 chars
+  body      authored, <= 1600 chars, constrained markdown
   checks[]  0..5 ordered strings, each <= 120 chars
   refs[]
   evidence[]
@@ -115,7 +122,7 @@ group
   id
   title         authored, <= 60 chars
   significance  float, ascending, 1.0 = most significant
-  paragraph     authored, <= 600 chars
+  paragraph     authored, <= 600 chars, constrained markdown
   hunks[]       hunk ids
   file_notes[]  { path, text <= 120 chars }
   kind          derived: the dominant kind across its hunks
@@ -182,6 +189,43 @@ payload
   highlight[] keys or line numbers changed
 ```
 
+### Example
+
+Authored illustration: a request as a client would send it, a config as it would be written, a call as it would be made. An example puts a change in context the way no diff can, and it is the one evidence kind that is invented rather than quoted, so the renderer must make that unmistakable: an example never carries line numbers, never names a file, and always carries its caption.
+
+```
+example
+  lang      string; syntax color when the renderer knows the language, mono otherwise
+  text      <= 800 chars
+  caption   authored, <= 120 chars, required
+```
+
+### Attachment
+
+A file the skill uploads with the review: a screenshot, a rendered chart, a before and after capture. First class, not a link out. Seer already stores files as the truth on disk, and attachments ride the same discipline.
+
+```
+attachment
+  id
+  media_type   image/* to start
+  bytes        derived
+  alt          authored, <= 140 chars, required
+  caption      authored, <= 120 chars
+```
+
+Attachments are uploaded as part of publication and referenced from `evidence[]` by id; an attachment nothing references is rejected. Formats start at images. The record already carries `media_type`, so widening later is a renderer change, not a model change.
+
+### Bundle
+
+A pointer to a Seer bundle in the same workspace: a prototype, a contact sheet, a rendered artifact of the change under review. Reviews and bundles live in one deployment, so this is a resolved in-house link, not a URL.
+
+```
+bundle
+  slug
+  version   int | null, null = latest
+  caption   authored, <= 120 chars, required
+```
+
 ### Annotation
 
 Deferred, but the shape is settled: comments and questions are one primitive. A question is an annotation awaiting an answer.
@@ -196,6 +240,10 @@ annotation
   answer      { body, refs[] } | null
   created_at
 ```
+
+## Authored text is constrained markdown
+
+`summary`, statement and note bodies, and group paragraphs accept a fixed subset: emphasis, inline code, links, lists, and fenced code. Headings, tables, raw HTML, and inline images are rejected with a 422 naming the construct, not silently stripped. Structure belongs to the schema, and images are attachments, which are first class evidence rather than inline decoration. One-line fields (`text`, `gist`, `title`, captions, checks) stay plain: no markup at all except inline code.
 
 ## Budgets are the schema, not a guideline
 
@@ -212,6 +260,9 @@ The counts that matter: 3 to 6 statements, at most 6 notes, 2 to 8 groups, and h
 - every statement has at least one ref
 - a `risk` note has checks or a ref into a changed hunk
 - every pull request and every ref in one review names the same repo, until multi-repo is actually built
+- markdown outside the allowed subset is a 422 naming the construct
+- every attachment is referenced by some `evidence[]`, carries a required `alt`, and is `image/*`
+- every bundle evidence resolves to a bundle in the same workspace
 
 ## Endpoints
 
@@ -223,11 +274,13 @@ GET   /r/:slug                      the rendered page
 POST  /api/reviews/:slug/annotations
 ```
 
-A review is authored in one shot. The skill reads the pull requests, forms its view, and publishes a whole document; it does not build one up over many calls. Annotations are the only thing written afterward.
+A review is authored in one shot. The skill reads the pull requests, forms its view, and publishes a whole document with its attachments; it does not build one up over many calls. Annotations are the only thing written afterward.
+
+Viewing is the refresh trigger. Opening `/r/:slug` compares the stored head SHAs against GitHub, rate limited to once a minute per review, and kicks an asynchronous re-derivation when a head has moved. The page renders the stored document immediately and updates its freshness marks when the refresh lands, over the same live channel Seer already uses for bundles. `POST /api/reviews/:slug/refresh` stays for explicit calls, but nothing depends on remembering to make one: a review someone is looking at cannot silently claim `current` while the branch moves underneath it, because looking at it is what checks.
 
 ## Privacy differs from Seer
 
-Seer bundles are public by link, because a bundle is something you want to hand to someone. A review contains private source code, so reviews are private by default and need a session. If sharing is ever wanted it should be an explicit, revocable share token per review rather than a guessable slug.
+Seer bundles are public by link, because a bundle is something you want to hand to someone. A review contains private source code, so reviews belong to a workspace, the same unit bundles now live under, and are private within it: viewing needs a workspace session. If sharing is ever wanted it should be an explicit, revocable share token per review rather than a guessable slug.
 
 ## Deliberately not built yet
 
@@ -236,6 +289,10 @@ Seer bundles are public by link, because a bundle is something you want to hand 
 **Non-code references.** Linear issues and their kin were in the original brief and are deferred. When they arrive the shape is a ref with a different kind and its own resolver, which is why `ref` is already a resolved pointer rather than a code-specific record. No further preparation is warranted now.
 
 **The `keep` statement kind.** Cut, see the statement section.
+
+**Rendering comment threads.** Pull request comments and review threads are derived and handed to the skill as context, so discussion informs the briefing. Rendering the threads themselves re-hosts GitHub's conversation UI, which is a project of its own and not this one. If a comment matters to the review, the skill says so in a statement or note and refs the code it is about.
+
+**Attachment formats beyond images.** The `media_type` field is already there; each new format is a renderer decision made when a real review needs it.
 
 ## Open questions
 
