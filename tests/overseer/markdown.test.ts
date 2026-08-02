@@ -246,7 +246,27 @@ describe("adversarial input", () => {
   });
 
   test("the language class cannot carry markup", () => {
-    expect(render('```a"b\nx\n```')).toBe("<pre><code>x\n</code></pre>");
+    const result = rejection('```a"b\nx\n```');
+    expect(result.construct).toBe("fenced code info string");
+    expect(result.text).toBe('a"b');
+    expect(() => render('```a"b\nx\n```')).toThrow(MarkdownRejection);
+    expect(rejection("```a`b\nx\n```").construct).toBe("fenced code info string");
+    expect(rejection("```<div>\nx\n```").construct).toBe("fenced code info string");
+  });
+
+  test("prose comparing values is not a raw tag", () => {
+    expect(render("the guard went from i<n to i<=n")).toBe(
+      "<p>the guard went from i&lt;n to i&lt;=n</p>",
+    );
+    expect(render("the loop runs while i<n and then exits")).toBe(
+      "<p>the loop runs while i&lt;n and then exits</p>",
+    );
+    expect(render("compare a<b\nand c<d")).toBe("<p>compare a&lt;b\nand c&lt;d</p>");
+    expect(validate("compare a<b\nand c<d")).toEqual({ ok: true });
+  });
+
+  test("a tag split inside a list is named as a tag", () => {
+    expect(rejection("- a <div\n- > q").construct).toBe("raw HTML tag");
   });
 });
 
@@ -335,6 +355,13 @@ describe("authored content survives intact", () => {
 
   test("a list still ends when the next block is not an item", () => {
     expect(render("1. a\n\ntext")).toBe("<ol><li>a</li></ol>\n<p>text</p>");
+  });
+
+  test("a list indented as a whole is not a nested list", () => {
+    expect(render("  - a\n  - b")).toBe("<ul><li>a</li><li>b</li></ul>");
+    expect(validate("  - a\n  - b")).toEqual({ ok: true });
+    expect(render("  1. a\n  2. b")).toBe("<ol><li>a</li><li>b</li></ol>");
+    expect(rejection("- a\n  - b").construct).toBe("nested list");
   });
 
   test("a list broken by two blank lines still numbers faithfully", () => {

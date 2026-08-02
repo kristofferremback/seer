@@ -12,12 +12,25 @@
 // and the set of them is closed: p, em, strong, code, a, ul, ol, li, pre. A reader
 // auditing the output for injection has one file to read.
 //
+// The line between refusing and passing through is this: markdown that another dialect
+// would style is left as literal escaped text, so the reader sees exactly what was
+// written; only constructs that would otherwise disappear from the page are refused by
+// name. That is why `_emph_`, `__strong__`, `- [ ] task` and `<https://autolink>` render
+// as the characters they are, while a heading, a table or a raw tag is named and refused.
+//
 // A rejection quotes the offending source verbatim, so `message` and `text` are safe in
 // a JSON body but must go through `escapeHtml` before reaching any HTML template.
 
 import { escapeHtml } from "../pages";
 
-/** Where a rejected construct sits in the source. All 1-based except `offset`. */
+/**
+ * Where a rejected construct sits in the source. `line` and `column` are 1-based.
+ *
+ * `offset` indexes the *normalized* source, not the string the caller passed: parsing
+ * first drops carriage returns and expands leading tabs to four spaces, so an offset
+ * into a CRLF or tab-indented original would land a character or two short. Report it,
+ * do not use it to slice the caller's text.
+ */
 export interface Position {
   line: number;
   column: number;
@@ -99,7 +112,10 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*(\S*)[ \t]*$/;
 const UNORDERED = /^ {0,3}([-*+])(?:[ \t]+|$)/;
 const ORDERED = /^ {0,3}(\d{1,9})[.)](?:[ \t]+|$)/;
 const TABLE_DELIMITER = /^ {0,3}\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?$/;
-const HTML_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>])[^<>]*>?/;
+// The closing `>` is required. Without it `i<n and then exits` reads as a tag the author
+// never wrote, and CommonMark treats an unterminated `<name ...` as literal text anyway.
+// Nothing is lost by the tightening: an unmatched `<` still leaves as `&lt;`.
+const HTML_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>])[^<>]*>/;
 const ATTRIBUTE_LESS_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*>/;
 
 /**
@@ -132,13 +148,31 @@ function rejectForbiddenLine(line: SourceLine, starts: number[], previousWasText
 }
 
 /**
+ * True when a `>` turns up on a later line of the same block before the next `<` does,
+ * which is what makes an unterminated `<name ...` an actual tag rather than prose.
+ */
+function closesOnALaterLine(lines: SourceLine[], from: number): boolean {
+  for (let j = from; j < lines.length; j++) {
+    const text = lines[j]!.text;
+    if (isBlank(text)) return false;
+    const gt = text.indexOf(">");
+    const lt = text.indexOf("<");
+    if (gt !== -1 && (lt === -1 || gt < lt)) return true;
+    if (lt !== -1) return false;
+  }
+  return false;
+}
+
+/**
  * A tag opened at the end of a line closes on the next one. The next line is checked
  * for forbidden constructs first, so without this the tag would be reported under
- * whatever name that line happens to match.
+ * whatever name that line happens to match. It has to actually close, though: `a<b`
+ * followed by `c<d` is arithmetic, not markup.
  */
-function rejectDanglingTag(line: SourceLine, starts: number[]): void {
+function rejectDanglingTag(line: SourceLine, lines: SourceLine[], next: number, starts: number[]): void {
   const open = /<\/?[A-Za-z][A-Za-z0-9-]*[^<>]*$/.exec(line.text);
   if (!open) return;
+  if (!closesOnALaterLine(lines, next)) return;
   const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(open[0]!)![1]!;
   reject(
     "raw HTML tag",
@@ -192,7 +226,10 @@ function parseBlocks(source: string, starts: number[]): Block[] {
       const marker = fence[1]![0]!;
       const width = fence[1]!.length;
       const lang = fence[2]!;
-      if (lang.includes("`")) {
+      // An info string outside the language subset is named rather than dropped: the
+      // author wrote it, and a silently discarded one is the same swallowed payload the
+      // rest of this file exists to refuse.
+      if (lang !== "" && !LANGUAGE.test(lang)) {
         reject("fenced code info string", positionOf(starts, line.offset), lang);
       }
       const body: string[] = [];
@@ -226,8 +263,17 @@ function parseBlocks(source: string, starts: number[]): Block[] {
       const isOrdered = !unordered;
       const start = isOrdered ? Number(ordered![1]!) : 1;
       const items: SourceLine[][] = [];
+      const listStart = i;
+      // The indent the author gave the list as a whole. Items at this indent are siblings;
+      // only a deeper one is nested.
+      const baseIndent = line.text.length - line.text.trimStart().length;
       for (; i < lines.length; i++) {
         const item = lines[i]!;
+        if (i > listStart && !isBlank(lines[i - 1]!.text)) {
+          // Same reason as in the paragraph loop: name a split tag as a tag, before the
+          // line it spills onto gets named as whatever it resembles.
+          rejectDanglingTag(lines[i - 1]!, lines, i, starts);
+        }
         if (isBlank(item.text)) {
           // Blank lines between items are a normal authoring style, so the list carries
           // on across them rather than splitting into a second list that restarts at 1.
@@ -245,7 +291,7 @@ function parseBlocks(source: string, starts: number[]): Block[] {
         if (marker) {
           if (!!u === isOrdered) break; // the other kind of list starts a new block
           const indent = item.text.length - item.text.trimStart().length;
-          if (indent > 0 && items.length > 0) {
+          if (indent > baseIndent && items.length > 0) {
             reject("nested list", positionOf(starts, item.offset), item.text.trim());
           }
           const content: SourceLine = {
@@ -276,7 +322,7 @@ function parseBlocks(source: string, starts: number[]): Block[] {
       const p = lines[i]!;
       if (isBlank(p.text)) break;
       if (paragraph.length > 0) {
-        rejectDanglingTag(paragraph[paragraph.length - 1]!, starts);
+        rejectDanglingTag(paragraph[paragraph.length - 1]!, lines, i, starts);
         rejectForbiddenLine(p, starts, true);
         rejectTableRow(p, lines[i + 1], starts);
         if (FENCE.test(p.text) || UNORDERED.test(p.text) || ORDERED.test(p.text)) break;
