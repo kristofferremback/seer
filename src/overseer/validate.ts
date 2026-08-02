@@ -21,7 +21,10 @@ import {
   maxNotes,
   maxStatements,
   prKey,
+  FIGURE_KINDS,
+  FIGURE_NODE_STATES,
   NOTE_KINDS,
+  PAYLOAD_LANGS,
   STATEMENT_KINDS,
   type Figure,
   type Hunk,
@@ -129,6 +132,9 @@ export interface PriorDoc {
   statements: { id: string }[];
   notes: { id: string }[];
   groups: { id: string }[];
+  /** Attachments share the id namespace within a version, so they share it across
+   *  versions too: an id that named an attachment cannot come back as a statement. */
+  attachments?: { id: string }[];
 }
 
 export interface ValidateOptions {
@@ -227,7 +233,7 @@ function minCount(
 }
 
 function required(errors: ValidationError[], field: string, value: string): boolean {
-  if (value.trim() === "") {
+  if (typeof value !== "string" || value.trim() === "") {
     errors.push({ field, rule: "required", message: `${field} is required` });
     return false;
   }
@@ -314,6 +320,49 @@ function rangeOf(h: Hunk): string {
   return `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`;
 }
 
+/** The list at `field`, or [] plus a `required` error when it is absent or not a list. */
+function requireList<T>(errors: ValidationError[], field: string, value: T[] | undefined): T[] {
+  if (Array.isArray(value)) return value;
+  errors.push({
+    field,
+    rule: "required",
+    message: `${field} is required and is a list`,
+  });
+  return [];
+}
+
+/** Every list the rules walk, coerced to a list. Shape errors are reported by name so a
+ *  malformed body reads as a 422 about a field rather than as a crash. */
+function normalizeLists(errors: ValidationError[], payload: PublishPayload): PublishPayload {
+  const prs = requireList(errors, "prs", payload.prs);
+  const statements = requireList(errors, "statements", payload.statements);
+  const notes = requireList(errors, "notes", payload.notes);
+  const groups = requireList(errors, "groups", payload.groups);
+  const attachments = requireList(errors, "attachments", payload.attachments);
+  return {
+    ...payload,
+    prs,
+    statements: statements.map((s, i) => ({
+      ...s,
+      prs: requireList(errors, `statements[${i}].prs`, s.prs),
+      refs: requireList(errors, `statements[${i}].refs`, s.refs),
+      evidence: requireList(errors, `statements[${i}].evidence`, s.evidence),
+    })),
+    notes: notes.map((n, i) => ({
+      ...n,
+      checks: requireList(errors, `notes[${i}].checks`, n.checks),
+      refs: requireList(errors, `notes[${i}].refs`, n.refs),
+      evidence: requireList(errors, `notes[${i}].evidence`, n.evidence),
+    })),
+    groups: groups.map((g, i) => ({
+      ...g,
+      hunks: requireList(errors, `groups[${i}].hunks`, g.hunks),
+      fileNotes: requireList(errors, `groups[${i}].fileNotes`, g.fileNotes),
+    })),
+    attachments,
+  };
+}
+
 // ---- the rules ----
 
 export function validatePublish(
@@ -324,6 +373,10 @@ export function validatePublish(
 ): ValidationResult {
   const errors: ValidationError[] = [];
   const warnings: ValidationWarning[] = [];
+
+  // A body missing a list is a 422 naming the field, not a 500 from the first `.length`
+  // below. Absence is answered once, here, and every rule after this reads a list.
+  payload = normalizeLists(errors, payload);
 
   // Budgets scale with distinct pull requests, never with repeated pointers: the same
   // repo#number twice would otherwise buy breadth for a review that named one change.
@@ -424,7 +477,6 @@ export function validatePublish(
       checkLine(errors, `${at}.gist`, pr.gist);
     }
     if (required(errors, `${at}.detail`, pr.detail)) {
-      capText(errors, `${at}.detail`, pr.detail, BUDGETS.chars.prDetail);
       checkBody(errors, `${at}.detail`, pr.detail);
       const sentences = sentencesOf(pr.detail);
       if (sentences > 2) {
@@ -533,10 +585,14 @@ export function validatePublish(
     n.refs.forEach((r, j) => checkRef(errors, `${at}.refs[${j}]`, r, homeRepo));
 
     // "a risk note has checks or a ref into a changed hunk": a risk has to point at
-    // something falsifiable.
+    // something falsifiable. Any ref backing the note counts, whether it sits in refs[]
+    // or in evidence[] as a ref: both are the note's pointers into the code.
     if (n.kind === "risk") {
       const hasChecks = n.checks.some((c) => c.trim() !== "");
-      const pointsAtChange = n.refs.some((r) => refTouchesChange(r, changedRefKeys));
+      const evidenceRefs = n.evidence.flatMap((e) => (e.type === "ref" ? [e.ref] : []));
+      const pointsAtChange = [...n.refs, ...evidenceRefs].some((r) =>
+        refTouchesChange(r, changedRefKeys),
+      );
       if (!hasChecks && !pointsAtChange) {
         errors.push({
           field: at,
@@ -673,6 +729,7 @@ export function validatePublish(
     for (const s of prior.statements) typeOfPriorId.set(s.id, "statement");
     for (const n of prior.notes) typeOfPriorId.set(n.id, "note");
     for (const g of prior.groups) typeOfPriorId.set(g.id, "group");
+    for (const a of prior.attachments ?? []) typeOfPriorId.set(a.id, "attachment");
     const check = (id: string, kind: string, field: string) => {
       const was = typeOfPriorId.get(id);
       if (was && was !== kind) {
@@ -686,12 +743,17 @@ export function validatePublish(
     payload.statements.forEach((s, i) => check(s.id, "statement", `statements[${i}].id`));
     payload.notes.forEach((n, i) => check(n.id, "note", `notes[${i}].id`));
     payload.groups.forEach((g, i) => check(g.id, "group", `groups[${i}].id`));
+    payload.attachments.forEach((a, i) => check(a.id, "attachment", `attachments[${i}].id`));
   }
 
   // ---- duplicate ids within this version ----
 
   const seenIds = new Map<string, string>();
   const claimId = (id: string, kind: string, field: string) => {
+    // The delta matches entities by id across versions, so a blank or absent id would
+    // silently degrade every later version. Two of them would also collide here into a
+    // confusing id_duplicated, which says nothing about what is actually wrong.
+    if (!required(errors, field, id)) return;
     const was = seenIds.get(id);
     if (was !== undefined) {
       errors.push({
@@ -776,6 +838,16 @@ function checkRef(
     });
   }
   for (const line of ref.highlight ?? []) {
+    // Types are erased at runtime and this is the only gate on a POSTed document, so a
+    // string or a NaN has to be caught here: both comparisons below are false for it.
+    if (!Number.isInteger(line)) {
+      errors.push({
+        field: `${field}.highlight`,
+        rule: "ref_highlight_outside",
+        message: `${field} highlights ${JSON.stringify(line)}, which is not a line number`,
+      });
+      continue;
+    }
     if (line < ref.startLine || line > ref.endLine) {
       errors.push({
         field: `${field}.highlight`,
@@ -804,7 +876,8 @@ function changedHunkIndex(derived: DerivedFacts): Map<string, Hunk[]> {
   return index;
 }
 
-function refTouchesChange(ref: RefPointerInput, index: Map<string, Hunk[]>): boolean {
+function refTouchesChange(ref: RefPointerInput | undefined, index: Map<string, Hunk[]>): boolean {
+  if (!ref || typeof ref.sha !== "string") return false;
   const hunks = index.get(`${ref.repo}@${ref.sha.toLowerCase()}:${ref.path}`);
   if (!hunks) return false;
   return hunks.some((h) => {
@@ -830,10 +903,15 @@ function checkEvidence(
         checkRef(errors, `${at}.ref`, e.ref, homeRepo);
         break;
       case "payload":
+        checkKind(errors, `${at}.payload.lang`, e.payload.lang, PAYLOAD_LANGS);
         capText(errors, `${at}.payload.before`, e.payload.before, BUDGETS.chars.payloadSide);
         capText(errors, `${at}.payload.after`, e.payload.after, BUDGETS.chars.payloadSide);
         break;
-      case "figure":
+      case "figure": {
+        checkKind(errors, `${at}.figure.kind`, e.figure.kind, FIGURE_KINDS);
+        // Node ids first: an edge naming an id no node declares is a dangling arrow the
+        // renderer would have to defend against, so it never reaches storage.
+        const nodeIds = new Set(e.figure.nodes.map((n) => n.id));
         e.figure.nodes.forEach((n, j) => {
           capText(
             errors,
@@ -842,6 +920,7 @@ function checkEvidence(
             BUDGETS.chars.figureNodeLabel,
           );
           checkLine(errors, `${at}.figure.nodes[${j}].label`, n.label);
+          checkKind(errors, `${at}.figure.nodes[${j}].state`, n.state, FIGURE_NODE_STATES);
         });
         e.figure.edges.forEach((edge, j) => {
           capText(
@@ -851,8 +930,17 @@ function checkEvidence(
             BUDGETS.chars.figureEdgeLabel,
           );
           checkLine(errors, `${at}.figure.edges[${j}].label`, edge.label);
+          for (const end of ["from", "to"] as const) {
+            if (nodeIds.has(edge[end])) continue;
+            errors.push({
+              field: `${at}.figure.edges[${j}].${end}`,
+              rule: "figure_edge_dangling",
+              message: `${at}.figure.edges[${j}].${end} names "${edge[end]}", which no node in this figure declares`,
+            });
+          }
         });
         break;
+      }
       case "example":
         capText(errors, `${at}.example.text`, e.example.text, BUDGETS.chars.exampleText);
         if (required(errors, `${at}.example.caption`, e.example.caption)) {

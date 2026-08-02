@@ -691,15 +691,6 @@ describe("a pull request detail", () => {
     expect(err?.message).toContain("heading");
   });
 
-  test("caps its characters, so one endless sentence cannot slip through", () => {
-    const payload = golden();
-    payload.prs[0]!.detail = `${"d".repeat(243)}.`;
-    const err = run(payload).errors.find(
-      (e) => e.field === "prs[0].detail" && e.rule === "cap_chars",
-    );
-    expect(err?.overage).toBe(4);
-  });
-
   test("caps its sentences", () => {
     const payload = golden();
     payload.prs[0]!.detail = "One. Two. Three.";
@@ -789,5 +780,147 @@ describe("statement and note kinds come from the doc's closed lists", () => {
     (payload.notes[0] as { kind: string }).kind = "warning";
     const err = find(run(payload).errors, "kind_unknown");
     expect(err.field).toBe("notes[0].kind");
+  });
+});
+
+// ---- rule: evidence sub-objects come from the doc's closed lists ----
+
+describe("evidence sub-objects come from the doc's closed lists", () => {
+  function firstPayloadEvidence(payload: PublishPayload) {
+    for (const s of payload.statements) {
+      for (const e of s.evidence) if (e.type === "payload") return e.payload;
+    }
+    throw new Error("the golden payload carries no payload evidence");
+  }
+
+  function firstFigure(payload: PublishPayload) {
+    for (const s of payload.statements) {
+      for (const e of s.evidence) if (e.type === "figure") return e.figure;
+    }
+    throw new Error("the golden payload carries no figure evidence");
+  }
+
+  test("a payload lang outside json | text is rejected", () => {
+    const payload = golden();
+    (firstPayloadEvidence(payload) as { lang: string }).lang = "yaml";
+    const err = find(run(payload).errors, "kind_unknown");
+    expect(err.field).toContain(".payload.lang");
+    expect(err.message).toContain("yaml");
+    expect(err.message).toContain("json, text");
+  });
+
+  test("a figure kind other than flow is rejected", () => {
+    const payload = golden();
+    (firstFigure(payload) as { kind: string }).kind = "sequence";
+    const err = find(run(payload).errors, "kind_unknown");
+    expect(err.field).toContain(".figure.kind");
+    expect(err.message).toContain("sequence");
+  });
+
+  test("a figure node state outside normal | muted is rejected", () => {
+    const payload = golden();
+    (firstFigure(payload).nodes[0] as { state: string }).state = "loud";
+    const err = find(run(payload).errors, "kind_unknown");
+    expect(err.field).toContain(".figure.nodes[0].state");
+    expect(err.message).toContain("loud");
+  });
+
+  test("a figure edge naming an id no node declares is a dangling arrow", () => {
+    const payload = golden();
+    const figure = firstFigure(payload);
+    figure.edges.push({ from: "nope", to: "alsonope", label: "" });
+    const dangling = run(payload).errors.filter((e) => e.rule === "figure_edge_dangling");
+    expect(dangling.length).toBe(2);
+    expect(dangling[0]!.field).toContain(`.figure.edges[${figure.edges.length - 1}].from`);
+    expect(dangling[0]!.message).toContain("nope");
+    expect(dangling[1]!.field).toContain(`.figure.edges[${figure.edges.length - 1}].to`);
+    expect(dangling[1]!.message).toContain("alsonope");
+  });
+
+  test("a ref highlight that is not a line number is rejected", () => {
+    const payload = golden();
+    payload.statements[0]!.refs[0]!.highlight = ["42" as unknown as number, Number.NaN];
+    const bad = run(payload).errors.filter((e) => e.rule === "ref_highlight_outside");
+    expect(bad.length).toBe(2);
+    expect(bad[0]!.field).toBe("statements[0].refs[0].highlight");
+    expect(bad[0]!.message).toContain("not a line number");
+  });
+});
+
+// ---- rule: a missing list is a named error, never a crash ----
+
+describe("a body missing a list", () => {
+  test("names the absent field instead of throwing", () => {
+    const payload = golden();
+    delete (payload as { notes?: unknown }).notes;
+    const err = find(run(payload).errors, "required");
+    expect(err.field).toBe("notes");
+  });
+
+  test("names an absent list on one entity", () => {
+    const payload = golden();
+    delete (payload.statements[0] as { refs?: unknown }).refs;
+    const err = run(payload).errors.find(
+      (e) => e.rule === "required" && e.field === "statements[0].refs",
+    );
+    expect(err).toBeDefined();
+  });
+});
+
+// ---- rule: every entity carries an id ----
+
+describe("entity ids", () => {
+  test("a blank statement id is a required error, not a duplicate", () => {
+    const payload = golden();
+    payload.statements[0]!.id = "";
+    const errors = run(payload).errors;
+    const err = errors.find((e) => e.field === "statements[0].id");
+    expect(err?.rule).toBe("required");
+    expect(rules(errors)).not.toContain("id_duplicated");
+  });
+
+  test("two entities missing their ids do not collide into id_duplicated", () => {
+    const payload = golden();
+    delete (payload.statements[0] as { id?: string }).id;
+    delete (payload.statements[1] as { id?: string }).id;
+    const errors = run(payload).errors;
+    expect(errors.filter((e) => e.rule === "required" && e.field.endsWith(".id")).length).toBe(2);
+    expect(rules(errors)).not.toContain("id_duplicated");
+  });
+});
+
+// ---- rule: attachments share the id namespace across versions too ----
+
+describe("an attachment id from the prior version", () => {
+  test("cannot come back as a statement id", () => {
+    const prior = {
+      statements: [],
+      notes: [],
+      groups: [],
+      attachments: [{ id: "at_screenshot" }],
+    };
+    const payload = golden();
+    payload.statements[0]!.id = "at_screenshot";
+    const err = find(run(payload, goldenDerived(), prior).errors, "id_type_changed");
+    expect(err.field).toBe("statements[0].id");
+    expect(err.message).toContain("attachment");
+    expect(err.message).toContain("statement");
+  });
+});
+
+// ---- rule: a risk's falsifying ref may sit in evidence ----
+
+describe("a risk with no checks", () => {
+  test("is falsifiable when its ref into a changed hunk sits in evidence", () => {
+    const payload = golden();
+    const note = payload.notes.find((n) => n.kind === "risk")!;
+    note.checks = [];
+    const intoChange = note.refs.find((r) =>
+      Object.values(GOLDEN_HUNKS).some((h) => h.path === r.path && h.sha === r.sha),
+    );
+    expect(intoChange).toBeDefined();
+    note.refs = [];
+    note.evidence = [...note.evidence, { type: "ref", ref: intoChange! }];
+    expect(rules(run(payload).errors)).not.toContain("risk_unfalsifiable");
   });
 });

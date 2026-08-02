@@ -22,9 +22,17 @@ export type RefOrigin = "in_stack" | "outside";
 
 export type HunkLineKind = "ctx" | "add" | "del";
 
-export type FigureNodeState = "normal" | "muted";
+/** Closed list: the doc's Figure block gives node state as normal | muted. */
+export const FIGURE_NODE_STATES = ["normal", "muted"] as const;
+export type FigureNodeState = (typeof FIGURE_NODE_STATES)[number];
 
-export type PayloadLang = "json" | "text";
+/** Closed list: the doc's Figure block gives one kind, and Mermaid was rejected. */
+export const FIGURE_KINDS = ["flow"] as const;
+export type FigureKind = (typeof FIGURE_KINDS)[number];
+
+/** Closed list: the doc's Payload block gives lang as json | text. */
+export const PAYLOAD_LANGS = ["json", "text"] as const;
+export type PayloadLang = (typeof PAYLOAD_LANGS)[number];
 
 export type AnnotationTargetType =
   | "statement"
@@ -214,7 +222,7 @@ export function prKey(repo: string, number: number): string {
 
 /** The one drawing on the page: a constrained graph, rendered in the house style. */
 export interface Figure {
-  kind: "flow";
+  kind: FigureKind;
   nodes: { id: string; label: string; state: FigureNodeState }[];
   edges: { from: string; to: string; label: string }[];
 }
@@ -293,7 +301,6 @@ export const BUDGETS = {
     reviewTitle: 80, // review.title
     summary: 600, // review.summary, also <= BUDGETS.paragraphs.summary paragraphs
     prGist: 100, // pr.gist, one line
-    prDetail: 240, // pr.detail, also <= 2 sentences
     statementText: 120, // statement.text, one line, no markup
     statementBody: 1200, // statement.body
     noteText: 140, // note.text

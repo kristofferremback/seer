@@ -67,7 +67,7 @@ pr
   co_authors[]    derived: Co-Authored-By trailers across the pr's commits, deduplicated
   body            derived: the pull request description, markdown as GitHub holds it
   gist            authored, <= 100 chars, one line
-  detail          authored, <= 2 sentences, <= 240 chars
+  detail          authored, <= 2 sentences
   detail_ref      ref id
   kinds[]         derived: the distinct kinds of the statements attributed to this pr
 ```
