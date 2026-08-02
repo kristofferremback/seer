@@ -225,6 +225,18 @@ if (SCENARIO === "v2") {
   const rCount = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount === 0, `reviews table starts empty, got ${rCount}`);
 
+  // A database from a newer binary is refused rather than half-read.
+  db.run("PRAGMA user_version = 4");
+  let threw = false;
+  try {
+    migrate();
+  } catch (err) {
+    threw = true;
+    assert(/user_version 4/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
+  }
+  assert(threw, "migrate must throw on a user_version newer than it knows");
+  db.run("PRAGMA user_version = 3");
+
   console.log("migrate v2: all assertions passed");
   process.exit(0);
 }

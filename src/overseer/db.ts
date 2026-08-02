@@ -96,12 +96,30 @@ export function listReviewVersions(
 /** Publish a document to a slug, creating the review on first publish. Returns the
  *  new version number. Mirrors createVersion() for bundles: head pointer and the
  *  version row move in one transaction, so a concurrent publish cannot observe a
- *  latest_version that has no row behind it. */
+ *  latest_version that has no row behind it.
+ *
+ *  The three key-derived fields are owned here, never taken from the caller: `slug`
+ *  and `version` come from the row the document is stored under, and `id` is minted on
+ *  the first publish and carried forward from the previous version on every republish.
+ *  A stored document therefore always names itself correctly, and a review keeps one
+ *  identity for its whole life. */
 export const createReviewVersion = db.transaction(
-  (wsId: string, slug: string, doc: Omit<ReviewDoc, "version">): number => {
+  (wsId: string, slug: string, doc: Omit<ReviewDoc, "id" | "slug" | "version">): number => {
     const now = Date.now();
     const existing = getReview(wsId, slug);
     const version = (existing?.latest_version ?? 0) + 1;
+    let id: string;
+    if (existing) {
+      const prior = getReviewVersion(wsId, slug, existing.latest_version);
+      if (!prior) {
+        throw new Error(
+          `Review ${wsId}/${slug} has latest_version ${existing.latest_version} with no version row behind it`,
+        );
+      }
+      id = prior.doc.id;
+    } else {
+      id = tinyId("rev");
+    }
     if (existing) {
       db.run("UPDATE reviews SET latest_version = ? WHERE workspace_id = ? AND slug = ?", [
         version,
@@ -116,11 +134,15 @@ export const createReviewVersion = db.transaction(
     }
     db.run(
       "INSERT INTO review_versions (workspace_id, slug, version, doc, created_at) VALUES (?, ?, ?, ?, ?)",
-      [wsId, slug, version, JSON.stringify({ ...doc, version }), now],
+      [wsId, slug, version, JSON.stringify({ ...doc, id, slug, version }), now],
     );
     return version;
   },
-) as (wsId: string, slug: string, doc: Omit<ReviewDoc, "version">) => number;
+) as (
+  wsId: string,
+  slug: string,
+  doc: Omit<ReviewDoc, "id" | "slug" | "version">,
+) => number;
 
 // ---- attachments ----
 
@@ -157,10 +179,15 @@ export function createAttachment(
   return id;
 }
 
-export function getAttachment(id: string): AttachmentRow | null {
+/** Scoped like the annotation accessors: the owning workspace and slug are part of
+ *  the WHERE clause, so a route holding only an id from the URL misses rather than
+ *  reading another workspace's attachment. */
+export function getAttachment(wsId: string, slug: string, id: string): AttachmentRow | null {
   return db
-    .query<AttachmentRow, [string]>("SELECT * FROM review_attachments WHERE id = ?")
-    .get(id);
+    .query<AttachmentRow, [string, string, string]>(
+      "SELECT * FROM review_attachments WHERE workspace_id = ? AND slug = ? AND id = ?",
+    )
+    .get(wsId, slug, id);
 }
 
 export function listAttachments(wsId: string, slug: string): AttachmentRow[] {

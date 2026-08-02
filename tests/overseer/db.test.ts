@@ -15,8 +15,10 @@ import {
   getReviewVersion,
   getSnippet,
   listAnnotations,
+  listAttachments,
   listFreshness,
   listReviewVersions,
+  listReviews,
   putSnippet,
   reopenAnnotation,
   setFreshness,
@@ -25,12 +27,13 @@ import {
 } from "../../src/overseer/db";
 import {
   attachmentKey,
+  attachmentLocation,
   attachmentPath,
   openAttachment,
   saveAttachment,
 } from "../../src/store";
 import { config } from "../../src/config";
-import { ATT_ID_RE, ANN_ID_RE } from "../../src/ids";
+import { ATT_ID_RE, ANN_ID_RE, REV_ID_RE } from "../../src/ids";
 import { join } from "node:path";
 
 beforeAll(() => {
@@ -40,10 +43,9 @@ beforeAll(() => {
 const WS_A = "ws_aaaaaaaaaa";
 const WS_B = "ws_bbbbbbbbbb";
 
-function doc(title: string): Omit<ReviewDoc, "version"> {
+// The store owns id, slug and version, so the fixture carries none of them.
+function doc(title: string): Omit<ReviewDoc, "id" | "slug" | "version"> {
   return {
-    id: "rev_0000000000",
-    slug: "the-review",
     title,
     kind: "single",
     summary: "It does the thing.",
@@ -78,6 +80,22 @@ describe("review versions", () => {
     expect(getReviewVersion(WS_A, "again", 2)?.doc.version).toBe(2);
   });
 
+  test("the stored document names its own slug and keeps one id across versions", () => {
+    createReviewVersion(WS_A, "self-naming", doc("First pass"));
+    createReviewVersion(WS_A, "self-naming", doc("Second pass"));
+
+    const v1 = getReviewVersion(WS_A, "self-naming", 1)!;
+    const v2 = getReviewVersion(WS_A, "self-naming", 2)!;
+    expect(v1.doc.slug).toBe("self-naming");
+    expect(v2.doc.slug).toBe("self-naming");
+    expect(REV_ID_RE.test(v1.doc.id)).toBe(true);
+    expect(v2.doc.id).toBe(v1.doc.id);
+
+    // A different review under a different slug is a different identity.
+    createReviewVersion(WS_A, "other-naming", doc("Elsewhere"));
+    expect(getReviewVersion(WS_A, "other-naming", 1)?.doc.id).not.toBe(v1.doc.id);
+  });
+
   test("two workspaces hold the same slug independently", () => {
     createReviewVersion(WS_A, "shared-slug", doc("A one"));
     createReviewVersion(WS_A, "shared-slug", doc("A two"));
@@ -88,6 +106,25 @@ describe("review versions", () => {
     expect(getReview(WS_B, "shared-slug")?.latest_version).toBe(1);
     expect(getReviewVersion(WS_B, "shared-slug", 1)?.doc.title).toBe("B one");
     expect(getReviewVersion(WS_B, "shared-slug", 2)).toBeNull();
+
+    // Same slug, two reviews: each document names the slug it lives under and the two
+    // identities are distinct.
+    const aDoc = getReviewVersion(WS_A, "shared-slug", 2)!.doc;
+    const bDoc = getReviewVersion(WS_B, "shared-slug", 1)!.doc;
+    expect(aDoc.slug).toBe("shared-slug");
+    expect(bDoc.slug).toBe("shared-slug");
+    expect(bDoc.id).not.toBe(aDoc.id);
+  });
+
+  test("listReviews is scoped to the workspace, newest first", () => {
+    createReviewVersion(WS_B, "listed-b-one", doc("one"));
+    createReviewVersion(WS_B, "listed-b-two", doc("two"));
+
+    const slugs = listReviews(WS_B).map((r) => r.slug);
+    expect(slugs).toContain("listed-b-one");
+    expect(slugs).toContain("listed-b-two");
+    expect(slugs).not.toContain("first"); // WS_A only
+    expect(listReviews("ws_cccccccccc")).toEqual([]);
   });
 
   test("listReviewVersions is newest first and scoped to the workspace", () => {
@@ -245,7 +282,7 @@ describe("attachments", () => {
     const id = createAttachment(WS_A, "with-shot", 1, "image/png", 1234, "The chart", "Figure 1");
     expect(ATT_ID_RE.test(id)).toBe(true);
 
-    const row = getAttachment(id)!;
+    const row = getAttachment(WS_A, "with-shot", id)!;
     expect(row.workspace_id).toBe(WS_A);
     expect(row.slug).toBe("with-shot");
     expect(row.version).toBe(1);
@@ -253,6 +290,22 @@ describe("attachments", () => {
     expect(row.bytes).toBe(1234);
     expect(row.alt).toBe("The chart");
     expect(row.caption).toBe("Figure 1");
+
+    // Scoped like the annotation accessors: the id alone reaches nothing.
+    expect(getAttachment(WS_B, "with-shot", id)).toBeNull();
+    expect(getAttachment(WS_A, "other-slug", id)).toBeNull();
+  });
+
+  test("listAttachments returns one review's attachments and nobody else's", () => {
+    createReviewVersion(WS_A, "gallery", doc("Pass one"));
+    const first = createAttachment(WS_A, "gallery", 1, "image/png", 10, "One", "");
+    const second = createAttachment(WS_A, "gallery", 1, "image/png", 20, "Two", "");
+
+    expect(listAttachments(WS_A, "gallery").map((a) => a.id).sort()).toEqual(
+      [first, second].sort(),
+    );
+    expect(listAttachments(WS_B, "gallery")).toEqual([]);
+    expect(listAttachments(WS_A, "no-such-review")).toEqual([]);
   });
 
   test("the blob round-trips through the disk store", async () => {
@@ -277,6 +330,12 @@ describe("attachments", () => {
   test("the S3 key mirrors the on-disk layout", () => {
     expect(attachmentKey(WS_A, "att_xxxxxxxxxx")).toBe(
       `review-attachments/${WS_A}/att_xxxxxxxxxx`,
+    );
+  });
+
+  test("the logged location is the on-disk path when there is no S3", () => {
+    expect(attachmentLocation(WS_A, "att_xxxxxxxxxx")).toBe(
+      attachmentPath(WS_A, "att_xxxxxxxxxx"),
     );
   });
 });

@@ -210,6 +210,12 @@ const V3_REVIEWS = `
     checked_at INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, slug, repo, pr_number)
   );
+  -- Process-global cache of SHA-pinned source files. The key is deliberately
+  -- (repo, sha, path) with no workspace column: the same key always names the same
+  -- bytes. That makes it a shared cache of private source, so the resolver must only
+  -- ever look up keys it derived from a ref it already fetched under the caller's own
+  -- GitHub token, never a key taken from a request parameter. There is no size bound
+  -- or eviction here either; both belong with the resolver that fills it.
   CREATE TABLE IF NOT EXISTS ref_snippets (
     repo TEXT NOT NULL,
     sha TEXT NOT NULL,
