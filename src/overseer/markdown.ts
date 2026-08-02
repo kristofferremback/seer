@@ -128,6 +128,22 @@ function rejectForbiddenLine(line: SourceLine, starts: number[], previousWasText
   if (definition) reject("link reference definition", at(0), definition[0]!);
 }
 
+/**
+ * A tag opened at the end of a line closes on the next one. The next line is checked
+ * for forbidden constructs first, so without this the tag would be reported under
+ * whatever name that line happens to match.
+ */
+function rejectDanglingTag(line: SourceLine, starts: number[]): void {
+  const open = /<\/?[A-Za-z][A-Za-z0-9-]*[^<>]*$/.exec(line.text);
+  if (!open) return;
+  const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(open[0]!)![1]!;
+  reject(
+    "raw HTML tag",
+    positionOf(starts, line.offset + open.index),
+    `<${open[0]!.startsWith("</") ? "/" : ""}${name}>`,
+  );
+}
+
 /** Table rows without a leading pipe still need catching: they name the row after them. */
 function rejectTableRow(line: SourceLine, next: SourceLine | undefined, starts: number[]): void {
   if (!next || !line.text.includes("|")) return;
@@ -215,7 +231,13 @@ function parseBlocks(source: string, starts: number[]): Block[] {
           if (indent > 0 && items.length > 0) {
             reject("nested list", positionOf(starts, item.offset), item.text.trim());
           }
-          items.push([{ text: item.text.slice(marker[0]!.length), offset: item.offset + marker[0]!.length }]);
+          const content: SourceLine = {
+            text: item.text.slice(marker[0]!.length),
+            offset: item.offset + marker[0]!.length,
+          };
+          // The marker hid the head of the line from the anchored patterns above.
+          rejectForbiddenLine(content, starts, false);
+          items.push([content]);
           continue;
         }
         if (items.length === 0) break;
@@ -237,6 +259,7 @@ function parseBlocks(source: string, starts: number[]): Block[] {
       const p = lines[i]!;
       if (isBlank(p.text)) break;
       if (paragraph.length > 0) {
+        rejectDanglingTag(paragraph[paragraph.length - 1]!, starts);
         rejectForbiddenLine(p, starts, true);
         rejectTableRow(p, lines[i + 1], starts);
         if (FENCE.test(p.text) || UNORDERED.test(p.text) || ORDERED.test(p.text)) break;
@@ -299,15 +322,49 @@ function rejectHtml(text: string, index: number, position: Position): void {
   }
 }
 
-function renderInlineInto(
-  text: string,
-  offset: number,
-  starts: number[],
-  options: InlineOptions,
-): string {
+/**
+ * Text handed to the inline renderer along with, per character, the offset it came
+ * from in the source. Block parsing trims lines before joining them, so the two
+ * cannot be related by a single base offset without misreporting positions.
+ */
+interface InlineSpan {
+  text: string;
+  offsets: number[];
+}
+
+/** Trims each line, joins with newlines, and keeps every character's source offset. */
+function spanOfLines(lines: SourceLine[]): InlineSpan {
+  let text = "";
+  const offsets: number[] = [];
+  lines.forEach((line, index) => {
+    if (index > 0) {
+      text += "\n";
+      offsets.push(line.offset > 0 ? line.offset - 1 : line.offset);
+    }
+    const lead = line.text.length - line.text.trimStart().length;
+    const trimmed = line.text.trim();
+    text += trimmed;
+    for (let k = 0; k < trimmed.length; k++) offsets.push(line.offset + lead + k);
+  });
+  return { text, offsets };
+}
+
+function spanOfText(text: string, base: number): InlineSpan {
+  const offsets: number[] = [];
+  for (let k = 0; k < text.length; k++) offsets.push(base + k);
+  return { text, offsets };
+}
+
+function subSpan(span: InlineSpan, start: number, end: number): InlineSpan {
+  return { text: span.text.slice(start, end), offsets: span.offsets.slice(start, end) };
+}
+
+function renderInlineInto(span: InlineSpan, starts: number[], options: InlineOptions): string {
+  const text = span.text;
   let out = "";
   let plain = "";
-  const at = (i: number) => positionOf(starts, offset + i);
+  const at = (i: number) =>
+    positionOf(starts, span.offsets[i] ?? (span.offsets[span.offsets.length - 1] ?? 0) + 1);
   const flush = () => {
     out += escapeHtml(plain);
     plain = "";
@@ -358,12 +415,13 @@ function renderInlineInto(
 
     if (c === "[") {
       if (text[i + 1] === "^") reject("footnote reference", at(i), "[^");
-      if (!options.links) reject("link", at(i), "[");
+      // A bracket that never forms `[label](url)` is ordinary text, in every mode.
       const parsed = parseLink(text, i);
       if (parsed) {
+        if (!options.links) reject("link", at(i), text.slice(i, parsed.end));
         flush();
         const href = renderUrl(parsed.url, at(i + parsed.urlAt));
-        const label = renderInlineInto(parsed.label, offset + i + 1, starts, {
+        const label = renderInlineInto(subSpan(span, i + 1, i + 1 + parsed.label.length), starts, {
           links: false,
           emphasis: options.emphasis,
         });
@@ -379,19 +437,35 @@ function renderInlineInto(
     if (c === "~" && text[i + 1] === "~") reject("strikethrough", at(i), "~~");
 
     if (c === "*") {
-      if (!options.emphasis) reject("emphasis", at(i), "*");
-      const strong = text.startsWith("**", i);
-      const marker = strong ? "**" : "*";
-      const body = closingEmphasis(text, i, marker);
+      // Longest delimiter first, falling back so `***x**` still reads as strong.
+      const candidates = ["***", "**", "*"].filter((m) => text.startsWith(m, i));
+      let marker = "";
+      let body: number | null = null;
+      for (const candidate of candidates) {
+        const found = closingEmphasis(text, i, candidate);
+        if (found !== null) {
+          marker = candidate;
+          body = found;
+          break;
+        }
+      }
       if (body !== null) {
+        // An asterisk that never closes is ordinary text, in every mode.
+        if (!options.emphasis) reject("emphasis", at(i), marker);
         flush();
-        const inner = renderInlineInto(text.slice(i + marker.length, body), offset + i + marker.length, starts, options);
-        out += strong ? `<strong>${inner}</strong>` : `<em>${inner}</em>`;
+        const inner = renderInlineInto(subSpan(span, i + marker.length, body), starts, options);
+        out +=
+          marker === "***"
+            ? `<strong><em>${inner}</em></strong>`
+            : marker === "**"
+              ? `<strong>${inner}</strong>`
+              : `<em>${inner}</em>`;
         i = body + marker.length;
         continue;
       }
-      plain += marker;
-      i += marker.length;
+      const literal = candidates[0]!;
+      plain += literal;
+      i += literal.length;
       continue;
     }
 
@@ -492,15 +566,13 @@ function renderBlocks(blocks: Block[], starts: number[]): string {
     }
     if (block.kind === "list") {
       const tag = block.ordered ? "ol" : "ul";
-      const items = block.items.map((item) => {
-        const text = item.map((l) => l.text.trim()).join("\n");
-        return `<li>${renderInlineInto(text, item[0]!.offset, starts, FULL_INLINE)}</li>`;
-      });
+      const items = block.items.map(
+        (item) => `<li>${renderInlineInto(spanOfLines(item), starts, FULL_INLINE)}</li>`,
+      );
       out.push(`<${tag}>${items.join("")}</${tag}>`);
       continue;
     }
-    const text = block.lines.map((l) => l.text.trim()).join("\n");
-    out.push(`<p>${renderInlineInto(text, block.lines[0]!.offset, starts, FULL_INLINE)}</p>`);
+    out.push(`<p>${renderInlineInto(spanOfLines(block.lines), starts, FULL_INLINE)}</p>`);
   }
   return out.join("\n");
 }
@@ -554,5 +626,5 @@ export function renderInline(source: string): string {
   rejectForbiddenLine({ text, offset: 0 }, starts, false);
   const list = UNORDERED.exec(text) ?? ORDERED.exec(text);
   if (list) reject("list", positionOf(starts, 0), list[0]!.trim());
-  return renderInlineInto(text, 0, starts, CODE_ONLY);
+  return renderInlineInto(spanOfText(text, 0), starts, CODE_ONLY);
 }

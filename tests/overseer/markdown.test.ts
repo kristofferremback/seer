@@ -145,6 +145,84 @@ describe("adversarial input", () => {
     }
   });
 
+  test("near-miss markup either rejects or emits only whitelisted tags", () => {
+    const sources = [
+      "*<img src=x onerror=alert(1)>*",
+      "**<script>alert(1)</script>**",
+      "[<b>label</b>](https://x.test/)",
+      "- <div a=b>",
+      "1. <span>x</span>",
+      "- a\n- <img src=x>",
+      "a <div\n> b",
+      "<div",
+      "</p",
+      "`<`",
+      "``<a href=x>``",
+      "a < b > c",
+      "*a `<i>` b*",
+      "[a *<u>b</u>* c](/d)",
+      "***<b>x</b>***",
+      "```\n</code></pre><script>alert(1)</script>\n```",
+      "- `</li></ul><script>x</script>`",
+      "text with <notatag",
+      "5 <x and 6 >y",
+      "[x](/a\">b)",
+    ];
+    let rejected = 0;
+    for (const source of sources) {
+      let html: string;
+      try {
+        html = render(source);
+      } catch (err) {
+        expect(err).toBeInstanceOf(MarkdownRejection);
+        rejected++;
+        continue;
+      }
+      for (const tag of emittedTags(html)) expect(WHITELIST.has(tag)).toBe(true);
+      expect(html).not.toMatch(/<(?!\/?(p|em|strong|code|a|ul|ol|li|pre)[ >])/);
+    }
+    expect(rejected).toBeGreaterThan(0);
+  });
+
+  test("a tag split across a line break is named as a tag", () => {
+    expect(rejection("<div\n>").construct).toBe("raw HTML tag");
+    expect(rejection("a paragraph <div\n> and more").construct).toBe("raw HTML tag");
+  });
+
+  test("a forbidden construct inside a list item is named, not flattened", () => {
+    expect(rejection("- a\n- # h").construct).toBe("heading");
+    expect(rejection("- a\n- > quote").construct).toBe("blockquote");
+    expect(rejection("- a\n- |x|y|").construct).toBe("table");
+    expect(rejection("1. # h").construct).toBe("heading");
+  });
+
+  test("triple emphasis nests instead of leaking delimiters", () => {
+    expect(render("***bold italic***")).toBe("<p><strong><em>bold italic</em></strong></p>");
+  });
+
+  test("the reported position points at the offending character", () => {
+    const source = "a\n        b\nc <div x=y>";
+    const result = validate(source);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a rejection");
+    expect(source[result.position.offset]).toBe("<");
+    expect(result.position.line).toBe(3);
+    expect(result.position.column).toBe(3);
+
+    const second = validate("first line\n     second line has a <div a=b> tag");
+    if (second.ok) throw new Error("expected a rejection");
+    expect(second.position.line).toBe(2);
+    expect(second.position.column).toBe(24);
+  });
+
+  test("plain one-line text carrying brackets or asterisks is not markup", () => {
+    for (const text of ["items[0] is empty", "the ratio is 2 * 3", "a 5*3 grid", "TODO[1] follow up"]) {
+      expect(validateInline(text).ok).toBe(true);
+      expect(renderInline(text)).toBe(text);
+      expect(render(text)).toBe(`<p>${text}</p>`);
+    }
+  });
+
   test("a link url carrying a quote cannot break out of the attribute", () => {
     const result = rejection('[x](https://a.test/" onmouseover="alert(1))');
     expect(result.construct).toBe("link url");
