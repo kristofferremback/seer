@@ -1,0 +1,143 @@
+import { test, expect, describe, afterEach } from "bun:test";
+import {
+  createFetchGithubClient,
+  githubClient,
+  setGithubClient,
+  nextLink,
+  GithubError,
+} from "../../src/overseer/github";
+import { fakeGithubClient, loadPull, loadFiles, loadCommits } from "./github-fixtures";
+
+// Every request in this file goes through a stub fetch. No socket is opened, and the
+// grep the acceptance criteria asks for finds api.github.com only in the assertions
+// about URL construction below.
+function stubFetch(handler: (url: string, init: RequestInit) => Response) {
+  const calls: { url: string; headers: Record<string, string> }[] = [];
+  const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    calls.push({ url, headers });
+    return handler(url, init ?? {});
+  }) as unknown as typeof fetch;
+  return { impl, calls };
+}
+
+const ok = (body: unknown, headers: Record<string, string> = {}) =>
+  new Response(typeof body === "string" ? body : JSON.stringify(body), { status: 200, headers });
+
+afterEach(() => setGithubClient(null));
+
+describe("the fetch client", () => {
+  test("getPull hits the pull endpoint and returns the payload", async () => {
+    const { impl, calls } = stubFetch(() => ok(loadPull(2)));
+    const client = createFetchGithubClient({ token: "t", fetchImpl: impl });
+    const pull = await client.getPull("kristofferremback/seer", 2);
+    expect(pull.number).toBe(2);
+    expect(calls[0]!.url).toBe("https://api.github.com/repos/kristofferremback/seer/pulls/2");
+    expect(calls[0]!.headers.Authorization).toBe("Bearer t");
+    expect(calls[0]!.headers.Accept).toBe("application/vnd.github+json");
+  });
+
+  test("no token means no Authorization header", async () => {
+    const { impl, calls } = stubFetch(() => ok(loadPull(2)));
+    await createFetchGithubClient({ fetchImpl: impl }).getPull("a/b", 1);
+    expect(calls[0]!.headers.Authorization).toBeUndefined();
+  });
+
+  test("list endpoints follow the Link header until it stops", async () => {
+    const pages = [loadCommits(4).slice(0, 2), loadCommits(4).slice(2)];
+    let n = 0;
+    const { impl, calls } = stubFetch(() => {
+      const page = pages[n++]!;
+      const link: Record<string, string> =
+        n < pages.length ? { Link: '<https://api.github.com/next-page>; rel="next", <x>; rel="last"' } : {};
+      return ok(page, link);
+    });
+    const client = createFetchGithubClient({ fetchImpl: impl });
+    const commits = await client.listCommits("kristofferremback/seer", 4);
+    expect(commits.length).toBe(loadCommits(4).length);
+    expect(calls.length).toBe(2);
+    expect(calls[0]!.url).toContain("per_page=100");
+    expect(calls[1]!.url).toBe("https://api.github.com/next-page");
+  });
+
+  test("listFiles returns the recorded file entries", async () => {
+    const { impl } = stubFetch(() => ok(loadFiles(3)));
+    const files = await createFetchGithubClient({ fetchImpl: impl }).listFiles("a/b", 3);
+    expect(files.map((f) => f.filename)).toContain("src/images.ts");
+  });
+
+  test("getPullDiff asks for the diff media type and returns text", async () => {
+    const { impl, calls } = stubFetch(() => ok("diff --git a/x b/x\n"));
+    const diff = await createFetchGithubClient({ fetchImpl: impl }).getPullDiff("a/b", 9);
+    expect(diff).toBe("diff --git a/x b/x\n");
+    expect(calls[0]!.headers.Accept).toBe("application/vnd.github.diff");
+    expect(calls[0]!.url).toBe("https://api.github.com/repos/a/b/pulls/9");
+  });
+
+  test("getFileAtSha pins the ref and asks for raw content", async () => {
+    const { impl, calls } = stubFetch(() => ok("export const a = 1;\n"));
+    const text = await createFetchGithubClient({ fetchImpl: impl }).getFileAtSha("a/b", "src/dir/x.ts", "abc123");
+    expect(text).toBe("export const a = 1;\n");
+    expect(calls[0]!.url).toBe("https://api.github.com/repos/a/b/contents/src/dir/x.ts?ref=abc123");
+    expect(calls[0]!.headers.Accept).toBe("application/vnd.github.raw");
+  });
+
+  test("a non-2xx response is a GithubError naming the status and the url", async () => {
+    const { impl } = stubFetch(() => new Response("Not Found", { status: 404 }));
+    const client = createFetchGithubClient({ fetchImpl: impl });
+    let error: unknown;
+    await client.getPull("a/b", 1).catch((e) => {
+      error = e;
+    });
+    expect(error).toBeInstanceOf(GithubError);
+    expect((error as GithubError).status).toBe(404);
+    expect((error as GithubError).message).toContain("/repos/a/b/pulls/1");
+  });
+
+  test("a malformed repo fails before any request is made", async () => {
+    const { impl, calls } = stubFetch(() => ok({}));
+    const client = createFetchGithubClient({ fetchImpl: impl });
+    await expect(client.getPull("not-a-repo", 1)).rejects.toThrow(GithubError);
+    expect(calls.length).toBe(0);
+  });
+
+  test("apiBase is overridable, so nothing is hard-wired to github.com", async () => {
+    const { impl, calls } = stubFetch(() => ok(loadPull(2)));
+    const client = createFetchGithubClient({ fetchImpl: impl, apiBase: "https://ghe.example/api/v3/" });
+    await client.getPull("a/b", 2);
+    expect(calls[0]!.url).toBe("https://ghe.example/api/v3/repos/a/b/pulls/2");
+  });
+});
+
+describe("Link parsing", () => {
+  test("the next url is picked out of a multi-rel header", () => {
+    expect(nextLink('<https://x/2>; rel="next", <https://x/9>; rel="last"')).toBe("https://x/2");
+  });
+
+  test("a header with no next ends the walk", () => {
+    expect(nextLink('<https://x/1>; rel="prev", <https://x/1>; rel="first"')).toBeNull();
+    expect(nextLink(null)).toBeNull();
+  });
+});
+
+describe("the injection seam", () => {
+  test("an injected client is what the rest of Overseer gets", async () => {
+    const fake = fakeGithubClient({ pull: loadPull(3) });
+    setGithubClient(fake);
+    expect(githubClient()).toBe(fake);
+    expect((await githubClient().getPull("a/b", 3)).number).toBe(3);
+  });
+
+  test("clearing the seam restores the default without a network call", () => {
+    setGithubClient(fakeGithubClient());
+    setGithubClient(null);
+    const client = githubClient();
+    expect(typeof client.getPull).toBe("function");
+  });
+
+  test("the fake refuses to invent what it was not given", async () => {
+    const fake = fakeGithubClient({});
+    await expect(fake.listFiles("a/b", 1)).rejects.toThrow(/no files/);
+  });
+});

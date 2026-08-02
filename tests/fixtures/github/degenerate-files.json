@@ -1,0 +1,73 @@
+[
+  {
+    "filename": "src/multi.ts",
+    "status": "modified",
+    "additions": 4,
+    "deletions": 3,
+    "changes": 7,
+    "patch": "@@ -1,6 +1,7 @@\n const a = 1;\n \n-const label = \"old\";\n+const label = \"new\";\n \n function one() {\n+  return a;\n }\n@@ -20,4 +21,5 @@ function one() {\n // tail\n-let x = 0;\n-let y = 0;\n+let x = 1;\n+let y = 2;\n+let z = 3;\n // end"
+  },
+  {
+    "filename": "src/renamed-new.ts",
+    "previous_filename": "src/renamed-old.ts",
+    "status": "renamed",
+    "additions": 1,
+    "deletions": 1,
+    "changes": 2,
+    "patch": "@@ -1,3 +1,3 @@\n one\n-two three four\n+two THREE four\n five"
+  },
+  {
+    "filename": "src/moved.ts",
+    "previous_filename": "src/moved-old.ts",
+    "status": "renamed",
+    "additions": 0,
+    "deletions": 0,
+    "changes": 0
+  },
+  {
+    "filename": "src/gone.ts",
+    "status": "removed",
+    "additions": 0,
+    "deletions": 4,
+    "changes": 4,
+    "patch": "@@ -1,4 +0,0 @@\n-alpha\n-beta\n-gamma\n-delta"
+  },
+  {
+    "filename": "src/brand-new.ts",
+    "status": "added",
+    "additions": 3,
+    "deletions": 0,
+    "changes": 3,
+    "patch": "@@ -0,0 +1,3 @@\n+first\n+second\n+third"
+  },
+  {
+    "filename": "src/eof.ts",
+    "status": "modified",
+    "additions": 1,
+    "deletions": 1,
+    "changes": 2,
+    "patch": "@@ -1,3 +1,3 @@\n keep\n tail\n-last line before\n\\ No newline at end of file\n+last line after\n\\ No newline at end of file"
+  },
+  {
+    "filename": "src/rewrite.ts",
+    "status": "modified",
+    "additions": 1,
+    "deletions": 1,
+    "changes": 2,
+    "patch": "@@ -1,2 +1,2 @@\n head\n-alpha beta gamma\n+delta epsilon zeta"
+  },
+  {
+    "filename": "src/too-large.ts",
+    "status": "modified",
+    "additions": 1,
+    "deletions": 0,
+    "changes": 1
+  },
+  {
+    "filename": "assets/logo.png",
+    "status": "modified",
+    "additions": 0,
+    "deletions": 0,
+    "changes": 1
+  }
+]

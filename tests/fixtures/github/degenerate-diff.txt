@@ -1,0 +1,22 @@
+diff --git a/src/too-large.ts b/src/too-large.ts
+index 1111111..2222222 100644
+--- a/src/too-large.ts
++++ b/src/too-large.ts
+@@ -1,3 +1,4 @@
+ one
+ two
++two and a half
+ three
+diff --git a/assets/logo.png b/assets/logo.png
+index 3333333..4444444 100644
+Binary files a/assets/logo.png and b/assets/logo.png differ
+diff --git a/src/gone.ts b/src/gone.ts
+deleted file mode 100644
+index 5555555..0000000
+--- a/src/gone.ts
++++ /dev/null
+@@ -1,4 +0,0 @@
+-alpha
+-beta
+-gamma
+-delta
