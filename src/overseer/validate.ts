@@ -64,6 +64,16 @@ export type EvidenceInput =
   | { type: "attachment"; attachment: AttachmentEvidenceInput }
   | { type: "bundle"; bundle: BundleEvidenceInput };
 
+/** The closed list from the data model. Anything else is not evidence Overseer stores. */
+export const EVIDENCE_KINDS = [
+  "ref",
+  "payload",
+  "figure",
+  "example",
+  "attachment",
+  "bundle",
+] as const satisfies readonly EvidenceInput["type"][];
+
 export interface PrInput {
   repo: string;
   number: number;
@@ -176,9 +186,23 @@ export const REINDEX_EPSILON = 1e-6;
 
 // ---- helpers ----
 
-/** Code points, not UTF-16 units: an emoji in a title is one character to its author. */
-function len(s: string): number {
-  return [...s].length;
+/** Code points, not UTF-16 units: an emoji in a title is one character to its author.
+ *  Anything that is not text has no length to measure; the rule that owns the field
+ *  reports its absence by name, and this returns 0 rather than throwing on the spread. */
+function len(s: unknown): number {
+  return typeof s === "string" ? [...s].length : 0;
+}
+
+/** Text this rule expects to exist. A number or an absent field is a 422 naming the
+ *  field, not a crash inside whichever helper reads it first. */
+function isText(errors: ValidationError[], field: string, value: unknown): value is string {
+  if (typeof value === "string") return true;
+  errors.push({
+    field,
+    rule: "not_text",
+    message: `${field} is ${value === undefined ? "absent" : JSON.stringify(value)}, and it is text`,
+  });
+  return false;
 }
 
 function capText(
@@ -187,6 +211,7 @@ function capText(
   value: string,
   cap: number,
 ): void {
+  if (typeof value !== "string") return;
   const n = len(value);
   if (n > cap) {
     errors.push({
@@ -242,6 +267,7 @@ function required(errors: ValidationError[], field: string, value: string): bool
 
 /** A multi-line authored body: the constrained markdown subset from step 5. */
 function checkBody(errors: ValidationError[], field: string, value: string): void {
+  if (typeof value !== "string") return;
   const result = validateMarkdown(value);
   if (!result.ok) {
     errors.push({
@@ -254,6 +280,7 @@ function checkBody(errors: ValidationError[], field: string, value: string): voi
 
 /** A one-line field: plain text and inline code, nothing else. */
 function checkLine(errors: ValidationError[], field: string, value: string): void {
+  if (typeof value !== "string") return;
   const result = validateInline(value);
   if (!result.ok) {
     errors.push({
@@ -331,6 +358,22 @@ function requireList<T>(errors: ValidationError[], field: string, value: T[] | u
   return [];
 }
 
+/** The sub-object at `field`, or a `required` error naming it. Evidence carries its
+ *  content in a nested object, and an absent one is a 422 about that field rather than
+ *  a crash on the first property read. */
+function requireObject(errors: ValidationError[], field: string, value: unknown): boolean {
+  if (value !== null && typeof value === "object") return true;
+  errors.push({ field, rule: "required", message: `${field} is required` });
+  return false;
+}
+
+/** An entry the rules read fields off, coerced to an object. A null in a list would
+ *  otherwise crash the first property read; as {} every field below it reports itself
+ *  absent by name. */
+function asRecord<T>(entry: T): T {
+  return { ...(entry as object) } as T;
+}
+
 /** Every list the rules walk, coerced to a list. Shape errors are reported by name so a
  *  malformed body reads as a 422 about a field rather than as a crash. */
 function normalizeLists(errors: ValidationError[], payload: PublishPayload): PublishPayload {
@@ -341,25 +384,25 @@ function normalizeLists(errors: ValidationError[], payload: PublishPayload): Pub
   const attachments = requireList(errors, "attachments", payload.attachments);
   return {
     ...payload,
-    prs,
+    prs: prs.map(asRecord),
     statements: statements.map((s, i) => ({
-      ...s,
-      prs: requireList(errors, `statements[${i}].prs`, s.prs),
-      refs: requireList(errors, `statements[${i}].refs`, s.refs),
-      evidence: requireList(errors, `statements[${i}].evidence`, s.evidence),
+      ...asRecord(s),
+      prs: requireList(errors, `statements[${i}].prs`, s?.prs),
+      refs: requireList(errors, `statements[${i}].refs`, s?.refs),
+      evidence: requireList(errors, `statements[${i}].evidence`, s?.evidence).map(asRecord),
     })),
     notes: notes.map((n, i) => ({
-      ...n,
-      checks: requireList(errors, `notes[${i}].checks`, n.checks),
-      refs: requireList(errors, `notes[${i}].refs`, n.refs),
-      evidence: requireList(errors, `notes[${i}].evidence`, n.evidence),
+      ...asRecord(n),
+      checks: requireList(errors, `notes[${i}].checks`, n?.checks),
+      refs: requireList(errors, `notes[${i}].refs`, n?.refs),
+      evidence: requireList(errors, `notes[${i}].evidence`, n?.evidence).map(asRecord),
     })),
     groups: groups.map((g, i) => ({
-      ...g,
-      hunks: requireList(errors, `groups[${i}].hunks`, g.hunks),
-      fileNotes: requireList(errors, `groups[${i}].fileNotes`, g.fileNotes),
+      ...asRecord(g),
+      hunks: requireList(errors, `groups[${i}].hunks`, g?.hunks),
+      fileNotes: requireList(errors, `groups[${i}].fileNotes`, g?.fileNotes).map(asRecord),
     })),
-    attachments,
+    attachments: attachments.map(asRecord),
   };
 }
 
@@ -426,14 +469,17 @@ export function validatePublish(
 
   // ---- review head ----
 
-  required(errors, "title", payload.title);
-  capText(errors, "title", payload.title, BUDGETS.chars.reviewTitle);
-  checkLine(errors, "title", payload.title);
+  if (required(errors, "title", payload.title)) {
+    capText(errors, "title", payload.title, BUDGETS.chars.reviewTitle);
+    checkLine(errors, "title", payload.title);
+  }
 
-  required(errors, "summary", payload.summary);
-  capText(errors, "summary", payload.summary, BUDGETS.chars.summary);
-  checkBody(errors, "summary", payload.summary);
-  const paragraphs = paragraphsOf(payload.summary);
+  const hasSummary = required(errors, "summary", payload.summary);
+  if (hasSummary) {
+    capText(errors, "summary", payload.summary, BUDGETS.chars.summary);
+    checkBody(errors, "summary", payload.summary);
+  }
+  const paragraphs = hasSummary ? paragraphsOf(payload.summary) : 0;
   if (paragraphs > BUDGETS.paragraphs.summary) {
     errors.push({
       field: "summary",
@@ -489,6 +535,24 @@ export function validatePublish(
       }
     }
     checkRef(errors, `${at}.detailRef`, pr.detailRef, homeRepo);
+
+    // A parent names another pull request in this review: the stack the renderer draws
+    // is a chain through the review, and a parent outside it is a dangling link.
+    if (pr.parent !== undefined && pr.parent !== null) {
+      if (pr.parent === pr.number) {
+        errors.push({
+          field: `${at}.parent`,
+          rule: "pr_parent_self",
+          message: `${at}.parent is ${pr.parent}, which is the pull request itself`,
+        });
+      } else if (!payloadKeys.has(prKey(pr.repo, pr.parent))) {
+        errors.push({
+          field: `${at}.parent`,
+          rule: "pr_parent_unknown",
+          message: `${at}.parent is ${JSON.stringify(pr.parent)}, which names no pull request in this review`,
+        });
+      }
+    }
   });
 
   // ---- statements ----
@@ -505,9 +569,10 @@ export function validatePublish(
       capText(errors, `${at}.text`, s.text, BUDGETS.chars.statementText);
       checkLine(errors, `${at}.text`, s.text);
     }
-    required(errors, `${at}.body`, s.body);
-    capText(errors, `${at}.body`, s.body, BUDGETS.chars.statementBody);
-    checkBody(errors, `${at}.body`, s.body);
+    if (required(errors, `${at}.body`, s.body)) {
+      capText(errors, `${at}.body`, s.body, BUDGETS.chars.statementBody);
+      checkBody(errors, `${at}.body`, s.body);
+    }
 
     // "every statement carries at least one ref": a claim with nothing behind it does
     // not belong on the page.
@@ -527,7 +592,19 @@ export function validatePublish(
         message: `${at} names no pull request`,
       });
     }
+    // Named once each, as at the review level: a repeat says nothing a single mention
+    // does not, and it reads as an attribution the author lost track of.
+    const namedHere = new Set<string>();
     s.prs.forEach((key, j) => {
+      if (namedHere.has(key)) {
+        errors.push({
+          field: `${at}.prs[${j}]`,
+          rule: "pr_duplicated",
+          message: `${at}.prs names ${key} more than once`,
+        });
+        return;
+      }
+      namedHere.add(key);
       if (!payloadKeys.has(key)) {
         errors.push({
           field: `${at}.prs[${j}]`,
@@ -574,11 +651,13 @@ export function validatePublish(
       capText(errors, `${at}.text`, n.text, BUDGETS.chars.noteText);
       checkLine(errors, `${at}.text`, n.text);
     }
-    required(errors, `${at}.body`, n.body);
-    capText(errors, `${at}.body`, n.body, BUDGETS.chars.noteBody);
-    checkBody(errors, `${at}.body`, n.body);
+    if (required(errors, `${at}.body`, n.body)) {
+      capText(errors, `${at}.body`, n.body, BUDGETS.chars.noteBody);
+      checkBody(errors, `${at}.body`, n.body);
+    }
     capCount(errors, `${at}.checks`, n.checks.length, BUDGETS.checks.max, "checks");
     n.checks.forEach((c, j) => {
+      if (!isText(errors, `${at}.checks[${j}]`, c)) return;
       capText(errors, `${at}.checks[${j}]`, c, BUDGETS.chars.check);
       checkLine(errors, `${at}.checks[${j}]`, c);
     });
@@ -588,7 +667,7 @@ export function validatePublish(
     // something falsifiable. Any ref backing the note counts, whether it sits in refs[]
     // or in evidence[] as a ref: both are the note's pointers into the code.
     if (n.kind === "risk") {
-      const hasChecks = n.checks.some((c) => c.trim() !== "");
+      const hasChecks = n.checks.some((c) => typeof c === "string" && c.trim() !== "");
       const evidenceRefs = n.evidence.flatMap((e) => (e.type === "ref" ? [e.ref] : []));
       const pointsAtChange = [...n.refs, ...evidenceRefs].some((r) =>
         refTouchesChange(r, changedRefKeys),
@@ -625,9 +704,10 @@ export function validatePublish(
       capText(errors, `${at}.title`, g.title, BUDGETS.chars.groupTitle);
       checkLine(errors, `${at}.title`, g.title);
     }
-    required(errors, `${at}.paragraph`, g.paragraph);
-    capText(errors, `${at}.paragraph`, g.paragraph, BUDGETS.chars.groupParagraph);
-    checkBody(errors, `${at}.paragraph`, g.paragraph);
+    if (required(errors, `${at}.paragraph`, g.paragraph)) {
+      capText(errors, `${at}.paragraph`, g.paragraph, BUDGETS.chars.groupParagraph);
+      checkBody(errors, `${at}.paragraph`, g.paragraph);
+    }
     // "a set of hunks that changed for one reason": an empty set is not a group.
     if (g.hunks.length === 0) {
       errors.push({
@@ -637,6 +717,7 @@ export function validatePublish(
       });
     }
     g.fileNotes.forEach((fn, j) => {
+      if (!isText(errors, `${at}.fileNotes[${j}].text`, fn.text)) return;
       capText(errors, `${at}.fileNotes[${j}].text`, fn.text, BUDGETS.chars.fileNote);
       checkLine(errors, `${at}.fileNotes[${j}].text`, fn.text);
     });
@@ -704,13 +785,15 @@ export function validatePublish(
       capText(errors, `${at}.alt`, a.alt, BUDGETS.chars.alt);
       checkLine(errors, `${at}.alt`, a.alt);
     }
-    capText(errors, `${at}.caption`, a.caption, BUDGETS.chars.caption);
-    checkLine(errors, `${at}.caption`, a.caption);
-    if (!a.mediaType.startsWith("image/")) {
+    if (isText(errors, `${at}.caption`, a.caption)) {
+      capText(errors, `${at}.caption`, a.caption, BUDGETS.chars.caption);
+      checkLine(errors, `${at}.caption`, a.caption);
+    }
+    if (typeof a.mediaType !== "string" || !a.mediaType.startsWith("image/")) {
       errors.push({
         field: `${at}.mediaType`,
         rule: "attachment_media_type",
-        message: `${at}.mediaType is ${a.mediaType || "empty"}; attachments are image/* to start`,
+        message: `${at}.mediaType is ${typeof a.mediaType === "string" ? a.mediaType || "empty" : "absent"}; attachments are image/* to start`,
       });
     }
     if (!referencedAttachments.has(a.id)) {
@@ -837,7 +920,7 @@ function checkRef(
       message: `${field} names ${ref.path}:${ref.startLine}-${ref.endLine}, which is not a line range`,
     });
   }
-  for (const line of ref.highlight ?? []) {
+  for (const line of Array.isArray(ref.highlight) ? ref.highlight : []) {
     // Types are erased at runtime and this is the only gate on a POSTed document, so a
     // string or a NaN has to be caught here: both comparisons below are false for it.
     if (!Number.isInteger(line)) {
@@ -902,17 +985,27 @@ function checkEvidence(
       case "ref":
         checkRef(errors, `${at}.ref`, e.ref, homeRepo);
         break;
-      case "payload":
-        checkKind(errors, `${at}.payload.lang`, e.payload.lang, PAYLOAD_LANGS);
-        capText(errors, `${at}.payload.before`, e.payload.before, BUDGETS.chars.payloadSide);
-        capText(errors, `${at}.payload.after`, e.payload.after, BUDGETS.chars.payloadSide);
+      case "payload": {
+        const p = e.payload;
+        if (!requireObject(errors, `${at}.payload`, p)) break;
+        checkKind(errors, `${at}.payload.lang`, p.lang, PAYLOAD_LANGS);
+        if (isText(errors, `${at}.payload.before`, p.before)) {
+          capText(errors, `${at}.payload.before`, p.before, BUDGETS.chars.payloadSide);
+        }
+        if (isText(errors, `${at}.payload.after`, p.after)) {
+          capText(errors, `${at}.payload.after`, p.after, BUDGETS.chars.payloadSide);
+        }
         break;
+      }
       case "figure": {
+        if (!requireObject(errors, `${at}.figure`, e.figure)) break;
         checkKind(errors, `${at}.figure.kind`, e.figure.kind, FIGURE_KINDS);
+        const nodes = requireList(errors, `${at}.figure.nodes`, e.figure.nodes).map(asRecord);
+        const edges = requireList(errors, `${at}.figure.edges`, e.figure.edges).map(asRecord);
         // Node ids first: an edge naming an id no node declares is a dangling arrow the
         // renderer would have to defend against, so it never reaches storage.
-        const nodeIds = new Set(e.figure.nodes.map((n) => n.id));
-        e.figure.nodes.forEach((n, j) => {
+        const nodeIds = new Set(nodes.map((n) => n.id));
+        nodes.forEach((n, j) => {
           capText(
             errors,
             `${at}.figure.nodes[${j}].label`,
@@ -922,7 +1015,7 @@ function checkEvidence(
           checkLine(errors, `${at}.figure.nodes[${j}].label`, n.label);
           checkKind(errors, `${at}.figure.nodes[${j}].state`, n.state, FIGURE_NODE_STATES);
         });
-        e.figure.edges.forEach((edge, j) => {
+        edges.forEach((edge, j) => {
           capText(
             errors,
             `${at}.figure.edges[${j}].label`,
@@ -941,14 +1034,20 @@ function checkEvidence(
         });
         break;
       }
-      case "example":
-        capText(errors, `${at}.example.text`, e.example.text, BUDGETS.chars.exampleText);
-        if (required(errors, `${at}.example.caption`, e.example.caption)) {
-          capText(errors, `${at}.example.caption`, e.example.caption, BUDGETS.chars.caption);
-          checkLine(errors, `${at}.example.caption`, e.example.caption);
+      case "example": {
+        const x = e.example;
+        if (!requireObject(errors, `${at}.example`, x)) break;
+        if (isText(errors, `${at}.example.text`, x.text)) {
+          capText(errors, `${at}.example.text`, x.text, BUDGETS.chars.exampleText);
+        }
+        if (required(errors, `${at}.example.caption`, x.caption)) {
+          capText(errors, `${at}.example.caption`, x.caption, BUDGETS.chars.caption);
+          checkLine(errors, `${at}.example.caption`, x.caption);
         }
         break;
-      case "attachment":
+      }
+      case "attachment": {
+        if (!requireObject(errors, `${at}.attachment`, e.attachment)) break;
         if (!attachmentIds.has(e.attachment.id)) {
           errors.push({
             field: `${at}.attachment.id`,
@@ -959,7 +1058,9 @@ function checkEvidence(
         }
         referencedAttachments.add(e.attachment.id);
         break;
+      }
       case "bundle": {
+        if (!requireObject(errors, `${at}.bundle`, e.bundle)) break;
         if (required(errors, `${at}.bundle.caption`, e.bundle.caption)) {
           capText(errors, `${at}.bundle.caption`, e.bundle.caption, BUDGETS.chars.caption);
           checkLine(errors, `${at}.bundle.caption`, e.bundle.caption);
@@ -975,6 +1076,15 @@ function checkEvidence(
         }
         break;
       }
+      default:
+        // The evidence list in the data model is closed. An invented kind that fell
+        // through here would reach storage and become the renderer's problem, so it
+        // stops at the door instead.
+        errors.push({
+          field: `${at}.type`,
+          rule: "evidence_kind_unknown",
+          message: `${at}.type is ${(e as { type?: unknown }).type === undefined ? "absent" : JSON.stringify((e as { type?: unknown }).type)}, which is not one of ${EVIDENCE_KINDS.join(", ")}`,
+        });
     }
   });
 }

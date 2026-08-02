@@ -924,3 +924,197 @@ describe("a risk with no checks", () => {
     expect(rules(run(payload).errors)).not.toContain("risk_unfalsifiable");
   });
 });
+
+// ---- rule: the evidence list is closed ----
+
+describe("an evidence kind outside the list", () => {
+  test("is an error naming the field and the kind, not a silent pass", () => {
+    const payload = golden();
+    payload.statements[0]!.evidence = [
+      ...payload.statements[0]!.evidence,
+      { type: "video", src: "http://x" } as unknown as (typeof payload.statements)[0]["evidence"][0],
+    ];
+    const errors = run(payload).errors;
+    const err = find(errors, "evidence_kind_unknown");
+    const j = payload.statements[0]!.evidence.length - 1;
+    expect(err.field).toBe(`statements[0].evidence[${j}].type`);
+    expect(err.message).toContain("video");
+  });
+
+  test("a null evidence entry is reported, not a crash", () => {
+    const payload = golden();
+    payload.notes[0]!.evidence = [
+      null as unknown as (typeof payload.notes)[0]["evidence"][0],
+    ];
+    const errors = run(payload).errors;
+    expect(find(errors, "evidence_kind_unknown").field).toBe("notes[0].evidence[0].type");
+  });
+
+  test("a known kind missing its sub-object is a required error, not a crash", () => {
+    const payload = golden();
+    payload.statements[0]!.evidence = [
+      { type: "attachment" } as unknown as (typeof payload.statements)[0]["evidence"][0],
+    ];
+    const errors = run(payload).errors;
+    const err = errors.find((e) => e.field === "statements[0].evidence[0].attachment");
+    expect(err?.rule).toBe("required");
+  });
+
+  test("a figure missing its nodes is a required error, not a crash", () => {
+    const payload = golden();
+    const at = payload.statements.flatMap((s, i) =>
+      s.evidence.map((e, j) => (e.type === "figure" ? ([i, j] as const) : null)),
+    ).find((x) => x !== null)!;
+    const figure = payload.statements[at[0]]!.evidence[at[1]]! as { figure: { nodes?: unknown } };
+    delete figure.figure.nodes;
+    const errors = run(payload).errors;
+    const field = `statements[${at[0]}].evidence[${at[1]}].figure.nodes`;
+    expect(errors.find((e) => e.field === field)?.rule).toBe("required");
+  });
+});
+
+// ---- a malformed body is a 422, never a 500 ----
+//
+// Every scalar leaf of the golden payload, deleted and then mistyped in turn. The
+// module exists to turn a bad document into an error list, so any path through it that
+// throws is a 500 the publish route cannot answer with.
+
+type Leaf = { path: string; parent: Record<string, unknown> | unknown[]; key: string | number };
+
+function leaves(value: unknown, path: string, out: Leaf[]): void {
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => {
+      if (v !== null && typeof v === "object") leaves(v, `${path}[${i}]`, out);
+      else out.push({ path: `${path}[${i}]`, parent: value, key: i });
+    });
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v !== null && typeof v === "object") leaves(v, `${path}.${k}`, out);
+      else out.push({ path: `${path}.${k}`, parent: value as Record<string, unknown>, key: k });
+    }
+  }
+}
+
+function scalarPaths(): string[] {
+  const out: Leaf[] = [];
+  leaves(golden(), "", out);
+  return out.map((l) => l.path);
+}
+
+function mutate(path: string, apply: (leaf: Leaf) => void): PublishPayload {
+  const payload = golden();
+  const out: Leaf[] = [];
+  leaves(payload, "", out);
+  const leaf = out.find((l) => l.path === path);
+  expect(leaf, `no leaf at ${path}`).toBeDefined();
+  apply(leaf!);
+  return payload;
+}
+
+describe("a payload with a missing or mistyped scalar", () => {
+  const paths = scalarPaths();
+
+  test("the golden payload has scalars at every depth to mutate", () => {
+    expect(paths.length).toBeGreaterThan(100);
+  });
+
+  for (const path of paths) {
+    test(`deleting ${path} returns errors rather than throwing`, () => {
+      const payload = mutate(path, (leaf) => {
+        delete (leaf.parent as Record<string | number, unknown>)[leaf.key];
+      });
+      expect(() => run(payload)).not.toThrow();
+    });
+
+    test(`replacing ${path} with a number returns errors rather than throwing`, () => {
+      const payload = mutate(path, (leaf) => {
+        (leaf.parent as Record<string | number, unknown>)[leaf.key] = 5;
+      });
+      expect(() => run(payload)).not.toThrow();
+    });
+
+    test(`replacing ${path} with null returns errors rather than throwing`, () => {
+      const payload = mutate(path, (leaf) => {
+        (leaf.parent as Record<string | number, unknown>)[leaf.key] = null;
+      });
+      expect(() => run(payload)).not.toThrow();
+    });
+  }
+
+  test("deleting a whole entity from a list does not throw", () => {
+    for (const key of ["prs", "statements", "notes", "groups", "attachments"] as const) {
+      const payload = golden();
+      (payload[key] as unknown[])[0] = null;
+      expect(() => run(payload), `${key}[0] = null`).not.toThrow();
+    }
+  });
+
+  test("a required scalar that is absent is named by its field", () => {
+    const payload = golden();
+    delete (payload as { title?: string }).title;
+    expect(run(payload).errors.find((e) => e.field === "title")?.rule).toBe("required");
+  });
+
+  test("a body that is a number is named by its field, not silently accepted", () => {
+    const payload = golden();
+    (payload.statements[0] as { body: unknown }).body = 5;
+    expect(run(payload).errors.find((e) => e.field === "statements[0].body")?.rule).toBe(
+      "required",
+    );
+  });
+
+  test("a check that is a number is named by its field", () => {
+    const payload = golden();
+    const note = payload.notes.find((n) => n.checks.length > 0)!;
+    const i = payload.notes.indexOf(note);
+    (note.checks as unknown[])[0] = 5;
+    expect(run(payload).errors.find((e) => e.field === `notes[${i}].checks[0]`)?.rule).toBe(
+      "not_text",
+    );
+  });
+
+  test("an attachment without a media type is an attachment_media_type error", () => {
+    const payload = golden();
+    delete (payload.attachments[0] as { mediaType?: string }).mediaType;
+    const err = find(run(payload).errors, "attachment_media_type");
+    expect(err.field).toBe("attachments[0].mediaType");
+    expect(err.message).toContain("absent");
+  });
+});
+
+// ---- rule: a parent names a pull request in this review ----
+
+describe("a pull request's parent", () => {
+  test("naming no pull request in the review is an error", () => {
+    const payload = golden();
+    payload.prs[1]!.parent = 999;
+    const err = find(run(payload).errors, "pr_parent_unknown");
+    expect(err.field).toBe("prs[1].parent");
+    expect(err.message).toContain("999");
+  });
+
+  test("naming itself is an error", () => {
+    const payload = golden();
+    payload.prs[1]!.parent = payload.prs[1]!.number;
+    expect(find(run(payload).errors, "pr_parent_self").field).toBe("prs[1].parent");
+  });
+
+  test("naming another pull request in the review is fine", () => {
+    expect(rules(run(golden()).errors)).not.toContain("pr_parent_unknown");
+  });
+});
+
+// ---- rule: a statement names each pull request once ----
+
+describe("a statement naming one pull request twice", () => {
+  test("is a pr_duplicated error naming the repeated position", () => {
+    const payload = golden();
+    const s = payload.statements[0]!;
+    s.prs = [s.prs[0]!, s.prs[0]!];
+    const err = find(run(payload).errors, "pr_duplicated");
+    expect(err.field).toBe("statements[0].prs[1]");
+    expect(err.message).toContain(s.prs[0]!);
+  });
+});
