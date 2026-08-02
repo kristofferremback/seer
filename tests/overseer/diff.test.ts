@@ -332,6 +332,13 @@ describe("invariants over every fixture", () => {
   ];
 
   function check(hunk: Hunk): void {
+    // The facts Overseer owns rather than reads off the patch text. hunk.sha is the pin
+    // every ref resolves against, so a blank one has to be a failure here.
+    expect(hunk.repo).toBe(CTX.repo);
+    expect(hunk.prNumber).toBe(CTX.prNumber);
+    expect(hunk.sha).toBe(CTX.sha);
+    expect(hunk.id.startsWith(`pr${CTX.prNumber}:${hunk.path}:@@`)).toBe(true);
+
     const ctx = hunk.lines.filter((l) => l.kind === "ctx").length;
     const del = hunk.lines.filter((l) => l.kind === "del").length;
     const add = hunk.lines.filter((l) => l.kind === "add").length;
@@ -385,4 +392,65 @@ describe("invariants over every fixture", () => {
       expect(new Set(ids).size).toBe(ids.length);
     });
   }
+
+  test("hunks parsed through the fallback hold the same invariants", async () => {
+    const client = fakeGithubClient({ files: loadDegenerateFiles(), diff: degenerateDiff() });
+    const result = await collectPullDiff(client, CTX.repo, CTX.prNumber, CTX.sha);
+    let seen = 0;
+    for (const file of result.files) {
+      for (const hunk of file.hunks) {
+        expect(hunk.path).toBe(file.path);
+        check(hunk);
+        seen++;
+      }
+    }
+    expect(seen).toBeGreaterThan(0);
+    const large = result.files.find((f) => f.path === "src/too-large.ts")!;
+    expect(large.hunks.length).toBe(1);
+  });
+
+  test("a file entry carries the counts GitHub reported", async () => {
+    const files = loadDegenerateFiles();
+    const client = fakeGithubClient({ files, diff: degenerateDiff() });
+    const result = await collectPullDiff(client, CTX.repo, CTX.prNumber, CTX.sha);
+    for (const file of files) {
+      const entry = result.files.find((f) => f.path === file.filename)!;
+      expect(entry.additions).toBe(file.additions);
+      expect(entry.deletions).toBe(file.deletions);
+      expect(entry.status).toBe(file.status);
+    }
+  });
+});
+
+describe("patches with nothing to parse", () => {
+  test("patch text with no @@ header is a named failure, never zero hunks", () => {
+    const combined = "@@@ -1,2 -1,2 +1,3 @@@\n  a\n++b\n";
+    let error: unknown;
+    try {
+      parsePatch(combined, { ...CTX, path: "src/merged.ts" });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(DiffParseError);
+    expect((error as DiffParseError).path).toBe("src/merged.ts");
+    expect(parsePatch("", { ...CTX, path: "src/empty.ts" })).toEqual([]);
+  });
+
+  test("a mode-only change is reported as a mode change, not as binary content", async () => {
+    const files: GithubFile[] = [
+      { filename: "scripts/run.sh", status: "modified", additions: 0, deletions: 0, changes: 0 },
+    ];
+    const diff = [
+      "diff --git a/scripts/run.sh b/scripts/run.sh",
+      "old mode 100644",
+      "new mode 100755",
+      "",
+    ].join("\n");
+    const result = await collectPullDiff(fakeGithubClient({ files, diff }), CTX.repo, CTX.prNumber, CTX.sha);
+    expect(result.missing.length).toBe(1);
+    expect(result.missing[0]!.reason).toBe(
+      "Only this file's mode changed, so the pull request diff carries no lines for it.",
+    );
+    expect(result.files[0]!.hunks).toEqual([]);
+  });
 });

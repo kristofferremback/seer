@@ -141,6 +141,15 @@ export function parsePatch(patch: string, ctx: HunkContext): Hunk[] {
     }
   }
   if (current) finish(current, ctx.path);
+  // Patch text that carried no recognizable `@@` would otherwise return zero hunks and
+  // pass for a file with nothing in it, which is the silent drop this module refuses.
+  // A combined diff (`@@@ -1,2 -1,2 +1,3 @@@`) lands here.
+  if (hunks.length === 0 && lines.length > 0) {
+    throw new DiffParseError(
+      `Patch for ${ctx.path} carries no recognizable @@ hunk header.`,
+      ctx.path,
+    );
+  }
   return hunks;
 }
 
@@ -170,7 +179,13 @@ function finish(hunk: Hunk, path: string): void {
 
 type Token = { text: string; start: number; end: number };
 
-/** Words are runs of non-whitespace; whitespace is a separator and never a token. */
+/**
+ * Words are runs of non-whitespace; whitespace is a separator and never a token. A
+ * paired line that differs only in indentation, or only in whether the file ends with
+ * a newline, therefore has no differing words and comes out with no ranges, the same
+ * as an unpaired line. That is deliberate: in both cases the whole line is already
+ * marked added or deleted, and there is nothing narrower worth pointing at.
+ */
 export function words(s: string): Token[] {
   const out: Token[] = [];
   const re = /\S+/g;
@@ -368,6 +383,40 @@ export function binaryPathsOfDiff(diff: string): Set<string> {
 }
 
 /**
+ * The paths whose only change is the file mode, by their new name. Git writes `old
+ * mode` / `new mode` and then nothing: no hunks, no binary marker. Such a file is
+ * still reported rather than dropped, but it deserves its own reason rather than the
+ * guess about binary content.
+ */
+export function modeChangePathsOfDiff(diff: string): Set<string> {
+  const out = new Set<string>();
+  let path: string | null = null;
+  let mode = false;
+  let content = false;
+  const flush = () => {
+    if (path && mode && !content) out.add(path);
+    path = null;
+    mode = false;
+    content = false;
+  };
+  for (const line of diff.split("\n")) {
+    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (header) {
+      flush();
+      path = header[2]!;
+      continue;
+    }
+    if (!path) continue;
+    if (line.startsWith("old mode ") || line.startsWith("new mode ")) mode = true;
+    else if (line.startsWith("@@") || line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) {
+      content = true;
+    }
+  }
+  flush();
+  return out;
+}
+
+/**
  * Every file of a pull request, as hunks. Files GitHub sent without a `patch` are
  * retried against the whole-pull-request diff, and anything still without one comes
  * back as a named MissingPatch on the file and in `missing`. Nothing is dropped.
@@ -379,11 +428,19 @@ export async function collectPullDiff(
   headSha: string,
 ): Promise<PullDiff> {
   const files = await client.listFiles(repo, prNumber);
-  let fallback: { patches: Map<string, string>; binary: Set<string> } | null = null;
+  let fallback: {
+    patches: Map<string, string>;
+    binary: Set<string>;
+    modeOnly: Set<string>;
+  } | null = null;
   const loadFallback = async () => {
     if (!fallback) {
       const diff = await client.getPullDiff(repo, prNumber);
-      fallback = { patches: splitUnifiedDiff(diff), binary: binaryPathsOfDiff(diff) };
+      fallback = {
+        patches: splitUnifiedDiff(diff),
+        binary: binaryPathsOfDiff(diff),
+        modeOnly: modeChangePathsOfDiff(diff),
+      };
     }
     return fallback;
   };
@@ -394,10 +451,12 @@ export async function collectPullDiff(
   for (const file of files) {
     let patch = file.patch;
     let binary = false;
+    let modeOnly = false;
     if (patch === undefined) {
       const loaded = await loadFallback();
       patch = loaded.patches.get(file.filename);
       binary = loaded.binary.has(file.filename);
+      modeOnly = loaded.modeOnly.has(file.filename);
     }
     const entry: FileDiff = {
       path: file.filename,
@@ -426,8 +485,9 @@ export async function collectPullDiff(
         status: file.status,
         reason: binary
           ? "This file is binary, so the pull request diff carries no lines for it."
-          : "GitHub returned no patch for this file and it is absent from the pull request diff " +
-            "(binary content, or a diff too large to serve).",
+          : modeOnly
+            ? "Only this file's mode changed, so the pull request diff carries no lines for it."
+            : "GitHub returned no patch for this file and it is absent from the pull request diff.",
       };
       missing.push(entry.missing);
     } else {

@@ -87,9 +87,36 @@ const PER_PAGE = 100;
 /** A pull request with more pages than this is a mistake, not a review. */
 const MAX_PAGES = 20;
 
+/**
+ * An "owner/name" pair, in GitHub's own charset and nothing wider. `repo` is authored
+ * outside this module, and a "?" or a "#" in it would end the path of the URL early:
+ * `/repos/a/b#x/pulls/42` resolves to `/repos/a/b`, which answers 200 with a
+ * repository object that nothing downstream would recognise as the wrong payload.
+ */
+const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
 function assertRepo(repo: string): void {
-  if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) {
-    throw new GithubError(`Malformed repo "${repo}": expected "owner/name".`, 0, "");
+  const parts = repo.split("/");
+  const bad =
+    parts.length !== 2 ||
+    parts.some((seg) => !REPO_SEGMENT.test(seg) || seg === "." || seg === "..");
+  if (bad) {
+    throw new GithubError(
+      `Malformed repo ${JSON.stringify(repo)}: expected "owner/name" in [A-Za-z0-9._-].`,
+      0,
+      "",
+    );
+  }
+}
+
+/** A pull request number is interpolated raw into the URL, so it is a number or nothing. */
+function assertNumber(number: number): void {
+  if (!Number.isInteger(number) || number <= 0) {
+    throw new GithubError(
+      `Malformed pull request number ${JSON.stringify(number)}: expected a positive integer.`,
+      0,
+      "",
+    );
   }
 }
 
@@ -194,18 +221,22 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
   return {
     async getPull(repo, number) {
       assertRepo(repo);
+      assertNumber(number);
       return json<GithubPull>(`/repos/${repo}/pulls/${number}`);
     },
     async listCommits(repo, number) {
       assertRepo(repo);
+      assertNumber(number);
       return paged<GithubCommit>(`/repos/${repo}/pulls/${number}/commits`);
     },
     async listFiles(repo, number) {
       assertRepo(repo);
+      assertNumber(number);
       return paged<GithubFile>(`/repos/${repo}/pulls/${number}/files`);
     },
     async listReviewComments(repo, number) {
       assertRepo(repo);
+      assertNumber(number);
       return paged<GithubReviewComment>(`/repos/${repo}/pulls/${number}/comments`);
     },
     async getFileAtSha(repo, path, sha) {
@@ -219,6 +250,7 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
     },
     async getPullDiff(repo, number) {
       assertRepo(repo);
+      assertNumber(number);
       const res = await request(`/repos/${repo}/pulls/${number}`, "application/vnd.github.diff");
       return res.text();
     },

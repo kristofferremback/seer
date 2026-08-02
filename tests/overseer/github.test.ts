@@ -6,7 +6,7 @@ import {
   nextLink,
   GithubError,
 } from "../../src/overseer/github";
-import { fakeGithubClient, loadPull, loadFiles, loadCommits } from "./github-fixtures";
+import { fakeGithubClient, loadPull, loadFiles, loadCommits, loadComments } from "./github-fixtures";
 
 // Every request in this file goes through a stub fetch. No socket is opened, and the
 // grep the acceptance criteria asks for finds api.github.com only in the assertions
@@ -131,6 +131,55 @@ describe("the fetch client", () => {
     const client = createFetchGithubClient({ fetchImpl: impl });
     await expect(client.getPull("not-a-repo", 1)).rejects.toThrow(GithubError);
     expect(calls.length).toBe(0);
+  });
+
+  test("a repo carrying url punctuation is refused before it can redirect the request", async () => {
+    // "a/b#x" and "a/b?x=1" both resolve to /repos/a/b, which answers 200 with a
+    // repository object that would then be read as a pull request.
+    const { impl, calls } = stubFetch(() => ok(loadPull(2)));
+    const client = createFetchGithubClient({ token: "t", fetchImpl: impl });
+    for (const repo of ["a/b?x=1", "a/b#x", "a/b y", "a/b/c", "a/..", "../a", "a/b\\c", "a/b@c"]) {
+      await expect(client.getPull(repo, 1)).rejects.toThrow(GithubError);
+      await expect(client.listFiles(repo, 1)).rejects.toThrow(GithubError);
+      await expect(client.getPullDiff(repo, 1)).rejects.toThrow(GithubError);
+      await expect(client.getFileAtSha(repo, "src/x.ts", "abc")).rejects.toThrow(GithubError);
+    }
+    expect(calls.length).toBe(0);
+  });
+
+  test("a pull request number that is not a positive integer is refused too", async () => {
+    const { impl, calls } = stubFetch(() => ok(loadPull(2)));
+    const client = createFetchGithubClient({ fetchImpl: impl });
+    for (const n of [0, -1, 1.5, Number.NaN]) {
+      await expect(client.getPull("a/b", n)).rejects.toThrow(GithubError);
+      await expect(client.listCommits("a/b", n)).rejects.toThrow(GithubError);
+    }
+    expect(calls.length).toBe(0);
+  });
+
+  test("listReviewComments hits the comments endpoint and returns the payload", async () => {
+    const recorded = loadComments(2);
+    const comments = [
+      ...recorded,
+      {
+        id: 11,
+        path: "src/server.ts",
+        body: "This reads as dead code.",
+        user: { login: "kristofferremback" },
+        commit_id: "c1ac138",
+        line: 12,
+        start_line: null,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ];
+    const { impl, calls } = stubFetch(() => ok(comments));
+    const client = createFetchGithubClient({ token: "t", fetchImpl: impl });
+    const got = await client.listReviewComments("kristofferremback/seer", 2);
+    expect(got.map((c) => c.id)).toEqual(comments.map((c) => c.id));
+    expect(calls[0]!.url).toBe(
+      "https://api.github.com/repos/kristofferremback/seer/pulls/2/comments?per_page=100",
+    );
+    expect(calls[0]!.headers.Accept).toBe("application/vnd.github+json");
   });
 
   test("apiBase is overridable, so nothing is hard-wired to github.com", async () => {
