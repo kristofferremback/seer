@@ -108,7 +108,13 @@ type Block =
   | { kind: "list"; ordered: boolean; start: number; items: SourceLine[][] };
 
 const THEMATIC_BREAK = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
-const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*(\S*)[ \t]*$/;
+// The info string is the whole rest of the line, so a multi-word one (```js foo) is
+// still recognised as a fence and gets named by the LANGUAGE guard instead of falling
+// through to paragraph handling, where it would shift fence pairing and silently
+// swallow whatever follows. CommonMark would treat a backtick fence whose info string
+// contains a backtick as paragraph text; this module rejects it by name instead,
+// because a fence-shaped line that half-parses is exactly the ambiguity it refuses.
+const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*?)[ \t]*$/;
 const UNORDERED = /^ {0,3}([-*+])(?:[ \t]+|$)/;
 const ORDERED = /^ {0,3}(\d{1,9})[.)](?:[ \t]+|$)/;
 // GFM's delimiter cell is `:?-+:?`, so a single hyphen is enough. Matching only two or
