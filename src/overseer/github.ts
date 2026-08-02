@@ -93,6 +93,48 @@ function assertRepo(repo: string): void {
   }
 }
 
+/**
+ * A file path inside a repository, and nothing else. Both `new URL()` and `new
+ * Request()` collapse `..` away, so a path carrying one would fetch a different API
+ * endpoint with the token attached. Paths are authored outside this module, so they
+ * are checked here rather than trusted.
+ */
+function assertPath(path: string): void {
+  const bad =
+    path.length === 0 ||
+    path.startsWith("/") ||
+    path.split("/").some((seg) => seg === "" || seg === "." || seg === "..");
+  if (bad) {
+    throw new GithubError(
+      `Malformed path ${JSON.stringify(path)}: expected a repository-relative path with no empty, "." or ".." segments.`,
+      0,
+      "",
+    );
+  }
+}
+
+/**
+ * A paging link comes back inside a response body's headers, so it is checked against
+ * the configured API before the token is sent to it.
+ */
+function assertSameOrigin(url: string, base: string): void {
+  let origin: string;
+  let expected: string;
+  try {
+    origin = new URL(url).origin;
+    expected = new URL(base).origin;
+  } catch {
+    throw new GithubError(`Unusable pagination link ${JSON.stringify(url)}.`, 0, url);
+  }
+  if (origin !== expected) {
+    throw new GithubError(
+      `Pagination link ${url} points at ${origin}, not ${expected}. Refusing to send the token.`,
+      0,
+      url,
+    );
+  }
+}
+
 export interface FetchGithubClientOptions {
   /** A personal access token. Absent, only public repositories resolve. */
   token?: string | undefined;
@@ -136,6 +178,15 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
       const res: Response = await request(next, "application/vnd.github+json");
       out.push(...((await res.json()) as T[]));
       next = nextLink(res.headers.get("Link"));
+      if (next) assertSameOrigin(next, base);
+    }
+    // A truncated list is a lie about the pull request, so it is a failure instead.
+    if (next) {
+      throw new GithubError(
+        `More than ${MAX_PAGES} pages of ${path} (${PER_PAGE} per page). Overseer will not review a partial list.`,
+        0,
+        next,
+      );
     }
     return out;
   }
@@ -159,6 +210,7 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
     },
     async getFileAtSha(repo, path, sha) {
       assertRepo(repo);
+      assertPath(path);
       const res = await request(
         `/repos/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(sha)}`,
         "application/vnd.github.raw",

@@ -134,8 +134,29 @@ describe("word ranges", () => {
     expect(dels.every((l) => l.wordRanges.length > 0)).toBe(true);
     expect(adds[0]!.wordRanges.length).toBeGreaterThan(0);
     expect(adds[1]!.wordRanges.length).toBeGreaterThan(0);
+    // Pairing is positional: "let x = 0;" against "let x = 1;" and "let y = 0;"
+    // against "let y = 2;", so each pair differs in its last word alone. Pairing them
+    // the other way round would also mark the variable name.
+    expect(dels[0]!.content).toBe("let x = 0;");
+    expect(adds[0]!.content).toBe("let x = 1;");
+    expect(dels[0]!.wordRanges).toEqual([[8, 10]]);
+    expect(adds[0]!.wordRanges).toEqual([[8, 10]]);
+    expect(dels[1]!.content).toBe("let y = 0;");
+    expect(adds[1]!.content).toBe("let y = 2;");
+    expect(dels[1]!.wordRanges).toEqual([[8, 10]]);
+    expect(adds[1]!.wordRanges).toEqual([[8, 10]]);
     // The third addition has no partner, so the whole line is the mark.
     expect(adds[2]!.wordRanges).toEqual([]);
+  });
+
+  test("a line pair too large to diff by word is left to its whole-line mark", () => {
+    const old = Array.from({ length: 3000 }, (_, i) => `t${i}`).join(" ");
+    const next = Array.from({ length: 3000 }, (_, i) => `t${i + 1}`).join(" ");
+    const started = Date.now();
+    const [oldR, newR] = wordRangesFor(old, next);
+    expect(oldR).toEqual([]);
+    expect(newR).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   test("context lines are never painted", () => {
@@ -218,6 +239,57 @@ describe("whole pull requests", () => {
     expect(moved.previousPath).toBe("src/moved-old.ts");
     expect(moved.hunks).toEqual([]);
     expect(moved.missing).toBeNull();
+  });
+
+  test("a renamed binary file is a named error, not a pure rename", async () => {
+    // GitHub reports 0 additions and 0 deletions for binary content whether or not
+    // the bytes changed, so only the diff can tell a move apart from a rewrite.
+    const files: GithubFile[] = [
+      {
+        filename: "assets/mark.png",
+        previous_filename: "assets/logo.png",
+        status: "renamed",
+        additions: 0,
+        deletions: 0,
+        changes: 0,
+      },
+    ];
+    const diff = [
+      "diff --git a/assets/logo.png b/assets/mark.png",
+      "similarity index 68%",
+      "rename from assets/logo.png",
+      "rename to assets/mark.png",
+      "index 3333333..4444444 100644",
+      "Binary files a/assets/logo.png and b/assets/mark.png differ",
+      "",
+    ].join("\n");
+    const result = await collectPullDiff(fakeGithubClient({ files, diff }), CTX.repo, CTX.prNumber, CTX.sha);
+    expect(result.missing.map((m) => m.path)).toEqual(["assets/mark.png"]);
+    expect(result.files[0]!.missing!.status).toBe("renamed");
+    expect(result.files[0]!.hunks).toEqual([]);
+  });
+
+  test("a renamed text file with no content change stays a pure rename", async () => {
+    const files: GithubFile[] = [
+      {
+        filename: "src/moved.ts",
+        previous_filename: "src/moved-old.ts",
+        status: "renamed",
+        additions: 0,
+        deletions: 0,
+        changes: 0,
+      },
+    ];
+    const diff = [
+      "diff --git a/src/moved-old.ts b/src/moved.ts",
+      "similarity index 100%",
+      "rename from src/moved-old.ts",
+      "rename to src/moved.ts",
+      "",
+    ].join("\n");
+    const result = await collectPullDiff(fakeGithubClient({ files, diff }), CTX.repo, CTX.prNumber, CTX.sha);
+    expect(result.missing).toEqual([]);
+    expect(result.files[0]!.missing).toBeNull();
   });
 
   test("the pull request diff is fetched at most once", async () => {

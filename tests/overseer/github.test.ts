@@ -45,7 +45,7 @@ describe("the fetch client", () => {
   });
 
   test("list endpoints follow the Link header until it stops", async () => {
-    const pages = [loadCommits(4).slice(0, 2), loadCommits(4).slice(2)];
+    const pages = [loadCommits(2).slice(0, 2), loadCommits(2).slice(2)];
     let n = 0;
     const { impl, calls } = stubFetch(() => {
       const page = pages[n++]!;
@@ -54,8 +54,9 @@ describe("the fetch client", () => {
       return ok(page, link);
     });
     const client = createFetchGithubClient({ fetchImpl: impl });
-    const commits = await client.listCommits("kristofferremback/seer", 4);
-    expect(commits.length).toBe(loadCommits(4).length);
+    const commits = await client.listCommits("kristofferremback/seer", 2);
+    expect(commits.map((c) => c.sha)).toEqual(loadCommits(2).map((c) => c.sha));
+    expect(commits.length).toBeGreaterThan(2);
     expect(calls.length).toBe(2);
     expect(calls[0]!.url).toContain("per_page=100");
     expect(calls[1]!.url).toBe("https://api.github.com/next-page");
@@ -81,6 +82,36 @@ describe("the fetch client", () => {
     expect(text).toBe("export const a = 1;\n");
     expect(calls[0]!.url).toBe("https://api.github.com/repos/a/b/contents/src/dir/x.ts?ref=abc123");
     expect(calls[0]!.headers.Accept).toBe("application/vnd.github.raw");
+  });
+
+  test("a list that never stops paging fails instead of returning a partial answer", async () => {
+    const { impl, calls } = stubFetch(() =>
+      ok([], { Link: '<https://api.github.com/next-page>; rel="next"' }),
+    );
+    const client = createFetchGithubClient({ fetchImpl: impl });
+    let error: unknown;
+    await client.listFiles("a/b", 1).catch((e) => {
+      error = e;
+    });
+    expect(error).toBeInstanceOf(GithubError);
+    expect((error as GithubError).message).toContain("/repos/a/b/pulls/1/files");
+    expect(calls.length).toBe(20);
+  });
+
+  test("a paging link on another host is refused before the token travels", async () => {
+    const { impl, calls } = stubFetch(() => ok([], { Link: '<https://evil.example/steal>; rel="next"' }));
+    const client = createFetchGithubClient({ token: "t", fetchImpl: impl });
+    await expect(client.listCommits("a/b", 1)).rejects.toThrow(/evil\.example/);
+    expect(calls.length).toBe(1);
+  });
+
+  test("a path that climbs out of the repository is refused before any request", async () => {
+    const { impl, calls } = stubFetch(() => ok("secret"));
+    const client = createFetchGithubClient({ token: "t", fetchImpl: impl });
+    for (const path of ["../../../user/repos", "src/../../x", "/etc/passwd", "a//b", "."]) {
+      await expect(client.getFileAtSha("a/b", path, "abc")).rejects.toThrow(GithubError);
+    }
+    expect(calls.length).toBe(0);
   });
 
   test("a non-2xx response is a GithubError naming the status and the url", async () => {

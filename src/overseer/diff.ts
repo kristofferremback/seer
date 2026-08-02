@@ -13,7 +13,7 @@
 // keep no ranges: the whole line is already marked added or deleted, and painting it
 // a second time says nothing.
 
-import type { GithubClient, GithubFile } from "./github";
+import type { GithubClient } from "./github";
 import type { Hunk, HunkLine, HunkLineKind } from "./types";
 
 /** Everything a hunk needs that the patch text does not carry. */
@@ -182,6 +182,14 @@ export function words(s: string): Token[] {
 
 type Op = { t: "=" | "-" | "+"; i: number; j: number };
 
+/**
+ * The LCS table is quadratic in the words of one line pair, so a generated line
+ * (minified data, an SVG path, a one-line JSON array) can ask for gigabytes. Past
+ * this many cells the pair is left unpainted: the whole line is already marked, and
+ * word ranges are a refinement, never the fact.
+ */
+const MAX_LCS_CELLS = 2_000_000;
+
 /** Longest common subsequence over two token strings, as a flat op list. */
 function lcsOps(a: string[], b: string[]): Op[] {
   const n = a.length;
@@ -225,6 +233,7 @@ function lcsOps(a: string[], b: string[]): Op[] {
 export function wordRangesFor(oldText: string, newText: string): [[number, number][], [number, number][]] {
   const a = words(oldText);
   const b = words(newText);
+  if (a.length * b.length > MAX_LCS_CELLS) return [[], []];
   const ops = lcsOps(
     a.map((t) => t.text),
     b.map((t) => t.text),
@@ -339,6 +348,26 @@ export function splitUnifiedDiff(diff: string): Map<string, string> {
 }
 
 /**
+ * The paths a unified diff calls binary, by their new name. Git says so on its own
+ * line and never under an `@@`, so splitUnifiedDiff cannot see it: a binary file has
+ * no hunks, and a binary file that also moved would otherwise pass for a pure rename.
+ */
+export function binaryPathsOfDiff(diff: string): Set<string> {
+  const out = new Set<string>();
+  let path: string | null = null;
+  for (const line of diff.split("\n")) {
+    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (header) {
+      path = header[2]!;
+      continue;
+    }
+    if (!path) continue;
+    if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) out.add(path);
+  }
+  return out;
+}
+
+/**
  * Every file of a pull request, as hunks. Files GitHub sent without a `patch` are
  * retried against the whole-pull-request diff, and anything still without one comes
  * back as a named MissingPatch on the file and in `missing`. Nothing is dropped.
@@ -350,16 +379,25 @@ export async function collectPullDiff(
   headSha: string,
 ): Promise<PullDiff> {
   const files = await client.listFiles(repo, prNumber);
-  let fallback: Map<string, string> | null = null;
+  let fallback: { patches: Map<string, string>; binary: Set<string> } | null = null;
+  const loadFallback = async () => {
+    if (!fallback) {
+      const diff = await client.getPullDiff(repo, prNumber);
+      fallback = { patches: splitUnifiedDiff(diff), binary: binaryPathsOfDiff(diff) };
+    }
+    return fallback;
+  };
 
   const out: FileDiff[] = [];
   const missing: MissingPatch[] = [];
 
   for (const file of files) {
     let patch = file.patch;
+    let binary = false;
     if (patch === undefined) {
-      fallback ??= splitUnifiedDiff(await client.getPullDiff(repo, prNumber));
-      patch = fallback.get(file.filename);
+      const loaded = await loadFallback();
+      patch = loaded.patches.get(file.filename);
+      binary = loaded.binary.has(file.filename);
     }
     const entry: FileDiff = {
       path: file.filename,
@@ -370,18 +408,26 @@ export async function collectPullDiff(
       hunks: [],
       missing: null,
     };
-    if (patch === undefined && file.status === "renamed" && file.additions === 0 && file.deletions === 0) {
+    if (
+      patch === undefined &&
+      !binary &&
+      file.status === "renamed" &&
+      file.additions === 0 &&
+      file.deletions === 0
+    ) {
       // A pure rename: no patch because no content changed. Nothing is missing, so
-      // nothing is reported. A binary file is also 0/0, which is why the status is
-      // part of the test: `modified` with no patch is always an error.
+      // nothing is reported. GitHub reports a binary file as 0/0 whether or not its
+      // bytes changed, so the pull request diff has to confirm it is not binary
+      // before a renamed file is allowed through here.
     } else if (patch === undefined) {
       entry.missing = {
         code: "missing_patch",
         path: file.filename,
         status: file.status,
-        reason:
-          "GitHub returned no patch for this file and it is absent from the pull request diff " +
-          "(binary content, or a diff too large to serve).",
+        reason: binary
+          ? "This file is binary, so the pull request diff carries no lines for it."
+          : "GitHub returned no patch for this file and it is absent from the pull request diff " +
+            "(binary content, or a diff too large to serve).",
       };
       missing.push(entry.missing);
     } else {
@@ -390,10 +436,4 @@ export async function collectPullDiff(
     out.push(entry);
   }
   return { files: out, missing };
-}
-
-/** The hunks of a single GitHub file entry, for callers that already have one. */
-export function hunksOfFile(file: GithubFile, ctx: Omit<HunkContext, "path">): Hunk[] {
-  if (file.patch === undefined) return [];
-  return parsePatch(file.patch, { ...ctx, path: file.filename });
 }
