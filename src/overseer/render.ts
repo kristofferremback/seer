@@ -718,6 +718,8 @@ const STYLE = `  @font-face {
      vertical spine at the left, so the chain is a chain before a word is
      read. */
   .chain { display: flex; flex-direction: column; align-items: stretch; margin: 20px 0 0; --spine: 12px; }
+  /* A set gets no arrows, so its cards need the air the arrows would have given them. */
+  .chain > .card + .card { margin-top: 8px; }
   .base {
     display: flex; align-items: center; gap: 9px;
     margin: 0; padding-left: var(--spine);
@@ -783,6 +785,7 @@ const STYLE = `  @font-face {
      back up to paper. Every fold on the page then lands on the same base, and
      a diff wash means the same thing here as it does anywhere else. */
   .card-body .fold, .card-body .fold > .fold-body { margin: 0; background: hsl(var(--paper)); }
+  .card-body .fold + .fold { margin-top: 8px; }
   .card > summary:active { background-color: hsl(var(--ink) / 0.05); }
   @media (hover: hover) and (pointer: fine) {
     .card > summary { transition: background-color 150ms ease; }
@@ -1110,8 +1113,8 @@ const EVIDENCE_STYLE = `
   .ev-figure li.fg-muted { color: hsl(var(--muted)); }
   .ev-figure .fg-arrow { display: inline-block; width: 12px; height: 12px; stroke-width: 1.8; vertical-align: -1px; color: hsl(var(--muted)); }
   .ev-figure .fg-edge { color: hsl(var(--muted)); }
-  .prbody { margin: 0 0 11px; }
-  .prbody:empty { display: none; }
+  .prbody-body { padding: 10px 12px 1px; }
+  .prbody { margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: hsl(var(--ink-soft)); white-space: pre-wrap; }
 `;
 
 /** Resolved before first paint so the surface never flashes, and stored so an explicit
@@ -1211,14 +1214,21 @@ const KIND_LABEL: Record<string, string> = { add: "adds", change: "changes", rem
 
 /** The pull request description, as the characters GitHub holds. It is the one string
  *  on the page Overseer did not validate as constrained markdown, so it is not parsed
- *  as any markup at all: paragraphs, escaped. */
-function prBody(body: string): string {
-  return body
+ *  as any markup at all: paragraphs, escaped. It is also unbounded and derived, so it
+ *  gets its own fold rather than sitting between the authored detail and the ref. */
+function prBody(ownerId: string, body: string): string {
+  const paras = body
     .split(/\n{2,}/)
     .map((p) => p.trim())
-    .filter((p) => p !== "")
-    .map((p) => `<p class="prbody">${escapeHtml(p)}</p>`)
-    .join("");
+    .filter((p) => p !== "");
+  if (paras.length === 0) return "";
+  return (
+    `<details class="fold" id="${escapeHtml(ownerId)}-body">` +
+    `<summary>${icon("chev", "tick")}<span class="fh"><b>description</b></span></summary>` +
+    `<div class="fold-body prbody-body">` +
+    paras.map((p) => `<p class="prbody">${escapeHtml(p)}</p>`).join("") +
+    `</div></details>`
+  );
 }
 
 function card(pr: Pr): string {
@@ -1238,23 +1248,51 @@ function card(pr: Pr): string {
     `</summary>` +
     `<div class="card-body">` +
     `<p>${safeInline(pr.detail)}</p>` +
-    prBody(pr.body) +
+    prBody(owner, pr.body) +
     refFold(owner, pr.detailRef) +
     `</div></details>`
   );
 }
 
+/** Stack order comes from the derived `parent` links, never from the array: nothing in
+ *  the data model promises the pointers were listed bottom-up, so reading the array as
+ *  the chain draws some stacks backwards and names the wrong base. */
+function stackOrder(prs: Pr[]): Pr[] {
+  const inReview = new Map(prs.map((pr) => [pr.number, pr]));
+  const child = new Map<number, Pr>();
+  for (const pr of prs) {
+    if (pr.parent !== null && inReview.has(pr.parent)) child.set(pr.parent, pr);
+  }
+  const root = prs.find((pr) => pr.parent === null || !inReview.has(pr.parent));
+  if (!root) return prs;
+  const ordered: Pr[] = [];
+  const walked = new Set<number>();
+  let cur: Pr | undefined = root;
+  while (cur && !walked.has(cur.number)) {
+    walked.add(cur.number);
+    ordered.push(cur);
+    cur = child.get(cur.number);
+  }
+  // A second root, or a cycle off to the side: nothing is dropped from the page.
+  for (const pr of prs) if (!walked.has(pr.number)) ordered.push(pr);
+  return ordered;
+}
+
 /** The chain. Arrows are the claim that one pull request sits on the one above it, so
- *  they are drawn only for a stack; a set of unrelated pull requests gets cards alone. */
+ *  they are drawn only for a stack; a set of unrelated pull requests gets cards alone,
+ *  and no base line, because a set has no one base to name. */
 function chain(doc: ReviewDoc): string {
-  const first = doc.prs[0];
-  const base = first
-    ? `<p class="base">${icon("branch")}<span>${escapeHtml(first.baseRef)}</span>` +
-      `<span class="sha">${escapeHtml(shortSha(first.baseSha))}</span></p>`
-    : "";
+  const stack = doc.kind === "stack";
+  const prs = stack ? stackOrder(doc.prs) : doc.prs;
+  const root = prs[0];
+  const base =
+    stack && root
+      ? `<p class="base">${icon("branch")}<span>${escapeHtml(root.baseRef)}</span>` +
+        `<span class="sha">${escapeHtml(shortSha(root.baseSha))}</span></p>`
+      : "";
   const arrow = `${icon("arrow", "arw")}`;
-  const cards = doc.prs.map((pr) => card(pr)).join(doc.kind === "stack" ? arrow : "");
-  return `<div class="chain">${base}${doc.prs.length > 0 && doc.kind === "stack" ? arrow : ""}${cards}</div>`;
+  const cards = prs.map((pr) => card(pr)).join(stack ? arrow : "");
+  return `<div class="chain">${base}${prs.length > 0 && stack ? arrow : ""}${cards}</div>`;
 }
 
 function statementRow(s: Statement, ctx: RenderCtx): string {
@@ -1473,8 +1511,10 @@ export async function handleReviewAttachment(
   return new Response(bytes, {
     status: 200,
     headers: {
+      // No content-length by hand: the row's byte count is a record of what was
+      // stored, not a measure of what is being sent, and a disagreement between the
+      // two truncates the reader instead of failing. Bun derives it from the body.
       "content-type": row.media_type,
-      "content-length": String(row.bytes),
       // The id is minted once and the bytes behind it never change, but the review it
       // belongs to is private, so this is a private cache only.
       "cache-control": "private, max-age=31536000, immutable",

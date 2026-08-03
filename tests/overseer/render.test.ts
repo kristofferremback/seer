@@ -162,7 +162,9 @@ describe("the page itself", () => {
         type: "example",
         example: {
           lang: "json",
-          text: '{\n  "slug": "atlas-hum",\n  "version": 3\n}',
+          // A path-looking string inside the example itself: it stays text, it does
+          // not become a citation, and it grows no gutter beside it.
+          text: '{\n  "from": "src/auth.ts:42",\n  "slug": "atlas-hum"\n}',
           caption: "The shape a caller reads back",
         },
       },
@@ -172,9 +174,10 @@ describe("the page itself", () => {
     expect(block).toContain("The shape a caller reads back");
     // No gutter, and nothing that could be read as a citation.
     expect(block).not.toContain('class="n"');
-    expect(block).not.toContain("src/");
     expect(block).not.toMatch(/L\d+-\d+/);
     expect(block).not.toContain("github.com");
+    expect(block).not.toContain("<a ");
+    expect(block).toContain("src/auth.ts:42");
   });
 
   test("a ref panel links out to GitHub at the sha it was pinned at", () => {
@@ -240,6 +243,43 @@ describe("the page itself", () => {
     expect(set).not.toContain('class="arw"');
     expect(stack).toContain(`https://github.com/${GOLDEN_REPO}/pull/12`);
     expect(stack).toContain(`https://github.com/${GOLDEN_REPO}/pull/13`);
+  });
+
+  test("the chain is drawn from the parent links, not from the array order", () => {
+    const base = doc();
+    const [bottom, top] = base.prs;
+    expect(bottom!.number).toBe(12);
+    expect(top!.parent).toBe(12);
+    // The same document with the pointers listed newest first, as a publish may.
+    const html = page({ ...base, prs: [top!, bottom!] });
+    const order = [...html.matchAll(/<details class="card" id="pr-(\d+)"/g)].map((m) => m[1]);
+    expect(order).toEqual(["12", "13"]);
+    // The base line names the root's base branch, not another pr's head.
+    expect(html).toContain(`<span>${bottom!.baseRef}</span>`);
+    expect(html).not.toContain(`<span>${top!.baseRef}</span>`);
+  });
+
+  test("a set gets no shared base line", () => {
+    const html = page(doc({ kind: "set" }));
+    expect(html).not.toContain('<p class="base">');
+    expect(page(doc({ kind: "stack" }))).toContain('<p class="base">');
+  });
+
+  test("a pull request description is folded and never parsed as markup", () => {
+    const base = doc();
+    const prs = base.prs.map((pr) => ({
+      ...pr,
+      body: "## A heading\n\n- a bullet with <b>markup</b>",
+    }));
+    const html = page({ ...base, prs });
+    expect(html).toContain(`<details class="fold" id="pr-12-body"`);
+    expect(html).toContain("## A heading");
+    expect(html).toContain("&lt;b&gt;markup&lt;/b&gt;");
+    expect(html).not.toContain("<b>markup</b>");
+    // An empty description grows no fold at all.
+    expect(page({ ...base, prs: base.prs.map((pr) => ({ ...pr, body: "  " })) })).not.toContain(
+      `id="pr-12-body"`,
+    );
   });
 
   test("every pull request card carries its detail ref", () => {

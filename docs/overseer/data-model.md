@@ -68,9 +68,11 @@ pr
   body            derived: the pull request description, markdown as GitHub holds it
   gist            authored, <= 100 chars, one line
   detail          authored, <= 2 sentences
-  detail_ref      ref id
+  detail_ref      ref                   authored as a pointer, stored resolved
   kinds[]         derived: the distinct kinds of the statements attributed to this pr
 ```
+
+`detail_ref` is authored as a pointer and stored as the resolved ref itself, not as an id into a shared table. A card's snippet is not cited from anywhere else in the document, so an id alone would leave the card's own evidence resolvable only when some statement happened to name the same pointer.
 
 `kinds[]` is derived on purpose. The marks on a pull request card are then provably tied to real claims, instead of being a second thing the skill can get out of step with the first.
 

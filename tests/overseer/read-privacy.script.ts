@@ -101,6 +101,59 @@ assert(unknown.startsWith("404\n"), `unknown slug should 404, got ${unknown.spli
   assert(body === unknown, "non-member version read should be byte-identical to an unknown slug");
 }
 
+// ---- the html page and the attachment bytes, same three questions ----
+{
+  const { createAttachment } = await import("../../src/overseer/db");
+  const { saveAttachment } = await import("../../src/store");
+
+  const bytes = new Uint8Array([1, 2, 3, 4]);
+  const att = createAttachment(ws, "golden", 1, "image/png", bytes.length, "A shot", "");
+  await saveAttachment(ws, att, bytes);
+
+  const missingPage = await shape(await fetch(`${base}/r/no-such-review`));
+  assert(missingPage.startsWith("404\n"), `unknown review page should 404`);
+  const missingAtt = await shape(await fetch(`${base}/r/golden/a/att_nothinghere`));
+  assert(missingAtt.startsWith("404\n"), `unknown attachment should 404`);
+
+  {
+    const res = await fetch(`${base}/r/golden`, { headers: cookie(member) });
+    assert(res.status === 200, `member page read should 200, got ${res.status}`);
+    const res2 = await fetch(`${base}/r/golden/a/${att}`, { headers: cookie(member) });
+    assert(res2.status === 200, `member attachment read should 200, got ${res2.status}`);
+  }
+
+  for (const [who, headers] of [
+    ["signed out", {} as Record<string, string>],
+    ["a stranger", cookie(stranger)],
+  ] as const) {
+    for (const path of ["/r/golden", "/r/golden/v/1"]) {
+      const res = await fetch(`${base}${path}`, { headers, redirect: "manual" });
+      assert(!res.headers.get("location"), `${who} on ${path} should not redirect to login`);
+      const body = await shape(res);
+      assert(body === missingPage, `${who} on ${path} should be byte-identical to a missing review`);
+    }
+    const res = await fetch(`${base}/r/golden/a/${att}`, { headers, redirect: "manual" });
+    const body = await shape(res);
+    assert(body === missingAtt, `${who} on an attachment should be byte-identical to a missing one`);
+  }
+
+  // Another workspace's attachment, quoted through a slug the reader can read.
+  const other = tinyId("ws");
+  db.run("INSERT INTO workspaces (id, name, visibility, created_at) VALUES (?, ?, 'public', ?)", [
+    other,
+    "Beta",
+    now,
+  ]);
+  storeGoldenReview(other, "beta");
+  const foreign = createAttachment(other, "beta", 1, "image/png", bytes.length, "A shot", "");
+  await saveAttachment(other, foreign, bytes);
+  const res = await fetch(`${base}/r/golden/a/${foreign}`, { headers: cookie(member) });
+  assert(
+    (await shape(res)) === missingAtt,
+    "a foreign workspace's attachment should be byte-identical to a missing one",
+  );
+}
+
 // ---- membership is what changes the answer ----
 {
   db.run("INSERT INTO memberships (workspace_id, user_id, created_at) VALUES (?, ?, ?)", [
