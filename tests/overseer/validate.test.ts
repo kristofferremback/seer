@@ -1,4 +1,5 @@
 import { test, expect, describe } from "bun:test";
+import { BUDGETS } from "../../src/overseer/types";
 import {
   REINDEX_EPSILON,
   reindexSignificance,
@@ -1494,6 +1495,29 @@ describe("sentence counting", () => {
     const payload = golden();
     payload.prs[0]!.detail = "The timeout moves from 1.5 seconds to 2.5 seconds.";
     expect(rules(run(payload).errors)).not.toContain("cap_sentences");
+  });
+});
+
+describe("pr.detail", () => {
+  test("pr.detail is capped like every other authored field", () => {
+    // Every authored field carries a character cap. detail was the exception, which
+    // left the one field the write path could not bound, and left it able to skip
+    // markdown validation entirely once the scanners stopped parsing past the
+    // largest cap in the table.
+    const payload = golden();
+    payload.prs[0]!.detail = "a".repeat(BUDGETS.chars.prDetail + 1);
+    const { errors } = run(payload);
+    const named = errors.filter((e) => e.field === "prs[0].detail");
+    const capped = named.find((e) => e.rule === "cap_chars");
+    expect(capped).toBeDefined();
+    expect(capped!.overage).toBe(1);
+  });
+
+  test("a detail inside the cap is still parsed for forbidden constructs", () => {
+    const payload = golden();
+    payload.prs[0]!.detail = "# not allowed here";
+    const { errors } = run(payload);
+    expect(errors.some((e) => e.field === "prs[0].detail" && e.rule === "markdown_construct")).toBe(true);
   });
 });
 

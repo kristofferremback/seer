@@ -324,6 +324,11 @@ export const BUDGETS = {
     reviewTitle: 80, // review.title
     summary: 600, // review.summary, also <= BUDGETS.paragraphs.summary paragraphs
     prGist: 100, // pr.gist, one line
+    // pr.detail is two sentences by rule, and this is the ceiling those two
+    // sentences may not exceed. Every authored field carries a character cap:
+    // an uncapped one is a field the write path cannot bound, and the markdown
+    // scanners refuse to parse anything past the largest cap in this table.
+    prDetail: 400,
     statementText: 120, // statement.text, one line, no markup
     statementBody: 1200, // statement.body
     noteText: 140, // note.text

@@ -584,6 +584,7 @@ export function validatePublish(
       checkLine(errors, `${at}.gist`, pr.gist);
     }
     if (required(errors, `${at}.detail`, pr.detail)) {
+      capText(errors, `${at}.detail`, pr.detail, BUDGETS.chars.prDetail);
       checkBody(errors, `${at}.detail`, pr.detail);
       const sentences = sentencesOf(pr.detail);
       if (sentences > 2) {

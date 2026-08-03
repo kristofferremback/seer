@@ -214,7 +214,8 @@ field and the overage.
 | groups | 2 to 8 | +4 | 16 |
 | notes | 0 to 6 | +0 | 6 |
 
-Character caps: title 80, summary 600 over at most 2 paragraphs, pr gist 100, statement
+Character caps: title 80, summary 600 over at most 2 paragraphs, pr gist 100, pr detail
+400, statement
 text 120, statement body 1200, note text 140, note body 1600, each check 120, group
 title 60, group paragraph 600, file note 120, payload side 800, example text 800,
 caption 120, attachment alt 140, figure node label 40, figure edge label 24.
@@ -298,8 +299,8 @@ attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries
 `id` you author, unique within the document and stable across versions:
 
 - **pr**: `{ repo, number, gist, detail, detailRef, parent }`. `gist` is one line,
-  `detail` is at most 2 sentences and is the one authored field with no character
-  cap, `detailRef` is a full ref object
+  `detail` is at most 2 sentences and at most 400 characters, `detailRef` is a full
+  ref object
   (`{ repo, sha, path, startLine, endLine }`) pinned at that pull request's own head
   SHA, and `parent` is the number of its parent in the stack, or `null`.
 - **statement**: `{ id, kind, text, prs[], refs[], body, evidence[] }`. `kind` is `add`,
