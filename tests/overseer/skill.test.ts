@@ -56,14 +56,19 @@ describe("overseer skill doc", () => {
   });
 
   test("budget numbers match BUDGETS", () => {
-    expect(doc).toContain(String(BUDGETS.statements.ceiling));
-    expect(doc).toContain(String(BUDGETS.groups.ceiling));
+    // Whole table rows, so a number is pinned to its position: a bare substring search
+    // for "12" or "16" passes off the character caps and the worked example's hunk id.
+    expect(doc).toContain(
+      `| statements | ${BUDGETS.statements.min} to ${BUDGETS.statements.base} | +${BUDGETS.statements.perExtraPr} | ${BUDGETS.statements.ceiling} |`,
+    );
+    expect(doc).toContain(
+      `| groups | ${BUDGETS.groups.min} to ${BUDGETS.groups.base} | +${BUDGETS.groups.perExtraPr} | ${BUDGETS.groups.ceiling} |`,
+    );
+    expect(doc).toContain(
+      `| notes | ${BUDGETS.notes.min} to ${BUDGETS.notes.max} | +0 | ${BUDGETS.notes.max} |`,
+    );
     expect(BUDGETS.statements.ceiling).toBe(12);
     expect(BUDGETS.groups.ceiling).toBe(16);
-    expect(doc).toContain(`${BUDGETS.statements.min} to ${BUDGETS.statements.base}`);
-    expect(doc).toContain(`${BUDGETS.groups.min} to ${BUDGETS.groups.base}`);
-    expect(doc).toContain(`+${BUDGETS.statements.perExtraPr}`);
-    expect(doc).toContain(`+${BUDGETS.groups.perExtraPr}`);
     expect(doc).toContain("decomposition");
   });
 

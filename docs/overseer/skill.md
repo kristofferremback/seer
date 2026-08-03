@@ -75,8 +75,12 @@ path and the range, so the arithmetic is checked, not trusted.
 
 A group carries a `title` (60 chars), a `paragraph` (600 chars), its `hunks[]`, and
 `fileNotes[]` of `{ path, text }` at 120 characters each. Every list field in the
-document is required, including this one: a list with nothing in it is sent as `[]`, and
-an omitted key is a 422 saying the field is required and is a list.
+document's top level and its entities is required, including this one: `prs`,
+`statements`, `notes`, `groups`, `attachments`, a statement's `prs`, `refs` and
+`evidence`, a note's `checks`, `refs` and `evidence`, and a group's `hunks` and
+`fileNotes`. A list with nothing in it is sent as `[]`, and an omitted key is a 422
+saying the field is required and is a list. A ref's `highlight[]` is the one list that
+may be omitted; a payload's `highlight[]` may not.
 
 ## Hunk ids
 
@@ -136,11 +140,16 @@ loud rather than let the reader discover it.
 
 ## Choosing evidence
 
-Every statement needs at least one ref. Beyond that, pick the form that carries the
-claim:
+Every statement needs at least one ref. An evidence entry is a tagged object,
+`{ type, <kind>: { ... } }`: a ref is `{ type: "ref", ref: {...} }`, a payload is
+`{ type: "payload", payload: {...} }`, and so on for each kind below. The fields are
+never flattened onto the entry.
 
-- **ref**: the default. A SHA-pinned pointer of repo, sha, path, start and end line,
-  with optional `highlight[]`. Overseer resolves the snippet and derives whether the ref
+Beyond the required ref, pick the form that carries the claim:
+
+- **ref**: the default. A SHA-pinned pointer,
+  `{ repo, sha, path, startLine, endLine, highlight[] }`, camelCase like every other
+  authored field, with optional `highlight[]`. Overseer resolves the snippet and derives whether the ref
   is `in_stack` or `outside`. A ref into untouched code is often the most useful thing
   on the page, because it shows what the change reuses.
 - **payload**: a before and after pair, for a contract change. Use it when the shape of
@@ -195,10 +204,10 @@ A review names at most 10 pull requests. Success returns the review with its `ve
 `url`, `versionUrl`, and any `warnings`.
 
 **The other responses.** 400 for a body that is not a usable document or that carries no
-valid `slug`. 413 when the upload is over the server's size limit. 503 when Overseer
-cannot reach GitHub because `GITHUB_TOKEN` is unset. None of those three is about your
-content: do not re-author for them, and do not retry a 503 as if the document were
-wrong.
+valid `slug`. 413 when the upload is over the server's size limit. 502 when GitHub fails
+to serve a pull request or a ref cannot be read upstream. 503 when Overseer cannot reach
+GitHub because `GITHUB_TOKEN` is unset. None of those four is about your content: do not
+re-author for them, and do not retry a 502 or a 503 as if the document were wrong.
 
 **Reading a 422.** The body is `{ error, errors[], warnings[] }`. Each error carries
 `field` (a JSON path into your payload, such as `statements[2].text`), `rule`, and
