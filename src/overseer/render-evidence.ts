@@ -18,8 +18,10 @@
 // Nothing here interpolates a raw authored string into markup.
 
 import { escapeHtml } from "../escape";
+import { lineDiff } from "./diff";
 import { figureSvg } from "./figure";
 import { render as renderMarkdown, renderInline } from "./markdown";
+import { codeHtml } from "./render-diff";
 import type { Evidence, Figure, Payload, Ref } from "./types";
 
 /** One sprite mark. `label` makes it an image with a name; without one it is decoration. */
@@ -131,33 +133,41 @@ export function refFold(ownerId: string, ref: Ref, suffix = ""): string {
 
 // ---- payload ----
 
-/** One side of a before/after pair. No line numbers: a payload is a value, not a file,
- *  so there is nothing to count into. A highlight is a line number within this side or
- *  a key that appears on the line. */
-function payloadSide(text: string, highlight: (string | number)[]): string {
-  const numbers = new Set(highlight.filter((h): h is number => typeof h === "number"));
-  const keys = highlight.filter((h): h is string => typeof h === "string");
-  const lines = text.split("\n");
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
-  const body = lines
-    .map((line, i) => {
-      const marked = numbers.has(i + 1) || keys.some((k) => k !== "" && line.includes(k));
-      return `<span class="${marked ? "l hl" : "l"}">${escapeHtml(line)}</span>`;
+/** A payload as one diff, in the walkthrough's grammar. Two columns asked the reader
+ *  to find the change themselves, which is the one thing this page exists not to do,
+ *  so before and after are aligned here and only what moved is marked.
+ *
+ *  No line numbers: a payload is a value, not a file, so there is nothing to count
+ *  into and the gutter carries the glyph alone. An authored `highlight[]` marks a
+ *  line the computed diff left as context; where the two disagree the diff wins,
+ *  because it is derived and the highlight is authored. */
+function payloadBlock(payload: Payload): string {
+  const lang = payload.lang === "json" ? "json" : null;
+  const rows = lineDiff(payload.before, payload.after);
+  const numbers = new Set(payload.highlight.filter((h): h is number => typeof h === "number"));
+  const keys = payload.highlight.filter((h): h is string => typeof h === "string");
+
+  let after = 0;
+  const body = rows
+    .map((row) => {
+      if (row.kind !== "del") after++;
+      const flagged =
+        row.kind === "ctx" &&
+        (numbers.has(after) || keys.some((k) => k !== "" && row.content.includes(k)));
+      const cls = row.kind === "ctx" ? (flagged ? "l hl" : "l") : `l ${row.kind}`;
+      return (
+        `<span class="${cls}"><span class="gut">` +
+        `<span class="n"></span>` +
+        `<span class="g">${escapeHtml(GLYPH[row.kind])}</span></span>` +
+        codeHtml(row.content, lang, row.wordRanges) +
+        `</span>`
+      );
     })
     .join("");
   return `<div class="snipbox"><pre class="snip scroll-x"><code>${body}</code></pre></div>`;
 }
 
-function payloadBlock(payload: Payload): string {
-  return (
-    `<div class="ba">` +
-    `<span class="ba-label l1">before</span>` +
-    `<span class="ba-label l2">after</span>` +
-    `<div class="c1">${payloadSide(payload.before, payload.highlight)}</div>` +
-    `<div class="c2">${payloadSide(payload.after, payload.highlight)}</div>` +
-    `</div>`
-  );
-}
+const GLYPH: Record<"ctx" | "add" | "del", string> = { ctx: " ", add: "+", del: "-" };
 
 // ---- example ----
 

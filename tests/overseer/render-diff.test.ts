@@ -12,6 +12,7 @@ import { test, expect, describe } from "bun:test";
 import { renderReviewPage } from "../../src/overseer/render";
 import { codeHtml, groupsInOrder, langOfPath, walkthroughSection } from "../../src/overseer/render-diff";
 import { figureLabel, figureSvg } from "../../src/overseer/figure";
+import { lineDiff } from "../../src/overseer/diff";
 import type { ReviewDoc } from "../../src/overseer/db";
 import type { Group, Hunk } from "../../src/overseer/types";
 import { GOLDEN_HUNKS } from "./fixtures/golden-review";
@@ -388,5 +389,48 @@ describe("figures", () => {
     });
     expect(svg).not.toContain("<script");
     expect(svg).toContain("&lt;script&gt;");
+  });
+});
+
+describe("payload as a diff", () => {
+  const rows = (before: string, after: string) => lineDiff(before, after);
+
+  test("one changed word marks that word, and leaves its neighbours as context", () => {
+    const r = rows('{\n  "url": 1\n}', '{\n  "shareUrl": 1\n}');
+    expect(r.map((x) => x.kind)).toEqual(["ctx", "del", "add", "ctx"]);
+    const del = r[1]!;
+    const add = r[2]!;
+    // The mark covers the key that moved, not the whole line.
+    expect(del.wordRanges.length).toBeGreaterThan(0);
+    expect(add.wordRanges.length).toBeGreaterThan(0);
+    const marked = add.content.slice(add.wordRanges[0]![0], add.wordRanges[0]![1]);
+    expect(marked).toContain("shareUrl");
+    expect(marked).not.toContain("{");
+  });
+
+  test("a pure addition has no deletions, and a pure deletion no additions", () => {
+    const added = rows("a\nb", "a\nb\nc");
+    expect(added.filter((x) => x.kind === "del")).toEqual([]);
+    expect(added.filter((x) => x.kind === "add").map((x) => x.content)).toEqual(["c"]);
+
+    const removed = rows("a\nb\nc", "a\nb");
+    expect(removed.filter((x) => x.kind === "add")).toEqual([]);
+    expect(removed.filter((x) => x.kind === "del").map((x) => x.content)).toEqual(["c"]);
+  });
+
+  test("identical sides are all context and do not throw", () => {
+    const r = rows("same\nlines", "same\nlines");
+    expect(r.map((x) => x.kind)).toEqual(["ctx", "ctx"]);
+    expect(r.every((x) => x.wordRanges.length === 0)).toBe(true);
+  });
+
+  test("a trailing newline does not invent an empty last row", () => {
+    expect(rows("a\n", "a\n").length).toBe(1);
+  });
+
+  test("the same pair diffs identically twice", () => {
+    const a = JSON.stringify(rows('{ "a": 1 }', '{ "a": 2 }'));
+    const b = JSON.stringify(rows('{ "a": 1 }', '{ "a": 2 }'));
+    expect(a).toBe(b);
   });
 });

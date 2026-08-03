@@ -718,26 +718,6 @@ const STYLE = `  @font-face {
     color: hsl(var(--muted));
   }
 
-  /* before / after, on one grid so the rows line up in both columns */
-  .ba {
-    display: grid;
-    gap: 5px 14px;
-    grid-template-columns: 1fr;
-    grid-template-areas: "l1" "c1" "l2" "c2";
-    margin: 10px 0 14px;
-  }
-  .ba .l1 { grid-area: l1; } .ba .c1 { grid-area: c1; }
-  .ba .l2 { grid-area: l2; } .ba .c2 { grid-area: c2; }
-  .ba .l2 { margin-top: 8px; }
-  .ba-label { font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); }
-  .ba .snip .l { padding-right: 8px; }
-  @media (min-width: 640px) {
-    .ba { grid-template-columns: 1fr 1fr; grid-template-areas: "l1 l2" "c1 c2"; }
-    .ba .l2 { margin-top: 0; }
-  }
-  /* the spacer line only buys alignment while the two columns sit side by side */
-  .snip .void { color: transparent; }
-  @media (max-width: 639.98px) { .ba .snip .void { display: none; } }
 
   /* ---- the flow figure: a documentation figure, not an illustration ---- */
   .flow { display: block; width: 100%; max-width: 210px; height: auto; margin: 10px 0 14px; }
@@ -965,7 +945,6 @@ const STYLE = `  @font-face {
     .snip code { width: auto; }
     .snip .l { white-space: pre-wrap; overflow-wrap: anywhere; }
     .snip .l:has(> .n) { padding-left: calc(8px + 3.3em); text-indent: -3.3em; }
-    .ba .snip .l { padding-left: 2em; text-indent: -2em; }
     .filediff .snip .l { padding-left: 58px; text-indent: -58px; }
     /* the hanging indent is the line's, not the gutter's: these are inline
        blocks, so they would otherwise inherit the pull and step off the edge */

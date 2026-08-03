@@ -210,9 +210,15 @@ describe("the page itself", () => {
       },
     ];
     const html = page(doc({ statements: [statement({ evidence })] }));
-    expect(html).toContain('<span class="ba-label l1">before</span>');
-    expect(html).toContain('<span class="ba-label l2">after</span>');
-    expect(html).toContain('<span class="l hl">{ &quot;shareUrl&quot;: 2 }</span>');
+    // A payload is one diff, not two columns to compare by eye: the old line is
+    // marked deleted, the new one added, and the word that moved carries the mark.
+    expect(html).not.toContain("ba-label");
+    expect(html).toContain('<span class="l del">');
+    expect(html).toContain('<span class="l add">');
+    expect(html).toContain('<span class="w">');
+    expect(html).toContain("&quot;shareUrl&quot;");
+    // No line numbers: a value counts into nothing, so the gutter is the glyph alone.
+    expect(html).toContain('<span class="n"></span><span class="g">+</span>');
     expect(html).toContain('src="/ws_test/r/golden/a/att_abc123"');
     expect(html).toContain('alt="The inventory with a share link per bundle"');
     expect(html).toContain('href="/ws_test/b/contact-sheet/v/3/"');

@@ -172,7 +172,7 @@ function finish(hunk: Hunk, path: string): void {
       path,
     );
   }
-  paintWordRanges(hunk);
+  paintRuns(hunk.lines);
 }
 
 // ---- word ranges ----
@@ -291,9 +291,49 @@ function pushRange(
   out.push([first.start, last.end]);
 }
 
+/**
+ * A before/after pair as diff rows, for evidence that carries a value rather than a
+ * file. Same machinery as a hunk: LCS over lines, then word ranges painted across
+ * paired deletions and additions, so a one-word contract change marks that word
+ * instead of asking the reader to compare two blocks by eye. There are no line
+ * numbers, because a payload counts into nothing.
+ */
+export function lineDiff(before: string, after: string): PayloadLine[] {
+  const a = splitLines(before);
+  const b = splitLines(after);
+  const rows: PayloadLine[] =
+    a.length * b.length > MAX_LCS_CELLS
+      ? // Too large to align honestly. Showing it whole as a replacement is true;
+        // guessing at an alignment is not.
+        [
+          ...a.map((content) => ({ kind: "del" as const, content, wordRanges: [] })),
+          ...b.map((content) => ({ kind: "add" as const, content, wordRanges: [] })),
+        ]
+      : lcsOps(a, b).map((op) => ({
+          kind: op.t === "=" ? ("ctx" as const) : op.t === "-" ? ("del" as const) : ("add" as const),
+          content: op.t === "+" ? b[op.j]! : a[op.i]!,
+          wordRanges: [] as [number, number][],
+        }));
+  paintRuns(rows);
+  return rows;
+}
+
+/** A payload diff row. A hunk line without the numbers, which a value has none of. */
+export interface PayloadLine {
+  kind: HunkLineKind;
+  content: string;
+  wordRanges: [number, number][];
+}
+
+/** Lines of a value, without the phantom last line a trailing newline would add. */
+function splitLines(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
 /** Pair each del run with the add run that follows it, line for line, and paint. */
-function paintWordRanges(hunk: Hunk): void {
-  const lines = hunk.lines;
+function paintRuns(lines: { kind: HunkLineKind; content: string; wordRanges: [number, number][] }[]): void {
   let i = 0;
   while (i < lines.length) {
     if (lines[i]!.kind !== "del") {
