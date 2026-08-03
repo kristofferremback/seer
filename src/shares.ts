@@ -197,3 +197,193 @@ function deadShare(req: Request, token: string): Response {
   }
   return softNotFound();
 }
+
+// ---- the API ----
+
+interface ApiError {
+  field: string;
+  rule: string;
+  message: string;
+}
+
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function unprocessable(errors: ApiError[]): Response {
+  return json({ error: "The share was not created", errors }, 422);
+}
+
+const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const LABEL_MAX = 80;
+
+/** The workspace a request names, once membership is checked. A member reaches their
+ *  own workspaces and no others; a non-member and a workspace that does not exist are
+ *  one answer, as everywhere else. */
+function memberWorkspace(req: Request, wsId: unknown): { ws: string; userId: string } | Response {
+  const user = sessionUser(req);
+  if (!user) return new Response(JSON.stringify({ error: "Sign in required" }), {
+    status: 403,
+    headers: { "content-type": "application/json" },
+  });
+  if (typeof wsId !== "string" || !WS_ID_RE.test(wsId)) {
+    return unprocessable([
+      { field: "workspace", rule: "workspace_missing", message: "workspace is required and must be a ws_ id" },
+    ]);
+  }
+  if (!isMember(wsId, user.id)) {
+    return json({ error: "No such workspace" }, 404);
+  }
+  return { ws: wsId, userId: user.id };
+}
+
+/** An `expiresAt` as a body may write it: an epoch in milliseconds or an ISO 8601
+ *  string. Null means no expiry, which is the default the design takes. */
+function readExpiry(raw: unknown): { at: number | null } | ApiError {
+  if (raw === undefined || raw === null || raw === "") return { at: null };
+  const at = typeof raw === "number" ? raw : typeof raw === "string" ? Date.parse(raw) : NaN;
+  if (!Number.isFinite(at)) {
+    return {
+      field: "expiresAt",
+      rule: "expires_unreadable",
+      message: "expiresAt must be an epoch in milliseconds or an ISO 8601 timestamp",
+    };
+  }
+  if (at <= Date.now()) {
+    return {
+      field: "expiresAt",
+      rule: "expires_past",
+      message: "expiresAt is in the past, so the link would be dead on arrival",
+    };
+  }
+  return { at };
+}
+
+/** Whether an asset a share would name is actually there. A target that does not exist
+ *  in that workspace is a 422 rather than a link that opens onto the soft-404. */
+function targetExists(wsId: string, kind: ShareKind, target: string): boolean {
+  return kind === "review" ? !!getReview(wsId, target) : !!getBundle(wsId, target);
+}
+
+/** POST /api/shares: mint one, and hand back the URL rather than the bare token,
+ *  because the URL is the thing a person actually wants. */
+export async function handleCreateShare(req: Request): Promise<Response> {
+  let body: Record<string, unknown>;
+  try {
+    const parsed: unknown = await req.json();
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return json({ error: "Body must be a JSON object: { workspace, kind, target, label?, expiresAt? }" }, 400);
+  }
+
+  const gate = memberWorkspace(req, body.workspace);
+  if (gate instanceof Response) return gate;
+
+  const errors: ApiError[] = [];
+  const kind = body.kind;
+  const kindOk = typeof kind === "string" && (SHARE_KINDS as readonly string[]).includes(kind);
+  if (!kindOk) {
+    errors.push({
+      field: "kind",
+      rule: "kind_unknown",
+      message: `kind must be one of ${SHARE_KINDS.join(", ")}`,
+    });
+  } else if (!(SERVED_SHARE_KINDS as readonly string[]).includes(kind as string)) {
+    // See SERVED_SHARE_KINDS: a bundle share would mint a link no route opens, and a
+    // link that cannot be followed is worse than a refusal that says why.
+    errors.push({
+      field: "kind",
+      rule: "kind_not_served",
+      message: `kind ${kind} cannot be shared yet; a bundle is public by link, so it needs no share`,
+    });
+  }
+
+  const target = body.target;
+  if (typeof target !== "string" || !SLUG_RE.test(target)) {
+    errors.push({
+      field: "target",
+      rule: "target_malformed",
+      message: "target is required and must match [a-z0-9][a-z0-9-]{0,63}",
+    });
+  } else if (kindOk && !targetExists(gate.ws, kind as ShareKind, target)) {
+    // A target in another workspace lands here too, and says the same thing: this
+    // workspace has no such asset. What another workspace holds is not this reply's
+    // to disclose.
+    errors.push({
+      field: "target",
+      rule: "target_unknown",
+      message: `${gate.ws} has no ${String(kind)} called ${target}`,
+    });
+  }
+
+  const label = body.label === undefined || body.label === null ? "" : body.label;
+  if (typeof label !== "string" || label.length > LABEL_MAX) {
+    errors.push({
+      field: "label",
+      rule: "label_length",
+      message: `label must be a string of at most ${LABEL_MAX} characters`,
+    });
+  }
+
+  const expiry = readExpiry(body.expiresAt);
+  if ("field" in expiry) errors.push(expiry);
+
+  if (errors.length > 0) return unprocessable(errors);
+
+  const { id, token } = createShare({
+    wsId: gate.ws,
+    kind: kind as ShareKind,
+    target: target as string,
+    label: label as string,
+    userId: gate.userId,
+    expiresAt: (expiry as { at: number | null }).at,
+  });
+  return json({
+    id,
+    workspace: gate.ws,
+    kind,
+    target,
+    label,
+    expiresAt: (expiry as { at: number | null }).at,
+    token,
+    url: `${config.baseUrl}/s/${token}`,
+  });
+}
+
+/** GET /api/shares?workspace=ws_…: what this workspace has shared. No tokens: only
+ *  their hashes survived the mint, and a list that could hand one back would undo the
+ *  whole point of hashing them. */
+export function handleListShares(req: Request): Response {
+  const wsId = new URL(req.url).searchParams.get("workspace");
+  const gate = memberWorkspace(req, wsId);
+  if (gate instanceof Response) return gate;
+  return json({
+    workspace: gate.ws,
+    shares: listShares(gate.ws).map((s) => ({
+      id: s.id,
+      kind: s.kind,
+      target: s.target,
+      label: s.label,
+      createdBy: s.created_by,
+      createdAt: new Date(s.created_at).toISOString(),
+      expiresAt: s.expires_at === null ? null : new Date(s.expires_at).toISOString(),
+    })),
+  });
+}
+
+/** DELETE /api/shares/:id. A share in a workspace the caller is not in is a 404, the
+ *  same answer an id that never existed gets. */
+export function handleRevokeShare(req: Request, id: string): Response {
+  const user = sessionUser(req);
+  if (!user) {
+    return json({ error: "Sign in required" }, 403);
+  }
+  const share = SHR_ID_RE.test(id) ? getShare(id) : null;
+  if (!share || !isMember(share.workspace_id, user.id)) return json({ error: "No such share" }, 404);
+  revokeShare(id);
+  return json({ id, revoked: true });
+}

@@ -10,6 +10,7 @@
 import { test, expect, beforeAll, afterAll, describe } from "bun:test";
 
 import { startServer } from "../src/server";
+import { config } from "../src/config";
 import { db, legacyWorkspaceId } from "../src/db";
 import { tinyId, hashKey, newShareToken } from "../src/ids";
 import { createAnnotation, createAttachment } from "../src/overseer/db";
@@ -268,5 +269,166 @@ describe("a share is never a write", () => {
     expect(html).not.toContain("Is the gate reachable?");
     expect(html).not.toContain("<form");
     expect(html).not.toContain("/annotations");
+  });
+});
+
+// ---- the API ----
+
+/** POST /api/shares as the signed-in root user. */
+function post(body: unknown): Promise<Response> {
+  return fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+interface ApiError {
+  field: string;
+  rule: string;
+  message: string;
+}
+
+/** The first error of a 422, which is the one a caller reads to know what to fix. */
+async function errorOf(res: Response): Promise<ApiError> {
+  expect(res.status).toBe(422);
+  const errors = ((await res.json()) as { errors: ApiError[] }).errors;
+  expect(errors.length).toBeGreaterThan(0);
+  return errors[0]!;
+}
+
+describe("the shares API", () => {
+  test("POST mints a share and answers with the /s/<token> URL", async () => {
+    const res = await post({
+      workspace: rootWs,
+      kind: "review",
+      target: "own-review",
+      label: "for the client",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      id: string;
+      token: string;
+      url: string;
+      label: string;
+      expiresAt: number | null;
+    };
+    expect(body.token).toMatch(/^seer_sh_[A-Za-z0-9_-]{32}$/);
+    expect(body.url).toBe(`${config.baseUrl}/s/${body.token}`);
+    expect(body.label).toBe("for the client");
+    expect(body.expiresAt).toBeNull();
+
+    // The URL it handed back is one that opens the review.
+    const page = await fetch(`${base}/s/${body.token}`);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("own-review");
+  });
+
+  test("an expiry is honoured, and a past one is refused", async () => {
+    const soon = Date.now() + 60_000;
+    const res = await post({ workspace: rootWs, kind: "review", target: "own-review", expiresAt: soon });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; expiresAt: number };
+    expect(body.expiresAt).toBe(soon);
+
+    const past = await post({
+      workspace: rootWs,
+      kind: "review",
+      target: "own-review",
+      expiresAt: Date.now() - 1000,
+    });
+    expect((await errorOf(past)).field).toBe("expiresAt");
+  });
+
+  test("an unknown kind is a 422 naming kind", async () => {
+    const res = await post({ workspace: rootWs, kind: "wallpaper", target: "own-review" });
+    const error = await errorOf(res);
+    expect(error.field).toBe("kind");
+    expect(error.rule).toBe("kind_unknown");
+  });
+
+  test("a kind no route serves is a 422 naming kind, not a link that cannot open", async () => {
+    const res = await post({ workspace: rootWs, kind: "bundle", target: "own-review" });
+    const error = await errorOf(res);
+    expect(error.field).toBe("kind");
+    expect(error.rule).toBe("kind_not_served");
+  });
+
+  test("an unknown target is a 422 naming target", async () => {
+    const res = await post({ workspace: rootWs, kind: "review", target: "no-such-review" });
+    const error = await errorOf(res);
+    expect(error.field).toBe("target");
+    expect(error.rule).toBe("target_unknown");
+  });
+
+  test("a target in another workspace is a 422 naming target", async () => {
+    // `shared-review` is real, but it belongs to wsOut, and this mint names rootWs.
+    const res = await post({
+      workspace: rootWs,
+      kind: "review",
+      target: "shared-review",
+      label: "reaching across",
+    });
+    const error = await errorOf(res);
+    expect(error.field).toBe("target");
+    expect(error.rule).toBe("target_unknown");
+    // A refused mint writes nothing.
+    expect(
+      db
+        .query<{ c: number }, [string]>("SELECT COUNT(*) c FROM shares WHERE label = ?")
+        .get("reaching across")!.c,
+    ).toBe(0);
+  });
+
+  test("a label longer than the cap is a 422 naming label", async () => {
+    const res = await post({
+      workspace: rootWs,
+      kind: "review",
+      target: "own-review",
+      label: "x".repeat(81),
+    });
+    expect((await errorOf(res)).field).toBe("label");
+  });
+
+  test("minting into a workspace the caller is not in is a 404", async () => {
+    const res = await post({ workspace: wsOut, kind: "review", target: "shared-review" });
+    expect(res.status).toBe(404);
+  });
+
+  test("GET lists the workspace's shares and never a token", async () => {
+    const minted = (await (
+      await post({ workspace: rootWs, kind: "review", target: "own-review", label: "listed by api" })
+    ).json()) as { id: string; token: string };
+
+    const res = await fetch(`${base}/api/shares?workspace=${rootWs}`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain(minted.token);
+    expect(text).not.toContain("token");
+    const body = JSON.parse(text) as { shares: { id: string; label: string; target: string }[] };
+    expect(body.shares.some((s) => s.id === minted.id && s.label === "listed by api")).toBe(true);
+
+    // Another workspace's shares are not this list's to hand over.
+    expect(await (await fetch(`${base}/api/shares?workspace=${wsOut}`)).status).toBe(404);
+  });
+
+  test("DELETE revokes, and only for a member of the owning workspace", async () => {
+    const mine = (await (
+      await post({ workspace: rootWs, kind: "review", target: "own-review", label: "to revoke" })
+    ).json()) as { id: string; token: string };
+
+    const res = await fetch(`${base}/api/shares/${mine.id}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    expect(resolveShare(mine.token)).toBeNull();
+    expect(lookupShare(mine.token)!.revoked_at).not.toBeNull();
+
+    // A share in a workspace the caller is not in: the same answer an id that never
+    // existed gets, and the row is untouched.
+    const theirs = mint({ label: "not yours to revoke" });
+    const refused = await fetch(`${base}/api/shares/${theirs.id}`, { method: "DELETE" });
+    expect(refused.status).toBe(404);
+    expect(resolveShare(theirs.token)).not.toBeNull();
+
+    expect((await fetch(`${base}/api/shares/shr_nosuchsha`, { method: "DELETE" })).status).toBe(404);
   });
 });

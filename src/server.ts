@@ -44,7 +44,12 @@ import {
   type SessionUser,
 } from "./auth";
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
-import { handleShare } from "./shares";
+import {
+  handleCreateShare,
+  handleListShares,
+  handleRevokeShare,
+  handleShare,
+} from "./shares";
 import { handlePublishReview } from "./overseer/routes";
 import { handleReadReview } from "./overseer/read";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
@@ -640,6 +645,23 @@ export async function startServer() {
       // renders a broken image, because its own /a/ route asks for membership.
       "/s/:token/a/:id": {
         GET: (req) => handleShare(req, req.params.token, null, req.params.id),
+      },
+
+      // Minting and revoking, session-authenticated and member-only. The mint answers
+      // with the full /s/<token> URL, because the URL is the thing a person wants; the
+      // list answers without tokens, because only their hashes survived the mint.
+      "/api/shares": {
+        GET: (req) => handleListShares(req),
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleCreateShare(req);
+        },
+      },
+      "/api/shares/:id": {
+        DELETE: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleRevokeShare(req, req.params.id);
+        },
       },
 
       "/api/images": {
