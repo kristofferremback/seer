@@ -14,9 +14,10 @@ Three clauses, settled:
 2. Author intent reaches you only through the published record: pull request titles and
    descriptions, commit messages, review comments and threads. If intent is not in the
    record, it is not available, and a briefing that asserts it is inventing it.
-3. Author context enters afterwards only through annotation answers. When a reader asks
-   a question on a published review and the author answers it, that answer is record,
-   and the next pass may use it.
+3. Author context enters afterwards only through annotation answers. A reader files a
+   question on a published review; you answer it, with your API key, from what the
+   author has since put in the record. An answer is the skill's act, never the reader's.
+   Once written, an answer is record, and the next pass may use it.
 
 Anything you cannot source to the record or to an answer is either derivable from the
 diff or is not yours to state.
@@ -73,7 +74,9 @@ path and the range, so the arithmetic is checked, not trusted.
   that the ranking is your judgment, which is the product.
 
 A group carries a `title` (60 chars), a `paragraph` (600 chars), its `hunks[]`, and
-optional `fileNotes[]` of `{ path, text }` at 120 characters each.
+`fileNotes[]` of `{ path, text }` at 120 characters each. Every list field in the
+document is required, including this one: a list with nothing in it is sent as `[]`, and
+an omitted key is a 422 saying the field is required and is a list.
 
 ## Hunk ids
 
@@ -84,24 +87,27 @@ pr<number>:<path>:@@<old_start>,<old_lines>+<new_start>,<new_lines>
 ```
 
 The four numbers are exactly the ones in that hunk's unified diff header, in header
-order. Worked example. This header in `src/server.ts` on pull request 41:
+order. Worked example, taken from this repository's own history and read as arriving on
+pull request 41:
 
 ```
-@@ -498,7 +498,12 @@ export function startServer() {
+@@ -141,6 +141,15 @@ export function parsePatch(patch: string, ctx: HunkContext): Hunk[] {
 ```
 
 yields:
 
 ```
-pr41:src/server.ts:@@498,7+498,12
+pr41:src/overseer/diff.ts:@@141,6+141,15
 ```
 
 Two details that catch people. A header written `@@ -12 +12,3 @@`, with a count
-omitted, means a count of 1, so the id is `pr41:src/server.ts:@@12,1+12,3`. And the
-path is the new path exactly as the diff spells it, with no leading `a/` or `b/`.
+omitted, means a count of 1, so the id is `pr41:src/overseer/diff.ts:@@12,1+12,3`. And
+the path is the new path exactly as the diff spells it, with no leading `a/` or `b/`.
 
-Read the ids off the diff Overseer hands you. If you compute one and it does not match
-a hunk in that pull request, publish fails naming it.
+Compute the ids from the pull request's own unified diff, the one you read on GitHub.
+Nothing hands you a diff before you publish, and hunks appear in the review document
+only after it exists. If you compute an id that does not match a hunk Overseer derived
+for that pull request, publish fails naming it.
 
 ## Budgets
 
@@ -170,8 +176,29 @@ curl -X POST "$SEER_URL/api/reviews" \
 ```
 
 The document is `{ slug, title, summary, prs[], statements[], notes[], groups[],
-attachments[] }`. Success returns the review with its `version`, `url`, `versionUrl`,
-and any `warnings`.
+attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries an
+`id` you author, unique within the document and stable across versions:
+
+- **pr**: `{ repo, number, gist, detail, detailRef, parent }`. `gist` is one line,
+  `detail` is at most 2 sentences, `detailRef` is a ref pointer into that pull request,
+  and `parent` is the number of its parent in the stack, or `null`.
+- **statement**: `{ id, kind, text, prs[], refs[], body, evidence[] }`. `kind` is `add`,
+  `change` or `remove`. `prs[]` names the pull requests the statement realizes, each as
+  `repo#number`, spelled exactly as the `prs[]` entries spell them.
+- **note**: `{ id, kind, text, body, checks[], refs[], evidence[] }`. `kind` is `risk`
+  or `note`.
+- **group**: `{ id, title, significance, paragraph, hunks[], fileNotes[] }`.
+- **attachment**: `{ id, mediaType, alt, caption }`. `caption` is the one optional
+  field here; `alt` is required, and the part carrying the bytes is named for `id`.
+
+A review names at most 10 pull requests. Success returns the review with its `version`,
+`url`, `versionUrl`, and any `warnings`.
+
+**The other responses.** 400 for a body that is not a usable document or that carries no
+valid `slug`. 413 when the upload is over the server's size limit. 503 when Overseer
+cannot reach GitHub because `GITHUB_TOKEN` is unset. None of those three is about your
+content: do not re-author for them, and do not retry a 503 as if the document were
+wrong.
 
 **Reading a 422.** The body is `{ error, errors[], warnings[] }`. Each error carries
 `field` (a JSON path into your payload, such as `statements[2].text`), `rule`, and
@@ -186,8 +213,23 @@ text, so a returning reader sees what is new and what was revised. An id reused 
 prior version must name an entity of the same type. You never write what changed about
 your own account.
 
-On a second pass you are given the prior version and its open annotations. Both are
+**The second pass.** `GET /api/reviews/:slug` with the same bearer token returns the
+current version and its annotations; `GET /api/reviews/:slug/v/:n` returns an earlier
+one. That is where the prior version and its open annotations come from. Both are
 published record.
+
+**Answering an annotation.** A signed-in member files a question. Only an API key for
+the review's workspace answers one, so answering is yours and no one else's:
+
+```
+POST /api/reviews/:slug/annotations
+{ "id": "<annotation id>", "answer": { "body": "...", "refs": [] } }
+```
+
+A present `answer` key is what routes the request to the answer path; a body without
+one is read as filing a question and is refused for an API key. `refs[]` is optional and
+names the same repo the review names. An annotation already answered stays answered:
+the route will not overwrite one.
 
 ## Graded failure modes
 

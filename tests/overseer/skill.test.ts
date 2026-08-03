@@ -34,9 +34,25 @@ describe("overseer skill doc", () => {
 
   test("states the hunk id format and a worked example that hunkId() reproduces", () => {
     expect(doc).toContain("pr<number>:<path>:@@<old_start>,<old_lines>+<new_start>,<new_lines>");
-    expect(doc).toContain(hunkId(41, "src/server.ts", 498, 7, 498, 12));
+    expect(doc).toContain(hunkId(41, "src/overseer/diff.ts", 141, 6, 141, 15));
     // The omitted-count case: `@@ -12 +12,3 @@` means a count of 1.
-    expect(doc).toContain(hunkId(41, "src/server.ts", 12, 1, 12, 3));
+    expect(doc).toContain(hunkId(41, "src/overseer/diff.ts", 12, 1, 12, 3));
+  });
+
+  test("states the authored fields the write path requires", () => {
+    expect(doc).toContain("{ repo, number, gist, detail, detailRef, parent }");
+    expect(doc).toContain("{ id, kind, text, prs[], refs[], body, evidence[] }");
+    expect(doc).toContain("{ id, kind, text, body, checks[], refs[], evidence[] }");
+    expect(doc).toContain("{ id, title, significance, paragraph, hunks[], fileNotes[] }");
+    // Every list is required, sent as [] when unused: the doc must not call one optional.
+    expect(doc).toContain("Every list field in the");
+    expect(doc).not.toContain("optional `fileNotes[]`");
+  });
+
+  test("documents answering an annotation as the skill's own act", () => {
+    expect(doc).toContain("POST /api/reviews/:slug/annotations");
+    expect(doc).toContain("GET /api/reviews/:slug");
+    expect(doc).toContain('"answer"');
   });
 
   test("budget numbers match BUDGETS", () => {
