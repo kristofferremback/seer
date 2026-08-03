@@ -147,10 +147,13 @@ const filing = { target: { type: "statement", id: "st_gate" }, body: "Who may wr
   assert(res.status === 403, `a member answering should 403, got ${res.status}`);
 }
 
-// ---- the form is drawn for the member and for nobody else ----
+// ---- the page draws no questions for anyone while they are deferred ----
 {
   const memberPage = await (await fetch(`${base}/r/golden`, { headers: cookie(member) })).text();
-  assert(memberPage.includes(`<form class="ask-form"`), "a member's page should carry the ask form");
+  assert(
+    !memberPage.includes(`<form class="ask-form"`),
+    "the ask form is deferred and should be on nobody's page",
+  );
   const keyPage = await fetch(`${base}/r/golden`, {
     headers: { authorization: `Bearer ${key}` },
   });

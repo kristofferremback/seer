@@ -279,7 +279,17 @@ const STYLE = `  @font-face {
     .head, #notes, #walkthrough, #questions, .colophon { max-width: 760px; }
     .lede { display: flex; align-items: flex-start; gap: 36px; }
     .lede > #summary { order: 1; flex: 1 1 760px; max-width: 760px; min-width: 0; margin-top: 0; }
-    .lede > .chain { order: 2; flex: 0 0 296px; min-width: 0; margin-top: 4px; }
+    /* the stack is a sidebar here: it holds its own scroll and stays put while
+       the account moves, so a reader deep in the walkthrough can still see which
+       pull request they are in. It never scrolls the page to reach its own end. */
+    .lede > .chain {
+      order: 2; flex: 0 0 296px; min-width: 0; margin-top: 4px;
+      position: sticky; top: 20px;
+      max-height: calc(100vh - 40px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+    }
   }
 
   /* ---- type ---- */
@@ -772,49 +782,54 @@ const STYLE = `  @font-face {
     border-radius: 6px;
     min-width: 0;
   }
+  /* the card stacks: the title takes the width it needs and the identity line
+     sits under it, so nothing on a card competes for one row and nothing wraps
+     mid-token in a 296px column */
   .card > summary {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto auto;
-    align-items: center;
-    column-gap: 10px; row-gap: 3px;
+    display: block;
     padding: 11px var(--spine) 12px;
   }
+  .c-head { display: flex; align-items: flex-start; gap: 10px; }
+  .c-title {
+    flex: 1 1 auto; min-width: 0;
+    font-size: 14.5px; font-weight: 500; line-height: 1.35; color: hsl(var(--ink));
+  }
+  .card > summary .tick { flex: none; margin-top: 3px; }
+  .c-id {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-top: 5px;
+    flex-wrap: wrap;
+  }
   /* the ref is the one thing on the card that leaves the page, so it carries
-     its own hit area and sits above the summary's. The two do not overlap:
-     the ref's box is the top line of the left column, the card's is everything
-     under and beside it. */
+     its own hit area and sits above the summary's. */
   .c-ref {
     position: relative; z-index: 1;
-    grid-column: 1; grid-row: 1;
     display: inline-flex; align-items: center; gap: 7px;
-    justify-self: start;
     font-family: var(--font-mono); font-size: 12px; font-weight: 500;
-    min-height: 22px;
     min-width: 0;
-    overflow-wrap: anywhere;
   }
-  .c-ref::after { content: ""; position: absolute; left: -6px; right: -6px; top: 50%; height: 44px; transform: translateY(-50%); }
-  /* the rule belongs under the text, not under the mark that labels it, so the
-     underline lives on an inner span rather than across the whole flex box */
+  .c-ref::after { content: ""; position: absolute; left: -6px; right: -6px; top: 50%; height: 34px; transform: translateY(-50%); }
+  /* the rule belongs under the text, not under the mark that labels it */
   .c-ref, .c-ref:active { text-decoration: none; background-color: transparent; }
-  .c-reftext { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  .c-reftext { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; white-space: nowrap; }
   .c-ref:active .c-reftext { text-decoration-thickness: 2px; }
   @media (hover: hover) and (pointer: fine) {
     .c-ref:hover .c-reftext { text-decoration-thickness: 2px; }
   }
-  .c-kinds { grid-column: 2; grid-row: 1; display: flex; align-items: center; gap: 9px; flex: none; }
-  /* the marks say what the step does and the chevron says the card opens: two
-     different statements, so they do not sit in one cluster. */
-  /* what the step costs, in the same mono the file rows count in, so a number on a
-     card and a number in the walkthrough read as the same kind of fact */
-  .c-stat {
-    grid-column: 3; grid-row: 1;
-    font-family: var(--font-mono); font-size: 11.5px;
-    color: hsl(var(--muted)); white-space: nowrap;
+  .c-stat { font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); white-space: nowrap; }
+  /* what a tap adds: the marks and the gist, then the author's own account
+     behind one more fold */
+  .c-open { padding: 0 var(--spine) 12px; }
+  .c-kinds { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+  .c-more > summary {
+    display: flex; align-items: center; gap: 7px;
+    margin-top: 10px; padding: 0;
+    font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted));
   }
-  .card > summary .tick { grid-column: 4; grid-row: 1; margin-left: 5px; }
-  .c-title { grid-column: 1 / -1; grid-row: 2; font-size: 14.5px; font-weight: 500; line-height: 1.35; color: hsl(var(--ink)); margin-top: 3px; }
-  .c-line { grid-column: 1 / -1; grid-row: 3; font-size: 13px; line-height: 1.5; color: hsl(var(--ink-soft)); }
+  .c-more > summary .tick { flex: none; }
+  .c-more[open] > summary { margin-bottom: 8px; }
+  .c-morelabel { min-width: 0; overflow-wrap: anywhere; }
+  .c-line { font-size: 13px; line-height: 1.5; color: hsl(var(--ink-soft)); display: block; }
   /* open state is the walkthrough group's, on a card: the head keeps its rule
      and the border firms up, so the open one is the open one at a glance. */
   .card[open] { border-color: hsl(var(--ink) / 0.26); }
@@ -832,22 +847,19 @@ const STYLE = `  @font-face {
     .card > summary:hover { background-color: hsl(var(--ink) / 0.03); }
   }
   /* the ref is the longest fixed string on the card and the narrowest screen
-     is where it and the kind cluster meet. Both tighten a step rather than
-     letting the ref break across two lines. */
+     is where it and the count meet, so both tighten a step. */
   @media (max-width: 479.98px) {
-    .card > summary { column-gap: 8px; padding-right: 10px; }
+    .card > summary { padding-right: 12px; }
+    .c-id { gap: 8px; }
     .c-ref { font-size: 11.5px; gap: 6px; }
     .c-kinds { gap: 8px; }
-    /* four things share the top line here. The count is the one that can move
-       without losing its subject, so on a phone it sits under the title with
-       the gist rather than squeezing the pull request's own name. */
-    .c-stat { grid-column: 1 / -1; grid-row: 4; justify-self: start; margin-top: 2px; }
   }
   @media (min-width: 700px) {
     .chain { --spine: 16px; margin-top: 24px; }
     .arw { margin-top: 6px; margin-bottom: 6px; }
     .card > summary { padding: 13px var(--spine) 14px; }
-    .card-body { padding: 14px var(--spine) 16px; }
+    .c-open { padding: 0 var(--spine) 14px; }
+    .card-body { padding: 0; }
     .c-title { font-size: 15px; }
     .c-line { font-size: 13.5px; }
   }
@@ -1007,74 +1019,15 @@ const STYLE = `  @font-face {
   }
 
   /* ---- questions ---- */
-  .qa .qline, .qa .aline { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 0 4px; font-size: 14.5px; }
-  .qa .qline { color: hsl(var(--ink)); margin-bottom: 8px; }
-  .qa .aline { color: hsl(var(--ink-soft)); }
-  .qa .mk { font-family: var(--font-mono); font-size: 12px; color: hsl(var(--muted)); line-height: 1.6; }
-  .qa .fold { margin-top: 10px; }
 
-  .ask { margin-top: 24px; }
   /* the one line the queue owes the reader: where the text goes. Mono and
      muted, so it reads as a machine fact rather than a sentence to obey. */
-  .ask-note {
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    color: hsl(var(--muted));
-    margin: 9px 0 0;
-    letter-spacing: 0.01em;
-  }
-  .ask-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
-  .ask-form textarea {
-    flex: 1 1 240px;
-    min-width: 0;
-    font-family: var(--font-body);
-    font-size: 15px;
-    line-height: 1.5;
-    color: hsl(var(--ink));
-    background: hsl(var(--paper-sunk));
-    border: 1px solid hsl(var(--line));
-    border-radius: 6px;
-    padding: 10px 12px;
-    resize: none;
-    min-height: 72px;
-  }
-  .ask-form textarea::placeholder { color: hsl(var(--muted)); }
-  .ask-form button {
-    font-family: var(--font-body);
-    font-size: 14.5px;
-    font-weight: 500;
-    color: hsl(var(--paper));
-    background: hsl(var(--accent));
-    border: 0;
-    border-radius: 6px;
-    padding: 0 18px;
-    min-height: 44px;
-    cursor: pointer;
-  }
   /* the fill is the accent, so the button is the strongest ink on the page with
      the surface colour cut out of it: 17.98:1 in light, 16.24:1 in dark. Hover
      and press step back down the same ramp rather than sideways into a hue. */
-  .ask-form button:active { background: hsl(var(--ink-soft)); }
   @media (hover: hover) and (pointer: fine) {
-    .ask-form button { transition: background-color 160ms ease; }
-    .ask-form button:hover { background: hsl(var(--ink)); }
   }
-  .queue { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 14px; }
-  .queue:empty { display: none; margin: 0; }
-  .queue li { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 0 14px; }
-  .queue .qx { grid-column: 1 / -1; grid-row: 1; font-size: 14.5px; line-height: 1.5; color: hsl(var(--ink)); min-width: 0; overflow-wrap: anywhere; }
-  .queue .qt { grid-column: 1; grid-row: 2; align-self: center; font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); }
-  .queue .qd {
-    grid-column: 2; grid-row: 2;
-    display: inline-flex; align-items: center;
-    background: none; border: 0; cursor: pointer;
-    font-family: var(--font-body); font-size: 13px; color: hsl(var(--accent));
-    padding: 0 8px; margin: 0 -8px; min-height: 44px;
-    text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px;
-  }
-  .queue .qd:active { text-decoration-thickness: 2px; background-color: hsl(var(--ink) / 0.08); }
   @media (hover: hover) and (pointer: fine) {
-    .queue .qd:hover { text-decoration-thickness: 2px; }
   }
 
   /* ---- colophon ---- */
@@ -1092,7 +1045,7 @@ const STYLE = `  @font-face {
   @media (prefers-reduced-motion: reduce) {
     .tick, .ref, .rtick,
     .note > summary, .row > summary, .grp > summary, .frow > summary, .fold > summary,
-    .card > summary, .ask-form button { transition: none; }
+    .card > summary { transition: none; }
   }
 `;
 // Lucide, ISC licensed, at its published 24x24 geometry, copied from the prototype.
@@ -1302,55 +1255,9 @@ const DELTA_STYLE = `
 // mono line beneath, because both are machine facts about the question rather than
 // part of what was asked.
 const QUESTION_STYLE = `
-  .qa { margin: 0 0 26px; padding-bottom: 20px; border-bottom: 1px solid hsl(var(--line)); }
-  .qa:last-of-type { border-bottom: 0; }
-  .qa .qline, .qa .aline { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 0 4px; font-size: 14.5px; }
-  .qa .qline { color: hsl(var(--ink)); margin: 0 0 8px; }
-  .qa .aline { color: hsl(var(--ink-soft)); margin: 0; }
-  .qa .mk { font-family: var(--font-mono); font-size: 12px; color: hsl(var(--muted)); line-height: 1.6; }
-  .qa .fold { margin-top: 10px; }
-  .qa .qquote { margin: 0 0 8px 26px; padding-left: 10px; border-left: 2px solid hsl(var(--line)); color: hsl(var(--ink-soft)); font-size: 14px; }
   .qmeta { font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); margin: 10px 0 0; letter-spacing: 0.01em; display: flex; flex-wrap: wrap; gap: 4px 10px; }
   .qmeta .is-open { color: hsl(var(--change)); }
-  .qhere { margin: 10px 0 0; font-size: 12.5px; color: hsl(var(--muted)); }
-  .qhere a { color: inherit; }
-  .qnone { color: hsl(var(--muted)); font-size: 14px; }
-  .ask { margin-top: 24px; }
-  .ask-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
-  .ask-form label { font-size: 12.5px; color: hsl(var(--muted)); display: block; margin-bottom: 4px; }
-  .ask-where { flex: 0 1 240px; min-width: 0; }
-  .ask-what { flex: 1 1 260px; min-width: 0; }
-  .ask-form select, .ask-form textarea {
-    width: 100%;
-    font-family: var(--font-body);
-    font-size: 15px;
-    line-height: 1.5;
-    color: hsl(var(--ink));
-    background: hsl(var(--paper-sunk));
-    border: 1px solid hsl(var(--line));
-    border-radius: 6px;
-    padding: 10px 12px;
-    resize: none;
-  }
-  .ask-form select { min-height: 44px; }
-  .ask-form textarea { min-height: 72px; }
-  .ask-form textarea::placeholder { color: hsl(var(--muted)); }
-  .ask-form button {
-    font-family: var(--font-body);
-    font-size: 14.5px;
-    font-weight: 500;
-    color: hsl(var(--paper));
-    background: hsl(var(--accent));
-    border: 0;
-    border-radius: 6px;
-    padding: 0 18px;
-    min-height: 44px;
-    cursor: pointer;
-  }
-  .ask-form button:active { background: hsl(var(--ink-soft)); }
   @media (hover: hover) and (pointer: fine) {
-    .ask-form button { transition: background-color 160ms ease; }
-    .ask-form button:hover { background: hsl(var(--ink)); }
   }
 `;
 
@@ -1417,23 +1324,49 @@ function card(pr: Pr, refs: Map<string, Ref>, hunks: Hunk[], ctx: RenderCtx): st
   const detailRef = refs.get(pr.detailRef);
   const detailFold = detailRef ? refFold(owner, detailRef) : "";
   const d = ctx.delta ? ctx.delta.get("pr", prKey(pr.repo, pr.number)) : null;
+  const hasMore = pr.detail.trim() !== "" || detailFold !== "" || pr.body.trim() !== "";
+  // Three readings, each earned by a tap. Closed is the title and what it cost,
+  // which is what a stack is scanned for. Open adds the marks and the one-line
+  // gist. The nested fold holds the author's own account, which is the longest
+  // thing on the card and the least often wanted.
+  const more = hasMore
+    ? `<details class="c-more"><summary>${icon("chev", "tick")}` +
+      `<span class="c-morelabel">${escapeHtml(prLabel(pr))} on GitHub</span></summary>` +
+      `<div class="card-body">` +
+      marked(safeBlock(pr.detail), d, "detail", owner) +
+      detailFold +
+      prBody(owner, pr.body, d) +
+      `</div></details>`
+    : "";
   return (
     `<details class="card" id="${escapeHtml(owner)}">` +
     `<summary>` +
-    `<a class="c-ref" href="https://github.com/${escapeHtml(pr.repo)}/pull/${pr.number}">` +
-    `${icon("pr")}<span class="c-reftext">${escapeHtml(prKey(pr.repo, pr.number))}</span></a>` +
-    `<span class="c-kinds">${kinds}${chip(d)}</span>` +
-    prStat(pr, hunks) +
-    `${icon("chev", "tick")}` +
+    `<span class="c-head">` +
     `<span class="c-title">${escapeHtml(pr.title)}</span>` +
-    `<span class="c-line">${marked(safeInline(pr.gist), d, "gist", owner)}</span>` +
+    `${icon("chev", "tick")}` +
+    `</span>` +
+    `<span class="c-id">` +
+    `<a class="c-ref" href="https://github.com/${escapeHtml(pr.repo)}/pull/${pr.number}">` +
+    `${icon("pr")}<span class="c-reftext">${escapeHtml(prLabel(pr))}</span></a>` +
+    prStat(pr, hunks) +
+    `</span>` +
     `</summary>` +
-    `<div class="card-body">` +
-    marked(safeBlock(pr.detail), d, "detail", owner) +
-    detailFold +
-    prBody(owner, pr.body, d) +
+    `<div class="c-open">` +
+    `<span class="c-kinds">${kinds}${chip(d)}</span>` +
+    `<span class="c-line">${marked(safeInline(pr.gist), d, "gist", owner)}</span>` +
+    more +
     `</div></details>`
   );
+}
+
+/** What a card calls its pull request. The owner is dropped: every pull request in
+ *  one review names the same repository, so the owner is the same word on every
+ *  card and the number is the part that differs. `threahq/threa#1723` becomes
+ *  `threa#1723`, which fits the sidebar without wrapping. */
+function prLabel(pr: Pr): string {
+  const cut = pr.repo.lastIndexOf("/");
+  const name = cut === -1 ? pr.repo : pr.repo.slice(cut + 1);
+  return `${name}#${pr.number}`;
 }
 
 /** Stack order comes from the derived `parent` links, never from the array: nothing in
@@ -1670,6 +1603,11 @@ function plainText(source: string): string {
  *  itself lives once, in the questions section, so this is an anchor rather than a
  *  second copy that could say something different. */
 function questionsHere(ctx: RenderCtx, type: string, id: string): string {
+  // Deferred. The annotation write path, its storage and its roles are built and
+  // tested; what is not built is a reading grammar for questions worth putting on
+  // this page. Until there is one, a review renders no question marks and no ask
+  // form: an unresolved design is better absent than shipped as a raw form.
+  if (!QUESTIONS_ON_PAGE) return "";
   const asked = ctx.annotations.get(targetKey(type, id));
   if (!asked || asked.length === 0) return "";
   const links = asked
@@ -1680,6 +1618,10 @@ function questionsHere(ctx: RenderCtx, type: string, id: string): string {
     .join(" · ");
   return `<p class="qhere">${links}</p>`;
 }
+
+/** Whether questions are drawn on the page at all. See questionsHere: the endpoint
+ *  stands, the rendering waits for a design. */
+const QUESTIONS_ON_PAGE = false;
 
 /** One target's options in the ask form, so a reader without scripting can still say
  *  what they are asking about. */
@@ -1697,6 +1639,7 @@ function targetOptions(doc: ReviewDoc): string {
 /** The questions section. Nothing here needs scripting: the form is a plain POST to
  *  the annotations route, which answers a form with the page it came from. */
 function questionsSection(input: RenderInput, annotations: Annotation[], basePath: string): string {
+  if (!QUESTIONS_ON_PAGE) return "";
   const blocks =
     annotations.length === 0
       ? `<p class="qnone">Nothing has been asked about this review.</p>`
@@ -1924,8 +1867,7 @@ export function renderReviewPage(input: RenderInput): string {
     `<div class="rows">${rows}</div>` +
     `<p class="contents"><span class="nb"><a href="#summary">summary</a> ·</span> ` +
     `<span class="nb"><a href="#notes">review notes</a> ·</span> ` +
-    `<span class="nb"><a href="#walkthrough">walkthrough</a> ·</span> ` +
-    `<span class="nb"><a href="#questions">questions</a></span></p>` +
+    `<span class="nb"><a href="#walkthrough">walkthrough</a></span></p>` +
     `</section></div>\n` +
     `<section id="notes"><h2>Review notes</h2><div class="notes">${notes}</div></section>\n` +
     walkthroughSection(doc, delta, (type, id) => questionsHere(ctx, type, id)) +

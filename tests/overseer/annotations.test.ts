@@ -114,18 +114,21 @@ describe("filing", () => {
     expect(json.document.annotations[0].body).toContain("Does a key minted");
   });
 
-  test("the page draws it under its target, open, with the version it was filed against", async () => {
+  test("a filing is stored with the version it was filed against, and stays off the page", async () => {
+    // Questions are deferred: the write path stands and is exercised here, while
+    // the page draws none of it until the reading grammar is designed.
+    const stored = listAnnotations(ws, "filed");
+    expect(stored).toHaveLength(1);
+    expect(stored[0]!.body).toBe("Does a key minted before the gate still read?");
+    expect(stored[0]!.version).toBe(1);
+    expect(stored[0]!.status).toBe("open");
     const html = await (await page("filed")).text();
-    expect(html).toContain(`<section id="questions">`);
-    expect(html).toContain("Does a key minted before the gate still read?");
-    expect(html).toContain("filed against v1");
-    expect(html).toContain(`<span class="is-open">open</span>`);
-    // Anchored both ways: the question points at its target, the target row points back.
-    expect(html).toContain(`<a href="#st_gate">statement st_gate</a>`);
-    expect(html).toMatch(/<p class="qhere"><a href="#ann_[a-z0-9]+">open question<\/a><\/p>/);
+    expect(html).not.toContain(`<section id="questions">`);
+    expect(html).not.toContain("Does a key minted before the gate still read?");
+    expect(html).not.toContain(`class="qhere"`);
   });
 
-  test("every target type the review actually has is fileable, and each is drawn on its target", async () => {
+  test("every target type the review actually has is fileable", async () => {
     storeGoldenReview(ws, "targets");
     const targets = [
       { type: "note", id: "no_keys" },
@@ -140,21 +143,15 @@ describe("filing", () => {
     }
     const stored = listAnnotations(ws, "targets");
     expect(stored).toHaveLength(5);
-
+    expect(stored.map((a) => a.target.type).sort()).toEqual(
+      ["file", "group", "hunk", "note", "summary"],
+    );
+    // The targets the page really carries are still the ones a filing may name, so
+    // the validation keeps its grip while the drawing waits.
     const html = await (await page("targets")).text();
-    // One anchor on the target itself per filing, and the anchors are the ids the page
-    // really carries: a link into nothing is the same as no link at all.
-    for (const a of stored) {
-      expect(html).toContain(`<p class="qhere"><a href="#${a.id}">open question</a></p>`);
-    }
-    expect((html.match(/class="qhere"/g) ?? []).length).toBe(5);
-    for (const anchor of ["no_keys", "gr_gate", "summary", "h-pr12_3a_src_2f_auth_2e_ts_3a__40__40_40_2c_6_2b_40_2c_9"]) {
+    for (const anchor of ["no_keys", "gr_gate", "summary"]) {
       expect(html).toContain(`id="${anchor}"`);
-      expect(html).toContain(`href="#${anchor}"`);
     }
-    // A file names a path, which is drawn once per group that claims it, so no single
-    // element is it: the question says where it is without pretending to link there.
-    expect(html).toContain(`<span>file src/auth.ts</span>`);
   });
 
   test("a question filed from one workspace's page stays in that workspace", async () => {
@@ -202,16 +199,21 @@ describe("filing", () => {
     expect(listAnnotations(ws, "origin")).toHaveLength(0);
   });
 
-  test("the ask form is drawn on the current version and not on a pinned older one", async () => {
+  test("no version of the page offers a form while questions are deferred", async () => {
     storeGoldenReview(ws, "pinned");
     storeGoldenReview(ws, "pinned");
     const current = await (await page("pinned")).text();
-    expect(current).toContain(`action="/${ws}/r/pinned/annotations"`);
-    // v1 is not the version a filing would be stamped with, so the page reading it
-    // does not offer to file.
     const older = await (await fetch(`${base}/r/pinned/v/1`)).text();
-    expect(older).toContain(`<section id="questions">`);
-    expect(older).not.toContain(`class="ask-form"`);
+    for (const html of [current, older]) {
+      expect(html).not.toContain(`class="ask-form"`);
+      expect(html).not.toContain(`<section id="questions">`);
+    }
+    // The route it would have posted to is still there and still enforcing.
+    const res = await file("pinned", {
+      target: { type: "summary", id: "summary" },
+      body: "Still fileable by api.",
+    });
+    expect(res.status).toBe(200);
   });
 
   test("a target the version does not have is a 422 naming it", async () => {
@@ -275,18 +277,13 @@ describe("the plain form", () => {
     expect(stored).toHaveLength(1);
     expect(stored[0]!.quote).toBeNull();
     expect(res.headers.get("location")).toBe(`/${ws}/r/formfiled#${stored[0]!.id}`);
+    // The route stands while the questions UI is deferred: the redirect target is a
+    // page that draws neither the filing nor a form to make another.
+    const html = await (await page("formfiled")).text();
+    expect(html).not.toContain("Asked without any javascript at all");
+    expect(html).not.toContain(`class="ask-form"`);
   });
 
-  test("the page carries a plain form for a member, posting to the route", async () => {
-    const html = await (await page("formfiled")).text();
-    // Workspace-scoped, like the page it is served from: a bare slug two workspaces
-    // both hold would resolve to whichever published last.
-    expect(html).toContain(`action="/${ws}/r/formfiled/annotations"`);
-    expect(html).toContain(`method="post"`);
-    expect(html).toContain(`<option value="statement:st_gate">`);
-    // No scripting anywhere in the ask block: the form is the whole mechanism.
-    expect(html).not.toContain("data-js-only");
-  });
 });
 
 describe("answering", () => {
@@ -325,10 +322,9 @@ describe("answering", () => {
     expect(json.annotation.answer.refs[0].origin).toBe("in_stack");
 
     const html = await (await page("answered")).text();
-    expect(html).toContain("The same session() bundles use.");
-    expect(html).toContain(`<span class="is-answered">answered</span>`);
-    expect(html).toContain("src/auth.ts");
-    expect(html).toMatch(/<p class="qhere"><a href="#ann_[a-z0-9]+">answered question<\/a><\/p>/);
+    // The answer is record; the page does not draw it yet.
+    expect(html).not.toContain("The same session() bundles use.");
+    expect(html).not.toContain(`class="is-answered"`);
   });
 
   test("an answer with no refs needs nothing from GitHub", async () => {
@@ -417,10 +413,11 @@ describe("across versions", () => {
     expect(json.version).toBe(3);
     expect(json.document.annotations[0].version).toBe(1);
 
+    // The version a filing recorded survives every republish, which is the claim
+    // the page will draw once questions have a design. Read back through the api
+    // meanwhile, and the page stays clean.
     const html = await (await page("moving")).text();
-    expect(html).toContain("Asked on the first pass");
-    expect(html).toContain("filed against v1");
-    expect(html).toContain("reading v3");
+    expect(html).not.toContain("Asked on the first pass");
   });
 });
 
@@ -440,13 +437,16 @@ describe("escaping", () => {
       answer: { body: `</p><script>alert("a")</script>` },
     });
 
+    // Stored verbatim, and the page draws none of it while questions are deferred.
+    // Both halves matter: the escaping test comes back with the rendering, and the
+    // absence is what keeps an unescaped draft from reaching a page in the meantime.
+    const stored = listAnnotations(ws, "hostile");
+    expect(stored[0]!.body).toBe(nasty);
     const html = await (await page("hostile")).text();
-    expect(html).toContain("&lt;script&gt;alert(&quot;q&quot;)&lt;/script&gt;");
-    expect(html).toContain("&lt;b&gt;quoted&lt;/b&gt;");
-    expect(html).toContain("&lt;script&gt;alert(&quot;a&quot;)&lt;/script&gt;");
     expect(html).not.toContain(`<script>alert("q")</script>`);
     expect(html).not.toContain(`<script>alert("a")</script>`);
     expect(html).not.toContain("onerror=1>");
+    expect(html).not.toContain("&lt;b&gt;quoted&lt;/b&gt;");
   });
 });
 
