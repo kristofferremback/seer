@@ -248,6 +248,11 @@ describe("the delta itself", () => {
     const d = diffField("text", false, prior, html)!;
     const out = markField(html, d, "st_x");
     expect(/class="dw/.test(out)).toBe(true);
+    // The insert lands in two pieces around the code span, so the prior words cannot
+    // ride along inside one mark: they come out on their own, and the whole prior
+    // line is readable from what the field drew.
+    expect(out).toContain(`<span class="dp dpb">${textOf(prior)}</span>`);
+    expect(out).toMatch(/<input type="checkbox" class="dtog"[^>]*aria-label="prior text"/);
   });
 
   test("a field past the word ceiling is republished whole rather than aligned", () => {
@@ -332,6 +337,40 @@ describe("the marks on the page", () => {
     expect(summaryBlock).toContain('class="dw');
     expect(summaryBlock).toMatch(/<ins class="dw dnew">[^<]*grew/);
   });
+
+  // One mutation per compared field, on every entity that can carry a chip. A field
+  // the delta compares and the renderer never draws would mint a chip over an
+  // unmarked row, which is the one thing the page may not do, so the sweep asks the
+  // question field by field rather than trusting one fixture to touch them all.
+  const singleFieldEdits: Array<[string, (d: Doc) => void]> = [
+    ["statement text", (d) => { d.statements[0]!.text = "Reviews move behind the login gate"; }],
+    ["statement body", (d) => { d.statements[0]!.body = "A body the statement now carries."; }],
+    ["statement kind", (d) => { d.statements[0]!.kind = "remove"; }],
+    ["note text", (d) => { d.notes[0]!.text = "Keys are read through the helper now"; }],
+    ["note body", (d) => { d.notes[0]!.body = "A body the note now carries."; }],
+    ["note check", (d) => { d.notes[0]!.checks = ["a check worded differently"]; }],
+    ["note kind", (d) => { d.notes[0]!.kind = "note"; }],
+    ["group title", (d) => { d.groups[0]!.title = "The session gate"; }],
+    ["group paragraph", (d) => { d.groups[0]!.paragraph = "A paragraph the group now carries."; }],
+    ["group kind", (d) => { d.groups[0]!.kind = "remove"; }],
+    ["pr gist", (d) => { d.prs[0]!.gist = "A gist that reads differently now"; }],
+    ["pr detail", (d) => { d.prs[0]!.detail = "A detail the card now carries."; }],
+    ["pr body", (d) => { d.prs[0]!.body = `${d.prs[0]!.body}\n\nA paragraph the description grew.`; }],
+  ];
+
+  for (const [name, edit] of singleFieldEdits) {
+    test(`a chip minted by a change to ${name} alone has a mark inside its own row`, () => {
+      const before = doc();
+      const after = doc(edit);
+      const html = page(after, before);
+      const chips = [...html.matchAll(/<span class="rev">/g)];
+      expect(chips.length).toBeGreaterThan(0);
+      for (const m of chips) {
+        const unit = unitAround(html, m.index!);
+        expect(/class="(dw|dp|dw dnew|dw dall|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
+      }
+    });
+  }
 
   test("a chip on a card whose description was emptied still has a mark under it", () => {
     const before = doc();

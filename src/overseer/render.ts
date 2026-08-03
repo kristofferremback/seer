@@ -41,7 +41,7 @@ import {
   type EntityDelta,
 } from "./delta";
 import { freshnessOf, readableWorkspaces } from "./read";
-import { KIND_LABEL, walkthroughSection } from "./render-diff";
+import { KIND_LABEL, kindMark, walkthroughSection } from "./render-diff";
 import {
   icon,
   refChip,
@@ -1396,7 +1396,7 @@ function chain(doc: ReviewDoc, ctx: RenderCtx): string {
   const gone = ctx.delta
     ? ctx.delta
         .removed("pr")
-        .map((e) => removedStub(e, "card"))
+        .map((e) => removedStub(e, "card", "c-line"))
         .join("")
     : "";
   return `<div class="chain">${base}${prs.length > 0 && stack ? arrow : ""}${cards}${gone}</div>`;
@@ -1428,14 +1428,6 @@ function evidenceMarks(d: EntityDelta | null, owner: string): EvidenceMarks | nu
   };
 }
 
-/** An entity's kind, on the page only when it moved. The kind draws the row's icon
- *  and nothing else, and a risk quietly restated as a note is exactly what a reader
- *  came back for, so when it moves it comes out as the word it is. */
-function kindMark(d: EntityDelta | null, owner: string, kind: string): string {
-  if (!touched(d, "kind")) return "";
-  return `<p class="ev-was">${marked(safeInline(kind), d, "kind", owner, true)}</p>`;
-}
-
 function statementRow(s: Statement, ctx: RenderCtx): string {
   const refs = uniqueRefs(s.refs);
   const chips = refs.map((r) => refChip(s.id, r)).join(" ");
@@ -1456,8 +1448,10 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
 
 /** An entity the base version had and this one does not, drawn as a stub that
  *  opens to everything it used to say. An absence a reader cannot open is a
- *  claim they have to take on trust, so the former content comes with it. */
-function removedStub(e: EntityDelta, cls: string): string {
+ *  claim they have to take on trust, so the former content comes with it. The head
+ *  takes the class its container places and sizes, so a stub sits where the unit it
+ *  replaces sat. */
+function removedStub(e: EntityDelta, cls: string, headCls: string): string {
   const former = e.former ?? { head: "", body: [] };
   const id = `dgone-${safeId(e.id)}`;
   const body = former.body.map((h) => `<div class="dp dpb">${h}</div>`).join("");
@@ -1468,7 +1462,7 @@ function removedStub(e: EntityDelta, cls: string): string {
   return (
     `<details class="${cls} dgoneunit" id="${escapeHtml(id)}">` +
     `<summary>${icon("chev", "tick")}${mark}` +
-    `<span class="none"><span class="dp dpstub">${former.head}</span></span>` +
+    `<span class="${headCls}"><span class="dp dpstub">${former.head}</span></span>` +
     `<span class="rrefs">${chip(e)}</span>` +
     `</summary>` +
     `<div class="dgone-body">${body === "" ? `<div class="dp dpb"></div>` : body}</div>` +
@@ -1620,12 +1614,12 @@ export function renderReviewPage(input: RenderInput): string {
 
   const rows =
     doc.statements.map((s) => statementRow(s, ctx)).join("") +
-    (delta ? delta.removed("statement").map((e) => removedStub(e, "row")).join("") : "");
+    (delta ? delta.removed("statement").map((e) => removedStub(e, "row", "rwhat")).join("") : "");
   const notes =
     notesInOrder(doc.notes)
       .map((n) => noteRow(n, ctx))
       .join("") +
-    (delta ? delta.removed("note").map((e) => removedStub(e, `note is-${escapeHtml(e.formerKind ?? "note")}`)).join("") : "");
+    (delta ? delta.removed("note").map((e) => removedStub(e, `note is-${escapeHtml(e.formerKind ?? "note")}`, "none")).join("") : "");
   // The page says what it is measuring against, once, next to what it is.
   const baseMark =
     input.baseVersion == null

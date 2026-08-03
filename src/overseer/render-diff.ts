@@ -31,6 +31,15 @@ import {
 import { icon, safeBlock, safeInline, shortSha } from "./render-evidence";
 import type { Group, Hunk, HunkLine, StatementKind } from "./types";
 
+/** An entity's kind, on the page only when it moved. The kind draws the row's icon
+ *  and nothing else, and a risk quietly restated as a note is exactly what a reader
+ *  came back for, so when it moves it comes out as the word it is. Every entity the
+ *  delta compares a kind on draws this, or its chip would stand over an unmarked row. */
+export function kindMark(d: EntityDelta | null, owner: string, kind: string): string {
+  if (!touched(d, "kind")) return "";
+  return `<p class="ev-was">${marked(safeInline(kind), d, "kind", owner, true)}</p>`;
+}
+
 /** What a kind mark is called out loud. Shared with the chain and the statement rows,
  *  so one mark never has two names on one page. */
 export const KIND_LABEL: Record<StatementKind, string> = {
@@ -416,6 +425,7 @@ function groupBlock(
     // emphasis, a link, a list or a fenced block.
     (gsum === "" ? "" : `<div class="gsum">${gsum}</div>`) +
     gfiles +
+    kindMark(d, group.id, group.kind) +
     `<div class="frows">${rows}</div>` +
     `</div></details>`
   );
