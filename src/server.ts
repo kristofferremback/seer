@@ -60,6 +60,7 @@ import {
   invitePage,
   settingsPage,
   skillDoc,
+  skillRouter,
   softNotFoundPage,
   injectBundleMeta,
   type BundleMeta,
@@ -92,8 +93,8 @@ const WS_ANNOTATIONS_RE = new RegExp(
 // than being re-derived at subscribe time.
 type WSData = { ws: string; slug: string; kind: "bundle" | "review" };
 
-function markdownDoc(): Response {
-  return new Response(skillDoc(), {
+function markdown(body: string): Response {
+  return new Response(body, {
     headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-cache" },
   });
 }
@@ -500,8 +501,11 @@ export async function startServer() {
 
       // Agent-facing usage doc. Public, no auth — agents (and llms.txt probers)
       // fetch this to learn how to publish. Both paths serve identical markdown.
-      "/skill.md": () => markdownDoc(),
-      "/llms.txt": () => markdownDoc(),
+      // The front door: what this deployment can do, and where each capability's own
+      // instructions are. Bundle publishing kept its document, one hop further in.
+      "/skill.md": () => markdown(skillRouter()),
+      "/llms.txt": () => markdown(skillRouter()),
+      "/bundles/skill.md": () => markdown(skillDoc()),
 
       // The signed-in ledger of held bundles, grouped by the user's workspaces.
       "/bundles": (req) => {

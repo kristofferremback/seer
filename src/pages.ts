@@ -674,6 +674,59 @@ function footer(links: string[]): string {
 // publish an HTML bundle. config.baseUrl is interpolated so every curl example is
 // copy-pasteable against this exact deployment. Served as text/markdown, no-cache.
 
+/**
+ * The front door for an agent. One page that says what this deployment can do and
+ * where each capability's own instructions live, because the alternative is a person
+ * remembering three URLs and telling their agent the right one.
+ *
+ * It is also the file a person installs: with the frontmatter it is a skill that takes
+ * one argument and fetches the right document. That only works once installed. A
+ * document fetched over HTTP is text an agent reads, never a command it runs, so the
+ * routing lives in what the installed skill does with the argument rather than in the
+ * fetch itself.
+ */
+export function skillRouter(): string {
+  const base = config.baseUrl;
+  return `---
+name: seer
+description: Publish to Seer: HTML bundles a human can open in a browser, and Overseer reviews of GitHub pull requests. Takes one argument naming what you want to do. Use when asked to publish a page, share a built artifact, or review a pull request.
+---
+
+# Seer
+
+Seer holds things a human is meant to look at: HTML bundles you built, and Overseer
+reviews of pull requests. Each capability has its own instructions; this page says which
+one you want and where it lives.
+
+You need an API key, \`$SEER_API_KEY\`, which belongs to one workspace and is the same key
+for everything below. A human mints it at \`${base}/settings/<workspace>\`.
+
+## Pick one
+
+| you were asked to | fetch |
+|---|---|
+| publish a page, dashboard, report or small app | \`${base}/bundles/skill.md\` |
+| review a pull request, or a stack of them | \`${base}/overseer/agent.md\` |
+
+Fetch the one that matches and follow it. Do not guess at an API from this page: each
+document carries the exact calls, and they are the current ones.
+
+\`\`\`bash
+# whichever fits the request
+curl -s ${base}/bundles/skill.md
+curl -s ${base}/overseer/agent.md
+\`\`\`
+
+## One thing worth knowing before you route
+
+A pull request review is written by a **fresh sub-agent**, never by you. If you wrote the
+change, or watched it get built, you will describe what it was meant to do rather than
+what the diff says. \`${base}/overseer/agent.md\` is the document that tells you how to
+dispatch one correctly; \`${base}/overseer/skill.md\` is what that sub-agent reads, and
+you do not need it yourself.
+`;
+}
+
 export function skillDoc(): string {
   const base = config.baseUrl;
   return `# Seer — publishing HTML bundles as an agent
@@ -921,7 +974,6 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
       `<a href="${GITHUB_URL}">github</a>`,
       `<a href="mailto:${CONTACT_EMAIL}">email</a>`,
       `<a href="/skill.md"><code>skill.md</code></a>`,
-      `<a href="/overseer/agent.md"><code>overseer</code></a>`,
       signedIn ? `<a href="/bundles">bundles</a>` : `<a href="/login">Sign in</a>`,
     ])}
   </div>
