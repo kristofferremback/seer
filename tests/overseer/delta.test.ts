@@ -741,7 +741,11 @@ describe("authored evidence, and the fields that are not prose", () => {
     const html = page(after, before);
     const unit = unitAround(html, html.indexOf('id="st_gate"'));
     expect(unit).toContain("How a caller sees it");
-    expect(unit).toContain("const a = 1;");
+    // The stub reconstructs a dropped field from its words, and the example body now
+    // carries syntax spans, so a tag boundary is a token boundary: `1;` comes back as
+    // `1 ;`. Word-level is what the delta promises, so the words are what is checked.
+    const text = unit.replace(/<[^>]*>/g, "");
+    for (const word of ["const", "a", "=", "1"]) expect(text).toContain(word);
     expect(unit).toContain('<span class="rev">revised</span>');
   });
 

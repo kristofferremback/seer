@@ -327,7 +327,9 @@ function evidenceFields(evidence: Evidence[]): FieldSpec[] {
     };
     switch (e.type) {
       case "example":
-        push(`${p}-text`, false, e.example.text, exampleBodyHtml(e.example.text));
+        // Same lang the renderer draws it with, or the delta would compare markup
+        // against markup the page never shows.
+        push(`${p}-text`, false, e.example.text, exampleBodyHtml(e.example.text, e.example.lang));
         push(`${p}-caption`, true, e.example.caption);
         break;
       case "attachment":

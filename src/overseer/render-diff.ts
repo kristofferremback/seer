@@ -55,6 +55,17 @@ export const KIND_LABEL: Record<StatementKind, string> = {
 // ---- syntax ----
 
 /** The language a path is read as, or null for the mono fallback. */
+/** The same two tokenizers, keyed by a language name a witness authored rather than
+ *  by a file extension. Anything unrecognised is mono, which is the honest answer for
+ *  a language the tokenizer does not know. */
+export function langOfName(name: string | null | undefined): "ts" | "json" | null {
+  if (!name) return null;
+  const n = name.trim().toLowerCase();
+  if (["ts", "tsx", "typescript", "js", "jsx", "javascript", "mjs", "cjs"].includes(n)) return "ts";
+  if (n === "json" || n === "jsonc") return "json";
+  return null;
+}
+
 export function langOfPath(path: string): "ts" | "json" | null {
   const cut = path.lastIndexOf(".");
   if (cut === -1) return null;

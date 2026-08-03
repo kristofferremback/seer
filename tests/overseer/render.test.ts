@@ -297,6 +297,35 @@ describe("the page itself", () => {
     for (const r of refs) expect(html).toContain(`<details class="fold" id="st_m-${r.id}"`);
   });
 
+
+  test("quoted code carries syntax classes, like the diff of the same file does", () => {
+    // A citation and a hunk of the same file used to look like different languages:
+    // hunks were classed and snippets were plain escaped text, so everything on the
+    // page read with equal weight and nothing was ranked.
+    const r = ref("ref_ts", "src/auth.ts");
+    r.snippet = "const gate = true;\nreturn deny();\n";
+    const html = page(doc({ statements: [statement({ id: "st_c", refs: [r] })] }));
+    const fold = html.slice(html.indexOf('id="st_c-ref_ts"'));
+    expect(fold).toContain('<span class="kw">const</span>');
+    expect(fold).toContain('<span class="kw">return</span>');
+  });
+
+  test("an example is classed by the language it declares, and unknown stays mono", () => {
+    const known: Evidence[] = [
+      { type: "example", example: { lang: "ts", text: "const x = 1;", caption: "A call" } },
+    ];
+    const shown = page(doc({ statements: [statement({ id: "st_k", evidence: known })] }));
+    expect(shown).toContain('<span class="kw">const</span>');
+
+    const odd: Evidence[] = [
+      { type: "example", example: { lang: "cobol", text: "const x = 1;", caption: "A call" } },
+    ];
+    const plain = page(doc({ statements: [statement({ id: "st_u", evidence: odd })] }));
+    const block = plain.slice(plain.indexOf("ev-example"));
+    // No tokenizer for it, so no classes invented: mono is the honest answer.
+    expect(block.slice(0, 300)).not.toContain('class="kw"');
+  });
+
   test("authored text arrives escaped", () => {
     const html = page(
       doc({

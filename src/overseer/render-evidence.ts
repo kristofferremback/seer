@@ -21,7 +21,7 @@ import { escapeHtml } from "../escape";
 import { lineDiff } from "./diff";
 import { figureSvg } from "./figure";
 import { render as renderMarkdown, renderInline } from "./markdown";
-import { codeHtml } from "./render-diff";
+import { codeHtml, langOfName, langOfPath } from "./render-diff";
 import type { Evidence, Figure, Payload, Ref } from "./types";
 
 /** One sprite mark. `label` makes it an image with a name; without one it is decoration. */
@@ -129,6 +129,11 @@ function githubBlobUrl(ref: Ref): string {
 /** The quoted lines, numbered from the pointer's own start. Highlighted lines are the
  *  ones the pointer named, counted in the file's numbering rather than the panel's. */
 function snippetLines(ref: Ref): string {
+  // Quoted code is code. It was plain escaped text while the walkthrough's hunks
+  // carried syntax classes, so a citation and a diff of the same file did not look
+  // like the same language, and a page where everything reads with equal weight is
+  // a page that has stopped ranking anything.
+  const lang = langOfPath(ref.path);
   const highlight = new Set(ref.highlight);
   const lines = ref.snippet.split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
@@ -136,7 +141,7 @@ function snippetLines(ref: Ref): string {
     .map((line, i) => {
       const no = ref.startLine + i;
       const cls = highlight.has(no) ? "l hl" : "l";
-      return `<span class="${cls}"><span class="n">${no}</span>${escapeHtml(line)}</span>`;
+      return `<span class="${cls}"><span class="n">${no}</span>${codeHtml(line, lang)}</span>`;
     })
     .join("");
 }
@@ -206,10 +211,11 @@ const GLYPH: Record<"ctx" | "add" | "del", string> = { ctx: " ", add: "+", del: 
  *  citation. Its caption says what it is, and the caption is required. */
 /** The lines of an example, as the page draws them. Exported because the delta
  *  compares the markup a field is shown as, and this is that markup. */
-export function exampleBodyHtml(text: string): string {
+export function exampleBodyHtml(text: string, lang?: string | null): string {
+  const cls = langOfName(lang);
   const lines = text.split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
-  return lines.map((line) => `<span class="l">${escapeHtml(line)}</span>`).join("");
+  return lines.map((line) => `<span class="l">${codeHtml(line, cls)}</span>`).join("");
 }
 
 function exampleBlock(
@@ -219,7 +225,7 @@ function exampleBlock(
   p: string,
   marks: EvidenceMarks | null,
 ): string {
-  const body = mark(marks, `${p}-text`, exampleBodyHtml(text));
+  const body = mark(marks, `${p}-text`, exampleBodyHtml(text, lang));
   return (
     `<figure class="ev ev-example" data-lang="${escapeHtml(lang)}">` +
     `<div class="snipbox"><pre class="snip scroll-x"><code>${body}</code></pre></div>` +
