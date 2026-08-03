@@ -456,6 +456,52 @@ function normalizeLists(errors: ValidationError[], input: PublishPayload): Publi
 
 // ---- the rules ----
 
+/**
+ * What a published document spent, handed back so a witness can see its own size.
+ * Every cap is per field, so a review three times longer than it should be can clear
+ * every one of them and ship in silence: the only signals are a 422 at a single field
+ * or the decomposition warning at the very edge. A witness that can read its own totals
+ * can cut and republish; one that cannot is left judging its own verbosity, which is
+ * the judgement it is worst placed to make.
+ */
+export interface PublishUsage {
+  statements: { used: number; min: number; max: number };
+  notes: { used: number; min: number; max: number };
+  groups: { used: number; min: number; max: number };
+  hunks: number;
+  /** Every authored character on the page, which is the number the skill calibrates
+   *  against, plus the prose-only subset so the two readings never have to be guessed. */
+  prose: { total: number; bodies: number; perPr: number };
+}
+
+export function publishUsage(payload: PublishPayload, hunks: number): PublishUsage {
+  const prCount = Math.max(1, payload.prs?.length ?? 1);
+  const len = (v: unknown) => (typeof v === "string" ? v.length : 0);
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const statements = payload.statements ?? [];
+  const notes = payload.notes ?? [];
+  const groups = payload.groups ?? [];
+  const bodies =
+    len(payload.summary) +
+    sum(statements.map((x) => len(x?.body))) +
+    sum(notes.map((x) => len(x?.body))) +
+    sum(groups.map((x) => len(x?.paragraph)));
+  const total =
+    bodies +
+    len(payload.title) +
+    sum((payload.prs ?? []).map((p) => len(p?.gist) + len(p?.detail))) +
+    sum(statements.map((x) => len(x?.text))) +
+    sum(notes.map((x) => len(x?.text) + sum((x?.checks ?? []).map(len)))) +
+    sum(groups.map((x) => len(x?.title) + sum((x?.fileNotes ?? []).map((f) => len(f?.text)))));
+  return {
+    statements: { used: statements.length, min: BUDGETS.statements.min, max: maxStatements(prCount) },
+    notes: { used: notes.length, min: BUDGETS.notes.min, max: maxNotes() },
+    groups: { used: groups.length, min: BUDGETS.groups.min, max: maxGroups(prCount) },
+    hunks,
+    prose: { total, bodies, perPr: Math.round(total / prCount) },
+  };
+}
+
 export function validatePublish(
   payload: PublishPayload,
   derived: DerivedFacts,

@@ -141,6 +141,9 @@ path and the range, so the arithmetic is checked, not trusted.
 
 - Groups hold hunks, not files. One file with two unrelated changes belongs to two
   groups.
+- A group may hold hunks from several pull requests. One reason realized across a stack
+  is one group, and the `pr<number>:` prefix on each id is what says where each part came
+  from. A group carries no `prs[]` of its own.
 - Mechanical churn does not get dropped. It gets a group named for the chore it is, and
   that group ranks last.
 - `significance` is a float. Groups sort ascending and the lowest number is the most
@@ -218,11 +221,16 @@ ids Overseer actually derived, which is the ground truth to reconcile against.
 Budgets are the schema. Every cap is enforced on write and returns a 422 naming the
 field and the overage.
 
-| | one pull request | each additional | ceiling |
-|---|---|---|---|
-| statements | 3 to 6 | +2 | 12 |
-| groups | 2 to 8 | +4 | 16 |
-| notes | 0 to 6 | +0 | 6 |
+| | minimum, always | maximum, one pull request | maximum, each additional | ceiling |
+|---|---|---|---|---|
+| statements | 3 | 6 | +2 | 12 |
+| groups | 2 | 8 | +4 | 16 |
+| notes | 0 | 6 | +0 | 6 |
+
+**Only the maximum scales. The minimum is flat and small.** Four pull requests raise the
+group ceiling to 16; they do not raise the floor above 2. If a coherent partition of the
+diff wants eleven groups, publish eleven. Splitting a group you did not want in order to
+reach a number is padding, it costs the reader a section, and nothing asked for it.
 
 Character caps: title 80, summary 600 over at most 2 paragraphs, pr gist 100, pr detail
 400, statement
@@ -314,7 +322,7 @@ The document is `{ slug, title, summary, prs[], statements[], notes[], groups[],
 attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries an
 `id` you author, unique within the document and stable across versions:
 
-- **pr**: `{ repo, number, gist, detail, detailRef, parent }`. `gist` is one line,
+- **pr**: `{ id, repo, number, gist, detail, detailRef, parent }`. `gist` is one line,
   `detail` is at most 2 sentences and at most 400 characters, `detailRef` is a full
   ref object
   (`{ repo, sha, path, startLine, endLine }`) pinned at that pull request's own head
@@ -330,7 +338,25 @@ attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries
   field here; `alt` is required, and the part carrying the bytes is named for `id`.
 
 A review names at most 10 pull requests. Success returns the review with its `version`,
-`url`, `versionUrl`, and any `warnings`.
+`url`, `versionUrl`, any `warnings`, and `usage`.
+
+**Read `usage` back.** Every cap is per field, so a review three times longer than it
+should be clears every one of them and publishes in silence. `usage` is the only place
+that says how big the thing you just made actually is:
+
+```
+usage: {
+  statements: { used, min, max },   notes: { used, min, max },
+  groups:     { used, min, max },   hunks,
+  prose: { total, bodies, perPr }
+}
+```
+
+`prose.total` is every authored character on the page and `prose.perPr` divides it by the
+number of pull requests, which is the figure to compare against the calibration above:
+roughly 2,700 characters for a pull request of about 130 changed lines. Well past that
+and the review is long, whatever the per-field caps say. You can republish: same slug,
+same ids for the claims that survive, and the reader sees what you cut.
 
 **The other responses.** 401 when the bearer token is missing or wrong; the token is
 the `seer_sk_` secret itself, not any id that names it, and a 401 means fix the

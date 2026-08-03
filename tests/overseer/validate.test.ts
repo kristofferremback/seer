@@ -3,6 +3,7 @@ import { BUDGETS } from "../../src/overseer/types";
 import {
   REINDEX_EPSILON,
   reindexSignificance,
+  publishUsage,
   validatePublish,
   type DerivedFacts,
   type PublishPayload,
@@ -1546,5 +1547,56 @@ describe("a field far past its cap is not parsed", () => {
     payload.statements[0]!.body = "# a heading";
     const { errors } = run(payload);
     expect(errors.some((e) => e.field === "statements[0].body" && e.rule === "markdown_construct")).toBe(true);
+  });
+});
+
+describe("what a publish spent", () => {
+  test("usage reports counts against the scaled caps, and the flat floor", () => {
+    // The golden payload is a two-pull-request stack, so its ceiling is already one
+    // step above the single-pull-request base.
+    const two = golden();
+    const usage = publishUsage(two, 5);
+    expect(two.prs).toHaveLength(2);
+    expect(usage.statements.min).toBe(BUDGETS.statements.min);
+    expect(usage.statements.max).toBe(BUDGETS.statements.base + BUDGETS.statements.perExtraPr);
+    expect(usage.groups.min).toBe(BUDGETS.groups.min);
+    expect(usage.hunks).toBe(5);
+
+    // Four pull requests raise the ceiling and leave the floor exactly where it was.
+    const many = golden();
+    many.prs = [many.prs[0]!, many.prs[1]!, many.prs[0]!, many.prs[1]!];
+    const four = publishUsage(many, 81);
+    expect(four.groups.max).toBe(16);
+    expect(four.groups.min).toBe(2);
+    expect(four.statements.max).toBe(12);
+    expect(four.statements.min).toBe(3);
+  });
+
+  test("prose counts every authored character, and the bodies subset separately", () => {
+    const payload = golden();
+    const before = publishUsage(payload, 0).prose;
+    // A character added to a body shows up in both totals; one added to a one-line
+    // field shows up only in the total, which is what makes the two readings distinct.
+    payload.statements[0]!.body += "x";
+    const afterBody = publishUsage(payload, 0).prose;
+    expect(afterBody.total).toBe(before.total + 1);
+    expect(afterBody.bodies).toBe(before.bodies + 1);
+
+    payload.groups[0]!.title += "y";
+    const afterTitle = publishUsage(payload, 0).prose;
+    expect(afterTitle.total).toBe(afterBody.total + 1);
+    expect(afterTitle.bodies).toBe(afterBody.bodies);
+  });
+
+  test("perPr divides by the pull requests, which is the figure to calibrate against", () => {
+    const payload = golden();
+    const two = publishUsage(payload, 0);
+    expect(two.prose.perPr).toBe(Math.round(two.prose.total / 2));
+    // Dropping a pull request drops its own gist and detail from the total too, so
+    // the check is against the recomputed total rather than the old one.
+    payload.prs = [payload.prs[0]!];
+    const one = publishUsage(payload, 0);
+    expect(one.prose.perPr).toBe(one.prose.total);
+    expect(one.prose.total).toBeLessThan(two.prose.total);
   });
 });

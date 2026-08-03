@@ -30,6 +30,7 @@ import {
 } from "./derive";
 import { GithubError, githubClient } from "./github";
 import {
+  publishUsage,
   validatePublish,
   type EvidenceInput,
   type PriorDoc,
@@ -779,6 +780,9 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     url: `${config.baseUrl}/${ws}/r/${slug}`,
     versionUrl: `${config.baseUrl}/${ws}/r/${slug}/v/${version}`,
     warnings: result.warnings,
+    // What this document spent, so a witness can read its own size back and cut. Every
+    // cap is per field, so an overlong review clears all of them and ships silently.
+    usage: publishUsage(payload, stored.doc.hunks.length),
     document: stored.doc,
   });
 }

@@ -41,7 +41,7 @@ describe("overseer skill doc", () => {
   });
 
   test("states the authored fields the write path requires", () => {
-    expect(doc).toContain("{ repo, number, gist, detail, detailRef, parent }");
+    expect(doc).toContain("{ id, repo, number, gist, detail, detailRef, parent }");
     expect(doc).toContain("{ id, kind, text, prs[], refs[], body, evidence[] }");
     expect(doc).toContain("{ id, kind, text, body, checks[], refs[], evidence[] }");
     expect(doc).toContain("{ id, title, significance, paragraph, hunks[], fileNotes[] }");
@@ -59,15 +59,19 @@ describe("overseer skill doc", () => {
   test("budget numbers match BUDGETS", () => {
     // Whole table rows, so a number is pinned to its position: a bare substring search
     // for "12" or "16" passes off the character caps and the worked example's hunk id.
+    // The minimum has its own column: two witnesses read "2 to 8 | +4" as a floor that
+    // scaled to 14 on a four-pull-request stack and padded to reach it.
     expect(doc).toContain(
-      `| statements | ${BUDGETS.statements.min} to ${BUDGETS.statements.base} | +${BUDGETS.statements.perExtraPr} | ${BUDGETS.statements.ceiling} |`,
+      `| statements | ${BUDGETS.statements.min} | ${BUDGETS.statements.base} | +${BUDGETS.statements.perExtraPr} | ${BUDGETS.statements.ceiling} |`,
     );
     expect(doc).toContain(
-      `| groups | ${BUDGETS.groups.min} to ${BUDGETS.groups.base} | +${BUDGETS.groups.perExtraPr} | ${BUDGETS.groups.ceiling} |`,
+      `| groups | ${BUDGETS.groups.min} | ${BUDGETS.groups.base} | +${BUDGETS.groups.perExtraPr} | ${BUDGETS.groups.ceiling} |`,
     );
     expect(doc).toContain(
-      `| notes | ${BUDGETS.notes.min} to ${BUDGETS.notes.max} | +0 | ${BUDGETS.notes.max} |`,
+      `| notes | ${BUDGETS.notes.min} | ${BUDGETS.notes.max} | +0 | ${BUDGETS.notes.max} |`,
     );
+    // And it says so in words, because the table alone was what misled them.
+    expect(doc).toContain("Only the maximum scales. The minimum is flat and small.");
     expect(BUDGETS.statements.ceiling).toBe(12);
     expect(BUDGETS.groups.ceiling).toBe(16);
     expect(doc).toContain("decomposition");
