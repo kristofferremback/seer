@@ -17,6 +17,7 @@ import {
   type GithubFile,
   type GithubPull,
 } from "../../src/overseer/github";
+import { offlineGithubClient } from "../offline-github";
 import { REINDEX_EPSILON, validatePublish, type PublishPayload } from "../../src/overseer/validate";
 import { maxStatements } from "../../src/overseer/types";
 import { ATT_ID_RE } from "../../src/ids";
@@ -228,7 +229,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  setGithubClient(null);
+  setGithubClient(offlineGithubClient());
   config.githubToken = priorToken;
   server.stop(true);
 });

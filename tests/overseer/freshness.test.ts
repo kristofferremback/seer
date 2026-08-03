@@ -12,7 +12,13 @@ import { startServer } from "../../src/server";
 import { createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
 import { listFreshness } from "../../src/overseer/db";
 import { setGithubClient, type GithubClient, type GithubPull } from "../../src/overseer/github";
-import { CHECK_INTERVAL_MS, claimCheck, resetChecks } from "../../src/overseer/freshness";
+import {
+  CHECK_INTERVAL_MS,
+  claimCheck,
+  resetChecks,
+  setFreshnessPublisher,
+} from "../../src/overseer/freshness";
+import { offlineGithubClient } from "../offline-github";
 import { tinyId } from "../../src/ids";
 import { GOLDEN_HEAD_SHA_12, GOLDEN_HEAD_SHA_13, GOLDEN_REPO } from "./fixtures/golden-review";
 import { storeGoldenReview } from "./fixtures/stored-review";
@@ -83,7 +89,9 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  setGithubClient(null);
+  setGithubClient(offlineGithubClient());
+  // The publisher is a module-level singleton, and this server is about to stop.
+  setFreshnessPublisher(null);
   server.stop(true);
 });
 
@@ -225,6 +233,43 @@ describe("the live channel", () => {
     expect(res.status).toBe(200);
     expect(JSON.parse(await message)).toEqual({ type: "freshness", behind: 1, total: 2 });
     socket.close();
+  });
+
+  test("a push says what changed, in either direction, and repeats nothing", async () => {
+    storeGoldenReview(wsA, "swings");
+    let head12 = "6".repeat(40);
+    setGithubClient(countingClient((_repo, n) => (n === 12 ? head12 : GOLDEN_HEAD_SHA_13)).client);
+
+    const url = `ws://localhost:${server.port}/ws/livereload?kind=review&ws=${wsA}&slug=swings`;
+    const socket = new WebSocket(url);
+    await new Promise<void>((resolve) => {
+      socket.onopen = () => resolve();
+    });
+    const heard: string[] = [];
+    socket.onmessage = (e) => heard.push(String(e.data));
+
+    const refresh = async () => {
+      resetChecks();
+      const res = await fetch(`${base}/api/reviews/swings/refresh`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${keyA}` },
+      });
+      expect(res.status).toBe(200);
+      await settle(4);
+    };
+
+    await refresh();
+    // The second check sees the same moved head: the page already knows.
+    await refresh();
+    // The branch is reset to what the review was published against.
+    head12 = GOLDEN_HEAD_SHA_12;
+    await refresh();
+    socket.close();
+
+    expect(heard.map((m) => JSON.parse(m))).toEqual([
+      { type: "freshness", behind: 1, total: 2 },
+      { type: "freshness", behind: 0, total: 2 },
+    ]);
   });
 
   test("a member subscribes and a non-member is refused", async () => {

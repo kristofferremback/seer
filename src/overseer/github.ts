@@ -169,13 +169,21 @@ export interface FetchGithubClientOptions {
   apiBase?: string;
   /** Overridable so a test can drive the transport without a socket. */
   fetchImpl?: typeof fetch;
+  /** How long one request may take before it is abandoned. A stalled connection is a
+   *  failed call here rather than a task that waits forever: callers on the read path
+   *  are detached, so nothing would ever time them out from outside. */
+  timeoutMs?: number;
 }
+
+/** Long enough for a slow paged response, short enough that a dead socket is noticed. */
+export const REQUEST_TIMEOUT_MS = 20_000;
 
 /** The one implementation that talks to GitHub. */
 export function createFetchGithubClient(options: FetchGithubClientOptions = {}): GithubClient {
   const base = (options.apiBase ?? API).replace(/\/$/, "");
   const doFetch = options.fetchImpl ?? fetch;
   const token = options.token;
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
   async function request(path: string, accept: string): Promise<Response> {
     const url = path.startsWith("http") ? path : `${base}${path}`;
@@ -185,7 +193,19 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
       "User-Agent": "overseer",
     };
     if (token) headers.Authorization = `Bearer ${token}`;
-    const res = await doFetch(url, { headers });
+    let res: Response;
+    try {
+      res = await doFetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err) {
+      const timedOut = err instanceof DOMException && err.name === "TimeoutError";
+      throw new GithubError(
+        timedOut
+          ? `GitHub did not answer ${url} within ${timeoutMs}ms.`
+          : `GitHub request to ${url} failed: ${String(err)}`,
+        0,
+        url,
+      );
+    }
     if (!res.ok) {
       const body = (await res.text().catch(() => "")).slice(0, 400);
       throw new GithubError(`GitHub ${res.status} for ${url}: ${body}`, res.status, url);

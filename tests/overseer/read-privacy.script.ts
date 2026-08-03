@@ -19,6 +19,13 @@ process.env.BASE_URL = "http://localhost:3000";
 process.env.PORT = "0";
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-read-privacy-"));
 
+// This process does not get bunfig's test preload, so it installs the same offline
+// GitHub client itself: rendering a review page kicks a freshness check, and no test
+// anywhere reaches the real API.
+const { setGithubClient } = await import("../../src/overseer/github");
+const { offlineGithubClient } = await import("../offline-github");
+setGithubClient(offlineGithubClient());
+
 const { sessionCookie } = await import("../../src/auth");
 const { db } = await import("../../src/db");
 const { tinyId } = await import("../../src/ids");
@@ -152,6 +159,50 @@ assert(unknown.startsWith("404\n"), `unknown slug should 404, got ${unknown.spli
     (await shape(res)) === missingAtt,
     "a foreign workspace's attachment should be byte-identical to a missing one",
   );
+}
+
+// ---- the refresh route: the same three questions ----
+{
+  const missingRefresh = await shape(
+    await fetch(`${base}/api/reviews/no-such-review/refresh`, { method: "POST" }),
+  );
+  assert(missingRefresh.startsWith("404\n"), "refresh on an unknown slug should 404");
+
+  for (const [who, headers] of [
+    ["signed out", {} as Record<string, string>],
+    ["a stranger", cookie(stranger)],
+  ] as const) {
+    const res = await fetch(`${base}/api/reviews/golden/refresh`, {
+      method: "POST",
+      headers,
+      redirect: "manual",
+    });
+    assert(!res.headers.get("location"), `${who} refreshing should not redirect to login`);
+    const body = await shape(res);
+    assert(
+      body === missingRefresh,
+      `${who} refreshing should be byte-identical to an unknown review`,
+    );
+  }
+}
+
+// ---- the live channel: membership is what opens it ----
+{
+  async function upgrade(headers: Record<string, string>): Promise<string> {
+    const url = `ws://localhost:${server.port}/ws/livereload?kind=review&ws=${ws}&slug=golden`;
+    const socket = new WebSocket(url, { headers } as unknown as string[]);
+    const answer = await new Promise<string>((resolve) => {
+      socket.onopen = () => resolve("open");
+      socket.onerror = () => resolve("refused");
+      socket.onclose = () => resolve("refused");
+    });
+    socket.close();
+    return answer;
+  }
+
+  assert((await upgrade(cookie(member))) === "open", "a member should subscribe to the review");
+  assert((await upgrade({})) === "refused", "a signed-out socket should be refused");
+  assert((await upgrade(cookie(stranger))) === "refused", "a stranger's socket should be refused");
 }
 
 // ---- membership is what changes the answer ----

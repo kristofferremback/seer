@@ -7,6 +7,7 @@ import {
   GithubError,
 } from "../../src/overseer/github";
 import { fakeGithubClient, loadPull, loadFiles, loadCommits, loadComments } from "./github-fixtures";
+import { offlineGithubClient } from "../offline-github";
 
 // Every request in this file goes through a stub fetch. No socket is opened, and the
 // grep the acceptance criteria asks for finds api.github.com only in the assertions
@@ -25,9 +26,23 @@ function stubFetch(handler: (url: string, init: RequestInit) => Response) {
 const ok = (body: unknown, headers: Record<string, string> = {}) =>
   new Response(typeof body === "string" ? body : JSON.stringify(body), { status: 200, headers });
 
-afterEach(() => setGithubClient(null));
+// Back to the suite-wide offline default, not to the fetch-backed one: this file
+// shares a process with every other test file.
+afterEach(() => setGithubClient(offlineGithubClient()));
 
 describe("the fetch client", () => {
+  test("a request that stalls is abandoned rather than waited on forever", async () => {
+    // The signal the client passes is what ends this: nothing else would.
+    const impl = ((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation timed out.", "TimeoutError")),
+        );
+      })) as unknown as typeof fetch;
+    const client = createFetchGithubClient({ fetchImpl: impl, timeoutMs: 20 });
+    await expect(client.getPull("a/b", 1)).rejects.toThrow(/did not answer .* within 20ms/);
+  });
+
   test("getPull hits the pull endpoint and returns the payload", async () => {
     const { impl, calls } = stubFetch(() => ok(loadPull(2)));
     const client = createFetchGithubClient({ token: "t", fetchImpl: impl });

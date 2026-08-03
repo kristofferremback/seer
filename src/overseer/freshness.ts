@@ -92,8 +92,11 @@ export interface PrFreshness {
 
 export interface CheckResult {
   prs: PrFreshness[];
-  /** True when a head sha this check observed differs from the stored document's. */
-  moved: boolean;
+  /** True when this check changed a pull request's answer: current became behind, or
+   *  behind became current again. A push is worth sending exactly when something moved,
+   *  in either direction, so a page that was told "behind" hears when it stops being
+   *  true and a page that already knows is not told again every minute. */
+  changed: boolean;
 }
 
 /**
@@ -115,10 +118,11 @@ export async function checkReview(
     listFreshness(wsId, slug).map((f) => [prKey(f.repo, f.pr_number), f.observed_head_sha]),
   );
   const prs: PrFreshness[] = [];
-  let moved = false;
+  let changed = false;
   for (const pr of doc.prs) {
     const key = prKey(pr.repo, pr.number);
-    let head = observed.get(key) ?? pr.headSha;
+    const before = observed.get(key) ?? pr.headSha;
+    let head = before;
     try {
       const pull = await client.getPull(pr.repo, pr.number);
       head = pull.head.sha;
@@ -129,10 +133,11 @@ export async function checkReview(
       console.error(`[seer] freshness check failed for ${key} in ${wsId}/${slug}: ${String(err)}`);
     }
     const freshness: Freshness = head !== pr.headSha ? "behind" : "current";
-    if (freshness === "behind") moved = true;
+    const was: Freshness = before !== pr.headSha ? "behind" : "current";
+    if (freshness !== was) changed = true;
     prs.push({ pr: key, repo: pr.repo, number: pr.number, freshness });
   }
-  return { prs, moved };
+  return { prs, changed };
 }
 
 /** What a page pushes when a head has moved under it. One shape, so the script on the
@@ -156,7 +161,7 @@ export function refreshOnView(wsId: string, slug: string, doc: ReviewDoc): void 
   void (async () => {
     try {
       const result = await checkReview(wsId, slug, doc);
-      if (result.moved) publisher?.(reviewTopic(wsId, slug), freshnessMessage(result));
+      if (result.changed) publisher?.(reviewTopic(wsId, slug), freshnessMessage(result));
     } catch (err) {
       console.error(`[seer] freshness refresh failed for ${wsId}/${slug}: ${String(err)}`);
     }
@@ -192,7 +197,7 @@ export async function handleRefreshReview(req: Request, slug: string): Promise<R
 
   claimCheck(ws, slug);
   const result = await checkReview(ws, slug, row.doc);
-  if (result.moved) publisher?.(reviewTopic(ws, slug), freshnessMessage(result));
+  if (result.changed) publisher?.(reviewTopic(ws, slug), freshnessMessage(result));
 
   return new Response(
     JSON.stringify(
