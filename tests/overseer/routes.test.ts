@@ -280,7 +280,8 @@ describe("POST /api/reviews", () => {
     expect(pr12.coAuthors).toEqual(["Claude Fable 5 <noreply@anthropic.com>"]);
     expect(pr12.kinds).toEqual(["add", "change", "remove"]);
     expect(doc.prs.find((p) => p.number === 13)!.parent).toBe(12);
-    expect(pr12.detailRef).toContain("src/auth.ts");
+    expect(pr12.detailRef.path).toBe("src/auth.ts");
+    expect(pr12.detailRef.snippet.length).toBeGreaterThan(0);
     // The review comments travel with the document for the skill's next pass.
     expect(doc.skillContext.map((c) => c.id)).toEqual([900]);
   });

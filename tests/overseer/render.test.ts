@@ -20,6 +20,7 @@ import { GOLDEN_REPO } from "./fixtures/golden-review";
 import { goldenStoredDoc, storeGoldenReview } from "./fixtures/stored-review";
 
 const RENDER_SOURCE = `${import.meta.dir}/../../src/overseer/render.ts`;
+const EVIDENCE_SOURCE = `${import.meta.dir}/../../src/overseer/render-evidence.ts`;
 
 function ref(id: string, path: string, startLine = 40): Ref {
   return {
@@ -241,6 +242,62 @@ describe("the page itself", () => {
     expect(stack).toContain(`https://github.com/${GOLDEN_REPO}/pull/13`);
   });
 
+  test("every pull request card carries its detail ref", () => {
+    const d = doc();
+    const html = page(d);
+    for (const pr of d.prs) {
+      expect(html).toContain(`<details class="fold" id="pr-${pr.number}-${pr.detailRef.id}"`);
+      // The card's own highlight, not one borrowed from a statement citing the file.
+      expect(html).toContain(pr.detailRef.snippet.trim().slice(0, 12));
+    }
+  });
+
+  test("one-line fields keep the one markup the data model allows", () => {
+    const base = doc();
+    const html = page({
+      ...base,
+      title: "The `session()` gate",
+      statements: [statement({ text: "The `session()` helper moves" })],
+      notes: [note({ text: "A key minted before `session()` still reads" })],
+    });
+    expect(html).toContain(`<h1 class="title">The <code>session()</code> gate</h1>`);
+    expect(html).toContain(`<span class="rwhat">The <code>session()</code> helper moves</span>`);
+    expect(html).toContain(
+      `<span class="none">A key minted before <code>session()</code> still reads</span>`,
+    );
+    // The document title is a plain string in a plain-text element, so it keeps its
+    // characters there and grows markup only where markup renders.
+    expect(html).toContain("<title>The `session()` gate · Overseer</title>");
+  });
+
+  test("a figure lists its nodes and edges rather than vanishing", () => {
+    const html = page(
+      doc({
+        statements: [
+          statement({
+            evidence: [
+              {
+                type: "figure",
+                figure: {
+                  kind: "flow",
+                  nodes: [
+                    { id: "a", label: "request", state: "normal" },
+                    { id: "b", label: "gate", state: "muted" },
+                  ],
+                  edges: [{ from: "a", to: "b", label: "cookie" }],
+                },
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(html).toContain('class="ev ev-figure"');
+    expect(html).toContain("request");
+    expect(html).toContain('<li class="fg-muted">gate</li>');
+    expect(html).toContain('<span class="fg-edge">cookie</span>');
+  });
+
   test("the meta row says how fresh the heads are", () => {
     const d = doc();
     const current = page(d, { freshness: {} });
@@ -288,11 +345,13 @@ describe("the page itself", () => {
     const html = page(doc());
     expect(html).not.toContain("—");
     // And none was written into the renderer's own copy.
-    const source = await Bun.file(RENDER_SOURCE).text();
-    const authored = source
-      .split("\n")
-      .filter((l) => !l.trimStart().startsWith("//") && !l.trimStart().startsWith("*"));
-    expect(authored.join("\n")).not.toContain("—");
+    for (const path of [RENDER_SOURCE, EVIDENCE_SOURCE]) {
+      const source = await Bun.file(path).text();
+      const authored = source
+        .split("\n")
+        .filter((l) => !l.trimStart().startsWith("//") && !l.trimStart().startsWith("*"));
+      expect(authored.join("\n")).not.toContain("—");
+    }
   });
 });
 

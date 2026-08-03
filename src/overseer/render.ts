@@ -29,7 +29,7 @@ import {
   safeInline,
   shortSha,
 } from "./render-evidence";
-import { prKey, type Note, type Pr, type Ref, type Statement } from "./types";
+import { prKey, type Note, type Pr, type Statement } from "./types";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ATT_ID_RE = /^att_[a-z0-9]+$/;
@@ -1209,24 +1209,6 @@ const FAVICON =
 
 const KIND_LABEL: Record<string, string> = { add: "adds", change: "changes", remove: "removes" };
 
-/** Every ref the document holds, by id. A pull request card names its detail ref by id
- *  alone, and the resolved ref itself lives wherever it was first cited. */
-function refIndex(doc: ReviewDoc): Map<string, Ref> {
-  const refs = new Map<string, Ref>();
-  const add = (r: Ref) => {
-    if (!refs.has(r.id)) refs.set(r.id, r);
-  };
-  for (const s of doc.statements) {
-    s.refs.forEach(add);
-    for (const e of s.evidence) if (e.type === "ref") add(e.ref);
-  }
-  for (const n of doc.notes) {
-    n.refs.forEach(add);
-    for (const e of n.evidence) if (e.type === "ref") add(e.ref);
-  }
-  return refs;
-}
-
 /** The pull request description, as the characters GitHub holds. It is the one string
  *  on the page Overseer did not validate as constrained markdown, so it is not parsed
  *  as any markup at all: paragraphs, escaped. */
@@ -1239,11 +1221,10 @@ function prBody(body: string): string {
     .join("");
 }
 
-function card(pr: Pr, refs: Map<string, Ref>): string {
+function card(pr: Pr): string {
   const kinds = pr.kinds
     .map((k) => icon(k, `ic k-${k}`, KIND_LABEL[k] ?? k))
     .join("");
-  const detailRef = refs.get(pr.detailRef);
   const owner = `pr-${pr.number}`;
   return (
     `<details class="card" id="${escapeHtml(owner)}">` +
@@ -1258,21 +1239,21 @@ function card(pr: Pr, refs: Map<string, Ref>): string {
     `<div class="card-body">` +
     `<p>${safeInline(pr.detail)}</p>` +
     prBody(pr.body) +
-    (detailRef ? refFold(owner, detailRef) : "") +
+    refFold(owner, pr.detailRef) +
     `</div></details>`
   );
 }
 
 /** The chain. Arrows are the claim that one pull request sits on the one above it, so
  *  they are drawn only for a stack; a set of unrelated pull requests gets cards alone. */
-function chain(doc: ReviewDoc, refs: Map<string, Ref>): string {
+function chain(doc: ReviewDoc): string {
   const first = doc.prs[0];
   const base = first
     ? `<p class="base">${icon("branch")}<span>${escapeHtml(first.baseRef)}</span>` +
       `<span class="sha">${escapeHtml(shortSha(first.baseSha))}</span></p>`
     : "";
   const arrow = `${icon("arrow", "arw")}`;
-  const cards = doc.prs.map((pr) => card(pr, refs)).join(doc.kind === "stack" ? arrow : "");
+  const cards = doc.prs.map((pr) => card(pr)).join(doc.kind === "stack" ? arrow : "");
   return `<div class="chain">${base}${doc.prs.length > 0 && doc.kind === "stack" ? arrow : ""}${cards}</div>`;
 }
 
@@ -1282,7 +1263,7 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
   return (
     `<details class="row" id="${escapeHtml(s.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(s.kind, `ic k-${s.kind}`, KIND_LABEL[s.kind] ?? s.kind)}` +
-    `<span class="rwhat">${escapeHtml(s.text)}</span>` +
+    `<span class="rwhat">${safeInline(s.text)}</span>` +
     `<span class="rrefs">${chips}</span>` +
     `</summary>` +
     `<div class="row-body">${safeBlock(s.body)}${folds}` +
@@ -1301,7 +1282,7 @@ function noteRow(n: Note, ctx: RenderCtx): string {
   return (
     `<details class="note is-${n.kind}" id="${escapeHtml(n.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(n.kind, `ic k-${n.kind}`, n.kind)}` +
-    `<span class="none">${escapeHtml(n.text)}</span>` +
+    `<span class="none">${safeInline(n.text)}</span>` +
     `</summary>` +
     `<div class="note-body">${safeBlock(n.body)}${checks}${chips === "" ? "" : `<p class="rrefs">${chips}</p>`}${folds}` +
     renderEvidence(n.evidence, n.id, ctx) +
@@ -1335,7 +1316,6 @@ export interface RenderInput {
 export function renderReviewPage(input: RenderInput): string {
   const { doc, slug, wsId } = input;
   const ctx: RenderCtx = { wsId, basePath: `/${wsId}/r/${slug}` };
-  const refs = refIndex(doc);
 
   const behind = doc.prs.filter((pr) => input.freshness[prKey(pr.repo, pr.number)] === "behind");
   const heads = behind.length === 0 ? "heads current" : `${behind.length} of ${doc.prs.length} behind`;
@@ -1371,10 +1351,10 @@ export function renderReviewPage(input: RenderInput): string {
     `aria-label="Switch between the light and dark reading surface">` +
     `${icon("contrast", "mark")}</button>` +
     `</div>` +
-    `<h1 class="title">${escapeHtml(doc.title)}</h1>` +
+    `<h1 class="title">${safeInline(doc.title)}</h1>` +
     `<p class="meta"><span>${escapeHtml(doc.kind)}</span><span>${escapeHtml(count)}</span>` +
     `<span>${escapeHtml(heads)}</span></p>` +
-    chain(doc, refs) +
+    chain(doc) +
     `</header>\n` +
     `<section id="summary"><h2>Summary</h2>${safeBlock(doc.summary)}` +
     `<div class="rows">${rows}</div>` +
@@ -1500,6 +1480,8 @@ export async function handleReviewAttachment(
       "cache-control": "private, max-age=31536000, immutable",
       "x-content-type-options": "nosniff",
       "content-disposition": "inline",
+      // Same shape as /i/: bytes served from this origin get no privileges of their own.
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
     },
   });
 }

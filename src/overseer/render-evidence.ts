@@ -19,7 +19,7 @@ import type { Evidence, Figure, Payload, Ref } from "./types";
 /** One sprite mark. `label` makes it an image with a name; without one it is decoration. */
 export function icon(id: string, cls = "ic", label?: string): string {
   const naming = label === undefined ? `aria-hidden="true"` : `role="img" aria-label="${escapeHtml(label)}"`;
-  return `<svg class="${cls}" ${naming}><use href="#i-${id}"/></svg>`;
+  return `<svg class="${escapeHtml(cls)}" ${naming}><use href="#i-${escapeHtml(id)}"/></svg>`;
 }
 
 /** Block markdown from a stored document. A published document passed the validator,
