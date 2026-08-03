@@ -22,6 +22,53 @@ Three clauses, settled:
 Anything you cannot source to the record or to an answer is either derivable from the
 diff or is not yours to state.
 
+## How to write
+
+The reader opens this page **instead of** the diff, to read less. Every sentence that
+carries nothing hides one that does. A briefing longer than the change it describes has
+failed, whatever else is true about it.
+
+**Lead with the change. Never with framing.** The first words of any field are the
+subject and verb of what changed. The reader knows they are reading a review of a pull
+request. Saying so spends their attention on nothing.
+
+Cut on sight: "The change itself.", "This PR ...", "This change introduces ...", "In
+order to ...", "It is worth noting that ...", "Independent of the other work and
+readable on its own.", "One hunk, easy to skim past.", "worth holding in mind when
+reading the risks." Anything that describes the review, or the reading of the review, or
+how significant a section is, is not about the code and does not belong on the page.
+
+**The one-liner says what. The body says why.** The one-liner is what changed, in the
+fewest words that stay precise. The body is what the diff cannot show: why it was
+needed, what it costs, what breaks if it is wrong. If a body's first sentence restates
+its one-liner, cut that sentence. The diff already proves the what; you are the only
+source of the why.
+
+**Caps are ceilings, not targets.** Most statement bodies want two to four sentences. A
+group paragraph wants one or two. Reaching a cap should be rare and earned. There is no
+floor on prose: a small change gets a small review, and three modest fixes want three
+short statements, two or three groups, and often no notes at all.
+
+**Progressive disclosure is the shape.** The summary is one screen. Statements are
+headlines. Bodies serve the reader who wants the why. Evidence serves the reader who
+wants proof. Each layer is complete at its own depth, and no layer may need the one
+below it to make sense.
+
+A worked example, from a real review. This group paragraph was 33 words and said nothing
+the file list did not:
+
+> The change itself. `getSnapPointOffset` converts a Vaul snap point into the height
+> hidden below the viewport, `ActiveSnapPointContext` carries the live snap from the root
+> down to the content, and `ResponsiveDialogContent` renders the spacer.
+
+Shorter, and it now carries the reason the change exists:
+
+> Vaul positions the drawer with `translate3d`, so at the 0.8 snap its bottom fifth sits
+> below the viewport and any footer lands there. The spacer reserves exactly that band.
+
+Shorter and more informative is the target, every time. If cutting words costs
+information, you cut the wrong words.
+
 ## Reading a stack
 
 A review names one or more pull requests. Work in this order:
@@ -80,7 +127,10 @@ path and the range, so the arithmetic is checked, not trusted.
   that the ranking is your judgment, which is the product.
 
 A group carries a `title` (60 chars), a `paragraph` (600 chars), its `hunks[]`, and
-`fileNotes[]` of `{ path, text }` at 120 characters each. Every list field in the
+`fileNotes[]` of `{ path, text }` at 120 characters each. The paragraph says what this
+set of hunks does and why these hunks are one thing. It does not announce itself, rank
+itself, or tell the reader how to read it; the ordering already says what matters most.
+One or two sentences is the usual size, and a chore group often needs only its title. Every list field in the
 document's top level and its entities is required, including this one: `prs`,
 `statements`, `notes`, `groups`, `attachments`, a statement's `prs`, `refs` and
 `evidence`, a note's `checks`, `refs` and `evidence`, and a group's `hunks` and
@@ -285,6 +335,17 @@ is one you already ran and it passed, it is not a risk.
 
 **label-prose.** Writing a statement body as printed labels: "Why: ... What: ... How:
 ...". Those are areas to cover. Printed, they read as a form.
+
+**preamble.** Opening any field with framing rather than the change: "The change
+itself.", "This PR ...", or a sentence about how to read the section that follows. The
+reader came for the change and had to walk past you to reach it.
+
+**restated-one-liner.** A body whose first sentence says again what its one-line text
+already said. The reader pays twice and learns once.
+
+**ceiling-filling.** Writing to the cap because the cap exists. A 1200-character body on
+a one-token change is not thoroughness, it is noise with the volume of thoroughness, and
+it buries the changes that needed the room.
 
 **unclaimed-churn-hidden-in-a-big-group.** Sweeping unrelated hunks into a large group
 so the partition passes while the account lies. Churn gets its own group, named for what
