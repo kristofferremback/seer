@@ -269,24 +269,39 @@ const STYLE = `  @font-face {
   }
 
   /* ---- the lede: the account and the stack it belongs to ----
-     One tube on a phone. Once there is room the stack becomes an aside in the
-     right gutter, and the account keeps its reading measure in the middle of the
-     page. The left gutter is the one that collapses first, so a window with just
-     enough room left-aligns the account rather than squeezing the aside, and on a
-     very wide screen the account sits centred with the aside capped beside it
-     rather than sprawling. */
+     One tube on a phone. Everywhere else the stack is an aside in the right
+     gutter, on the same row as the account rather than above it: both carry an
+     explicit row, because the chain comes first in the markup and auto placement
+     would otherwise put the account on the row beneath it.
+
+     The account keeps the middle column. The left gutter is the one that
+     collapses first, so a narrow window left-aligns the account rather than
+     squeezing the aside, and a wide one centres it with the aside capped beside
+     it rather than sprawling across a large monitor. The lede repeats the
+     document's own column template so the summary lines up with every section
+     under it. */
   .lede > .chain { margin-top: 20px; }
-  @media (min-width: 1160px) {
-    .doc { max-width: none; }
-    .head, #notes, #walkthrough, .colophon { width: min(760px, 100%); margin-left: auto; margin-right: auto; }
-    .lede {
+  @media (min-width: 880px) {
+    .doc {
+      max-width: none;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 760px) minmax(300px, 1fr);
+      grid-template-columns: minmax(0, 1fr) minmax(0, 760px) minmax(260px, 1fr);
+      column-gap: 40px;
+    }
+    .doc > * { grid-column: 2; }
+    .lede {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 760px) minmax(260px, 1fr);
       column-gap: 40px;
       align-items: start;
     }
-    .lede > #summary { grid-column: 2; margin-top: 0; }
-    .lede > .chain { grid-column: 3; width: 100%; max-width: 420px; margin-top: 4px; }
+    .lede > #summary { grid-column: 2; grid-row: 1; margin-top: 0; min-width: 0; }
+    .lede > .chain {
+      grid-column: 3; grid-row: 1;
+      width: 100%; max-width: 420px; min-width: 0;
+      margin-top: 4px;
+    }
   }
 
   /* ---- type ---- */
@@ -820,7 +835,9 @@ const STYLE = `  @font-face {
   @media (hover: hover) and (pointer: fine) {
     .c-ref:hover .c-reftext { text-decoration-thickness: 2px; }
   }
-  .c-stat { font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); white-space: nowrap; }
+  .c-stat { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
+  .c-stat .s-add { color: hsl(var(--add)); }
+  .c-stat .s-del { color: hsl(var(--remove)); }
   /* what a tap adds: the marks and the gist, then the author's own account
      behind one more fold */
   .c-open { padding: 2px var(--spine) 12px; }
@@ -1316,9 +1333,12 @@ function prStat(pr: Pr, hunks: Hunk[]): string {
   if (mine.length === 0) return "";
   const { added, removed } = stats(mine);
   // U+2212, the minus sign: the count is a quantity, not a diff glyph.
+  // The counts carry the change hues the diff already uses: added is the add
+  // colour, removed the remove one, which is the same meaning the gutter glyphs
+  // carry a few sections down.
   return (
     `<span class="c-stat" role="img" aria-label="${added} added, ${removed} removed">` +
-    `+${added} \u2212${removed}</span>`
+    `<span class="s-add">+${added}</span> <span class="s-del">\u2212${removed}</span></span>`
   );
 }
 

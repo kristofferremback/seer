@@ -240,7 +240,10 @@ describe("the page itself", () => {
       }
       // The card counts the document's own hunks, so it cannot drift from the
       // walkthrough: both add up the same lines.
-      expect(html).toContain(`+${added} \u2212${removed}`);
+      // Each half carries its own change hue, the same meaning the gutter glyphs
+      // carry in the walkthrough.
+      expect(html).toContain(`<span class="s-add">+${added}</span>`);
+      expect(html).toContain(`<span class="s-del">\u2212${removed}</span>`);
       expect(html).toContain(`aria-label="${added} added, ${removed} removed"`);
     }
   });
@@ -249,7 +252,7 @@ describe("the page itself", () => {
     const d = doc();
     const html = page({ ...d, hunks: [] });
     expect(html).not.toContain('class="c-stat"');
-    expect(html).not.toContain("+0 \u22120");
+    expect(html).not.toContain(`<span class="s-add">+0</span>`);
   });
 
 
