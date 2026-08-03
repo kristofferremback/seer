@@ -726,6 +726,39 @@ describe("authored evidence, and the fields that are not prose", () => {
     expect(stub).toContain('<span class="rev">removed</span>');
   });
 
+  test("a removed group keeps the kind it was removed with", () => {
+    const before = doc();
+    const gone = before.groups[0]!;
+    const after = doc((d) => {
+      d.groups = d.groups.filter((g) => g.id !== gone.id);
+      d.hunks = d.hunks.filter((h) => !gone.hunks.includes(h.id));
+    });
+    const e = computeDelta(side(before), side(after)).entities.find(
+      (x) => x.kind === "group" && x.id === gone.id,
+    )!;
+    expect(e.status).toBe("removed");
+    expect(e.formerKind).toBe(gone.kind);
+    const html = page(after, before);
+    const at = html.indexOf(`dgone-${safeId(gone.id)}`);
+    expect(at).toBeGreaterThan(-1);
+    const stub = unitAround(html, at);
+    expect(stub).toContain(`<svg class="ic k-${gone.kind}"`);
+    expect(stub).toContain(`href="#i-${gone.kind}"`);
+    expect(stub).toContain(gone.title);
+    expect(stub).toContain('<span class="rev">removed</span>');
+  });
+
+  test("a summary-only revision is movement the timeline names", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.summary = `${d.summary}\n\nA whole new paragraph the reader has not seen before.`;
+      d.title = `${d.title}, restated`;
+    });
+    const counts = new DeltaIndex(computeDelta(side(before), side(after))).counts();
+    expect(counts.revised).toBe(0);
+    expect(counts.restated).toEqual(["title", "summary"]);
+  });
+
   test("a quoted thing is still never marked inside", () => {
     const before = doc((d) => {
       d.statements[0]!.evidence = [
@@ -850,6 +883,21 @@ describe("the revision timeline over the routes", () => {
     // v1 has nothing before it, so it moved nothing.
     expect(html).toContain("nothing moved");
     expect(html).toContain("code moved");
+  });
+
+  test("a version whose only movement is its summary never says nothing moved", async () => {
+    const slug = "restated";
+    publish(slug, () => {});
+    publish(slug, (d) => {
+      d.summary = `${d.summary}\n\nA whole new paragraph the reader has not seen before.`;
+      d.title = `${d.title}, restated`;
+    });
+    const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
+    // The page marks the summary, so the menu row for the version that moved it may
+    // not deny it. Only v1, which has nothing before it, moved nothing.
+    expect(html).toContain("marks since v1");
+    expect(html).toContain("title and summary restated");
+    expect((html.match(/nothing moved/g) ?? []).length).toBe(1);
   });
 
   test("only a version below the one being read carries a from link", async () => {

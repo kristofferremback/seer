@@ -47,6 +47,12 @@
 // rather than carrying a dozen little ones: at that density the prior sentence
 // is what a reader wants, not the prior clause.
 //
+// Only words are compared, which is also the limit of what this can see: an edit
+// that moves markup without moving a word, a phrase that became code or emphasis,
+// or a link retargeted under unchanged link text, produces no field, no mark and no
+// chip. Nothing false is claimed, but nothing is claimed at all, and a reader who
+// came back for what moved will not learn it here.
+//
 // The word-level machinery is ported from the prototype's `_delta.ts`. What is
 // not ported is its scanner: that one recovered structure by reading HTML back,
 // and here the structure is the document.
@@ -615,6 +621,12 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
 /** The delta, keyed the way a renderer walks a page. Built once per render. */
 export class DeltaIndex {
   private byKey = new Map<string, EntityDelta>();
+  /** Annotations that were open in the base version and are answered in this one.
+   *  Nothing on the page reads this yet: annotations are not rendered, and the
+   *  review page hands both sides an empty list because `review_annotations` records
+   *  the version an annotation was filed at and not the version it was answered at,
+   *  so the base side cannot be reconstructed. The step that renders annotations has
+   *  to fill both halves; it may not assume this one already arrives populated. */
   readonly answered: Set<string>;
   readonly delta: Delta;
 
@@ -633,17 +645,27 @@ export class DeltaIndex {
     return this.delta.entities.filter((e) => e.kind === kind && e.status === "removed");
   }
 
-  counts(): { revised: number; added: number; removed: number; codeMoved: number } {
+  counts(): {
+    revised: number;
+    added: number;
+    removed: number;
+    codeMoved: number;
+    restated: string[];
+  } {
     let revised = 0;
     let added = 0;
     let removed = 0;
     let codeMoved = 0;
+    // The title and the summary carry marks rather than a chip, because neither
+    // sits in a row that could hold one. They are still movement, and a menu that
+    // said nothing moved about a version whose summary the same page marks would
+    // be a denial the page contradicts, so they are named rather than counted.
+    const restated: string[] = [];
     for (const e of this.delta.entities) {
-      // The title and the summary carry marks rather than a chip, because neither
-      // sits in a row that could hold one. Counting them here would put a number in
-      // the menu that the page has no chip to account for, so the count is of the
-      // entities that do chip.
       const chips = e.kind !== "review" && e.kind !== "summary";
+      if (!chips && e.status === "revised" && e.fields.length > 0) {
+        restated.push(e.kind === "review" ? "title" : "summary");
+      }
       // A pull request whose only movement is its head sha is code moved, not
       // revised: nothing it says on the page changed.
       if (e.status === "revised") {
@@ -653,7 +675,9 @@ export class DeltaIndex {
       else removed++;
       if (e.codeMoved) codeMoved++;
     }
-    return { revised, added, removed, codeMoved };
+    // Title before summary, always, so two renders of one pair agree.
+    restated.sort((a, b) => (a === b ? 0 : a === "title" ? -1 : 1));
+    return { revised, added, removed, codeMoved, restated };
   }
 }
 

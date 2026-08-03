@@ -448,7 +448,13 @@ export function walkthroughSection(doc: ReviewDoc, delta: DeltaIndex | null = nu
         .map(
           (e) =>
             `<details class="grp dgoneunit" id="dgone-${safeId(e.id)}">` +
-            `<summary>${icon("chev", "tick")}` +
+            // A removed group keeps the kind it was removed with, in its icon, the
+            // way every other removed row does.
+            `<summary>${icon("chev", "tick")}${
+              e.formerKind === null
+                ? ""
+                : icon(e.formerKind, `ic k-${escapeHtml(e.formerKind)}`, e.formerKind)
+            }` +
             `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
             chip(e) +
             `</summary>` +

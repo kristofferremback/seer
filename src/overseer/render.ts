@@ -1533,6 +1533,9 @@ export interface TimelineEntry {
   revised: number;
   added: number;
   removed: number;
+  /** The unchipped fields that moved, named: "title", "summary", or both. They carry
+   *  marks rather than a chip, and the menu says so rather than saying nothing. */
+  restated: string[];
   codeMoved: boolean;
 }
 
@@ -1565,6 +1568,7 @@ function revisionMenu(input: RenderInput, basePath: string): string {
       if (e.added > 0) moved.push(`${e.added} new`);
       if (e.revised > 0) moved.push(`${e.revised} revised`);
       if (e.removed > 0) moved.push(`${e.removed} removed`);
+      if (e.restated.length > 0) moved.push(`${e.restated.join(" and ")} restated`);
       const counts = moved.length === 0 ? "nothing moved" : moved.join(" · ");
       const at = new Date(e.createdAt);
       const on = Number.isNaN(at.getTime()) ? "" : at.toISOString().slice(0, 10);
@@ -1714,7 +1718,13 @@ export function baseVersion(
   return want >= 1 ? want : null;
 }
 
-type Counts = { revised: number; added: number; removed: number; codeMoved: number };
+type Counts = {
+  revised: number;
+  added: number;
+  removed: number;
+  codeMoved: number;
+  restated: string[];
+};
 
 /** What moved in one version, against the one before it. A published version never
  *  changes, so this answer never changes either, and the timeline asks for it on
@@ -1740,7 +1750,7 @@ function timelineCounts(
       ? new DeltaIndex(
           computeDelta({ doc: before, annotations: [] }, { doc: cur, annotations: [] }),
         ).counts()
-      : { revised: 0, added: 0, removed: 0, codeMoved: 0 };
+      : { revised: 0, added: 0, removed: 0, codeMoved: 0, restated: [] };
   // Oldest entry out, rather than the whole table: clearing it would make every
   // reader on a busy process pay for the next one's first request.
   if (COUNT_MEMO.size >= COUNT_MEMO_MAX) {
@@ -1829,6 +1839,7 @@ export function handleReviewPage(
       revised: counts.revised,
       added: counts.added,
       removed: counts.removed,
+      restated: counts.restated,
       codeMoved: counts.codeMoved > 0,
     });
   }
