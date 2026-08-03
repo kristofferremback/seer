@@ -1,0 +1,391 @@
+// The renderer: the page a review is read as, and the gate in front of it.
+//
+// Two halves. The first renders documents directly and reads the HTML: what survives
+// with every script stripped, what order notes come out in, what an example may not
+// contain, and what an authored string looks like once it reaches the page. The second
+// runs the routes over a real server, because the soft-404 claim is about bytes on the
+// wire rather than about a string a function returned.
+
+import { test, expect, beforeAll, afterAll, describe } from "bun:test";
+
+import { startServer } from "../../src/server";
+import { createWorkspace, db, legacyWorkspaceId, listMembers } from "../../src/db";
+import { createAttachment } from "../../src/overseer/db";
+import { saveAttachment } from "../../src/store";
+import { tinyId } from "../../src/ids";
+import { renderReviewPage } from "../../src/overseer/render";
+import type { ReviewDoc } from "../../src/overseer/db";
+import type { Evidence, Note, Ref, Statement } from "../../src/overseer/types";
+import { GOLDEN_REPO } from "./fixtures/golden-review";
+import { goldenStoredDoc, storeGoldenReview } from "./fixtures/stored-review";
+
+const RENDER_SOURCE = `${import.meta.dir}/../../src/overseer/render.ts`;
+
+function ref(id: string, path: string, startLine = 40): Ref {
+  return {
+    id,
+    repo: GOLDEN_REPO,
+    sha: "4".repeat(40),
+    path,
+    startLine,
+    endLine: startLine + 2,
+    highlight: [startLine + 1],
+    origin: "in_stack",
+    snippet: "const gate = true;\nif (gate) return null;\nreturn deny();\n",
+  };
+}
+
+function statement(over: Partial<Statement> = {}): Statement {
+  return {
+    id: "st_x",
+    kind: "add",
+    text: "The gate moves to the session helper",
+    prs: [`${GOLDEN_REPO}#12`],
+    refs: [ref("ref_a", "src/auth.ts")],
+    body: "Plain body.",
+    evidence: [],
+    ...over,
+  };
+}
+
+function note(over: Partial<Note> = {}): Note {
+  return {
+    id: "no_x",
+    kind: "note",
+    text: "A note",
+    body: "Body.",
+    checks: [],
+    refs: [],
+    evidence: [],
+    ...over,
+  };
+}
+
+/** The golden stored document with the pieces a render test needs swapped in. */
+function doc(over: Partial<ReviewDoc> = {}): ReviewDoc {
+  return {
+    ...goldenStoredDoc(),
+    id: "rev_test",
+    slug: "golden",
+    version: 1,
+    ...over,
+  };
+}
+
+function page(document: ReviewDoc, over: Partial<Parameters<typeof renderReviewPage>[0]> = {}): string {
+  return renderReviewPage({
+    wsId: "ws_test",
+    slug: "golden",
+    doc: document,
+    version: 1,
+    latestVersion: 1,
+    pinned: false,
+    freshness: {},
+    ...over,
+  });
+}
+
+function withoutScripts(html: string): string {
+  return html.replace(/<script[\s\S]*?<\/script>/g, "");
+}
+
+describe("the page itself", () => {
+  test("nothing on the page depends on a script", () => {
+    const html = page(
+      doc({
+        statements: [statement({ id: "st_a" }), statement({ id: "st_b", kind: "change" })],
+      }),
+    );
+    // No inline handlers anywhere, script or no script.
+    expect(html).not.toMatch(/\son[a-z]+\s*=/i);
+
+    const stripped = withoutScripts(html);
+    expect(stripped).not.toContain("<script");
+    // Every disclosure is markup, not behaviour.
+    expect(stripped).toContain(`<details class="row" id="st_a"`);
+    expect(stripped).toContain("<summary>");
+    // Every citation is a fragment link to a panel that exists on the page.
+    const chips = [...stripped.matchAll(/<a class="ref" href="#([^"]+)"/g)].map((m) => m[1]!);
+    expect(chips.length).toBeGreaterThan(0);
+    for (const id of chips) expect(stripped).toContain(`<details class="fold" id="${id}"`);
+    // The one control that needs a script is hidden until it has one.
+    expect(stripped).toContain("data-theme-toggle hidden");
+  });
+
+  test("risks precede notes whatever order they were published in", () => {
+    const html = page(
+      doc({
+        notes: [
+          note({ id: "no_one", kind: "note", text: "An observation" }),
+          note({ id: "no_two", kind: "risk", text: "A risk" }),
+          note({ id: "no_three", kind: "note", text: "Another observation" }),
+          note({ id: "no_four", kind: "risk", text: "A second risk" }),
+        ],
+      }),
+    );
+    const order = [...html.matchAll(/<details class="note is-(risk|note)" id="(no_[a-z]+)"/g)].map(
+      (m) => [m[1], m[2]],
+    );
+    expect(order).toEqual([
+      ["risk", "no_two"],
+      ["risk", "no_four"],
+      ["note", "no_one"],
+      ["note", "no_three"],
+    ]);
+  });
+
+  test("every statement renders every ref it carries", () => {
+    const statements = [
+      statement({ id: "st_a", refs: [ref("ref_1", "src/auth.ts"), ref("ref_2", "src/db.ts", 80)] }),
+      // The same resolved ref cited twice: one panel each, no duplicated id.
+      statement({ id: "st_b", refs: [ref("ref_1", "src/auth.ts")] }),
+    ];
+    const html = page(doc({ statements }));
+    for (const s of statements) {
+      for (const r of s.refs) {
+        expect(html).toContain(`<a class="ref" href="#${s.id}-${r.id}"`);
+        expect(html).toContain(`<details class="fold" id="${s.id}-${r.id}"`);
+      }
+    }
+    const ids = [...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]!);
+    expect(new Set(ids).size).toBe(ids.length);
+    // The panel names the file, the commit and the range it was quoted at.
+    expect(html).toContain("<b>src/db.ts</b>");
+    expect(html).toContain("L80-82");
+    expect(html).toContain("4444444");
+  });
+
+  test("an example carries no line numbers and no path", () => {
+    const evidence: Evidence[] = [
+      {
+        type: "example",
+        example: {
+          lang: "json",
+          text: '{\n  "slug": "atlas-hum",\n  "version": 3\n}',
+          caption: "The shape a caller reads back",
+        },
+      },
+    ];
+    const html = page(doc({ statements: [statement({ evidence })] }));
+    const block = html.match(/<figure class="ev ev-example"[\s\S]*?<\/figure>/)![0];
+    expect(block).toContain("The shape a caller reads back");
+    // No gutter, and nothing that could be read as a citation.
+    expect(block).not.toContain('class="n"');
+    expect(block).not.toContain("src/");
+    expect(block).not.toMatch(/L\d+-\d+/);
+    expect(block).not.toContain("github.com");
+  });
+
+  test("a ref panel links out to GitHub at the sha it was pinned at", () => {
+    const html = page(doc({ statements: [statement({ refs: [ref("ref_a", "src/auth.ts")] })] }));
+    expect(html).toContain(
+      `https://github.com/${GOLDEN_REPO}/blob/${"4".repeat(40)}/src/auth.ts#L40-L42`,
+    );
+    expect(html).toContain("in this stack");
+  });
+
+  test("payload, attachment and bundle evidence render as themselves", () => {
+    const evidence: Evidence[] = [
+      {
+        type: "payload",
+        payload: { lang: "json", before: '{ "url": 1 }', after: '{ "shareUrl": 2 }', highlight: ["shareUrl"] },
+      },
+      {
+        type: "attachment",
+        attachment: {
+          id: "att_abc123",
+          mediaType: "image/png",
+          bytes: 12,
+          alt: "The inventory with a share link per bundle",
+          caption: "After the flip",
+        },
+      },
+      {
+        type: "bundle",
+        bundle: { slug: "contact-sheet", version: 3, caption: "The sheet this was drawn from" },
+      },
+    ];
+    const html = page(doc({ statements: [statement({ evidence })] }));
+    expect(html).toContain('<span class="ba-label l1">before</span>');
+    expect(html).toContain('<span class="ba-label l2">after</span>');
+    expect(html).toContain('<span class="l hl">{ &quot;shareUrl&quot;: 2 }</span>');
+    expect(html).toContain('src="/ws_test/r/golden/a/att_abc123"');
+    expect(html).toContain('alt="The inventory with a share link per bundle"');
+    expect(html).toContain('href="/ws_test/b/contact-sheet/v/3/"');
+  });
+
+  test("authored text arrives escaped", () => {
+    const html = page(
+      doc({
+        statements: [statement({ text: '<img src=x onerror=1>' })],
+        notes: [note({ text: '<script>alert(1)</script>', checks: ['<b>check</b>'] })],
+        title: '<svg onload=1>',
+      }),
+    );
+    expect(html).not.toContain("<img src=x");
+    expect(html).toContain("&lt;img src=x onerror=1&gt;");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).toContain("&lt;svg onload=1&gt;");
+    // The escaped characters are text, so no tag on the page grew a handler.
+    expect(html).not.toMatch(/<[a-z]+[^>]*\son[a-z]+\s*=/i);
+    // Only the two scripts the renderer writes itself.
+    expect(html.match(/<script/g)!.length).toBe(2);
+  });
+
+  test("the chain draws arrows for a stack and none for a set", () => {
+    const stack = page(doc({ kind: "stack" }));
+    const set = page(doc({ kind: "set" }));
+    expect(stack).toContain('class="arw"');
+    expect(set).not.toContain('class="arw"');
+    expect(stack).toContain(`https://github.com/${GOLDEN_REPO}/pull/12`);
+    expect(stack).toContain(`https://github.com/${GOLDEN_REPO}/pull/13`);
+  });
+
+  test("the meta row says how fresh the heads are", () => {
+    const d = doc();
+    const current = page(d, { freshness: {} });
+    expect(current).toContain("heads current");
+    const behind = page(d, {
+      freshness: { [`${GOLDEN_REPO}#12`]: "behind", [`${GOLDEN_REPO}#13`]: "current" },
+    });
+    expect(behind).toContain("1 of 2 behind");
+  });
+
+  test("a version page carries its version marking", () => {
+    const pinned = page(doc(), { version: 1, latestVersion: 2, pinned: true });
+    expect(pinned).toContain("version 1 of 2");
+    const latest = page(doc(), { version: 2, latestVersion: 2, pinned: false });
+    expect(latest).toContain("version 2");
+    expect(latest).not.toContain("version 2 of 2");
+  });
+
+  test("the token block is the prototype's", async () => {
+    const html = page(doc());
+    // Spot-checked against the transcribed block: the accent at both ends of the
+    // scale, the diff washes and the syntax tokens.
+    for (const token of [
+      "--accent: 8 24% 5%;",
+      "--accent: 28 35% 95%;",
+      "--wash-add: hsl(var(--add) / 0.13);",
+      "--wash-rem: hsl(var(--remove) / 0.11);",
+      "--rail-add: hsl(var(--add) / 0.8);",
+      "--syn-cm: 8 12% 36%;",
+      "--syn-kw: 282 22% 30%;",
+      "--syn-st: 210 41% 28%;",
+      "--syn-kw: 285 34% 77%;",
+    ]) {
+      expect(html).toContain(token);
+    }
+    // The no-script floor: system dark still lands on the dark surface.
+    expect(html).toContain("@media (prefers-color-scheme: dark)");
+    expect(html).toContain(':root:not([data-theme="light"])');
+    // The sprite is inline, so no mark is a network request.
+    expect(html).toContain('<symbol id="i-risk"');
+    expect(html).toContain('href="/fonts/switzer.woff2"');
+  });
+
+  test("no em dash reaches the page", async () => {
+    const html = page(doc());
+    expect(html).not.toContain("—");
+    // And none was written into the renderer's own copy.
+    const source = await Bun.file(RENDER_SOURCE).text();
+    const authored = source
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("//") && !l.trimStart().startsWith("*"));
+    expect(authored.join("\n")).not.toContain("—");
+  });
+});
+
+// ---- the routes ----
+
+let server: Awaited<ReturnType<typeof startServer>>;
+let base = "";
+let wsA = "";
+let wsB = "";
+
+async function shape(res: Response): Promise<string> {
+  return [res.status, res.headers.get("content-type"), await res.text()].join("\n");
+}
+
+beforeAll(async () => {
+  server = await startServer();
+  base = `http://localhost:${server.port}`;
+
+  const owner = listMembers(legacyWorkspaceId()!)[0]!.id;
+  wsA = createWorkspace("Render A", owner);
+
+  const stranger = tinyId("usr");
+  db.run("INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)", [
+    stranger,
+    "render-stranger@example.com",
+    Date.now(),
+  ]);
+  wsB = createWorkspace("Render B", stranger);
+
+  storeGoldenReview(wsA, "shown");
+  storeGoldenReview(wsA, "shown");
+  storeGoldenReview(wsB, "hidden");
+});
+
+afterAll(() => {
+  server.stop(true);
+});
+
+describe("GET /r/:slug", () => {
+  test("a member reads the page", async () => {
+    const res = await fetch(`${base}/r/shown`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/html;charset=utf-8");
+    const html = await res.text();
+    expect(html).toContain("<title>");
+    expect(html).toContain("version 2");
+    expect(html).toContain('<div class="chain">');
+  });
+
+  test("the workspace-scoped url publish hands back serves the same page", async () => {
+    const res = await fetch(`${base}/${wsA}/r/shown`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('<div class="chain">');
+  });
+
+  test("a pinned version marks itself", async () => {
+    const res = await fetch(`${base}/r/shown/v/1`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("version 1 of 2");
+  });
+
+  test("a review in someone else's workspace is the same answer as one that never existed", async () => {
+    const foreign = await shape(await fetch(`${base}/r/hidden`));
+    const missing = await shape(await fetch(`${base}/r/nowhere`));
+    const malformed = await shape(await fetch(`${base}/r/NOT_A_SLUG`));
+    const outOfRange = await shape(await fetch(`${base}/r/shown/v/9`));
+    const scopedForeign = await shape(await fetch(`${base}/${wsB}/r/hidden`));
+    expect(foreign).toBe(missing);
+    expect(malformed).toBe(missing);
+    expect(outOfRange).toBe(missing);
+    expect(scopedForeign).toBe(missing);
+    expect(missing.startsWith("404\ntext/html;charset=utf-8")).toBe(true);
+  });
+});
+
+describe("GET /r/:slug/a/:id", () => {
+  test("an attachment is served to a member and withheld from everyone else", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const mine = createAttachment(wsA, "shown", 1, "image/png", bytes.length, "A shot", "");
+    await saveAttachment(wsA, mine, bytes);
+    const theirs = createAttachment(wsB, "hidden", 1, "image/png", bytes.length, "A shot", "");
+    await saveAttachment(wsB, theirs, bytes);
+
+    const ok = await fetch(`${base}/r/shown/a/${mine}`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toBe("image/png");
+    expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(new Uint8Array(await ok.arrayBuffer())).toEqual(bytes);
+
+    const missing = await shape(await fetch(`${base}/r/shown/a/att_nothinghere`));
+    // Another workspace's attachment, and this workspace's slug quoting it.
+    expect(await shape(await fetch(`${base}/r/hidden/a/${theirs}`))).toBe(missing);
+    expect(await shape(await fetch(`${base}/r/shown/a/${theirs}`))).toBe(missing);
+    expect(await shape(await fetch(`${base}/r/shown/a/not-an-id`))).toBe(missing);
+  });
+});

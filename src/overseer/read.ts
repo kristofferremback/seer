@@ -47,7 +47,7 @@ function json(data: unknown): Response {
  *  present, and then both count. A key that does not authenticate contributes
  *  nothing rather than failing the request: on this path being unauthenticated and
  *  being unauthorized are the same answer. */
-function readableWorkspaces(req: Request): string[] {
+export function readableWorkspaces(req: Request): string[] {
   const ids: string[] = [];
   const user = sessionUser(req);
   if (user) ids.push(...listUserWorkspaces(user.id).map((w) => w.id));
@@ -61,7 +61,7 @@ function readableWorkspaces(req: Request): string[] {
 /** Freshness as of the last check, per pull request of the version being read. A
  *  head that has moved since publication is `behind`; a head nobody has checked
  *  since is `current`, because the stored document is the last thing known true. */
-function freshnessOf(wsId: string, slug: string, doc: ReviewDoc): Record<string, Freshness> {
+export function freshnessOf(wsId: string, slug: string, doc: ReviewDoc): Record<string, Freshness> {
   const observed = new Map(
     listFreshness(wsId, slug).map((f) => [prKey(f.repo, f.pr_number), f.observed_head_sha]),
   );

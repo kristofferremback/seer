@@ -46,6 +46,7 @@ import {
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
 import { handlePublishReview } from "./overseer/routes";
 import { handleReadReview } from "./overseer/read";
+import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
 import {
   landingPage,
   bundlesPage,
@@ -66,6 +67,12 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const WS_BUNDLE_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/b/`);
 // Workspace-scoped image path: /<ws_id>/i/<img_id>/<filename>.
 const WS_IMG_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/i/`);
+// Workspace-scoped review path: /<ws_id>/r/<slug>[/v/N | /a/<att_id>]. This is the
+// URL publish hands back; the bare /r/<slug> routes resolve the same review across
+// every workspace the reader can reach.
+const WS_REVIEW_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)(?:/(v|a)/([^/]+))?/?$`,
+);
 
 type WSData = { ws: string; slug: string };
 
@@ -556,6 +563,17 @@ export async function startServer() {
         GET: (req) => handleReadReview(req, req.params.slug, req.params.n),
       },
 
+      // The review itself, as a page. Same gate as the JSON, same soft-404.
+      "/r/:slug": {
+        GET: (req) => handleReviewPage(req, req.params.slug, null),
+      },
+      "/r/:slug/v/:n": {
+        GET: (req) => handleReviewPage(req, req.params.slug, req.params.n),
+      },
+      "/r/:slug/a/:id": {
+        GET: (req) => handleReviewAttachment(req, req.params.slug, req.params.id),
+      },
+
       "/api/images": {
         GET: (req) => {
           const auth = requireApiKey(req);
@@ -741,6 +759,13 @@ export async function startServer() {
 
       const wsImage = url.pathname.match(WS_IMG_RE);
       if (wsImage) return handleWorkspaceImage(req, wsImage[1]!);
+
+      const wsReview = url.pathname.match(WS_REVIEW_RE);
+      if (wsReview) {
+        const [, wsId, slug, part, value] = wsReview;
+        if (part === "a") return handleReviewAttachment(req, slug!, value!, wsId!);
+        return handleReviewPage(req, slug!, part === "v" ? value! : null, wsId!);
+      }
 
       // Legacy /b/<slug>[...] → 301 to the bootstrap workspace, preserving the full
       // remainder and query. No legacy workspace recorded → a plain 404.
