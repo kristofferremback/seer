@@ -1271,6 +1271,7 @@ const DELTA_STYLE = `
   .dgoneunit > summary .dp { display: inline; text-decoration: none; }
   .dgoneunit .dgone-body .dp, .dgoneunit .grp-body .dp, .dgoneunit .card-body .dp { display: block; text-decoration: none; }
   ins.dnew { text-decoration: none; }
+  .dw.dcut { display: inline-block; width: 5px; height: 0.85em; margin: 0 1px; vertical-align: -0.13em; background: var(--word-rem); border-radius: 2px; }
   .rev { display: inline-block; margin-right: 6px; padding: 1px 6px; border: 1px solid hsl(var(--line)); border-radius: 999px; font-size: 11px; letter-spacing: 0.02em; color: hsl(var(--muted)); background: hsl(var(--paper-sunk)); vertical-align: middle; }
   .rev-moved { color: hsl(var(--change)); }
   .dbase { color: hsl(var(--muted)); }
@@ -1569,7 +1570,11 @@ function revisionMenu(input: RenderInput, basePath: string): string {
       if (e.revised > 0) moved.push(`${e.revised} revised`);
       if (e.removed > 0) moved.push(`${e.removed} removed`);
       if (e.restated.length > 0) moved.push(`${e.restated.join(" and ")} restated`);
-      const counts = moved.length === 0 ? "nothing moved" : moved.join(" · ");
+      // A row may not deny movement it is marking in the same breath: when the
+      // only thing that moved is a head SHA, the code-moved chip beside this is
+      // the whole count.
+      const counts =
+        moved.length === 0 ? (e.codeMoved ? "" : "nothing moved") : moved.join(" · ");
       const at = new Date(e.createdAt);
       const on = Number.isNaN(at.getTime()) ? "" : at.toISOString().slice(0, 10);
       const here = e.version === input.version;
@@ -1826,7 +1831,9 @@ export function handleReviewPage(
           // was written at but not the version it was answered at, so the base side
           // cannot be reconstructed. Rather than approximate it and over-report every
           // answer, the route asks the delta nothing about annotations until the
-          // storage can answer honestly.
+          // storage can answer honestly. The step that draws annotations has to add
+          // an answered-at column and wire both sides here; until it does,
+          // `DeltaIndex.answered` is empty in production by construction.
           computeDelta({ doc: baseDoc, annotations: [] }, { doc: row.doc, annotations: [] }),
         );
 

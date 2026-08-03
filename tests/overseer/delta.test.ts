@@ -30,6 +30,13 @@ import { GOLDEN_REPO } from "./fixtures/golden-review";
 import { goldenStoredDoc } from "./fixtures/stored-review";
 
 const DELTA_SOURCE = `${import.meta.dir}/../../src/overseer/delta.ts`;
+/** Every file this step's user-facing copy lives in: the delta's own chips, the
+ *  revision menu strings, and the kind marks. */
+const COPY_SOURCES = [
+  DELTA_SOURCE,
+  `${import.meta.dir}/../../src/overseer/render.ts`,
+  `${import.meta.dir}/../../src/overseer/render-diff.ts`,
+];
 
 type Doc = ReviewDoc;
 
@@ -179,6 +186,33 @@ describe("the delta itself", () => {
     expect(field.priorWords.join(" ")).toContain("six seven eight");
   });
 
+  // The threshold itself, bracketed either side of 0.4 so the constant is what
+  // decides rather than some far-away score.
+  test("a body edited at the threshold stays in place, and one word more goes whole", () => {
+    const before = doc((d) => {
+      d.statements[0]!.body = "one two three four five six seven eight nine ten";
+    });
+    const bodyField = (after: Doc) =>
+      computeDelta(side(before), side(after)).entities[0]!.fields.find((f) => f.field === "body")!;
+    // Two of ten words replaced: two inserted and two deleted over ten, which is
+    // 0.4 exactly, and the threshold is the word past it.
+    const at = bodyField(
+      doc((d) => {
+        d.statements[0]!.body = "one two three four five six seven eight alpha beta";
+      }),
+    );
+    expect(at.density).toBeCloseTo(0.4, 5);
+    expect(at.mode).toBe("words");
+    // Three of ten, which is 0.6.
+    const over = bodyField(
+      doc((d) => {
+        d.statements[0]!.body = "one two three four five six seven alpha beta gamma";
+      }),
+    );
+    expect(over.density).toBeCloseTo(0.6, 5);
+    expect(over.mode).toBe("whole");
+  });
+
   test("a light edit to the same body stays in place", () => {
     const before = doc((d) => {
       d.statements[0]!.body = "one two three four five six seven eight nine ten";
@@ -242,10 +276,37 @@ describe("the delta itself", () => {
     }
   });
 
+  test("a pure deletion in a one-line field still draws a mark, with the row shut", () => {
+    const prior = safeInline("Reviews move behind the workspace session gate");
+    const html = safeInline("Reviews move behind the workspace gate");
+    const d = diffField("text", true, prior, html)!;
+    const out = markField(html, d, "st_gate");
+    // The prior words are hidden until the row opens, so the cut itself carries
+    // the ink the chip stands over.
+    expect(out).toContain('<span class="dw dcut" aria-hidden="true"></span>');
+    expect(out).toContain('<span class="dp">session </span>');
+  });
+
+  test("the deletion caret is drawn, and drawn only where nothing was inserted", () => {
+    const prior = safeInline("keys read the old helper");
+    const html = safeInline("keys read the new helper");
+    const d = diffField("text", true, prior, html)!;
+    const out = markField(html, d, "st_swap");
+    // A replacement already shows its inserted word, so it needs no caret.
+    expect(out).toContain('<ins class="dw">new</ins>');
+    expect(out).not.toContain("dcut");
+  });
+
   test("a revised field whose insert straddles a tag keeps both the mark and the prior words", () => {
-    const prior = safeInline("keys read the helper");
-    const html = safeInline("keys read the `slow` helper of the gate");
+    // A long field with a two-word insert, so density stays well under the
+    // threshold and the straddle is the only reason the field goes whole. The
+    // insert lands either side of the code span, which is what makes it straddle.
+    const words = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+    const prior = safeInline(`${words} carries helper`);
+    const html = safeInline(`${words} carries the \`slow\` helper`);
     const d = diffField("text", false, prior, html)!;
+    expect(d.density).toBeLessThan(0.4);
+    expect(d.mode).toBe("whole");
     const out = markField(html, d, "st_x");
     expect(/class="dw/.test(out)).toBe(true);
     // The insert lands in two pieces around the code span, so the prior words cannot
@@ -508,6 +569,9 @@ describe("the marks on the page", () => {
     // whole prior body.
     expect(html).toContain("details.row[open] > summary .dp");
     expect(html).not.toContain("details.row[open] .dp,");
+    // The deletion caret is ink of its own rather than something a shut row hides.
+    expect(html).toContain(".dw.dcut {");
+    expect(html).not.toMatch(/\.dw\.dcut \{[^}]*display: none/);
   });
 
   test("every checkbox the delta emits has a name a screen reader can read", () => {
@@ -541,12 +605,14 @@ describe("the marks on the page", () => {
     expect(page(after, before)).toBe(page(after, before));
   });
 
-  test("no em dash reaches the delta's own copy", async () => {
-    const source = await Bun.file(DELTA_SOURCE).text();
-    const authored = source
-      .split("\n")
-      .filter((l) => !l.trimStart().startsWith("//") && !l.trimStart().startsWith("*"));
-    expect(authored.join("\n")).not.toContain("—");
+  test("no em dash reaches the copy of any file this step draws from", async () => {
+    for (const path of COPY_SOURCES) {
+      const source = await Bun.file(path).text();
+      const authored = source
+        .split("\n")
+        .filter((l) => !l.trimStart().startsWith("//") && !l.trimStart().startsWith("*"));
+      expect(authored.join("\n")).not.toContain("—");
+    }
   });
 });
 
@@ -897,6 +963,19 @@ describe("the revision timeline over the routes", () => {
     // not deny it. Only v1, which has nothing before it, moved nothing.
     expect(html).toContain("marks since v1");
     expect(html).toContain("title and summary restated");
+    expect((html.match(/nothing moved/g) ?? []).length).toBe(1);
+  });
+
+  test("a version whose only movement is a head sha never says nothing moved", async () => {
+    const slug = "shaonly";
+    publish(slug, () => {});
+    publish(slug, (d) => {
+      d.prs[0]!.headSha = "9".repeat(40);
+    });
+    const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
+    // The row marks the move with its own chip, so it may not deny it in the same
+    // breath. Only v1, which has nothing before it, moved nothing.
+    expect(html).toContain("code moved");
     expect((html.match(/nothing moved/g) ?? []).length).toBe(1);
   });
 

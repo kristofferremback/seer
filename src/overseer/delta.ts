@@ -744,9 +744,17 @@ export function markField(
   };
 
   /** The prior words on their own, next to where they used to stand. */
-  const priorOnly = (at: number, was: string) => {
+  const priorOnly = (at: number, was: string, cutOnly = false) => {
     if (!own) {
-      cut(at, 0, `<span class="dp">${was} </span>`);
+      if (!cutOnly) {
+        cut(at, 0, `<span class="dp">${was} </span>`);
+        return;
+      }
+      // A pure deletion inside a summary has no inserted word to carry the mark,
+      // and the prior words are hidden while the row is shut. Without a mark of
+      // its own the row's chip would stand over nothing, so the cut itself is
+      // drawn: a caret where the words used to be.
+      cut(at, 0, `<span class="dw dcut" aria-hidden="true"></span><span class="dp">${was} </span>`);
       return;
     }
     const id = box();
@@ -805,7 +813,7 @@ export function markField(
         insRuns(r.c0, r.c1);
         if (was !== "") priorOnly(at, was);
       } else if (was !== "") {
-        priorOnly(at, was);
+        priorOnly(at, was, true);
       }
     }
   }
