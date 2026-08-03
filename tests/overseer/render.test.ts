@@ -251,8 +251,12 @@ describe("the page itself", () => {
   test("a pull request with no hunks shows no count rather than a confident zero", () => {
     const d = doc();
     const html = page({ ...d, hunks: [] });
-    expect(html).not.toContain('class="c-stat"');
-    expect(html).not.toContain(`<span class="s-add">+0</span>`);
+    // Scoped to the chain: a pull request can legitimately carry no hunks, while a
+    // walkthrough group cannot (the partition rule sees to that), so only the card
+    // has a silence to keep.
+    const chain = html.slice(html.indexOf('<div class="chain">'), html.indexOf("</section>"));
+    expect(chain).not.toContain('class="c-stat"');
+    expect(chain).not.toContain(`<span class="s-add">+0</span>`);
   });
 
 

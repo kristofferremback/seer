@@ -192,7 +192,7 @@ describe("the walkthrough", () => {
     const html = walkthroughSection(doc({ groups: twoGroups() }));
     // Every golden hunk holds one addition and one deletion; src/server.ts appears in
     // the first group once, so its row counts one of each.
-    expect(html).toContain("+1 −1");
+    expect(html).toContain(`<span class="s-add">+1</span> <span class="s-del">−1</span>`);
   });
 
   test("adjacent hunks from different pull requests are marked as a seam", () => {
@@ -203,7 +203,7 @@ describe("the walkthrough", () => {
     const html = walkthroughSection(doc({ groups: [g] }));
     expect(html.match(/data-src-break/g)!.length).toBe(1);
     // One file row holding two hunks sums both of them, rather than counting one.
-    expect(html).toContain("+2 −2");
+    expect(html).toContain(`<span class="s-add">+2</span> <span class="s-del">−2</span>`);
     // The first hunk of the file is nobody's neighbour.
     const first = html.indexOf(`data-hunk="${GOLDEN_HUNKS.serverGate.id}"`);
     expect(html.slice(first, first + 200)).not.toContain("data-src-break");

@@ -43,7 +43,7 @@ import {
 } from "./delta";
 import { freshnessOf, readableWorkspaces } from "./read";
 import { refreshOnView } from "./freshness";
-import { KIND_LABEL, hunkAnchorId, kindMark, stats, walkthroughSection } from "./render-diff";
+import { KIND_LABEL, hunkAnchorId, kindMark, statHtml, stats, walkthroughSection } from "./render-diff";
 import {
   icon,
   refChip,
@@ -836,8 +836,9 @@ const STYLE = `  @font-face {
     .c-ref:hover .c-reftext { text-decoration-thickness: 2px; }
   }
   .c-stat { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
-  .c-stat .s-add { color: hsl(var(--add)); }
-  .c-stat .s-del { color: hsl(var(--remove)); }
+  .stat { white-space: nowrap; }
+  .stat .s-add { color: hsl(var(--add)); }
+  .stat .s-del { color: hsl(var(--remove)); }
   /* what a tap adds: the marks and the gist, then the author's own account
      behind one more fold */
   .c-open { padding: 2px var(--spine) 12px; }
@@ -1333,13 +1334,7 @@ function prStat(pr: Pr, hunks: Hunk[]): string {
   if (mine.length === 0) return "";
   const { added, removed } = stats(mine);
   // U+2212, the minus sign: the count is a quantity, not a diff glyph.
-  // The counts carry the change hues the diff already uses: added is the add
-  // colour, removed the remove one, which is the same meaning the gutter glyphs
-  // carry a few sections down.
-  return (
-    `<span class="c-stat" role="img" aria-label="${added} added, ${removed} removed">` +
-    `<span class="s-add">+${added}</span> <span class="s-del">\u2212${removed}</span></span>`
-  );
+  return `<span class="c-stat">${statHtml(added, removed)}</span>`;
 }
 
 function card(pr: Pr, refs: Map<string, Ref>, hunks: Hunk[], ctx: RenderCtx): string {

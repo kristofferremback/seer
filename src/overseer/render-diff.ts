@@ -324,6 +324,17 @@ function hunkBlock(
 /** The lines a set of hunks adds and removes. Exported so the chain can count a
  *  pull request's share from the same hunks the walkthrough partitions: two places
  *  reading one source can disagree about presentation but never about the number. */
+/** What a set of hunks costs, in the one form the page says it everywhere: a card,
+ *  a walkthrough group and a file row all read the same way, and each half carries
+ *  the change hue its glyph carries in the diff below. U+2212, the minus sign: the
+ *  count is a quantity, not a diff glyph. */
+export function statHtml(added: number, removed: number): string {
+  return (
+    `<span class="stat" role="img" aria-label="${added} added, ${removed} removed">` +
+    `<span class="s-add">+${added}</span> <span class="s-del">−${removed}</span></span>`
+  );
+}
+
 export function stats(hunks: Hunk[]): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
@@ -387,8 +398,7 @@ function fileRow(
     `<summary>${icon("chev", "tick")}<span class="fhead">` +
     `${icon(kind, `ic k-${kind}`, KIND_LABEL[kind])}` +
     `<span class="fpath">${escapeHtml(file.path)}</span>` +
-    // U+2212, the minus sign: the count is a quantity, not a diff glyph.
-    `<span class="fstat">+${added} −${removed}</span>` +
+    `<span class="fstat">${statHtml(added, removed)}</span>` +
     `${icon("cue", "cue")}</span>` +
     (note === undefined ? "" : `<span class="fnote">${safeInline(note)}</span>`) +
     `</summary>` +
@@ -415,9 +425,11 @@ function groupBlock(
   here: QuestionsHere,
 ): string {
   const files = filesOf(group, byId, order);
-  // The badge counts hunks, not files: a group is a set of hunks, and the number beside
-  // its title is how much of the diff it holds.
-  const count = files.reduce((n, f) => n + f.hunks.length, 0);
+  // How much of the diff this group holds. It used to be a bare hunk count, which
+  // is a true number nobody can read: a group of one file can hold twenty-three
+  // hunks, and the reader is left to guess what twenty-three counts. Lines added
+  // and removed is the same language the cards and the file rows under it use.
+  const { added, removed } = stats(files.flatMap((f) => f.hunks));
   // One note per path, and every note's path is a path the group's own hunks touch:
   // both are validator rules (file_note_duplicate, file_note_orphan), so nothing
   // authored is dropped here.
@@ -441,7 +453,7 @@ function groupBlock(
     `${icon(group.kind, `ic ic-lg k-${group.kind}`, KIND_LABEL[group.kind])}` +
     `<span class="gname">${marked(safeInline(group.title), d, "title", group.id)}</span>` +
     `${chip(d)}` +
-    `<span class="gcount">${count}</span>` +
+    `<span class="gcount">${statHtml(added, removed)}</span>` +
     `</summary>` +
     `<div class="grp-body">` +
     // Block markdown, the way the data model defines it: a group paragraph may carry
