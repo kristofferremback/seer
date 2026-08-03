@@ -766,9 +766,33 @@ export function validatePublish(
         message: `${at} claims no hunk; a group is the set of hunks that changed for one reason`,
       });
     }
+    // The paths this group's own hunks touch: a file note is drawn on one of those
+    // rows, so a note naming any other path has nowhere on the page to go.
+    const groupPaths = new Set<string>();
+    for (const id of g.hunks) {
+      const hunk = derivedHunks.get(id);
+      if (hunk) groupPaths.add(hunk.path);
+    }
+    const notedPaths = new Set<string>();
     g.fileNotes.forEach((fn, j) => {
       // The path is the filename the walkthrough prints above the note.
       checkPath(errors, `${at}.fileNotes[${j}].path`, fn.path, BUDGETS.chars.fileNote);
+      if (typeof fn.path === "string") {
+        if (notedPaths.has(fn.path)) {
+          errors.push({
+            field: `${at}.fileNotes[${j}].path`,
+            rule: "file_note_duplicate",
+            message: `${at} carries two notes for ${fn.path}; a file row holds one note`,
+          });
+        } else if (groupPaths.size > 0 && !groupPaths.has(fn.path)) {
+          errors.push({
+            field: `${at}.fileNotes[${j}].path`,
+            rule: "file_note_orphan",
+            message: `${at} notes ${fn.path}, which none of the group's hunks touch; the note would have no row to sit on`,
+          });
+        }
+        notedPaths.add(fn.path);
+      }
       if (!isText(errors, `${at}.fileNotes[${j}].text`, fn.text)) return;
       capText(errors, `${at}.fileNotes[${j}].text`, fn.text, BUDGETS.chars.fileNote);
       checkLine(errors, `${at}.fileNotes[${j}].text`, fn.text);

@@ -19,7 +19,7 @@
 
 import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
-import { icon, safeInline, shortSha } from "./render-evidence";
+import { icon, safeBlock, safeInline, shortSha } from "./render-evidence";
 import type { Group, Hunk, HunkLine, StatementKind } from "./types";
 
 /** What a kind mark is called out loud. Shared with the chain and the statement rows,
@@ -169,6 +169,10 @@ function normalizeRanges(ranges: [number, number][], len: number): [number, numb
   const clean: [number, number][] = [];
   for (const [a, b] of ranges) {
     if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    // Rejected before clamping: a range that lies wholly off the line names nothing on
+    // it, and clamping would turn it into a seam mark at a column it never meant.
+    if (Math.trunc(b) < Math.trunc(a)) continue;
+    if (Math.trunc(b) < 0 || Math.trunc(a) > len) continue;
     const start = Math.max(0, Math.min(len, Math.trunc(a)));
     const end = Math.max(0, Math.min(len, Math.trunc(b)));
     if (end < start) continue;
@@ -365,7 +369,12 @@ export function groupsInOrder(groups: Group[]): Group[] {
 
 function groupBlock(group: Group, byId: Map<string, Hunk>, order: Map<string, number>): string {
   const files = filesOf(group, byId, order);
+  // The badge counts hunks, not files: a group is a set of hunks, and the number beside
+  // its title is how much of the diff it holds.
   const count = files.reduce((n, f) => n + f.hunks.length, 0);
+  // One note per path, and every note's path is a path the group's own hunks touch:
+  // both are validator rules (file_note_duplicate, file_note_orphan), so nothing
+  // authored is dropped here.
   const notes = new Map<string, string>();
   for (const n of group.fileNotes) if (!notes.has(n.path)) notes.set(n.path, n.text);
   const rows = files
@@ -379,7 +388,9 @@ function groupBlock(group: Group, byId: Map<string, Hunk>, order: Map<string, nu
     `<span class="gcount">${count}</span>` +
     `</summary>` +
     `<div class="grp-body">` +
-    (group.paragraph.trim() === "" ? "" : `<p class="gsum">${safeInline(group.paragraph)}</p>`) +
+    // Block markdown, the way the data model defines it: a group paragraph may carry
+    // emphasis, a link, a list or a fenced block.
+    (group.paragraph.trim() === "" ? "" : `<div class="gsum">${safeBlock(group.paragraph)}</div>`) +
     `<div class="frows">${rows}</div>` +
     `</div></details>`
   );

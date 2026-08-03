@@ -310,6 +310,10 @@ describe("POST /api/reviews", () => {
     const rest = [...gate.hunks.filter((id) => id !== deleting), ...api.hunks];
     gate.hunks = [deleting];
     api.hunks = rest;
+    // The notes follow their files: a note sits on a row in the group that holds it.
+    const notes = [...gate.fileNotes, ...api.fileNotes];
+    gate.fileNotes = notes.filter((n) => n.path === GOLDEN_HUNKS.serverGate.path);
+    api.fileNotes = notes.filter((n) => n.path !== GOLDEN_HUNKS.serverGate.path);
     const res = await publish("kind-remove", payload);
     expect(res.status).toBe(200);
     const doc = getReviewVersion(wsA, "kind-remove", 1)!.doc;

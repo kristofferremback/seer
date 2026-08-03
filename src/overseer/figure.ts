@@ -96,10 +96,13 @@ export function figureLabel(figure: Figure): string {
   const nodes = figure.nodes
     .map((n) => (n.state === "muted" ? `${n.label} (muted)` : n.label))
     .join(", ");
+  // The same edges the drawing keeps: the label never announces an arrow the sighted
+  // reader cannot see.
   const edges = figure.edges
+    .filter((e) => byId.has(e.from) && byId.has(e.to))
     .map((e) => {
-      const from = byId.get(e.from) ?? e.from;
-      const to = byId.get(e.to) ?? e.to;
+      const from = byId.get(e.from)!;
+      const to = byId.get(e.to)!;
       return e.label === "" ? `${from} to ${to}` : `${from} to ${to}, ${e.label}`;
     })
     .join(". ");
@@ -141,7 +144,7 @@ export function figureSvg(figure: Figure): string {
       return (
         `<rect class="${cls}" x="${round(n.x)}" y="${round(n.y)}" width="${round(n.w)}" ` +
         `height="${NODE_H}" rx="4"/>` +
-        `<text class="${n.muted ? "dim" : ""}" x="${round(n.x + n.w / 2)}" ` +
+        `<text${n.muted ? ' class="dim"' : ""} x="${round(n.x + n.w / 2)}" ` +
         `y="${round(n.y + NODE_H / 2)}" dy="0.35em" text-anchor="middle">${escapeHtml(n.label)}</text>`
       );
     })

@@ -166,6 +166,27 @@ describe("the walkthrough", () => {
     expect(html.match(/class="w"/g)!.length).toBe(2);
   });
 
+  test("a group paragraph is block markdown, rendered as markup and not as source", () => {
+    const g = group({
+      hunks: [GOLDEN_HUNKS.auth.id],
+      paragraph: "The session check, see [the gate](https://example.com).\n\n- one\n- two",
+    });
+    const html = walkthroughSection(doc({ hunks: [GOLDEN_HUNKS.auth], groups: [g] }));
+    expect(html).toContain('<a href="https://example.com"');
+    expect(html).toContain("<li>one</li>");
+    expect(html).not.toContain("[the gate]");
+    expect(html).not.toContain("- one");
+  });
+
+  test("the golden document draws the word marks its hunks carry", () => {
+    const document = doc({ groups: twoGroups() });
+    const marked = document.hunks.flatMap((h) => h.lines.filter((l) => l.wordRanges.length > 0));
+    expect(marked.length).toBeGreaterThan(0);
+    const html = walkthroughSection(document);
+    const total = marked.reduce((n, l) => n + l.wordRanges.length, 0);
+    expect(html.match(/class="w"/g)!.length).toBe(total);
+  });
+
   test("added and removed lines are counted off the lines themselves", () => {
     const html = walkthroughSection(doc({ groups: twoGroups() }));
     // Every golden hunk holds one addition and one deletion; src/server.ts appears in
@@ -180,6 +201,8 @@ describe("the walkthrough", () => {
     });
     const html = walkthroughSection(doc({ groups: [g] }));
     expect(html.match(/data-src-break/g)!.length).toBe(1);
+    // One file row holding two hunks sums both of them, rather than counting one.
+    expect(html).toContain("+2 −2");
     // The first hunk of the file is nobody's neighbour.
     const first = html.indexOf(`data-hunk="${GOLDEN_HUNKS.serverGate.id}"`);
     expect(html.slice(first, first + 200)).not.toContain("data-src-break");
@@ -258,6 +281,9 @@ describe("syntax", () => {
 
   test("a range the line cannot hold is dropped, and a zero width one is a seam", () => {
     expect(codeHtml("abc", null, [[2, 1]])).toBe("abc");
+    // Wholly off the line: dropped rather than clamped into a seam at column 0.
+    expect(codeHtml("abc", null, [[-5, -1]])).toBe("abc");
+    expect(codeHtml("abc", null, [[7, 9]])).toBe("abc");
     expect(codeHtml("abc", null, [[0, 99]])).toBe('<span class="w">abc</span>');
     expect(codeHtml("abc", null, [[3, 3]])).toBe('abc<span class="w"></span>');
     // Overlapping ranges merge instead of nesting.
@@ -332,7 +358,9 @@ describe("figures", () => {
     });
     expect(svg).not.toContain("<path");
     expect(svg).not.toContain(">x</text>");
-    expect(svg).toContain("a to gone");
+    // The label is composed from the edges that were drawn, so it does not announce an
+    // arrow the sighted reader cannot see.
+    expect(svg).not.toContain("a to gone");
   });
 
   test("a label with markup in it arrives escaped", () => {

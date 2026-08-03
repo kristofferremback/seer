@@ -10,7 +10,7 @@
 // no pull request touches, so `origin` derives as `outside` and the renderer's
 // outside-ref label has a case here rather than one invented per step.
 
-import { hunkId } from "../../../src/overseer/diff";
+import { hunkId, wordRangesFor } from "../../../src/overseer/diff";
 import type { Hunk, HunkLine } from "../../../src/overseer/types";
 import type { DerivedFacts, PublishPayload } from "../../../src/overseer/validate";
 
@@ -39,10 +39,15 @@ export function makeHunk(args: {
   newLines: number;
 }): Hunk {
   const { prNumber, path, sha, oldStart, oldLines, newStart, newLines } = args;
+  // The del and the add are a rewrite of one line, so they carry the word ranges the
+  // deriver would have written for them: the golden render draws real word marks.
+  const delText = "  return true;";
+  const addText = "  return session(req) !== null;";
+  const [delRanges, addRanges] = wordRangesFor(delText, addText);
   const lines: HunkLine[] = [
     line("ctx", oldStart, newStart, "export function gate(req: Request) {"),
-    line("del", oldStart + 1, null, "  return true;"),
-    line("add", null, newStart + 1, "  return session(req) !== null;"),
+    { ...line("del", oldStart + 1, null, delText), wordRanges: delRanges },
+    { ...line("add", null, newStart + 1, addText), wordRanges: addRanges },
     line("ctx", oldStart + 2, newStart + 2, "}"),
   ];
   return {

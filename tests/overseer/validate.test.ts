@@ -1343,6 +1343,24 @@ describe("a leaf that reaches the renderer", () => {
     expect(err.field).toBe(`groups[${i}].fileNotes[0].path`);
   });
 
+  test("a file note on a path the group's hunks do not touch is rejected", () => {
+    const payload = golden();
+    const i = payload.groups.findIndex((g) => g.fileNotes.length > 0);
+    payload.groups[i]!.fileNotes[0]!.path = "src/nowhere.ts";
+    const err = find(run(payload).errors, "file_note_orphan");
+    expect(err.field).toBe(`groups[${i}].fileNotes[0].path`);
+    expect(err.message).toContain("src/nowhere.ts");
+  });
+
+  test("two file notes on one path are rejected", () => {
+    const payload = golden();
+    const i = payload.groups.findIndex((g) => g.fileNotes.length > 0);
+    const first = payload.groups[i]!.fileNotes[0]!;
+    payload.groups[i]!.fileNotes.push({ path: first.path, text: "A second word on it" });
+    const err = find(run(payload).errors, "file_note_duplicate");
+    expect(err.field).toBe(`groups[${i}].fileNotes[${payload.groups[i]!.fileNotes.length - 1}].path`);
+  });
+
   test("a ref without a path is a required error, not an undefined in a message", () => {
     const payload = golden();
     delete (payload.prs[0]!.detailRef as { path?: string }).path;

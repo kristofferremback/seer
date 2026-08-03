@@ -850,6 +850,9 @@ const STYLE = `  @font-face {
     background: hsl(var(--ink) / 0.22);
   }
   .gsum { font-size: 14.5px; line-height: 1.62; color: hsl(var(--ink-soft)); margin: 0 0 12px; }
+  .gsum > * { font-size: inherit; line-height: inherit; color: inherit; }
+  .gsum > *:first-child { margin-top: 0; }
+  .gsum > *:last-child { margin-bottom: 0; }
 
   .frow { border-top: 1px solid hsl(var(--line)); }
   .frow > summary {
