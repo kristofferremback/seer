@@ -20,6 +20,7 @@ import { getWorkspace } from "../db";
 import { openAttachment, attachmentLocation } from "../store";
 import { getAttachment, getReviewVersion, resolveReview, type ReviewDoc } from "./db";
 import { freshnessOf, readableWorkspaces } from "./read";
+import { KIND_LABEL, walkthroughSection } from "./render-diff";
 import {
   icon,
   refChip,
@@ -918,6 +919,9 @@ const STYLE = `  @font-face {
   .filediff .snip .g { width: 1.1em; text-align: center; }
   .filediff .snip .l.add .w { background: var(--word-add); border-radius: 2px; }
   .filediff .snip .l.del .w { background: var(--word-rem); border-radius: 2px; }
+  /* a rewrite whose changed words are all on the other side still leaves a seam, and
+     the seam is a mark of zero width. Given a sliver it says where the text went in. */
+  .filediff .snip .l .w:empty { display: inline-block; width: 3px; }
   .filediff .snip .l.void-line { color: hsl(var(--muted)); }
 
   /* ---- code on a phone ----
@@ -1119,11 +1123,17 @@ const EVIDENCE_STYLE = `
   .ev-bundle .ic { align-self: center; color: hsl(var(--muted)); }
   .ev-bundle .ev-cap { color: hsl(var(--muted)); min-width: 0; }
   .ev-figure { border: 1px solid hsl(var(--line)); border-radius: 6px; padding: 11px 13px; background: hsl(var(--paper-sunk)); }
-  .ev-figure ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; font-family: var(--font-mono); font-size: 12px; color: hsl(var(--ink-soft)); }
-  .ev-figure .fg-edges { margin-top: 9px; padding-top: 9px; border-top: 1px solid hsl(var(--line)); }
-  .ev-figure li.fg-muted { color: hsl(var(--muted)); }
-  .ev-figure .fg-arrow { display: inline-block; width: 12px; height: 12px; stroke-width: 1.8; vertical-align: -1px; color: hsl(var(--muted)); }
-  .ev-figure .fg-edge { color: hsl(var(--muted)); }
+  /* the drawing is laid out server-side, so the only thing left to say here is what
+     its ink is: one weight of line, one type size, and a muted state that steps back
+     without changing hue. It scales with its box rather than fixing a pixel size. */
+  .fig { display: block; width: 100%; max-width: 460px; height: auto; }
+  .fig text { font-family: var(--font-mono); font-size: 11.5px; fill: hsl(var(--ink-soft)); }
+  .fig text.dim, .fig text.cap { fill: hsl(var(--muted)); }
+  .fig text.cap { font-size: 11px; }
+  .fig .fig-box { fill: hsl(var(--paper)); stroke: hsl(var(--ink-soft)); stroke-width: 1.3; }
+  .fig .fig-edge { fill: none; stroke: hsl(var(--ink-soft) / 0.45); stroke-width: 1.4; stroke-linecap: round; }
+  .fig .fig-box.fig-dim { stroke: hsl(var(--muted)); }
+  .fig .fig-edge.fig-dim { stroke: hsl(var(--muted) / 0.55); stroke-dasharray: 3 5; }
   .prbody-body { padding: 10px 12px 1px; }
   .prbody { margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: hsl(var(--ink-soft)); white-space: pre-wrap; }
 `;
@@ -1220,8 +1230,6 @@ const FAVICON =
   "%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E";
 
 // ---- the parts ----
-
-const KIND_LABEL: Record<string, string> = { add: "adds", change: "changes", remove: "removes" };
 
 /** The pull request description, as the characters GitHub holds. It is the one string
  *  on the page Overseer did not validate as constrained markdown, so it is not parsed
@@ -1443,9 +1451,12 @@ export function renderReviewPage(input: RenderInput): string {
     `<section id="summary"><h2>Summary</h2>${safeBlock(doc.summary)}` +
     `<div class="rows">${rows}</div>` +
     `<p class="contents"><span class="nb"><a href="#summary">summary</a> ·</span> ` +
-    `<span class="nb"><a href="#notes">review notes</a></span></p>` +
+    `<span class="nb"><a href="#notes">review notes</a> ·</span> ` +
+    `<span class="nb"><a href="#walkthrough">walkthrough</a></span></p>` +
     `</section>\n` +
     `<section id="notes"><h2>Review notes</h2><div class="notes">${notes}</div></section>\n` +
+    walkthroughSection(doc) +
+    `\n` +
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
     )}</p>\n` +

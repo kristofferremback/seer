@@ -4,9 +4,9 @@
 // snippet panel every quoted ref is drawn in.
 //
 // Five of the six evidence kinds live here, the ones that are not a diff: ref, payload,
-// example, attachment and bundle. A figure is a drawing and belongs with the diff work;
-// it renders as its nodes and edges in the meantime rather than vanishing, because a
-// silently dropped block is evidence the author believes is on the page.
+// example, attachment and bundle. The sixth is the figure, whose layout lives in
+// figure.ts because it is a drawing rather than a block of markup; this file holds the
+// one line that puts it on the page.
 //
 // Snippet lines are emitted as escaped plain text. The token block transcribed from the
 // prototype carries the syntax classes (kw, st, cm, ty) and the elision marker (el), but
@@ -18,6 +18,7 @@
 // Nothing here interpolates a raw authored string into markup.
 
 import { escapeHtml } from "../escape";
+import { figureSvg } from "./figure";
 import { render as renderMarkdown, renderInline } from "./markdown";
 import type { Evidence, Figure, Payload, Ref } from "./types";
 
@@ -195,25 +196,10 @@ function bundleBlock(wsId: string, slug: string, version: number | null, caption
   );
 }
 
-/** The figure, until it is drawn. Its nodes and edges are the whole content of the
- *  block, so they are listed rather than dropped. */
+/** The figure, drawn. The graph is laid out server-side into one static SVG, and the
+ *  whole drawing is a single image with its nodes and edges composed into the label. */
 function figureBlock(figure: Figure): string {
-  const labels = new Map(figure.nodes.map((n) => [n.id, n.label] as const));
-  const rows = figure.edges.map((e) => {
-    const from = labels.get(e.from) ?? e.from;
-    const to = labels.get(e.to) ?? e.to;
-    const label = e.label === "" ? "" : ` <span class="fg-edge">${safeInline(e.label)}</span>`;
-    return `<li>${safeInline(from)} ${icon("cue", "fg-arrow")} ${safeInline(to)}${label}</li>`;
-  });
-  const nodes = figure.nodes
-    .map((n) => `<li class="fg-${escapeHtml(n.state)}">${safeInline(n.label)}</li>`)
-    .join("");
-  return (
-    `<div class="ev ev-figure">` +
-    `<ul class="fg-nodes">${nodes}</ul>` +
-    (rows.length === 0 ? "" : `<ul class="fg-edges">${rows.join("")}</ul>`) +
-    `</div>`
-  );
+  return `<div class="ev ev-figure">${figureSvg(figure)}</div>`;
 }
 
 /** Every evidence block a statement or a note carries, in the order it was authored.

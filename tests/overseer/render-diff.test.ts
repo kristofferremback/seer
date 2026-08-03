@@ -1,0 +1,347 @@
+// The walkthrough, the hunks inside it, the syntax classes on their lines, and the
+// figure the layout draws.
+//
+// The claim the whole section rests on is that the groups partition the document's
+// hunks, so the first test here walks the document's own hunk ids against the ids that
+// reached the page and expects each one exactly once. The rest hold the page to the
+// document in the same way: the line numbers are the parsed ones, the word marks are
+// the parsed ranges, and two renders of one document are the same bytes.
+
+import { test, expect, describe } from "bun:test";
+
+import { renderReviewPage } from "../../src/overseer/render";
+import { codeHtml, groupsInOrder, langOfPath, walkthroughSection } from "../../src/overseer/render-diff";
+import { figureLabel, figureSvg } from "../../src/overseer/figure";
+import type { ReviewDoc } from "../../src/overseer/db";
+import type { Group, Hunk } from "../../src/overseer/types";
+import { GOLDEN_HUNKS } from "./fixtures/golden-review";
+import { goldenStoredDoc } from "./fixtures/stored-review";
+
+function doc(over: Partial<ReviewDoc> = {}): ReviewDoc {
+  return { ...goldenStoredDoc(), id: "rev_test", slug: "golden", version: 1, ...over };
+}
+
+function page(document: ReviewDoc): string {
+  return renderReviewPage({
+    wsId: "ws_test",
+    slug: "golden",
+    doc: document,
+    version: 1,
+    latestVersion: 1,
+    pinned: false,
+    freshness: {},
+  });
+}
+
+function group(over: Partial<Group> = {}): Group {
+  return {
+    id: "gr_a",
+    title: "A group",
+    significance: 1,
+    paragraph: "What it does.",
+    hunks: [],
+    fileNotes: [],
+    kind: "change",
+    ...over,
+  };
+}
+
+/** The two groups the golden hunks split into, as the derived facts have them. */
+function twoGroups(): Group[] {
+  return [
+    group({
+      id: "gr_gate",
+      title: "The gate",
+      significance: 1,
+      hunks: [GOLDEN_HUNKS.auth.id, GOLDEN_HUNKS.serverGate.id],
+      fileNotes: [{ path: GOLDEN_HUNKS.auth.path, text: "The helper itself" }],
+    }),
+    group({
+      id: "gr_api",
+      title: "The endpoints",
+      significance: 2,
+      hunks: [GOLDEN_HUNKS.serverApi.id, GOLDEN_HUNKS.routes.id, GOLDEN_HUNKS.tests.id],
+      kind: "add",
+    }),
+  ];
+}
+
+function hunkIdsOf(html: string): string[] {
+  return [...html.matchAll(/data-hunk="([^"]+)"/g)].map((m) => m[1]!);
+}
+
+function unescape(s: string): string {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+describe("the walkthrough", () => {
+  test("every hunk of the document reaches the page exactly once", () => {
+    const d = doc({ groups: twoGroups() });
+    const ids = hunkIdsOf(walkthroughSection(d));
+    const want = d.hunks.map((h) => h.id);
+    expect(ids.length).toBe(want.length);
+    expect([...ids].sort()).toEqual([...want].sort());
+    for (const id of want) {
+      expect(ids.filter((x) => x === id).length).toBe(1);
+    }
+  });
+
+  test("groups come out in significance order, ties broken by id", () => {
+    const groups = [
+      group({ id: "gr_c", significance: 2, hunks: [GOLDEN_HUNKS.tests.id] }),
+      group({ id: "gr_b", significance: 1, hunks: [GOLDEN_HUNKS.routes.id] }),
+      group({ id: "gr_a", significance: 1, hunks: [GOLDEN_HUNKS.auth.id] }),
+    ];
+    expect(groupsInOrder(groups).map((g) => g.id)).toEqual(["gr_a", "gr_b", "gr_c"]);
+    // The sort does not touch the array it was handed.
+    expect(groups.map((g) => g.id)).toEqual(["gr_c", "gr_b", "gr_a"]);
+
+    const html = walkthroughSection(doc({ groups }));
+    const order = [...html.matchAll(/<details class="grp" id="([^"]+)"/g)].map((m) => m[1]!);
+    expect(order).toEqual(["gr_a", "gr_b", "gr_c"]);
+  });
+
+  test("two renders of one document are the same bytes", () => {
+    const d = doc({ groups: twoGroups() });
+    expect(page(d)).toBe(page(d));
+    // Even when the groups arrive in a different order and tie on significance.
+    const tied = [
+      group({ id: "gr_b", significance: 1, hunks: [GOLDEN_HUNKS.routes.id] }),
+      group({ id: "gr_a", significance: 1, hunks: [GOLDEN_HUNKS.auth.id] }),
+    ];
+    const one = walkthroughSection(doc({ groups: tied }));
+    const other = walkthroughSection(doc({ groups: [...tied].reverse() }));
+    expect(one).toBe(other);
+  });
+
+  test("the line numbers on the page are the ones the document carries", () => {
+    const hunk = GOLDEN_HUNKS.auth;
+    const html = walkthroughSection(
+      doc({ groups: [group({ hunks: [hunk.id] })] }),
+    );
+    const block = html.match(/<div class="hunk"[\s\S]*?<\/pre>/)![0];
+    const numbers = [...block.matchAll(/<span class="n">([^<]*)<\/span>/g)].map((m) => m[1]!);
+    // A deletion counts against the old file, everything else against the new one.
+    expect(numbers).toEqual(
+      hunk.lines.map((l) => {
+        const no = l.kind === "del" ? l.oldNo : l.newNo;
+        return no === null ? "" : String(no);
+      }),
+    );
+    // Nothing on the page recounts the range either.
+    expect(block).toContain(
+      `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+    );
+    expect(block).toContain(`#${hunk.prNumber} ${hunk.sha.slice(0, 7)}`);
+  });
+
+  test("word marks land exactly on the ranges the hunk carries, and nowhere else", () => {
+    const source = GOLDEN_HUNKS.auth;
+    const del = { ...source.lines[1]!, wordRanges: [[9, 13]] as [number, number][] };
+    const add = { ...source.lines[2]!, wordRanges: [[9, 30]] as [number, number][] };
+    const hunk: Hunk = {
+      ...source,
+      lines: [source.lines[0]!, del, add, source.lines[3]!],
+    };
+    const html = walkthroughSection(
+      doc({ hunks: [hunk], groups: [group({ hunks: [hunk.id] })] }),
+    );
+    // One mark per line that carried a range, holding exactly the characters the
+    // range names once the syntax spans inside it are stripped back off.
+    const lines = html.split('<span class="l').slice(1);
+    expect(lines.length).toBe(hunk.lines.length);
+    const marksOn = (line: string) =>
+      [...line.matchAll(/<span class="w">((?:(?!<span class="w">)[\s\S])*?)<\/span>(?=<|$)/g)].map(
+        (m) => unescape(m[1]!.replace(/<[^>]*>/g, "")),
+      );
+    expect(marksOn(lines[0]!)).toEqual([]);
+    expect(marksOn(lines[1]!)).toEqual([del.content.slice(9, 13)]);
+    expect(marksOn(lines[2]!)).toEqual([add.content.slice(9, 30)]);
+    expect(marksOn(lines[3]!)).toEqual([]);
+    expect(html.match(/class="w"/g)!.length).toBe(2);
+  });
+
+  test("added and removed lines are counted off the lines themselves", () => {
+    const html = walkthroughSection(doc({ groups: twoGroups() }));
+    // Every golden hunk holds one addition and one deletion; src/server.ts appears in
+    // the first group once, so its row counts one of each.
+    expect(html).toContain("+1 −1");
+  });
+
+  test("adjacent hunks from different pull requests are marked as a seam", () => {
+    // Both src/server.ts hunks in one group: they come from #12 and #13.
+    const g = group({
+      hunks: [GOLDEN_HUNKS.serverGate.id, GOLDEN_HUNKS.serverApi.id],
+    });
+    const html = walkthroughSection(doc({ groups: [g] }));
+    expect(html.match(/data-src-break/g)!.length).toBe(1);
+    // The first hunk of the file is nobody's neighbour.
+    const first = html.indexOf(`data-hunk="${GOLDEN_HUNKS.serverGate.id}"`);
+    expect(html.slice(first, first + 200)).not.toContain("data-src-break");
+  });
+
+  test("file rows carry their file note and only their own", () => {
+    const html = walkthroughSection(doc({ groups: twoGroups() }));
+    expect(html).toContain('<span class="fnote">The helper itself</span>');
+    expect(html.match(/class="fnote"/g)!.length).toBe(1);
+  });
+
+  test("the walkthrough is disclosures alone, with no script behind it", () => {
+    const html = page(doc({ groups: twoGroups() })).replace(/<script[\s\S]*?<\/script>/g, "");
+    const start = html.indexOf('<section id="walkthrough"');
+    const section = html.slice(start, html.indexOf("</section>", start));
+    expect(section).toContain('<details class="grp"');
+    expect(section).toContain('<details class="frow">');
+    expect(section).not.toMatch(/\son[a-z]+\s*=/i);
+    expect(section).not.toContain("<button");
+    expect(section).not.toContain("<script");
+    // The contents row points at it.
+    expect(html).toContain('<a href="#walkthrough">walkthrough</a>');
+  });
+
+  test("a group naming a hunk the document has no facts for draws the rest", () => {
+    const g = group({ hunks: ["pr99:nowhere.ts:@@1,1+1,1", GOLDEN_HUNKS.auth.id] });
+    const html = walkthroughSection(doc({ groups: [g] }));
+    expect(hunkIdsOf(html)).toEqual([GOLDEN_HUNKS.auth.id]);
+  });
+});
+
+describe("syntax", () => {
+  test("the language is read off the path, and an unknown one gets none", () => {
+    expect(langOfPath("src/auth.ts")).toBe("ts");
+    expect(langOfPath("src/app.tsx")).toBe("ts");
+    expect(langOfPath("package.json")).toBe("json");
+    expect(langOfPath("README.md")).toBe(null);
+    expect(langOfPath("Makefile")).toBe(null);
+  });
+
+  test("the four classes, on one line of TypeScript", () => {
+    const html = codeHtml('const Gate = "on"; // why', "ts");
+    expect(html).toContain('<span class="kw">const</span>');
+    expect(html).toContain('<span class="ty">Gate</span>');
+    expect(html).toContain('<span class="st">&quot;on&quot;</span>');
+    expect(html).toContain('<span class="cm">// why</span>');
+  });
+
+  test("a declared name is a name whatever case it is written in", () => {
+    expect(codeHtml("function gate(req) {", "ts")).toContain('<span class="ty">gate</span>');
+    expect(codeHtml("  const slug = value;", "ts")).not.toContain('class="ty"');
+  });
+
+  test("an unterminated string or comment stops at the end of its line", () => {
+    expect(codeHtml('const s = "open', "ts")).toContain('<span class="st">&quot;open</span>');
+    expect(codeHtml("x /* open", "ts")).toContain('<span class="cm">/* open</span>');
+  });
+
+  test("a JSON key is a name and its value is a literal", () => {
+    const html = codeHtml('  "slug": "atlas", "n": 3, "ok": true', "json");
+    expect(html).toContain('<span class="ty">&quot;slug&quot;</span>');
+    expect(html).toContain('<span class="st">&quot;atlas&quot;</span>');
+    expect(html).toContain('<span class="st">3</span>');
+    expect(html).toContain('<span class="kw">true</span>');
+  });
+
+  test("an unknown language is escaped text and nothing else", () => {
+    const html = codeHtml('const x = "<b>"; // no', null);
+    expect(html).toBe("const x = &quot;&lt;b&gt;&quot;; // no");
+  });
+
+  test("a mark wraps its syntax rather than the other way round", () => {
+    const html = codeHtml('const x = "on";', "ts", [[10, 14]]);
+    expect(html).toContain('<span class="w"><span class="st">&quot;on&quot;</span></span>');
+  });
+
+  test("a range the line cannot hold is dropped, and a zero width one is a seam", () => {
+    expect(codeHtml("abc", null, [[2, 1]])).toBe("abc");
+    expect(codeHtml("abc", null, [[0, 99]])).toBe('<span class="w">abc</span>');
+    expect(codeHtml("abc", null, [[3, 3]])).toBe('abc<span class="w"></span>');
+    // Overlapping ranges merge instead of nesting.
+    expect(codeHtml("abcdef", null, [[0, 3], [2, 5]])).toBe('<span class="w">abcde</span>f');
+  });
+});
+
+describe("figures", () => {
+  const figure = {
+    kind: "flow" as const,
+    nodes: [
+      { id: "in", label: "GET /s/:token", state: "normal" as const },
+      { id: "res", label: "resolve", state: "normal" as const },
+      { id: "old", label: "GET /b/:slug", state: "muted" as const },
+    ],
+    edges: [
+      { from: "in", to: "res", label: "match" },
+      { from: "old", to: "res", label: "" },
+    ],
+  };
+
+  test("nodes and edges are drawn, muted state included", () => {
+    const svg = figureSvg(figure);
+    expect(svg.startsWith('<svg class="fig"')).toBe(true);
+    expect(svg).toContain(">GET /s/:token</text>");
+    expect(svg).toContain(">resolve</text>");
+    expect(svg).toContain(">GET /b/:slug</text>");
+    expect(svg.match(/<rect /g)!.length).toBe(3);
+    expect(svg.match(/<path class="fig-edge/g)!.length).toBe(2);
+    expect(svg).toContain('class="fig-box fig-dim"');
+    expect(svg).toContain(">match</text>");
+  });
+
+  test("the whole drawing is one image with a composed label", () => {
+    expect(figureLabel(figure)).toBe(
+      "A flow figure: GET /s/:token, resolve, GET /b/:slug (muted). " +
+        "GET /s/:token to resolve, match. GET /b/:slug to resolve.",
+    );
+    expect(figureSvg(figure)).toContain(`role="img" aria-label="${figureLabel(figure)}"`);
+  });
+
+  test("the layout is layered top-down and stable", () => {
+    const svg = figureSvg(figure);
+    const ys = [...svg.matchAll(/<rect class="[^"]*" x="[^"]*" y="([^"]*)"/g)].map((m) => Number(m[1]));
+    // The two entry nodes share the first rank; the node both point at sits below,
+    // and the rects come out rank by rank rather than in the order they were authored.
+    expect(ys[0]).toBe(ys[1]!);
+    expect(ys[2]!).toBeGreaterThan(ys[0]!);
+    expect(figureSvg(figure)).toBe(svg);
+  });
+
+  test("a cycle lays out rather than looping forever", () => {
+    const svg = figureSvg({
+      kind: "flow",
+      nodes: [
+        { id: "a", label: "a", state: "normal" },
+        { id: "b", label: "b", state: "normal" },
+      ],
+      edges: [
+        { from: "a", to: "b", label: "" },
+        { from: "b", to: "a", label: "" },
+      ],
+    });
+    expect(svg.match(/<rect /g)!.length).toBe(2);
+  });
+
+  test("an edge naming a node the figure does not have is not drawn", () => {
+    const svg = figureSvg({
+      kind: "flow",
+      nodes: [{ id: "a", label: "a", state: "normal" }],
+      edges: [{ from: "a", to: "gone", label: "x" }],
+    });
+    expect(svg).not.toContain("<path");
+    expect(svg).not.toContain(">x</text>");
+    expect(svg).toContain("a to gone");
+  });
+
+  test("a label with markup in it arrives escaped", () => {
+    const svg = figureSvg({
+      kind: "flow",
+      nodes: [{ id: "a", label: '<script>alert(1)</script>', state: "normal" }],
+      edges: [],
+    });
+    expect(svg).not.toContain("<script");
+    expect(svg).toContain("&lt;script&gt;");
+  });
+});

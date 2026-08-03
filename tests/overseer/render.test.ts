@@ -337,7 +337,10 @@ describe("the page itself", () => {
     expect(html).toContain("<title>The `session()` gate · Overseer</title>");
   });
 
-  test("a figure lists its nodes and edges rather than vanishing", () => {
+  // Step 9 could only list a figure's nodes and edges; step 10 draws them. The claim
+  // is the same one, made against the drawing: every node reaches the page, the muted
+  // one is drawn muted, and the words on an edge are on the page beside it.
+  test("a figure draws its nodes and edges rather than vanishing", () => {
     const html = page(
       doc({
         statements: [
@@ -360,9 +363,17 @@ describe("the page itself", () => {
       }),
     );
     expect(html).toContain('class="ev ev-figure"');
-    expect(html).toContain("request");
-    expect(html).toContain('<li class="fg-muted">gate</li>');
-    expect(html).toContain('<span class="fg-edge">cookie</span>');
+    const svg = html.match(/<svg class="fig"[\s\S]*?<\/svg>/)![0];
+    expect(svg).toContain(">request</text>");
+    expect(svg).toContain('class="dim"');
+    expect(svg).toContain(">gate</text>");
+    expect(svg).toContain("fig-dim");
+    expect(svg).toContain('class="cap"');
+    expect(svg).toContain(">cookie</text>");
+    expect(svg).toContain('role="img"');
+    expect(svg).toContain(
+      'aria-label="A flow figure: request, gate (muted). request to gate, cookie."',
+    );
   });
 
   test("the meta row says how fresh the heads are", () => {
