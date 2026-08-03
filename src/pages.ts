@@ -940,7 +940,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
   <div class="shell spine">
     ${navRow(action)}
     <h1 class="h-display">Preview what your <span class="accent">agents</span> build.</h1>
-    <p class="subtitle">A private instrument for previewing HTML&nbsp;bundles.</p>
+    <p class="subtitle">A private instrument for previewing HTML&nbsp;bundles, and for reading pull&nbsp;requests.</p>
     <div class="prose">
       <p class="lede">An agent builds a page, zips it, and pushes it here. Seer keeps every
       version and hands back a URL that reloads itself the moment a new build lands.</p>
@@ -965,6 +965,32 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
         ${markSvg("mark mark-fig")}
         <figcaption>Fig. 1 &middot; the scrying glass</figcaption>
       </figure>
+    </div>
+  </div>
+</div>
+<div class="frame warm">
+  <div class="shell spine">
+    <h2 class="h-section">Overseer</h2>
+    <div class="prose">
+      <p class="lede">The same deployment reads pull requests. Point it at one, or at a
+      stack of them, and it publishes a page you read instead of the diff: what changed,
+      what it costs, what to look at closely, every claim one tap from the lines it
+      stands on.</p>
+      <p>It derives the facts itself, so the file list, the hunks, every line number and
+      every commit come from GitHub rather than from an agent's memory. The judgment
+      comes from a sub-agent that did not write the change, because one that did
+      describes what it meant to do rather than what the diff says. Reviews are private
+      to their workspace, and a review of the same pull requests published twice keeps
+      its link and shows you what moved between the passes.</p>
+    </div>
+    <div class="specimen-grid">
+      <div class="specimen">
+        <p class="eyebrow">To give an agent the ability</p>
+        <pre class="cmd scroll-x">curl -s ${escapeHtml(config.baseUrl)}/skill.md</pre>
+        <p class="specimen-note">One file, saved as a skill. Then ask it to review a
+        pull request. Full instructions at
+        <a href="/overseer/agent.md"><code>overseer/agent.md</code></a>.</p>
+      </div>
     </div>
   </div>
 </div>

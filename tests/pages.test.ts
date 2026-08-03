@@ -1,8 +1,10 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 
 // Env is set by tests/setup.ts (preload) before these app modules import.
+import { config } from "../src/config";
 import {
   bundlesPage,
+  landingPage,
   settingsPage,
   invitePage,
   noSeatPage,
@@ -251,4 +253,17 @@ describe("reveal never survives to a plain GET", () => {
     expect(html).not.toContain('class="reveal"');
     expect(html).not.toContain("shown once");
   });
+});
+
+test("the landing page says the deployment reads pull requests, and where to start", () => {
+  const html = landingPage(false);
+  // Overseer was invisible on the front page while being half the deployment.
+  expect(html).toContain("Overseer");
+  expect(html).toContain("/overseer/agent.md");
+  // The front door is what it points at, not a second copy of the instructions.
+  expect(html).toContain(`${config.baseUrl}/skill.md`);
+  expect(html).not.toContain("POST /api/reviews");
+  // The two claims that make it different from a diff, in the reader's language.
+  expect(html).toContain("instead of the diff");
+  expect(html).toContain("did not write the change");
 });
