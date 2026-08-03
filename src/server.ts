@@ -45,6 +45,7 @@ import {
 } from "./auth";
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
 import { handlePublishReview } from "./overseer/routes";
+import { handleReadReview } from "./overseer/read";
 import {
   landingPage,
   bundlesPage,
@@ -545,6 +546,14 @@ export async function startServer() {
       // Overseer: a review is authored in one shot, so publishing is one POST.
       "/api/reviews": {
         POST: (req) => handlePublishReview(req),
+      },
+      // Reading takes a bare slug, resolved across the caller's workspaces: the
+      // renderer and the witness both hold a slug, not a workspace id.
+      "/api/reviews/:slug": {
+        GET: (req) => handleReadReview(req, req.params.slug, null),
+      },
+      "/api/reviews/:slug/v/:n": {
+        GET: (req) => handleReadReview(req, req.params.slug, req.params.n),
       },
 
       "/api/images": {

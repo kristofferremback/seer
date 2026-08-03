@@ -77,6 +77,25 @@ export function getReview(wsId: string, slug: string): ReviewRow | null {
     .get(wsId, slug);
 }
 
+/** The one review a caller means by a bare slug. Reviews are keyed by (workspace,
+ *  slug), so the same slug can name a review in two of the caller's workspaces; the
+ *  most recently published one wins, ties broken by workspace id so the answer is
+ *  always the same one. Workspaces the caller cannot reach are never in `wsIds`,
+ *  which is what makes the read path's soft-404 mean both "no such review" and
+ *  "not yours" without the query knowing the difference. */
+export function resolveReview(wsIds: string[], slug: string): ReviewRow | null {
+  if (wsIds.length === 0) return null;
+  const holes = wsIds.map(() => "?").join(", ");
+  return db
+    .query<ReviewRow, string[]>(
+      `SELECT r.* FROM reviews r WHERE r.slug = ? AND r.workspace_id IN (${holes}) ` +
+        "ORDER BY (SELECT MAX(v.created_at) FROM review_versions v " +
+        "  WHERE v.workspace_id = r.workspace_id AND v.slug = r.slug) DESC, " +
+        "  r.workspace_id ASC LIMIT 1",
+    )
+    .get(slug, ...wsIds);
+}
+
 export function listReviews(wsId: string): ReviewRow[] {
   return db
     .query<ReviewRow, [string]>(
