@@ -29,12 +29,23 @@ import {
   safeInline,
   shortSha,
 } from "./render-evidence";
-import { prKey, type Freshness, type Note, type Pr, type Ref, type Statement } from "./types";
+import {
+  prKey,
+  type Evidence,
+  type Freshness,
+  type Note,
+  type Pr,
+  type Ref,
+  type Statement,
+} from "./types";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ATT_ID_RE = /^att_[a-z0-9]+$/;
 
-// Transcribed from the v9 prototype. Font URLs point at Seer /fonts; nothing else moved.
+// Transcribed from the v9 prototype. Font URLs point at Seer /fonts. Two layout rules
+// were added inside the block, next to the rules they qualify: `.chain > .card + .card`
+// (a set draws no arrows, so its cards need their own gap) and `.card-body .fold + .fold`
+// (a card body now holds both the detail ref and the description fold). Nothing else moved.
 const STYLE = `  @font-face {
     font-family: "Switzer";
     src: url("/fonts/switzer.woff2") format("woff2");
@@ -1231,11 +1242,27 @@ function prBody(ownerId: string, body: string): string {
   );
 }
 
-function card(pr: Pr): string {
+/** Every ref the document carries, by id. `detail_ref` is stored as an id alone, so the
+ *  snippet it names is found here; a version whose only mention of that ref was on a
+ *  statement that has since been rewritten simply grows no fold. */
+function refsById(doc: ReviewDoc): Map<string, Ref> {
+  const byId = new Map<string, Ref>();
+  const take = (refs: Ref[], evidence: Evidence[]) => {
+    for (const r of refs) byId.set(r.id, r);
+    for (const e of evidence) if (e.type === "ref") byId.set(e.ref.id, e.ref);
+  };
+  for (const s of doc.statements) take(s.refs, s.evidence);
+  for (const n of doc.notes) take(n.refs, n.evidence);
+  return byId;
+}
+
+function card(pr: Pr, refs: Map<string, Ref>): string {
   const kinds = pr.kinds
     .map((k) => icon(k, `ic k-${k}`, KIND_LABEL[k] ?? k))
     .join("");
   const owner = `pr-${pr.number}`;
+  const detailRef = refs.get(pr.detailRef);
+  const detailFold = detailRef ? refFold(owner, detailRef) : "";
   return (
     `<details class="card" id="${escapeHtml(owner)}">` +
     `<summary>` +
@@ -1247,7 +1274,8 @@ function card(pr: Pr): string {
     `<span class="c-line">${safeInline(pr.gist)}</span>` +
     `</summary>` +
     `<div class="card-body">` +
-    `<p>${safeInline(pr.detail)}</p>` +
+    safeBlock(pr.detail) +
+    detailFold +
     prBody(owner, pr.body) +
     `</div></details>`
   );
@@ -1290,7 +1318,8 @@ function chain(doc: ReviewDoc): string {
         `<span class="sha">${escapeHtml(shortSha(root.baseSha))}</span></p>`
       : "";
   const arrow = `${icon("arrow", "arw")}`;
-  const cards = prs.map((pr) => card(pr)).join(stack ? arrow : "");
+  const refs = refsById(doc);
+  const cards = prs.map((pr) => card(pr, refs)).join(stack ? arrow : "");
   return `<div class="chain">${base}${prs.length > 0 && stack ? arrow : ""}${cards}</div>`;
 }
 
@@ -1327,7 +1356,7 @@ function noteRow(n: Note, ctx: RenderCtx): string {
       ? ""
       : `<ul class="checks">${n.checks.map((c) => `<li>${safeInline(c)}</li>`).join("")}</ul>`;
   return (
-    `<details class="note is-${n.kind}" id="${escapeHtml(n.id)}">` +
+    `<details class="note is-${escapeHtml(n.kind)}" id="${escapeHtml(n.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(n.kind, `ic k-${n.kind}`, n.kind)}` +
     `<span class="none">${safeInline(n.text)}</span>` +
     `</summary>` +
@@ -1341,6 +1370,14 @@ function noteRow(n: Note, ctx: RenderCtx): string {
  *  thing a reader would miss, so it does not wait behind an observation. */
 function notesInOrder(notes: Note[]): Note[] {
   return [...notes.filter((n) => n.kind === "risk"), ...notes.filter((n) => n.kind !== "risk")];
+}
+
+/** A date the colophon can hold, or nothing. A stored timestamp out of the range Date
+ *  can name is cosmetic, and a readable page beats a 500 over the line under it. */
+function publishedOn(updatedAt: number): string {
+  const at = new Date(updatedAt);
+  if (Number.isNaN(at.getTime())) return "";
+  return ` · published ${at.toISOString().slice(0, 10)}`;
 }
 
 interface RenderCtx {
@@ -1410,7 +1447,7 @@ export function renderReviewPage(input: RenderInput): string {
     `</section>\n` +
     `<section id="notes"><h2>Review notes</h2><div class="notes">${notes}</div></section>\n` +
     `<p class="colophon">${escapeHtml(
-      `${slug} · ${marking} · published ${new Date(doc.updatedAt).toISOString().slice(0, 10)}`,
+      `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
     )}</p>\n` +
     `</main>\n<script>${PAGE_SCRIPT}</script>\n</body>\n</html>\n`
   );

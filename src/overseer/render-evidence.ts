@@ -202,11 +202,11 @@ function figureBlock(figure: Figure): string {
   const rows = figure.edges.map((e) => {
     const from = labels.get(e.from) ?? e.from;
     const to = labels.get(e.to) ?? e.to;
-    const label = e.label === "" ? "" : ` <span class="fg-edge">${escapeHtml(e.label)}</span>`;
-    return `<li>${escapeHtml(from)} ${icon("cue", "fg-arrow")} ${escapeHtml(to)}${label}</li>`;
+    const label = e.label === "" ? "" : ` <span class="fg-edge">${safeInline(e.label)}</span>`;
+    return `<li>${safeInline(from)} ${icon("cue", "fg-arrow")} ${safeInline(to)}${label}</li>`;
   });
   const nodes = figure.nodes
-    .map((n) => `<li class="fg-${escapeHtml(n.state)}">${escapeHtml(n.label)}</li>`)
+    .map((n) => `<li class="fg-${escapeHtml(n.state)}">${safeInline(n.label)}</li>`)
     .join("");
   return (
     `<div class="ev ev-figure">` +

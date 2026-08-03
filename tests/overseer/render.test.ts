@@ -282,6 +282,34 @@ describe("the page itself", () => {
     );
   });
 
+  test("a card detail is rendered as the constrained markdown it was validated as", () => {
+    const base = doc();
+    const prs = base.prs.map((pr) => ({
+      ...pr,
+      detail: "Adds the table. See [the plan](https://example.com/p) and the *rest*.",
+    }));
+    const html = page({ ...base, prs });
+    expect(html).toContain(`<a href="https://example.com/p"`);
+    expect(html).toContain("<em>rest</em>");
+    expect(html).not.toContain("[the plan]");
+  });
+
+  test("a card folds the ref its detail names", () => {
+    const base = doc();
+    const r = ref("ref_detail", "src/session.ts", 12);
+    const st = statement({ id: "st_a", refs: [r] });
+    const prs = base.prs.map((pr) => ({ ...pr, detailRef: r.id }));
+    const html = page({ ...base, prs, statements: [st] });
+    expect(html).toContain(`<details class="fold" id="pr-12-ref_detail"`);
+    // A detail ref no version of the document carries grows no fold at all.
+    const orphan = page({
+      ...base,
+      prs: base.prs.map((pr) => ({ ...pr, detailRef: "ref_gone" })),
+      statements: [st],
+    });
+    expect(orphan).not.toContain("ref_gone");
+  });
+
   test("a row citing one pointer twice draws it once", () => {
     const r = ref("ref_1", "src/auth.ts");
     const html = page(doc({ statements: [statement({ id: "st_a", refs: [r, r] })] }));
