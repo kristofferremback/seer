@@ -348,6 +348,82 @@ describe("publish refusals", () => {
     expect(res.status).toBe(400);
   });
 
+  test("a body over the upload limit -> 413", async () => {
+    const held = config.maxUploadBytes;
+    config.maxUploadBytes = 512;
+    try {
+      const res = await publish("too-big", noAttachments());
+      expect(res.status).toBe(413);
+      expect((await readJson(res)).error).toContain("512");
+    } finally {
+      config.maxUploadBytes = held;
+    }
+  });
+
+  test("a body over the upload limit that declares no length -> 413 on the bytes read", async () => {
+    const held = config.maxUploadBytes;
+    config.maxUploadBytes = 512;
+    const text = body("too-big-chunked", noAttachments());
+    try {
+      const res = await fetch(`${base}/api/reviews`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${keyA}`, "content-type": "application/json" },
+        // A stream body sends no content-length, so only the measured check can catch it.
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(text));
+            controller.close();
+          },
+        }),
+        // The runtime requires this for a stream body.
+        duplex: "half",
+      });
+      expect(res.status).toBe(413);
+    } finally {
+      config.maxUploadBytes = held;
+    }
+  });
+
+  test("no pull requests at all -> 422 the skill can fix, not a 502", async () => {
+    const before = counts();
+    const payload = noAttachments();
+    payload.prs = [];
+    const res = await publish("no-prs", payload);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    const err = json.errors.find((e: { rule: string }) => e.rule === "pr_not_derivable");
+    expect(err.field).toBe("prs");
+    expect(err.message).toContain("at least one");
+    expect(counts()).toEqual(before);
+  });
+
+  test("the same pull request twice -> 422 the skill can fix, not a 502", async () => {
+    const before = counts();
+    const payload = noAttachments();
+    payload.prs[1]!.repo = payload.prs[0]!.repo;
+    payload.prs[1]!.number = payload.prs[0]!.number;
+    const res = await publish("dup-prs", payload);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    const err = json.errors.find((e: { rule: string }) => e.rule === "pr_not_derivable");
+    expect(err.field).toBe("prs");
+    expect(err.message).toContain("more than once");
+    expect(counts()).toEqual(before);
+  });
+
+  test("prs that are not pointers at all -> 422 naming the fields", async () => {
+    const before = counts();
+    const payload = noAttachments();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (payload as any).prs = [{ repo: 7, number: "twelve" }];
+    const res = await publish("junk-prs", payload);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    expect(json.errors.length).toBeGreaterThan(0);
+    expect(json.errors.some((e: { field: string }) => e.field.startsWith("prs"))).toBe(true);
+    expect(counts()).toEqual(before);
+  });
+
   test("an attachment declared with no bytes -> 422 naming it", async () => {
     const before = counts();
     const res = await publish("no-bytes", goldenPayload());
@@ -356,6 +432,66 @@ describe("publish refusals", () => {
     expect(json.errors[0].rule).toBe("attachment_missing_part");
     expect(json.errors[0].message).toContain("att_gate");
     expect(counts()).toEqual(before);
+  });
+});
+
+// ---- bundle evidence resolves in the publishing workspace ----
+
+/** Rewrite every bundle citation in the payload, so the whole document points at one
+ *  bundle coordinate. Returns how many it rewrote, so a fixture that stopped citing
+ *  bundles cannot make these tests pass by having nothing to check. */
+function citeBundle(payload: PublishPayload, slug: string, version: number | null): number {
+  let cited = 0;
+  const rewrite = (evidence: PublishPayload["statements"][number]["evidence"]) => {
+    for (const e of evidence) {
+      if (e.type !== "bundle") continue;
+      e.bundle.slug = slug;
+      e.bundle.version = version;
+      cited++;
+    }
+  };
+  for (const s of payload.statements) rewrite(s.evidence);
+  for (const n of payload.notes) rewrite(n.evidence);
+  return cited;
+}
+
+describe("bundle evidence", () => {
+  test("a bundle that exists only in the other workspace -> 422", async () => {
+    createVersion(wsA, "only-in-a", 10, 1);
+    const payload = noAttachments();
+    expect(citeBundle(payload, "only-in-a", null)).toBeGreaterThan(0);
+
+    // The publishing workspace is the one the lookup is scoped to: wsA holds it, so the
+    // same payload publishes there and is refused from wsB.
+    const ok = await publish("bundle-scope", payload, keyA);
+    expect(ok.status).toBe(200);
+
+    const before = counts();
+    const res = await publish("bundle-scope", payload, keyB);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    const err = json.errors.find((e: { rule: string }) => e.rule === "bundle_unresolved");
+    expect(err.message).toContain("only-in-a");
+    expect(counts()).toEqual(before);
+  });
+
+  test("a bundle pinned past its latest version -> 422", async () => {
+    const payload = noAttachments();
+    expect(citeBundle(payload, GOLDEN_BUNDLE_SLUG, GOLDEN_BUNDLE_VERSION + 1)).toBeGreaterThan(0);
+    const before = counts();
+    const res = await publish("bundle-future", payload);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    const err = json.errors.find((e: { rule: string }) => e.rule === "bundle_unresolved");
+    expect(err.message).toContain(`v${GOLDEN_BUNDLE_VERSION + 1}`);
+    expect(counts()).toEqual(before);
+  });
+
+  test("a bundle pinned at a version that exists publishes", async () => {
+    const payload = noAttachments();
+    citeBundle(payload, GOLDEN_BUNDLE_SLUG, GOLDEN_BUNDLE_VERSION);
+    const res = await publish("bundle-pinned", payload);
+    expect(res.status).toBe(200);
   });
 });
 
@@ -441,6 +577,29 @@ describe("attachments", () => {
     expect(res.status).toBe(422);
     const json = await readJson(res);
     expect(json.errors[0].rule).toBe("attachment_not_image");
+    expect(counts()).toEqual(before);
+  });
+
+  test("an svg part -> 422; an attachment is never stored markup", async () => {
+    const before = counts();
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const res = await postForm(
+      multipart("svg-part", goldenPayload(), [
+        ["att_gate", new Blob([svg], { type: "image/svg+xml" }), "gate.svg"],
+      ]),
+    );
+    expect(res.status).toBe(422);
+    expect((await readJson(res)).errors[0].rule).toBe("attachment_not_image");
+    expect(counts()).toEqual(before);
+  });
+
+  test("two document parts -> 400 rather than one of them dropped", async () => {
+    const before = counts();
+    const form = multipart("two-docs", goldenPayload(), [["att_gate", png(), "gate.png"]]);
+    form.append("document", JSON.stringify({ slug: "two-docs", ...noAttachments() }));
+    const res = await postForm(form);
+    expect(res.status).toBe(400);
+    expect((await readJson(res)).error).toContain("more than once");
     expect(counts()).toEqual(before);
   });
 

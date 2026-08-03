@@ -5,6 +5,7 @@ import {
   coAuthorsOf,
   deriveOrigin,
   derivePrs,
+  PrPointerError,
   deriveReviewKind,
   hunksOf,
   kindsForPr,
@@ -298,11 +299,18 @@ describe("pull request facts", () => {
   });
 
   test("a review with no pull requests is a loud failure", async () => {
+    await expect(derivePrs(countingClient({}), [])).rejects.toThrow(PrPointerError);
     await expect(derivePrs(countingClient({}), [])).rejects.toThrow(/at least one/);
   });
 
   test("the same pull request named twice is a loud failure, before any call", async () => {
     const client = countingClient(chain());
+    await expect(
+      derivePrs(client, [
+        { repo: REPO, number: 101 },
+        { repo: REPO, number: 101 },
+      ]),
+    ).rejects.toThrow(PrPointerError);
     await expect(
       derivePrs(client, [
         { repo: REPO, number: 101 },

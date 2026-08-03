@@ -11,10 +11,9 @@
 // rules, processImage() for attachment bytes, createReviewVersion() for storage.
 
 import { config } from "../config";
-import { getBundle } from "../db";
+import { db, getBundle } from "../db";
 import { IMAGE_TYPES, processImage, sniffOk } from "../images";
 import { saveAttachment } from "../store";
-import { db } from "../db";
 import { tinyId } from "../ids";
 import { requireApiKey } from "../auth";
 import { createAttachment, createReviewVersion, getReview, getReviewVersion, type ReviewDoc } from "./db";
@@ -124,8 +123,14 @@ async function readBody(req: Request): Promise<PublishBody> {
 
   const parts = new Map<string, { bytes: Uint8Array; filename: string; type: string }>();
   let bytes = Buffer.byteLength(text, "utf8");
+  let documents = 0;
   for (const [name, value] of form.entries()) {
-    if (name === DOCUMENT_PART) continue;
+    if (name === DOCUMENT_PART) {
+      // A second document part is refused the way a second attachment part is: silently
+      // publishing whichever one form.get() returned would drop an authored document.
+      if (++documents > 1) throw new BadBody(`Part "${DOCUMENT_PART}" appears more than once`);
+      continue;
+    }
     if (typeof value === "string") {
       throw new BadBody(`Part "${name}" carries text; an attachment part carries file bytes`);
     }
@@ -154,20 +159,17 @@ function slugOf(parsed: unknown): unknown {
 /** The pointers to derive from, or null when the authored `prs` cannot be read as
  *  pointers at all. Null sends the payload through the validator with no derived facts,
  *  which answers with a 422 naming every field that is wrong rather than a crash out of
- *  the deriver. Duplicates are refused here too, for the same reason: derivePrs()
- *  throws on them and validatePublish() reports them by field. */
+ *  the deriver. An empty list and a repeated pull request are readable as pointers, so
+ *  they go to derivePrs(), which refuses both before any request goes out and whose
+ *  PrPointerError the route answers as a 422. */
 function pointersOf(payload: PublishPayload): PrPointer[] | null {
   const prs = payload?.prs;
-  if (!Array.isArray(prs) || prs.length === 0) return null;
-  const seen = new Set<string>();
+  if (!Array.isArray(prs)) return null;
   const out: PrPointer[] = [];
   for (const pr of prs) {
     if (pr === null || typeof pr !== "object") return null;
     const { repo, number } = pr;
     if (typeof repo !== "string" || repo === "" || !Number.isInteger(number)) return null;
-    const key = prKey(repo, number);
-    if (seen.has(key)) return null;
-    seen.add(key);
     out.push({ repo, number, parent: pr.parent ?? null });
   }
   return out;
@@ -252,14 +254,23 @@ interface ResolvedAttachment {
   caption: string;
 }
 
+/** The formats an attachment may not be. processImage() passes SVG through verbatim
+ *  because an SVG is text, so an accepted SVG attachment would be stored script waiting
+ *  on whichever route serves attachment bytes to send exactly the right headers. That
+ *  route does not exist yet, and a security rule that lives only in a comment for a
+ *  future step is not a rule, so an SVG is refused here instead. */
+const ATTACHMENT_EXCLUDED_EXTS = new Set(["svg"]);
+
 /** The image extension for a part, from its filename first and its declared type
- *  second. Null when neither names an image format Seer processes. */
+ *  second. Null when neither names an image format an attachment may be. */
 function extOf(filename: string, type: string): string | null {
   const named = /\.([a-z0-9]+)$/i.exec(filename)?.[1]?.toLowerCase();
+  if (named && ATTACHMENT_EXCLUDED_EXTS.has(named)) return null;
   // Own keys only: IMAGE_TYPES is a plain object, so `in` would accept a part named
   // "shot.constructor" as an image format and hand it to a pipeline that cannot read it.
   if (named && Object.hasOwn(IMAGE_TYPES, named)) return named;
   for (const [ext, mime] of Object.entries(IMAGE_TYPES)) {
+    if (ATTACHMENT_EXCLUDED_EXTS.has(ext)) continue;
     if (mime === type.toLowerCase().split(";")[0]?.trim()) return ext;
   }
   return null;
@@ -316,11 +327,8 @@ async function resolveAttachments(
     const part = body.parts.get(a.id)!;
     const ext = extOf(part.filename, part.type)!;
     try {
-      // The same pipeline /api/images uses, SVG passthrough included: an SVG is text,
-      // so its bytes are stored verbatim under image/svg+xml. Whichever route serves an
-      // attachment blob must send the header the image route sends for that media type
-      // (`content-security-policy: default-src 'none'; style-src 'unsafe-inline'`), or
-      // an uploaded SVG is stored script inside the workspace.
+      // The same pipeline /api/images uses, minus the formats extOf() excludes: every
+      // attachment that gets here re-encodes to raster bytes.
       const image = await processImage(ext, `attachment.${ext}`, part.bytes);
       attachments.push({
         authoredId: a.id,
@@ -572,7 +580,7 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   };
 
   const pointers = pointersOf(payload);
-  if (!pointers) {
+  if (pointers === null) {
     // Unusable pointers: the validator answers with the fields that are wrong.
     const { errors, warnings } = validatePublish(payload, { prs: [] }, null, { bundleExists });
     if (errors.length === 0) {
