@@ -13,8 +13,16 @@ import { test, expect, beforeAll, afterAll, describe } from "bun:test";
 import { startServer } from "../../src/server";
 import { createWorkspace, db, legacyWorkspaceId, listMembers } from "../../src/db";
 import { createReviewVersion, type ReviewDoc } from "../../src/overseer/db";
-import { computeDelta, DeltaIndex, diffField, textOf } from "../../src/overseer/delta";
+import {
+  computeDelta,
+  DeltaIndex,
+  diffField,
+  markField,
+  MAX_DIFF_WORDS,
+  textOf,
+} from "../../src/overseer/delta";
 import { baseVersion, renderReviewPage } from "../../src/overseer/render";
+import { safeInline } from "../../src/overseer/render-evidence";
 import { prKey, type Annotation } from "../../src/overseer/types";
 import { GOLDEN_REPO } from "./fixtures/golden-review";
 import { goldenStoredDoc } from "./fixtures/stored-review";
@@ -120,7 +128,18 @@ describe("the delta itself", () => {
     expect(e.status).toBe("removed");
     expect(e.id).toBe("st_gate");
     expect(e.former!.head).toBe("Reviews move behind the workspace session gate");
-    expect(e.former!.body[0]).toBe("The gate is the helper bundles already use.");
+    expect(e.former!.body[0]).toBe("<p>The gate is the helper bundles already use.</p>");
+  });
+
+  test("a removed entity keeps the shape of what it said, not just the words", () => {
+    const before = doc((d) => {
+      d.statements[0]!.body = "intro\n\n- one\n- two";
+    });
+    const after = doc((d) => {
+      d.statements = [];
+    });
+    const e = computeDelta(side(before), side(after)).entities.find((x) => x.kind === "statement")!;
+    expect(e.former!.body[0]).toContain("<ul><li>one</li><li>two</li></ul>");
   });
 
   test("an id the base version never had is new", () => {
@@ -209,6 +228,35 @@ describe("the delta itself", () => {
     expect(e.fields.some((f) => f.field === "body")).toBe(true);
   });
 
+  test("an inserted run that straddles a tag is marked piece by piece, never dropped", () => {
+    const html = safeInline("the `gate` helper now reads keys");
+    const d = diffField("text", true, "", html)!;
+    const out = markField(html, d, "no_code");
+    expect(out).toContain("<code>");
+    // Every word of the run carries a mark, on both sides of the tag.
+    expect([...out.matchAll(/<ins class="dw dnew">/g)].length).toBe(3);
+    for (const word of ["the", "gate", "helper now reads keys"]) {
+      expect(out).toContain(`<ins class="dw dnew">${word}</ins>`);
+    }
+  });
+
+  test("a revised field whose insert straddles a tag keeps both the mark and the prior words", () => {
+    const prior = safeInline("keys read the helper");
+    const html = safeInline("keys read the `slow` helper of the gate");
+    const d = diffField("text", false, prior, html)!;
+    const out = markField(html, d, "st_x");
+    expect(/class="dw/.test(out)).toBe(true);
+  });
+
+  test("a field past the word ceiling is republished whole rather than aligned", () => {
+    const long = Array.from({ length: MAX_DIFF_WORDS + 40 }, (_, i) => `w${i}`).join(" ");
+    const started = Date.now();
+    const d = diffField("body", false, `<p>${long}</p>`, `<p>${long} tail</p>`)!;
+    expect(d.mode).toBe("whole");
+    expect(d.density).toBe(1);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   test("two identical documents move nothing", () => {
     expect(computeDelta(side(doc()), side(doc())).entities).toEqual([]);
   });
@@ -245,6 +293,18 @@ describe("the marks on the page", () => {
         refs: [],
         evidence: [],
       });
+      // An inserted run that straddles a tag is the case a mark is easiest to
+      // lose: the words sit either side of the code span and cannot be one span.
+      d.notes.push({
+        id: "no_code",
+        kind: "note",
+        text: "the `gate` helper now reads keys",
+        body: "Body.",
+        checks: [],
+        refs: [],
+        evidence: [],
+      });
+      d.notes[0]!.text = "Keys are read through the `slow gate` helper now";
       d.groups[0]!.title = "The session gate";
       d.summary = `${d.summary} A sentence the summary grew.`;
       d.prs[0]!.gist = "A gist that reads differently now";
@@ -292,6 +352,57 @@ describe("the marks on the page", () => {
     expect(stub).toContain("Reviews move behind the workspace session gate");
     expect(stub).toContain("The gate is the helper bundles already use.");
     expect(stub).toContain('<span class="rev">removed</span>');
+  });
+
+  test("a pull request the base version carried and this one does not stays as a stub", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.prs = d.prs.slice(0, d.prs.length - 1);
+    });
+    expect(after.prs.length).toBeLessThan(before.prs.length);
+    const dropped = before.prs[before.prs.length - 1]!;
+    const html = page(after, before);
+    const at = html.indexOf('class="card dgoneunit"');
+    expect(at).toBeGreaterThan(-1);
+    const stub = unitAround(html, at);
+    expect(stub).toContain('<span class="rev">removed</span>');
+    expect(stub).toContain(textOf(dropped.gist).split(" ")[0]!);
+    // What the menu counts, the page accounts for.
+    const counts = new DeltaIndex(computeDelta(side(before), side(after))).counts();
+    expect(counts.removed).toBe(
+      [...html.matchAll(/<span class="rev">removed<\/span>/g)].length,
+    );
+  });
+
+  test("prior text is behind a control everywhere it is drawn, and never left open", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.title = `${d.title}, restated`;
+      d.statements[0]!.body = "one two three four five alpha beta gamma delta epsilon";
+    });
+    const html = page(after, before);
+    // The title stands on its own, so its prior words grow a control of their own.
+    const head = html.slice(html.indexOf('<h1 class="title">'), html.indexOf("</h1>"));
+    expect(head).toContain('class="dtog"');
+    expect(head).toContain('class="dp"');
+    // A whole prior block is hidden until its own checkbox is checked.
+    expect(html).toContain(".dp.dpb { margin-top");
+    expect(html).toContain(".dtog:checked + .dw + .dp.dpb { display: block; }");
+    // The row reveal is scoped to the summary, so an open row does not print its
+    // whole prior body.
+    expect(html).toContain("details.row[open] > summary .dp");
+    expect(html).not.toContain("details.row[open] .dp,");
+  });
+
+  test("every checkbox the delta emits has a name a screen reader can read", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.statements[0]!.body = "one two three four five alpha beta gamma delta epsilon";
+    });
+    const html = page(after, before);
+    const boxes = [...html.matchAll(/<input type="checkbox" class="dtog"[^>]*>/g)];
+    expect(boxes.length).toBeGreaterThan(0);
+    for (const b of boxes) expect(b[0]).toContain('aria-label="prior text"');
   });
 
   test("a head that moved marks the card without claiming a word changed", () => {

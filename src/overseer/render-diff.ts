@@ -424,10 +424,10 @@ export function walkthroughSection(doc: ReviewDoc, delta: DeltaIndex | null = nu
             `<details class="grp dgoneunit" id="dgone-${escapeHtml(e.id)}">` +
             `<summary>${icon("chev", "tick")}` +
             `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
-            `<span class="rev">removed</span>` +
+            chip(e) +
             `</summary>` +
             `<div class="grp-body">${(e.former ? e.former.body : [])
-              .map((t) => `<p class="dp dpb">${t}</p>`)
+              .map((h) => `<div class="dp dpb">${h}</div>`)
               .join("")}</div></details>`,
         )
         .join("")

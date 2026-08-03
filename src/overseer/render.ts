@@ -1257,12 +1257,13 @@ const DELTA_STYLE = `
   .dw.dxo, .dw.dall { background: none; color: hsl(var(--muted)); }
   .dp { display: none; color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
   .dtog:checked + .dw + .dp { display: inline; }
-  .dp.dpb { display: block; margin-top: 6px; padding: 6px 8px; text-decoration: none; }
+  .dp.dpb { margin-top: 6px; padding: 6px 8px; text-decoration: none; }
   .dtog:checked + .dw + .dp.dpb { display: block; }
-  details.row[open] .dp, details.note[open] .dp, details.grp[open] .dp.dpstub { display: inline; }
+  details.row[open] > summary .dp, details.note[open] > summary .dp, details.card[open] > summary .dp, details.grp[open] > summary .dp { display: inline; }
   .dgoneunit { opacity: 0.85; }
-  .dgoneunit .dgone-body { padding: 4px 0 8px; }
-  .dgoneunit .dp, .dgoneunit .dp.dpb { display: block; text-decoration: none; }
+  .dgoneunit .dgone-body, .dgoneunit .grp-body, .dgoneunit .card-body { padding: 4px 0 8px; }
+  .dgoneunit > summary .dp { display: inline; text-decoration: none; }
+  .dgoneunit .dgone-body .dp, .dgoneunit .grp-body .dp, .dgoneunit .card-body .dp { display: block; text-decoration: none; }
   ins.dnew { text-decoration: none; }
   .rev { display: inline-block; margin-right: 6px; padding: 1px 6px; border: 1px solid hsl(var(--line)); border-radius: 999px; font-size: 11px; letter-spacing: 0.02em; color: hsl(var(--muted)); background: hsl(var(--paper-sunk)); vertical-align: middle; }
   .rev-moved { color: hsl(var(--change)); }
@@ -1382,7 +1383,16 @@ function chain(doc: ReviewDoc, ctx: RenderCtx): string {
   const arrow = `${icon("arrow", "arw")}`;
   const refs = refsById(doc);
   const cards = prs.map((pr) => card(pr, refs, ctx)).join(stack ? arrow : "");
-  return `<div class="chain">${base}${prs.length > 0 && stack ? arrow : ""}${cards}</div>`;
+  // A pull request the base version carried and this one does not stays in the
+  // chain as a stub. A link that quietly leaves the stack is the one change a
+  // reader of a stack most needs to see.
+  const gone = ctx.delta
+    ? ctx.delta
+        .removed("pr")
+        .map((e) => removedStub(e, "card"))
+        .join("")
+    : "";
+  return `<div class="chain">${base}${prs.length > 0 && stack ? arrow : ""}${cards}${gone}</div>`;
 }
 
 /** Refs resolve once per pointer, so a row listing the same pointer twice holds the same
@@ -1416,16 +1426,14 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
 function removedStub(e: EntityDelta, cls: string): string {
   const former = e.former ?? { head: "", body: [] };
   const id = `dgone-${e.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-  const body = former.body
-    .map((t) => `<p class="dp dpb">${t}</p>`)
-    .join("");
+  const body = former.body.map((h) => `<div class="dp dpb">${h}</div>`).join("");
   return (
     `<details class="${cls} dgoneunit" id="${escapeHtml(id)}">` +
     `<summary>${icon("chev", "tick")}` +
     `<span class="none"><span class="dp dpstub">${former.head}</span></span>` +
-    `<span class="rrefs"><span class="rev">removed</span></span>` +
+    `<span class="rrefs">${chip(e)}</span>` +
     `</summary>` +
-    `<div class="dgone-body">${body === "" ? `<p class="dp dpb"></p>` : body}</div>` +
+    `<div class="dgone-body">${body === "" ? `<div class="dp dpb"></div>` : body}</div>` +
     `</details>`
   );
 }
@@ -1594,7 +1602,7 @@ export function renderReviewPage(input: RenderInput): string {
     `aria-label="Switch between the light and dark reading surface">` +
     `${icon("contrast", "mark")}</button>` +
     `</div>` +
-    `<h1 class="title">${marked(safeInline(doc.title), review, "title", "review")}</h1>` +
+    `<h1 class="title">${marked(safeInline(doc.title), review, "title", "review", true)}</h1>` +
     `<p class="meta"><span>${escapeHtml(doc.kind)}</span><span>${escapeHtml(count)}</span>` +
     `<span>${escapeHtml(heads)}</span>${baseMark}</p>` +
     revisionMenu(input, ctx.basePath) +
@@ -1664,6 +1672,38 @@ export function baseVersion(
  *  An annotation carries no answered-at, so an answer that landed before the base
  *  cannot be told from one that landed after; the base side is read as open, which
  *  marks an answer once too often rather than never. */
+type Counts = { revised: number; added: number; removed: number; codeMoved: number };
+
+/** What moved in one version, against the one before it. A published version never
+ *  changes, so this answer never changes either, and the timeline asks for it on
+ *  every request of a page anyone may read. It is computed once per version and
+ *  kept, rather than diffing the whole history again for each reader. Annotations
+ *  do not enter a count, so none are passed. */
+const COUNT_MEMO = new Map<string, Counts>();
+const COUNT_MEMO_MAX = 2000;
+
+function timelineCounts(
+  ws: string,
+  slug: string,
+  version: number,
+  docAt: (n: number) => ReviewDoc | null,
+): Counts {
+  const key = `${ws}:${slug}:${version}`;
+  const have = COUNT_MEMO.get(key);
+  if (have) return have;
+  const cur = docAt(version);
+  const before = version > 1 ? docAt(version - 1) : null;
+  const counts =
+    cur && before
+      ? new DeltaIndex(
+          computeDelta({ doc: before, annotations: [] }, { doc: cur, annotations: [] }),
+        ).counts()
+      : { revised: 0, added: 0, removed: 0, codeMoved: 0 };
+  if (COUNT_MEMO.size >= COUNT_MEMO_MAX) COUNT_MEMO.clear();
+  COUNT_MEMO.set(key, counts);
+  return counts;
+}
+
 function annotationsAt(all: Annotation[], version: number): Annotation[] {
   return all
     .filter((a) => a.version <= version)
@@ -1740,17 +1780,7 @@ export function handleReviewPage(
 
   const timeline: TimelineEntry[] = [];
   for (const v of listReviewVersions(ws, slug)) {
-    const cur = docAt(v.version);
-    const before = v.version > 1 ? docAt(v.version - 1) : null;
-    const counts =
-      cur && before
-        ? new DeltaIndex(
-            computeDelta(
-              { doc: before, annotations: annotationsAt(annotations, v.version - 1) },
-              { doc: cur, annotations: annotationsAt(annotations, v.version) },
-            ),
-          ).counts()
-        : { revised: 0, added: 0, removed: 0, codeMoved: 0 };
+      const counts = timelineCounts(ws, slug, v.version, docAt);
     timeline.push({
       version: v.version,
       createdAt: v.created_at,

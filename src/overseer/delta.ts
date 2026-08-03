@@ -50,6 +50,13 @@ import { prKey, type Annotation } from "./types";
 /** Past this share of moved words a field is shown whole rather than in place. */
 export const DENSE = 0.4;
 
+/** Past this many words on either side a field is not aligned at all. The
+ *  alignment is quadratic in both time and memory, and the one field with no
+ *  authored budget behind it is the pull request description GitHub holds, which
+ *  runs to tens of thousands of characters. Past the ceiling the field is
+ *  republished whole, which is what a reader of a rewritten essay wants anyway. */
+export const MAX_DIFF_WORDS = 2000;
+
 export type DeltaEntityKind = "review" | "summary" | "statement" | "note" | "group" | "pr";
 export type DeltaStatus = "new" | "revised" | "removed";
 
@@ -85,8 +92,9 @@ export interface EntityDelta {
   status: DeltaStatus;
   /** Empty for a removed entity: what changed is that it is gone. */
   fields: FieldDelta[];
-  /** Set on a removed entity: its former content, as text, so the stub can hold
-   *  everything the base version said. */
+  /** Set on a removed entity: its former content, as the markup the base version
+   *  showed, so the stub holds everything that version said in the shape it said
+   *  it. The markup is what `safeInline` and `safeBlock` already sanitised. */
   former: { head: string; body: string[] } | null;
   /** Set on a pull request whose head sha moved between the two versions. */
   codeMoved: boolean;
@@ -205,12 +213,31 @@ export function regions(ops: Op[]): Region[] {
   return out.filter((r) => r.d1 > r.d0 || r.c1 > r.c0);
 }
 
+/** The words of a fragment, plus how many tags stand before each of them. Two
+ *  words with the same count have no tag between them, which is the only question
+ *  the marker asks, so it is answered in constant time rather than by scanning. */
+interface WordIndex {
+  words: Tok[];
+  tagsBefore: Int32Array;
+}
+
+function wordIndex(html: string): WordIndex {
+  const words: Tok[] = [];
+  const before: number[] = [];
+  let tags = 0;
+  for (const t of tokens(html)) {
+    if (t.t === "tag") tags++;
+    else if (t.t === "w") {
+      words.push(t);
+      before.push(tags);
+    }
+  }
+  return { words, tagsBefore: Int32Array.from(before) };
+}
+
 /** A run of current words is only wrappable in place when no tag sits inside it. */
-function contiguous(tk: Tok[], words: Tok[], c0: number, c1: number): boolean {
-  const a = tk.indexOf(words[c0]!);
-  const b = tk.indexOf(words[c1 - 1]!);
-  for (let k = a; k <= b; k++) if (tk[k]!.t === "tag") return false;
-  return true;
+function contiguous(ix: WordIndex, c0: number, c1: number): boolean {
+  return ix.tagsBefore[c1 - 1] === ix.tagsBefore[c0];
 }
 
 /**
@@ -225,10 +252,22 @@ export function diffField(
   currentHtml: string,
 ): FieldDelta | null {
   const pw = wordToks(priorHtml).map((t) => t.raw);
-  const tk = tokens(currentHtml);
-  const cwTok = tk.filter((t) => t.t === "w");
-  const cw = cwTok.map((t) => t.raw);
+  const ix = wordIndex(currentHtml);
+  const cw = ix.words.map((t) => t.raw);
   if (pw.join(" ") === cw.join(" ")) return null;
+
+  // Too long to align. The field is republished whole: one region covering
+  // everything, which is what the whole-mode marker draws anyway.
+  if (pw.length > MAX_DIFF_WORDS || cw.length > MAX_DIFF_WORDS) {
+    return {
+      field,
+      inline,
+      mode: "whole",
+      regions: [{ d0: 0, d1: pw.length, c0: 0, c1: cw.length }],
+      priorWords: pw,
+      density: 1,
+    };
+  }
 
   const regs = regions(lcsOps(pw, cw));
   const moved = regs.reduce((a, r) => a + (r.d1 - r.d0) + (r.c1 - r.c0), 0);
@@ -236,7 +275,7 @@ export function diffField(
   // An inserted run that straddles a tag cannot be wrapped where it stands. A
   // one-line field is drawn inside a summary and has nowhere else to go, so it
   // wraps what it can; a block hands the whole paragraph over instead.
-  const splits = regs.some((r) => r.c1 > r.c0 && !contiguous(tk, cwTok, r.c0, r.c1));
+  const splits = regs.some((r) => r.c1 > r.c0 && !contiguous(ix, r.c0, r.c1));
   const mode: FieldDelta["mode"] = !inline && (density > DENSE || splits) ? "whole" : "words";
   return { field, inline, mode, regions: regs, priorWords: pw, density };
 }
@@ -333,8 +372,8 @@ function gone(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelt
     status: "removed",
     fields: [],
     former: {
-      head: textOf(head!.html),
-      body: rest.map((f) => textOf(f.html)).filter((t) => t !== ""),
+      head: head!.html,
+      body: rest.map((f) => f.html).filter((h) => h !== ""),
     },
     codeMoved: false,
   };
@@ -477,37 +516,70 @@ type Edit = { at: number; del: number; ins: string };
  * because one would fight the row's own; the prior words sit in place and the
  * row's chevron is the one tap. Nothing here needs JavaScript.
  */
-export function markField(html: string, d: FieldDelta, owner: string): string {
-  const tk = tokens(html);
-  const cwTok = tk.filter((t) => t.t === "w");
+export function markField(
+  html: string,
+  d: FieldDelta,
+  owner: string,
+  control = false,
+): string {
+  const ix = wordIndex(html);
+  const w = ix.words;
   const edits: Edit[] = [];
   const cut = (at: number, del: number, ins: string) => edits.push({ at, del, ins });
   const prior = d.priorWords;
+  // A one-line field inside a summary carries no control of its own, because one
+  // would fight the row's own chevron. A one-line field standing on its own, like
+  // the review title, has no row to borrow and so grows one.
+  const own = !d.inline || control;
   let k = 0;
+  const box = () => boxId(owner, d.field, ++k);
+
+  /** Every word of a run, wrapped where it stands. A run that straddles a tag is
+   *  wrapped piece by piece rather than dropped: the mark has to be there, because
+   *  the chip above it says it is. */
+  const insRuns = (c0: number, c1: number) => {
+    let a = c0;
+    while (a < c1) {
+      let b = a + 1;
+      while (b < c1 && contiguous(ix, a, b + 1)) b++;
+      cut(
+        w[a]!.s,
+        w[b - 1]!.e - w[a]!.s,
+        `<ins class="dw dnew">${html.slice(w[a]!.s, w[b - 1]!.e)}</ins>`,
+      );
+      a = b;
+    }
+  };
+
+  /** The prior words on their own, next to where they used to stand. */
+  const priorOnly = (at: number, was: string) => {
+    if (!own) {
+      cut(at, 0, `<span class="dp">${was} </span>`);
+      return;
+    }
+    const id = box();
+    cut(
+      at,
+      0,
+      `<input type="checkbox" class="dtog" id="${id}" aria-label="prior text">` +
+        `<label class="dw dxo" for="${id}">${CHEV}</label>` +
+        `<span class="dp">${was} </span>`,
+    );
+  };
 
   if (d.mode === "whole") {
     for (const r of d.regions) {
       if (r.c1 <= r.c0) continue;
-      let a = r.c0;
-      while (a < r.c1) {
-        let b = a + 1;
-        while (b < r.c1 && contiguous(tk, cwTok, a, b + 1)) b++;
-        cut(
-          cwTok[a]!.s,
-          cwTok[b - 1]!.e - cwTok[a]!.s,
-          `<ins class="dw dnew">${html.slice(cwTok[a]!.s, cwTok[b - 1]!.e)}</ins>`,
-        );
-        a = b;
-      }
+      insRuns(r.c0, r.c1);
     }
     // A field with no base text is new rather than rewritten, and there is no
     // prior paragraph to open.
     if (prior.length > 0) {
-      const id = boxId(owner, d.field, ++k);
+      const id = box();
       cut(
         html.length,
         0,
-        `<input type="checkbox" class="dtog" id="${id}">` +
+        `<input type="checkbox" class="dtog" id="${id}" aria-label="prior text">` +
           `<label class="dw dall" for="${id}">${CHEV}</label>` +
           `<span class="dp dpb">${prior.join(" ")}</span>`,
       );
@@ -515,42 +587,33 @@ export function markField(html: string, d: FieldDelta, owner: string): string {
   } else {
     for (const r of d.regions) {
       const was = prior.slice(r.d0, r.d1).join(" ");
-      const hasIns = r.c1 > r.c0 && contiguous(tk, cwTok, r.c0, r.c1);
-      const at = r.c0 < cwTok.length ? cwTok[r.c0]!.s : html.length;
-      if (hasIns) {
-        const slice = html.slice(cwTok[r.c0]!.s, cwTok[r.c1 - 1]!.e);
-        const span = cwTok[r.c1 - 1]!.e - cwTok[r.c0]!.s;
+      const hasIns = r.c1 > r.c0;
+      const inOne = hasIns && contiguous(ix, r.c0, r.c1);
+      const at = r.c0 < w.length ? w[r.c0]!.s : html.length;
+      if (inOne) {
+        const slice = html.slice(w[r.c0]!.s, w[r.c1 - 1]!.e);
+        const span = w[r.c1 - 1]!.e - w[r.c0]!.s;
         if (was === "") {
-          cut(cwTok[r.c0]!.s, span, `<ins class="dw dnew">${slice}</ins>`);
-        } else if (d.inline) {
-          cut(
-            cwTok[r.c0]!.s,
-            span,
-            `<ins class="dw">${slice}</ins><span class="dp"> ${was}</span>`,
-          );
+          cut(w[r.c0]!.s, span, `<ins class="dw dnew">${slice}</ins>`);
+        } else if (!own) {
+          cut(w[r.c0]!.s, span, `<ins class="dw">${slice}</ins><span class="dp"> ${was}</span>`);
         } else {
-          const id = boxId(owner, d.field, ++k);
+          const id = box();
           cut(
-            cwTok[r.c0]!.s,
+            w[r.c0]!.s,
             span,
-            `<input type="checkbox" class="dtog" id="${id}">` +
+            `<input type="checkbox" class="dtog" id="${id}" aria-label="prior text">` +
               `<label class="dw" for="${id}"><ins>${slice}</ins>${CHEV}</label>` +
               `<span class="dp"> ${was}</span>`,
           );
         }
+      } else if (hasIns) {
+        // The inserted run crosses a tag, so it cannot be one mark. It becomes one
+        // mark per piece, and the prior words hang off their own control beside it.
+        insRuns(r.c0, r.c1);
+        if (was !== "") priorOnly(at, was);
       } else if (was !== "") {
-        if (d.inline) {
-          cut(at, 0, `<span class="dp">${was} </span>`);
-        } else {
-          const id = boxId(owner, d.field, ++k);
-          cut(
-            at,
-            0,
-            `<input type="checkbox" class="dtog" id="${id}">` +
-              `<label class="dw dxo" for="${id}">${CHEV}</label>` +
-              `<span class="dp">${was} </span>`,
-          );
-        }
+        priorOnly(at, was);
       }
     }
   }
@@ -569,10 +632,13 @@ export function marked(
   entity: EntityDelta | null,
   field: string,
   owner: string,
+  /** True for a one-line field that stands on its own rather than inside a
+   *  summary, so its prior text needs a control of its own to open. */
+  control = false,
 ): string {
   if (!entity) return html;
   const d = entity.fields.find((f) => f.field === field);
-  return d ? markField(html, d, owner) : html;
+  return d ? markField(html, d, owner, control) : html;
 }
 
 /** The chip an entity carries, or nothing. The only place a chip is minted: the
