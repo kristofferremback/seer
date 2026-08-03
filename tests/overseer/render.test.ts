@@ -516,14 +516,14 @@ describe("the page itself", () => {
       "--wash-add: hsl(var(--add) / 0.13);",
       "--wash-rem: hsl(var(--remove) / 0.11);",
       "--rail-add: hsl(var(--add) / 0.8);",
-      "--syn-cm: 8 12% 36%;",
+      "--syn-cm: 10 14% 50%;",
       // The syntax hues were raised off the prototype's values after measuring a
       // real page: at the old chroma ceiling a keyword cleared body text by dE 23
       // with a 5.7 lightness gap, which reads as no colour at all. Hue distance
       // from the semantic marks is what keeps them apart, and it is unchanged.
-      "--syn-kw: 275 34% 38%;",
-      "--syn-st: 205 48% 36%;",
-      "--syn-kw: 285 52% 74%;",
+      "--syn-kw: 276 44% 42%;",
+      "--syn-st: 210 62% 38%;",
+      "--syn-kw: 283 58% 76%;",
     ]) {
       expect(html).toContain(token);
     }
