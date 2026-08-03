@@ -7,6 +7,7 @@ import {
   collectPullDiff,
   DiffParseError,
 } from "../../src/overseer/diff";
+import { GithubError } from "../../src/overseer/github";
 import type { GithubFile } from "../../src/overseer/github";
 import type { Hunk } from "../../src/overseer/types";
 import { fakeGithubClient, loadFiles, loadDegenerateFiles, degenerateDiff } from "./github-fixtures";

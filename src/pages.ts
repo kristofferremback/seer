@@ -921,6 +921,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
       `<a href="${GITHUB_URL}">github</a>`,
       `<a href="mailto:${CONTACT_EMAIL}">email</a>`,
       `<a href="/skill.md"><code>skill.md</code></a>`,
+      `<a href="/overseer/agent.md"><code>overseer</code></a>`,
       signedIn ? `<a href="/bundles">bundles</a>` : `<a href="/login">Sign in</a>`,
     ])}
   </div>

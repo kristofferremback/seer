@@ -1914,7 +1914,7 @@ export function renderReviewPage(input: RenderInput): string {
     questionsSection(input, annotations, ctx.basePath) +
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
-    )}</p>\n` +
+    )} · <a href="/overseer/agent.md">give your own agent this</a></p>\n` +
     `</main>\n<script>${PAGE_SCRIPT}</script>\n` +
     // A pinned version is a record of what was published, so it gets no live channel:
     // only the page reading the current version can go behind while it is open.

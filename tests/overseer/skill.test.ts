@@ -90,3 +90,31 @@ describe("overseer skill doc", () => {
     expect(doc.includes("—")).toBe(false);
   });
 });
+
+describe("the agent skill document", () => {
+  test("it is served, public and markdown, and says how to install itself", async () => {
+    const res = await fetch(`${base}/overseer/agent.md`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/markdown");
+    const text = await res.text();
+    // It is the file a person saves, so it carries its own frontmatter and says where.
+    expect(text.startsWith("---")).toBe(true);
+    expect(text).toContain("name: overseer");
+    expect(text).toContain("~/.claude/skills/overseer/SKILL.md");
+    expect(text).toContain("SEER_API_KEY");
+    // The rule the whole design rests on has to survive into the installed copy.
+    expect(text).toContain("You do not write the review. A fresh sub-agent does.");
+    // It points the witness at the other document rather than repeating it.
+    expect(text).toContain("/overseer/skill.md");
+  });
+
+  test("the two documents are different documents", async () => {
+    const agent = await (await fetch(`${base}/overseer/agent.md`)).text();
+    const witness = await (await fetch(`${base}/overseer/skill.md`)).text();
+    expect(agent).not.toBe(witness);
+    // The witness doc tells an agent what to write; the agent doc tells a person how to
+    // dispatch one. Neither should have grown the other's job.
+    expect(witness).not.toContain("~/.claude/skills");
+    expect(agent).not.toContain("Budgets are the schema");
+  });
+});
