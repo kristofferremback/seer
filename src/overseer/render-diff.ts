@@ -19,6 +19,7 @@
 
 import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
+import { chip, marked, type DeltaIndex, type EntityDelta } from "./delta";
 import { icon, safeBlock, safeInline, shortSha } from "./render-evidence";
 import type { Group, Hunk, HunkLine, StatementKind } from "./types";
 
@@ -367,7 +368,12 @@ export function groupsInOrder(groups: Group[]): Group[] {
   );
 }
 
-function groupBlock(group: Group, byId: Map<string, Hunk>, order: Map<string, number>): string {
+function groupBlock(
+  group: Group,
+  byId: Map<string, Hunk>,
+  order: Map<string, number>,
+  d: EntityDelta | null,
+): string {
   const files = filesOf(group, byId, order);
   // The badge counts hunks, not files: a group is a set of hunks, and the number beside
   // its title is how much of the diff it holds.
@@ -384,13 +390,16 @@ function groupBlock(group: Group, byId: Map<string, Hunk>, order: Map<string, nu
     `<details class="grp" id="${escapeHtml(group.id)}" data-kind="${escapeHtml(group.kind)}">` +
     `<summary>${icon("chev", "tick")}` +
     `${icon(group.kind, `ic ic-lg k-${group.kind}`, KIND_LABEL[group.kind])}` +
-    `<span class="gname">${safeInline(group.title)}</span>` +
+    `<span class="gname">${marked(safeInline(group.title), d, "title", group.id)}</span>` +
+    `${chip(d)}` +
     `<span class="gcount">${count}</span>` +
     `</summary>` +
     `<div class="grp-body">` +
     // Block markdown, the way the data model defines it: a group paragraph may carry
     // emphasis, a link, a list or a fenced block.
-    (group.paragraph.trim() === "" ? "" : `<div class="gsum">${safeBlock(group.paragraph)}</div>`) +
+    (group.paragraph.trim() === ""
+      ? ""
+      : `<div class="gsum">${marked(safeBlock(group.paragraph), d, "paragraph", group.id)}</div>`) +
     `<div class="frows">${rows}</div>` +
     `</div></details>`
   );
@@ -398,11 +407,30 @@ function groupBlock(group: Group, byId: Map<string, Hunk>, order: Map<string, nu
 
 /** The whole section. Every hunk the document carries reaches the page exactly once,
  *  because the groups partition them and each group draws the ones it names. */
-export function walkthroughSection(doc: ReviewDoc): string {
+export function walkthroughSection(doc: ReviewDoc, delta: DeltaIndex | null = null): string {
   const byId = new Map(doc.hunks.map((h) => [h.id, h] as const));
   const order = new Map(doc.hunks.map((h, i) => [h.id, i] as const));
   const groups = groupsInOrder(doc.groups)
-    .map((g) => groupBlock(g, byId, order))
+    .map((g) => groupBlock(g, byId, order, delta ? delta.get("group", g.id) : null))
     .join("");
-  return `<section id="walkthrough"><h2>Walkthrough</h2><div class="walk">${groups}</div></section>`;
+  // A group the base version had and this one does not is a stub, like any other
+  // removed entity: the walkthrough is a partition of the diff, and a partition
+  // that quietly lost a part is a partition a reader cannot check.
+  const removed = delta
+    ? delta
+        .removed("group")
+        .map(
+          (e) =>
+            `<details class="grp dgoneunit" id="dgone-${escapeHtml(e.id)}">` +
+            `<summary>${icon("chev", "tick")}` +
+            `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
+            `<span class="rev">removed</span>` +
+            `</summary>` +
+            `<div class="grp-body">${(e.former ? e.former.body : [])
+              .map((t) => `<p class="dp dpb">${t}</p>`)
+              .join("")}</div></details>`,
+        )
+        .join("")
+    : "";
+  return `<section id="walkthrough"><h2>Walkthrough</h2><div class="walk">${groups}${removed}</div></section>`;
 }

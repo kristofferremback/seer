@@ -17,8 +17,26 @@
 
 import { escapeHtml } from "../escape";
 import { getWorkspace } from "../db";
+import { sessionUser } from "../auth";
 import { openAttachment, attachmentLocation } from "../store";
-import { getAttachment, getReviewVersion, resolveReview, type ReviewDoc } from "./db";
+import {
+  getAttachment,
+  getReviewRead,
+  getReviewVersion,
+  listAnnotations,
+  listReviewVersions,
+  resolveReview,
+  setReviewRead,
+  type ReviewDoc,
+} from "./db";
+import {
+  chip,
+  computeDelta,
+  DeltaIndex,
+  marked,
+  prBodyHtml,
+  type EntityDelta,
+} from "./delta";
 import { freshnessOf, readableWorkspaces } from "./read";
 import { KIND_LABEL, walkthroughSection } from "./render-diff";
 import {
@@ -32,6 +50,7 @@ import {
 } from "./render-evidence";
 import {
   prKey,
+  type Annotation,
   type Evidence,
   type Freshness,
   type Note,
@@ -1226,6 +1245,40 @@ const PAGE_SCRIPT = `
 })();
 `;
 
+/** The delta's own ink. Every prior-text reveal is a checkbox and a label, so the
+ *  marks open with no script at all; the checkbox itself is never seen. */
+const DELTA_STYLE = `
+  .dtog { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  .dw { border-radius: 3px; background: var(--word-add); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  label.dw { cursor: pointer; padding: 0 2px; }
+  .dw ins, ins.dw { text-decoration: none; }
+  .dtick { width: 10px; height: 10px; margin-left: 3px; vertical-align: baseline; color: hsl(var(--muted)); fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; transition: transform 120ms ease; }
+  .dtog:checked + .dw .dtick, .dtog:checked + .dw.dxo .dtick, .dtog:checked + .dw.dall .dtick { transform: rotate(90deg); }
+  .dw.dxo, .dw.dall { background: none; color: hsl(var(--muted)); }
+  .dp { display: none; color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
+  .dtog:checked + .dw + .dp { display: inline; }
+  .dp.dpb { display: block; margin-top: 6px; padding: 6px 8px; text-decoration: none; }
+  .dtog:checked + .dw + .dp.dpb { display: block; }
+  details.row[open] .dp, details.note[open] .dp, details.grp[open] .dp.dpstub { display: inline; }
+  .dgoneunit { opacity: 0.85; }
+  .dgoneunit .dgone-body { padding: 4px 0 8px; }
+  .dgoneunit .dp, .dgoneunit .dp.dpb { display: block; text-decoration: none; }
+  ins.dnew { text-decoration: none; }
+  .rev { display: inline-block; margin-right: 6px; padding: 1px 6px; border: 1px solid hsl(var(--line)); border-radius: 999px; font-size: 11px; letter-spacing: 0.02em; color: hsl(var(--muted)); background: hsl(var(--paper-sunk)); vertical-align: middle; }
+  .rev-moved { color: hsl(var(--change)); }
+  .dbase { color: hsl(var(--muted)); }
+  .revs { margin: 10px 0 2px; }
+  .revs > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12.5px; color: hsl(var(--muted)); }
+  .revs > summary::-webkit-details-marker { display: none; }
+  .revs[open] > summary .tick { transform: rotate(90deg); }
+  .revlist { margin: 8px 0 0; padding: 0; list-style: none; border-top: 1px solid hsl(var(--line)); }
+  .rv { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; padding: 5px 0; border-bottom: 1px solid hsl(var(--line)); font-size: 12.5px; color: hsl(var(--muted)); }
+  .rv-n { font-family: var(--font-mono); color: hsl(var(--ink-soft)); }
+  .rv.is-here .rv-n { font-weight: 600; color: hsl(var(--ink)); }
+  .rv.is-base { background: hsl(var(--paper-sunk)); }
+  .rv-from { margin-left: auto; }
+`;
+
 const FAVICON =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' " +
   "stroke='%231f1614' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath " +
@@ -1238,17 +1291,14 @@ const FAVICON =
  *  on the page Overseer did not validate as constrained markdown, so it is not parsed
  *  as any markup at all: paragraphs, escaped. It is also unbounded and derived, so it
  *  gets its own fold rather than sitting between the authored detail and the ref. */
-function prBody(ownerId: string, body: string): string {
-  const paras = body
-    .split(/\n{2,}/)
-    .map((p) => p.trim())
-    .filter((p) => p !== "");
-  if (paras.length === 0) return "";
+function prBody(ownerId: string, body: string, d: EntityDelta | null): string {
+  const html = prBodyHtml(body);
+  if (html === "") return "";
   return (
     `<details class="fold" id="${escapeHtml(ownerId)}-body">` +
     `<summary>${icon("chev", "tick")}<span class="fh"><b>description</b></span></summary>` +
     `<div class="fold-body prbody-body">` +
-    paras.map((p) => `<p class="prbody">${escapeHtml(p)}</p>`).join("") +
+    marked(html, d, "body", `${ownerId}-body`) +
     `</div></details>`
   );
 }
@@ -1267,27 +1317,28 @@ function refsById(doc: ReviewDoc): Map<string, Ref> {
   return byId;
 }
 
-function card(pr: Pr, refs: Map<string, Ref>): string {
+function card(pr: Pr, refs: Map<string, Ref>, ctx: RenderCtx): string {
   const kinds = pr.kinds
     .map((k) => icon(k, `ic k-${k}`, KIND_LABEL[k] ?? k))
     .join("");
   const owner = `pr-${pr.number}`;
   const detailRef = refs.get(pr.detailRef);
   const detailFold = detailRef ? refFold(owner, detailRef) : "";
+  const d = ctx.delta ? ctx.delta.get("pr", prKey(pr.repo, pr.number)) : null;
   return (
     `<details class="card" id="${escapeHtml(owner)}">` +
     `<summary>` +
     `<a class="c-ref" href="https://github.com/${escapeHtml(pr.repo)}/pull/${pr.number}">` +
     `${icon("pr")}<span class="c-reftext">${escapeHtml(prKey(pr.repo, pr.number))}</span></a>` +
-    `<span class="c-kinds">${kinds}</span>` +
+    `<span class="c-kinds">${kinds}${chip(d)}</span>` +
     `${icon("chev", "tick")}` +
     `<span class="c-title">${escapeHtml(pr.title)}</span>` +
-    `<span class="c-line">${safeInline(pr.gist)}</span>` +
+    `<span class="c-line">${marked(safeInline(pr.gist), d, "gist", owner)}</span>` +
     `</summary>` +
     `<div class="card-body">` +
-    safeBlock(pr.detail) +
+    marked(safeBlock(pr.detail), d, "detail", owner) +
     detailFold +
-    prBody(owner, pr.body) +
+    prBody(owner, pr.body, d) +
     `</div></details>`
   );
 }
@@ -1319,7 +1370,7 @@ function stackOrder(prs: Pr[]): Pr[] {
 /** The chain. Arrows are the claim that one pull request sits on the one above it, so
  *  they are drawn only for a stack; a set of unrelated pull requests gets cards alone,
  *  and no base line, because a set has no one base to name. */
-function chain(doc: ReviewDoc): string {
+function chain(doc: ReviewDoc, ctx: RenderCtx): string {
   const stack = doc.kind === "stack";
   const prs = stack ? stackOrder(doc.prs) : doc.prs;
   const root = prs[0];
@@ -1330,7 +1381,7 @@ function chain(doc: ReviewDoc): string {
       : "";
   const arrow = `${icon("arrow", "arw")}`;
   const refs = refsById(doc);
-  const cards = prs.map((pr) => card(pr, refs)).join(stack ? arrow : "");
+  const cards = prs.map((pr) => card(pr, refs, ctx)).join(stack ? arrow : "");
   return `<div class="chain">${base}${prs.length > 0 && stack ? arrow : ""}${cards}</div>`;
 }
 
@@ -1346,15 +1397,36 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
   const refs = uniqueRefs(s.refs);
   const chips = refs.map((r) => refChip(s.id, r)).join(" ");
   const folds = refs.map((r) => refFold(s.id, r)).join("");
+  const d = ctx.delta ? ctx.delta.get("statement", s.id) : null;
   return (
     `<details class="row" id="${escapeHtml(s.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(s.kind, `ic k-${s.kind}`, KIND_LABEL[s.kind] ?? s.kind)}` +
-    `<span class="rwhat">${safeInline(s.text)}</span>` +
-    `<span class="rrefs">${chips}</span>` +
+    `<span class="rwhat">${marked(safeInline(s.text), d, "text", s.id)}</span>` +
+    `<span class="rrefs">${chip(d)}${chips}</span>` +
     `</summary>` +
-    `<div class="row-body">${safeBlock(s.body)}${folds}` +
+    `<div class="row-body">${marked(safeBlock(s.body), d, "body", s.id)}${folds}` +
     renderEvidence(s.evidence, s.id, ctx) +
     `</div></details>`
+  );
+}
+
+/** An entity the base version had and this one does not, drawn as a stub that
+ *  opens to everything it used to say. An absence a reader cannot open is a
+ *  claim they have to take on trust, so the former content comes with it. */
+function removedStub(e: EntityDelta, cls: string): string {
+  const former = e.former ?? { head: "", body: [] };
+  const id = `dgone-${e.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  const body = former.body
+    .map((t) => `<p class="dp dpb">${t}</p>`)
+    .join("");
+  return (
+    `<details class="${cls} dgoneunit" id="${escapeHtml(id)}">` +
+    `<summary>${icon("chev", "tick")}` +
+    `<span class="none"><span class="dp dpstub">${former.head}</span></span>` +
+    `<span class="rrefs"><span class="rev">removed</span></span>` +
+    `</summary>` +
+    `<div class="dgone-body">${body === "" ? `<p class="dp dpb"></p>` : body}</div>` +
+    `</details>`
   );
 }
 
@@ -1362,16 +1434,20 @@ function noteRow(n: Note, ctx: RenderCtx): string {
   const refs = uniqueRefs(n.refs);
   const chips = refs.map((r) => refChip(n.id, r)).join(" ");
   const folds = refs.map((r) => refFold(n.id, r)).join("");
+  const d = ctx.delta ? ctx.delta.get("note", n.id) : null;
   const checks =
     n.checks.length === 0
       ? ""
-      : `<ul class="checks">${n.checks.map((c) => `<li>${safeInline(c)}</li>`).join("")}</ul>`;
+      : `<ul class="checks">${n.checks
+          .map((c, i) => `<li>${marked(safeInline(c), d, `check-${i}`, n.id)}</li>`)
+          .join("")}</ul>`;
   return (
     `<details class="note is-${escapeHtml(n.kind)}" id="${escapeHtml(n.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(n.kind, `ic k-${n.kind}`, n.kind)}` +
-    `<span class="none">${safeInline(n.text)}</span>` +
+    `<span class="none">${marked(safeInline(n.text), d, "text", n.id)}</span>` +
+    `${chip(d) === "" ? "" : `<span class="rrefs">${chip(d)}</span>`}` +
     `</summary>` +
-    `<div class="note-body">${safeBlock(n.body)}${checks}${chips === "" ? "" : `<p class="rrefs">${chips}</p>`}${folds}` +
+    `<div class="note-body">${marked(safeBlock(n.body), d, "body", n.id)}${checks}${chips === "" ? "" : `<p class="rrefs">${chips}</p>`}${folds}` +
     renderEvidence(n.evidence, n.id, ctx) +
     `</div></details>`
   );
@@ -1395,6 +1471,20 @@ interface RenderCtx {
   wsId: string;
   /** The path this page is served under, which is what an attachment hangs off. */
   basePath: string;
+  /** What moved since the base version, or null when this page has no base. */
+  delta: DeltaIndex | null;
+}
+
+/** One row of the revision menu. Counts are derived from the delta between a
+ *  version and the one before it, so the timeline says the same thing the page
+ *  says, computed the same way. */
+export interface TimelineEntry {
+  version: number;
+  createdAt: number;
+  revised: number;
+  added: number;
+  removed: number;
+  codeMoved: boolean;
 }
 
 export interface RenderInput {
@@ -1406,11 +1496,60 @@ export interface RenderInput {
   /** True when the URL pinned a version rather than asking for the current one. */
   pinned: boolean;
   freshness: Record<string, Freshness>;
+  /** The version the marks are measured against, or null for a page with none. */
+  baseVersion?: number | null;
+  /** The delta from that base. Null and baseVersion null move together. */
+  delta?: DeltaIndex | null;
+  /** Newest first. Empty leaves the revision menu off the page. */
+  timeline?: TimelineEntry[];
+}
+
+/** The revision menu: every published version, what moved in it, and the two
+ *  ways to reach it. `/v/:n` reads that version; `?from=n` keeps this version on
+ *  screen and moves the base the marks are measured against. */
+function revisionMenu(input: RenderInput, basePath: string): string {
+  const entries = input.timeline ?? [];
+  if (entries.length === 0) return "";
+  const rows = entries
+    .map((e) => {
+      const moved: string[] = [];
+      if (e.added > 0) moved.push(`${e.added} new`);
+      if (e.revised > 0) moved.push(`${e.revised} revised`);
+      if (e.removed > 0) moved.push(`${e.removed} removed`);
+      const counts = moved.length === 0 ? "nothing moved" : moved.join(" · ");
+      const at = new Date(e.createdAt);
+      const on = Number.isNaN(at.getTime()) ? "" : at.toISOString().slice(0, 10);
+      const here = e.version === input.version;
+      const isBase = e.version === (input.baseVersion ?? null);
+      return (
+        `<li class="rv${here ? " is-here" : ""}${isBase ? " is-base" : ""}">` +
+        `<a class="rv-n" href="${escapeHtml(basePath)}/v/${e.version}">v${e.version}</a>` +
+        `<span class="rv-on">${escapeHtml(on)}</span>` +
+        `<span class="rv-counts">${escapeHtml(counts)}</span>` +
+        (e.codeMoved ? `<span class="rev rev-moved">code moved</span>` : "") +
+        (here
+          ? `<span class="rv-from">reading</span>`
+          : `<a class="rv-from" href="${escapeHtml(basePath)}${
+              input.pinned ? `/v/${input.version}` : ""
+            }?from=${e.version}">from v${e.version}</a>`) +
+        `</li>`
+      );
+    })
+    .join("");
+  return (
+    `<details class="revs" id="revisions"><summary>${icon("chev", "tick")}` +
+    `<span class="revs-h">revisions</span>` +
+    `<span class="revs-n">${entries.length}</span></summary>` +
+    `<ol class="revlist">${rows}</ol></details>`
+  );
 }
 
 export function renderReviewPage(input: RenderInput): string {
   const { doc, slug, wsId } = input;
-  const ctx: RenderCtx = { wsId, basePath: `/${wsId}/r/${slug}` };
+  const delta = input.delta ?? null;
+  const ctx: RenderCtx = { wsId, basePath: `/${wsId}/r/${slug}`, delta };
+  const review = delta ? delta.get("review", "review") : null;
+  const summaryDelta = delta ? delta.get("summary", "summary") : null;
 
   const behind = doc.prs.filter((pr) => input.freshness[prKey(pr.repo, pr.number)] === "behind");
   const heads = behind.length === 0 ? "heads current" : `${behind.length} of ${doc.prs.length} behind`;
@@ -1419,10 +1558,19 @@ export function renderReviewPage(input: RenderInput): string {
     ? `version ${input.version} of ${input.latestVersion}`
     : `version ${input.version}`;
 
-  const rows = doc.statements.map((s) => statementRow(s, ctx)).join("");
-  const notes = notesInOrder(doc.notes)
-    .map((n) => noteRow(n, ctx))
-    .join("");
+  const rows =
+    doc.statements.map((s) => statementRow(s, ctx)).join("") +
+    (delta ? delta.removed("statement").map((e) => removedStub(e, "row")).join("") : "");
+  const notes =
+    notesInOrder(doc.notes)
+      .map((n) => noteRow(n, ctx))
+      .join("") +
+    (delta ? delta.removed("note").map((e) => removedStub(e, "note is-note")).join("") : "");
+  // The page says what it is measuring against, once, next to what it is.
+  const baseMark =
+    input.baseVersion == null
+      ? ""
+      : `<span class="dbase">${escapeHtml(`marks since v${input.baseVersion}`)}</span>`;
 
   return (
     `<!doctype html>\n<html lang="en">\n<head>\n` +
@@ -1434,7 +1582,7 @@ export function renderReviewPage(input: RenderInput): string {
     `<link rel="icon" type="image/svg+xml" href="${FAVICON}">\n` +
     `<link rel="preload" href="/fonts/switzer.woff2" as="font" type="font/woff2" crossorigin>\n` +
     `<link rel="preload" href="/fonts/commit-mono-400.woff2" as="font" type="font/woff2" crossorigin>\n` +
-    `<style>\n${STYLE}\n${EVIDENCE_STYLE}</style>\n` +
+    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${DELTA_STYLE}</style>\n` +
     `</head>\n<body>\n` +
     SPRITE +
     `\n<main class="doc">\n` +
@@ -1446,19 +1594,21 @@ export function renderReviewPage(input: RenderInput): string {
     `aria-label="Switch between the light and dark reading surface">` +
     `${icon("contrast", "mark")}</button>` +
     `</div>` +
-    `<h1 class="title">${safeInline(doc.title)}</h1>` +
+    `<h1 class="title">${marked(safeInline(doc.title), review, "title", "review")}</h1>` +
     `<p class="meta"><span>${escapeHtml(doc.kind)}</span><span>${escapeHtml(count)}</span>` +
-    `<span>${escapeHtml(heads)}</span></p>` +
-    chain(doc) +
+    `<span>${escapeHtml(heads)}</span>${baseMark}</p>` +
+    revisionMenu(input, ctx.basePath) +
+    chain(doc, ctx) +
     `</header>\n` +
-    `<section id="summary"><h2>Summary</h2>${safeBlock(doc.summary)}` +
+    `<section id="summary"><h2>Summary</h2>` +
+    `${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary")}` +
     `<div class="rows">${rows}</div>` +
     `<p class="contents"><span class="nb"><a href="#summary">summary</a> ·</span> ` +
     `<span class="nb"><a href="#notes">review notes</a> ·</span> ` +
     `<span class="nb"><a href="#walkthrough">walkthrough</a></span></p>` +
     `</section>\n` +
     `<section id="notes"><h2>Review notes</h2><div class="notes">${notes}</div></section>\n` +
-    walkthroughSection(doc) +
+    walkthroughSection(doc, delta) +
     `\n` +
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
@@ -1483,6 +1633,41 @@ function softNotFound(): Response {
       headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
     },
   );
+}
+
+/**
+ * The version the marks are measured against.
+ *
+ * `?from=n` wins outright, because a reader who names a base has said what they
+ * want to see. Otherwise it is the version this reader last opened, clamped below
+ * the one being read: reopening v3 after reading v3 shows what moved into it, not
+ * nothing. A reader who has never opened this review gets the previous version, so
+ * a first visit still says what the last publish did. Version 1 has no base at all
+ * and renders no marks.
+ */
+export function baseVersion(
+  from: string | null,
+  asked: number,
+  lastOpened: number | null,
+): number | null {
+  if (from !== null) {
+    const n = versionNumber(from);
+    if (n !== null && n < asked) return n;
+    // A `from` that names this version or one that does not exist is not a base.
+    // The page falls back rather than refusing: the reader asked for a page.
+  }
+  const want = lastOpened === null ? asked - 1 : Math.min(lastOpened, asked - 1);
+  return want >= 1 ? want : null;
+}
+
+/** The annotations as they stood at a version: the ones filed at or before it.
+ *  An annotation carries no answered-at, so an answer that landed before the base
+ *  cannot be told from one that landed after; the base side is read as open, which
+ *  marks an answer once too often rather than never. */
+function annotationsAt(all: Annotation[], version: number): Annotation[] {
+  return all
+    .filter((a) => a.version <= version)
+    .map((a) => ({ ...a, status: "open" as const }));
 }
 
 function versionNumber(raw: string): number | null {
@@ -1525,6 +1710,57 @@ export function handleReviewPage(
   // writes the row and the pointer in one transaction.
   if (!row) throw new Error(`Review ${ws}/${slug} has no version row for version ${asked}`);
 
+  const reader = sessionUser(req);
+  const read = reader ? getReviewRead(ws, slug, reader.id) : null;
+  const base = baseVersion(new URL(req.url).searchParams.get("from"), asked, read ? read.version : null);
+  // Read before render, written after the base is fixed: a reader who opens v3
+  // sees it against what they last read, and the next open moves on.
+  if (reader && (!read || read.version < asked)) setReviewRead(ws, slug, reader.id, asked);
+
+  const annotations = listAnnotations(ws, slug);
+  const docs = new Map<number, ReviewDoc>([[asked, row.doc]]);
+  const docAt = (n: number): ReviewDoc | null => {
+    const have = docs.get(n);
+    if (have) return have;
+    const got = getReviewVersion(ws, slug, n);
+    if (got) docs.set(n, got.doc);
+    return got ? got.doc : null;
+  };
+
+  const baseDoc = base === null ? null : docAt(base);
+  const delta =
+    base === null || !baseDoc
+      ? null
+      : new DeltaIndex(
+          computeDelta(
+            { doc: baseDoc, annotations: annotationsAt(annotations, base) },
+            { doc: row.doc, annotations },
+          ),
+        );
+
+  const timeline: TimelineEntry[] = [];
+  for (const v of listReviewVersions(ws, slug)) {
+    const cur = docAt(v.version);
+    const before = v.version > 1 ? docAt(v.version - 1) : null;
+    const counts =
+      cur && before
+        ? new DeltaIndex(
+            computeDelta(
+              { doc: before, annotations: annotationsAt(annotations, v.version - 1) },
+              { doc: cur, annotations: annotationsAt(annotations, v.version) },
+            ),
+          ).counts()
+        : { revised: 0, added: 0, removed: 0, codeMoved: 0 };
+    timeline.push({
+      version: v.version,
+      createdAt: v.created_at,
+      revised: counts.revised,
+      added: counts.added,
+      removed: counts.removed,
+      codeMoved: counts.codeMoved > 0,
+    });
+  }
+
   const html = renderReviewPage({
     wsId: ws,
     slug,
@@ -1533,6 +1769,9 @@ export function handleReviewPage(
     latestVersion: review.latest_version,
     pinned: version !== null,
     freshness: freshnessOf(ws, slug, row.doc),
+    baseVersion: delta ? base : null,
+    delta,
+    timeline,
   });
   return new Response(html, {
     status: 200,

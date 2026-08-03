@@ -1,0 +1,436 @@
+// The delta engine, and the marks it puts on a page.
+//
+// Two halves, the same shape as the renderer's own tests. The first works on the
+// pure function: two documents in, one derived delta out, with no page anywhere
+// near it. The second renders and reads the HTML, because the law the page is
+// held to is about what a reader sees: every chip on the page came from the
+// delta, and every chip has something marked inside its own row. The third
+// stretch drives the routes, because which version the marks are measured
+// against depends on what this reader last opened, which is a database fact.
+
+import { test, expect, beforeAll, afterAll, describe } from "bun:test";
+
+import { startServer } from "../../src/server";
+import { createWorkspace, db, legacyWorkspaceId, listMembers } from "../../src/db";
+import { createReviewVersion, type ReviewDoc } from "../../src/overseer/db";
+import { computeDelta, DeltaIndex, diffField, textOf } from "../../src/overseer/delta";
+import { baseVersion, renderReviewPage } from "../../src/overseer/render";
+import { prKey, type Annotation } from "../../src/overseer/types";
+import { GOLDEN_REPO } from "./fixtures/golden-review";
+import { goldenStoredDoc } from "./fixtures/stored-review";
+
+const DELTA_SOURCE = `${import.meta.dir}/../../src/overseer/delta.ts`;
+
+type Doc = ReviewDoc;
+
+/** A stored document, fixed rather than freshly stamped: two documents built for
+ *  one comparison must not differ only in the clock they were built at. */
+function doc(over: (d: Doc) => void = () => {}): Doc {
+  const base = goldenStoredDoc();
+  const d: Doc = {
+    ...base,
+    id: "rev_delta",
+    slug: "delta",
+    version: 1,
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
+  };
+  const copy: Doc = JSON.parse(JSON.stringify(d));
+  over(copy);
+  return copy;
+}
+
+function side(d: Doc, annotations: Annotation[] = []) {
+  return { doc: d, annotations };
+}
+
+function annotation(over: Partial<Annotation> = {}): Annotation {
+  return {
+    id: "ann_one",
+    target: { type: "statement", id: "st_gate" },
+    quote: null,
+    body: "Is the key path covered?",
+    status: "open",
+    answer: null,
+    version: 1,
+    createdAt: 1_700_000_000_000,
+    ...over,
+  };
+}
+
+function page(current: Doc, prev: Doc | null, annotations: Annotation[] = []): string {
+  const delta =
+    prev === null
+      ? null
+      : new DeltaIndex(computeDelta(side(prev), side(current, annotations)));
+  return renderReviewPage({
+    wsId: "ws_delta",
+    slug: "delta",
+    doc: current,
+    version: prev === null ? 1 : 2,
+    latestVersion: prev === null ? 1 : 2,
+    pinned: false,
+    freshness: {},
+    baseVersion: prev === null ? null : 1,
+    delta,
+    timeline: [],
+  });
+}
+
+/** The `details` element a chip sits inside, with its whole body. Walked rather
+ *  than matched: rows nest folds, and a regex cannot say where one ends. */
+function unitAround(html: string, at: number): string {
+  const start = html.lastIndexOf("<details", at);
+  expect(start).toBeGreaterThan(-1);
+  const re = /<details\b|<\/details>/g;
+  re.lastIndex = start;
+  let depth = 0;
+  for (let m: RegExpExecArray | null; (m = re.exec(html)); ) {
+    if (m[0] === "</details>") {
+      if (--depth === 0) return html.slice(start, m.index + "</details>".length);
+    } else depth++;
+  }
+  throw new Error("unclosed details around a chip");
+}
+
+describe("the delta itself", () => {
+  test("an id that survives with its text edited is revised, with the regions to show it", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+    });
+    const delta = computeDelta(side(before), side(after));
+    const e = delta.entities.find((x) => x.kind === "statement" && x.id === "st_gate");
+    expect(e).toBeDefined();
+    expect(e!.status).toBe("revised");
+    const field = e!.fields.find((f) => f.field === "text")!;
+    expect(field.mode).toBe("words");
+    expect(field.regions.length).toBe(1);
+    expect(field.priorWords).toContain("session");
+    expect(field.density).toBeLessThan(0.4);
+  });
+
+  test("an id the current version does not carry is removed, with what it said", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.statements = [];
+    });
+    const delta = computeDelta(side(before), side(after));
+    const e = delta.entities.find((x) => x.kind === "statement")!;
+    expect(e.status).toBe("removed");
+    expect(e.id).toBe("st_gate");
+    expect(e.former!.head).toBe("Reviews move behind the workspace session gate");
+    expect(e.former!.body[0]).toBe("The gate is the helper bundles already use.");
+  });
+
+  test("an id the base version never had is new", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.notes.push({
+        id: "no_fresh",
+        kind: "note",
+        text: "The freshness check runs on read",
+        body: "It compares the stored head.",
+        checks: [],
+        refs: [],
+        evidence: [],
+      });
+    });
+    const delta = computeDelta(side(before), side(after));
+    const e = delta.entities.find((x) => x.id === "no_fresh")!;
+    expect(e.status).toBe("new");
+    expect(e.kind).toBe("note");
+    // A new entity still marks something, so its chip is never the only sign of it.
+    expect(e.fields.length).toBe(1);
+  });
+
+  test("a body rewritten past the density threshold is shown whole", () => {
+    const before = doc((d) => {
+      d.statements[0]!.body = "one two three four five six seven eight nine ten";
+    });
+    const after = doc((d) => {
+      d.statements[0]!.body = "one two three four five alpha beta gamma delta epsilon";
+    });
+    const delta = computeDelta(side(before), side(after));
+    const field = delta.entities[0]!.fields.find((f) => f.field === "body")!;
+    expect(field.density).toBeGreaterThan(0.4);
+    expect(field.mode).toBe("whole");
+    expect(field.priorWords.join(" ")).toContain("six seven eight");
+  });
+
+  test("a light edit to the same body stays in place", () => {
+    const before = doc((d) => {
+      d.statements[0]!.body = "one two three four five six seven eight nine ten";
+    });
+    const after = doc((d) => {
+      d.statements[0]!.body = "one two three four five six seven eight nine eleven";
+    });
+    const field = computeDelta(side(before), side(after)).entities[0]!.fields.find(
+      (f) => f.field === "body",
+    )!;
+    expect(field.mode).toBe("words");
+    expect(field.density).toBeLessThan(0.4);
+  });
+
+  test("an annotation answered between the two versions is answered", () => {
+    const before = doc();
+    const after = doc();
+    const open = annotation();
+    const delta = computeDelta(
+      side(before, [open]),
+      side(after, [{ ...open, status: "answered", answer: { body: "It is", refs: [] } }]),
+    );
+    expect(delta.answered).toEqual(["ann_one"]);
+    // One that was already answered at the base did not move.
+    const still = computeDelta(
+      side(before, [{ ...open, status: "answered", answer: { body: "It is", refs: [] } }]),
+      side(after, [{ ...open, status: "answered", answer: { body: "It is", refs: [] } }]),
+    );
+    expect(still.answered).toEqual([]);
+  });
+
+  test("a pull request whose head moved is marked, without any word being marked", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.prs[0]!.headSha = "9".repeat(40);
+    });
+    const e = computeDelta(side(before), side(after)).entities.find((x) => x.kind === "pr")!;
+    expect(e.id).toBe(prKey(GOLDEN_REPO, 12));
+    expect(e.codeMoved).toBe(true);
+    expect(e.fields).toEqual([]);
+  });
+
+  test("the derived pull request description is diffed like any other prose", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.prs[0]!.body = `${d.prs[0]!.body}\n\nA paragraph the description grew.`;
+    });
+    const e = computeDelta(side(before), side(after)).entities.find((x) => x.kind === "pr")!;
+    expect(e.fields.some((f) => f.field === "body")).toBe(true);
+  });
+
+  test("two identical documents move nothing", () => {
+    expect(computeDelta(side(doc()), side(doc())).entities).toEqual([]);
+  });
+
+  test("a field with no base text is all insertion and hides nothing behind a disclosure", () => {
+    const d = diffField("text", true, "", "a wholly new line")!;
+    expect(d.priorWords).toEqual([]);
+    expect(d.regions).toEqual([{ d0: 0, d1: 0, c0: 0, c1: 4 }]);
+    expect(textOf("<p>a <em>marked</em> line</p>")).toBe("a marked line");
+  });
+});
+
+describe("the marks on the page", () => {
+  test("every chip on a rendered page has a mark inside its own row", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+      d.statements.push({
+        id: "st_keys",
+        kind: "add",
+        text: "Keys read the workspace they were minted in",
+        prs: [prKey(GOLDEN_REPO, 12)],
+        refs: [],
+        body: "One workspace, one key.",
+        evidence: [],
+      });
+      d.notes[0]!.body = "Keys are workspace scoped, and the read path proves it.";
+      d.notes.push({
+        id: "no_new",
+        kind: "note",
+        text: "A note the base version did not have",
+        body: "Body.",
+        checks: [],
+        refs: [],
+        evidence: [],
+      });
+      d.groups[0]!.title = "The session gate";
+      d.summary = `${d.summary} A sentence the summary grew.`;
+      d.prs[0]!.gist = "A gist that reads differently now";
+    });
+    const html = page(after, before);
+
+    const chips = [...html.matchAll(/<span class="rev">/g)];
+    expect(chips.length).toBeGreaterThan(3);
+    for (const m of chips) {
+      const unit = unitAround(html, m.index!);
+      const marked = /class="(dw|dp|dw dnew|dw dall|dw dxo|dp dpb|dp dpstub)/.test(unit);
+      expect(marked).toBe(true);
+    }
+    // The page says what it is measuring against.
+    expect(html).toContain("marks since v1");
+    // The summary is diffed like any other body.
+    expect(html.slice(html.indexOf('id="summary"'))).toContain('class="dw');
+  });
+
+  test("a page with no base carries no chip and no mark at all", () => {
+    const html = page(doc(), null);
+    expect(html).not.toContain('<span class="rev">');
+    expect(html).not.toContain('class="dtog"');
+    expect(html).not.toContain("marks since");
+  });
+
+  test("a removed statement comes back as a stub holding everything it said", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.statements = [];
+      d.statements.push({
+        id: "st_other",
+        kind: "add",
+        text: "Something else entirely",
+        prs: [prKey(GOLDEN_REPO, 12)],
+        refs: [],
+        body: "Body.",
+        evidence: [],
+      });
+    });
+    const html = page(after, before);
+    const at = html.indexOf('class="row dgoneunit"');
+    expect(at).toBeGreaterThan(-1);
+    const stub = unitAround(html, at);
+    expect(stub).toContain("Reviews move behind the workspace session gate");
+    expect(stub).toContain("The gate is the helper bundles already use.");
+    expect(stub).toContain('<span class="rev">removed</span>');
+  });
+
+  test("a head that moved marks the card without claiming a word changed", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.prs[0]!.headSha = "9".repeat(40);
+    });
+    const html = page(after, before);
+    expect(html).toContain("code moved");
+    expect(html).not.toContain('<span class="rev">revised</span>');
+  });
+
+  test("two renders of the same pair are byte-identical", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+      d.statements[0]!.body = "one two three four five alpha beta gamma delta epsilon";
+      d.notes = [];
+    });
+    expect(page(after, before)).toBe(page(after, before));
+  });
+
+  test("no em dash reaches the delta's own copy", async () => {
+    const source = await Bun.file(DELTA_SOURCE).text();
+    const authored = source
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("//") && !l.trimStart().startsWith("*"));
+    expect(authored.join("\n")).not.toContain("—");
+  });
+});
+
+describe("which version the marks are measured against", () => {
+  test("the reader's last-opened version wins, clamped below the one being read", () => {
+    expect(baseVersion(null, 3, 1)).toBe(1);
+    expect(baseVersion(null, 3, 3)).toBe(2);
+    expect(baseVersion(null, 3, 9)).toBe(2);
+  });
+
+  test("a reader who never opened this review gets the previous version", () => {
+    expect(baseVersion(null, 3, null)).toBe(2);
+  });
+
+  test("the first version ever published has no base and renders no marks", () => {
+    expect(baseVersion(null, 1, null)).toBe(null);
+    expect(baseVersion(null, 1, 1)).toBe(null);
+  });
+
+  test("from overrides the reader's own history, and nonsense falls back", () => {
+    expect(baseVersion("2", 4, 1)).toBe(2);
+    expect(baseVersion("4", 4, 1)).toBe(1);
+    expect(baseVersion("nope", 4, 1)).toBe(1);
+  });
+});
+
+// ---- over the routes ----
+
+let server: Awaited<ReturnType<typeof startServer>>;
+let host = "";
+let ws = "";
+
+function publish(slug: string, over: (d: Doc) => void): number {
+  const d = doc(over);
+  const { id: _id, slug: _slug, version: _version, ...rest } = d;
+  return createReviewVersion(ws, slug, rest);
+}
+
+beforeAll(async () => {
+  server = await startServer();
+  host = `http://localhost:${server.port}`;
+  const owner = listMembers(legacyWorkspaceId()!)[0]!.id;
+  ws = createWorkspace("Delta", owner);
+  db.run("SELECT 1");
+});
+
+afterAll(() => {
+  server.stop(true);
+});
+
+describe("the revision timeline over the routes", () => {
+  test("a reader who opened v1 sees v3 against v1, and from overrides it", async () => {
+    const slug = "timeline";
+    publish(slug, () => {});
+    publish(slug, (d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+    });
+    publish(slug, (d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+      d.notes[0]!.text = "A key minted before the gate reads only its own workspace";
+    });
+
+    // Opening v1 is what puts this reader's read state at v1.
+    expect((await fetch(`${host}/${ws}/r/${slug}/v/1`)).status).toBe(200);
+
+    const three = await fetch(`${host}/${ws}/r/${slug}`);
+    const html = await three.text();
+    expect(html).toContain("marks since v1");
+    // The statement moved in v2 and the note in v3, so both are marked against v1.
+    expect(html).toContain("session");
+    expect((html.match(/<span class="rev">revised<\/span>/g) ?? []).length).toBeGreaterThan(1);
+
+    const from = await (await fetch(`${host}/${ws}/r/${slug}?from=2`)).text();
+    expect(from).toContain("marks since v2");
+    // Against v2 only the note moved.
+    expect((from.match(/<span class="rev">revised<\/span>/g) ?? []).length).toBe(1);
+  });
+
+  test("a reader who never opened a review reads the newest version against the one before it", async () => {
+    const slug = "unopened";
+    publish(slug, () => {});
+    publish(slug, (d) => {
+      d.groups[0]!.title = "The gate, restated";
+    });
+    const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
+    expect(html).toContain("marks since v1");
+  });
+
+  test("the first version of a review renders no marks", async () => {
+    const slug = "firstopen";
+    publish(slug, () => {});
+    const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
+    expect(html).not.toContain("marks since");
+    expect(html).not.toContain('<span class="rev">');
+  });
+
+  test("the revision menu lists every version with what moved in it", async () => {
+    const slug = "menu";
+    publish(slug, () => {});
+    publish(slug, (d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+      d.prs[0]!.headSha = "9".repeat(40);
+    });
+    const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
+    expect(html).toContain('id="revisions"');
+    expect(html).toContain(`href="/${ws}/r/${slug}/v/2"`);
+    expect(html).toContain(`href="/${ws}/r/${slug}/v/1"`);
+    expect(html).toContain("?from=1");
+    expect(html).toContain("1 revised");
+    // v1 has nothing before it, so it moved nothing.
+    expect(html).toContain("nothing moved");
+    expect(html).toContain("code moved");
+  });
+});
