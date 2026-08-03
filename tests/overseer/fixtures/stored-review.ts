@@ -54,7 +54,7 @@ export function goldenStoredDoc(): Omit<ReviewDoc, "id" | "slug" | "version"> {
       body: pr.body,
       gist: payload.prs[i]!.gist,
       detail: payload.prs[i]!.detail,
-      detailRef: ref(`ref_pr_${pr.number}`, "src/auth.ts", pr.headSha),
+      detailRef: `ref_pr_${pr.number}`,
       kinds: ["change"],
     })),
     statements: [

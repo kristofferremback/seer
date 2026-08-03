@@ -188,6 +188,18 @@ export interface ValidationResult {
  *  groups apart, so the write path respaces the whole list. */
 export const REINDEX_EPSILON = 1e-6;
 
+/** The media types an attachment may be stored as. An allowlist rather than an
+ *  `image/*` prefix: the stored value is echoed back as the response content-type when
+ *  the bytes are served, and a header value is not a place for free text. SVG is left
+ *  out: it is a document that can carry script, and these bytes are served from the
+ *  same origin as the page. */
+export const ATTACHMENT_MEDIA_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
 // ---- helpers ----
 
 /** Code points, not UTF-16 units: an emoji in a title is one character to its author.
@@ -831,11 +843,11 @@ export function validatePublish(
       capText(errors, `${at}.caption`, a.caption, BUDGETS.chars.caption);
       checkLine(errors, `${at}.caption`, a.caption);
     }
-    if (typeof a.mediaType !== "string" || !a.mediaType.startsWith("image/")) {
+    if (typeof a.mediaType !== "string" || !ATTACHMENT_MEDIA_TYPES.has(a.mediaType)) {
       errors.push({
         field: `${at}.mediaType`,
         rule: "attachment_media_type",
-        message: `${at}.mediaType is ${typeof a.mediaType === "string" ? a.mediaType || "empty" : "absent"}; attachments are image/* to start`,
+        message: `${at}.mediaType is ${typeof a.mediaType === "string" ? a.mediaType || "empty" : "absent"}; attachments are one of ${[...ATTACHMENT_MEDIA_TYPES].join(", ")}`,
       });
     }
     if (!referencedAttachments.has(a.id)) {

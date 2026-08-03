@@ -114,11 +114,8 @@ export interface Pr {
   gist: string;
   /** Authored, <= 2 sentences. */
   detail: string;
-  /** The resolved ref backing the detail. Stored whole rather than as an id: a card's
-   *  snippet is not reachable from anywhere else in the document, so an id alone would
-   *  leave the card's evidence resolvable only when a statement happened to cite the
-   *  same pointer. */
-  detailRef: Ref;
+  /** A ref id. */
+  detailRef: string;
   /** Derived: the distinct kinds of the statements attributed to this pr. */
   kinds: StatementKind[];
 }

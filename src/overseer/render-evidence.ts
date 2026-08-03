@@ -8,6 +8,11 @@
 // it renders as its nodes and edges in the meantime rather than vanishing, because a
 // silently dropped block is evidence the author believes is on the page.
 //
+// Snippet lines are emitted as escaped plain text. The token block transcribed from the
+// prototype carries the syntax classes (kw, st, cm, ty) and the elision marker (el), but
+// nothing here assigns them yet: classing a snippet reads the same source the diff work
+// reads, so it arrives with that.
+//
 // Everything that reaches HTML from a stored document goes through escapeHtml or
 // through the constrained markdown renderer, which escapes every text node itself.
 // Nothing here interpolates a raw authored string into markup.
@@ -29,7 +34,11 @@ export function safeBlock(source: string): string {
   if (source.trim() === "") return "";
   try {
     return renderMarkdown(source);
-  } catch {
+  } catch (err) {
+    console.error("overseer: block markdown threw on a stored document", {
+      source: source.slice(0, 80),
+      error: err,
+    });
     return `<p>${escapeHtml(source)}</p>`;
   }
 }
@@ -38,7 +47,11 @@ export function safeBlock(source: string): string {
 export function safeInline(source: string): string {
   try {
     return renderInline(source);
-  } catch {
+  } catch (err) {
+    console.error("overseer: inline markdown threw on a stored document", {
+      source: source.slice(0, 80),
+      error: err,
+    });
     return escapeHtml(source);
   }
 }

@@ -501,7 +501,7 @@ function buildDocument(args: {
       body: derived.body,
       gist: pr.gist,
       detail: pr.detail,
-      detailRef: refs.get(pointerKey(pr.detailRef))!,
+      detailRef: refs.get(pointerKey(pr.detailRef))!.id,
       // The derived-kinds rule from step 4, called with the document's own statements
       // so a card's marks are tied to claims that survived validation.
       kinds: kindsForPr(statements, prKey(derived.repo, derived.number)),

@@ -606,6 +606,20 @@ describe("attachments", () => {
     expect(err.field).toBe("attachments[0].mediaType");
   });
 
+  test("an image media type outside the allowlist is rejected", () => {
+    // The stored value is echoed as a response header, so it is an allowlist, not a
+    // prefix: a header-shaped string never reaches the wire.
+    for (const bad of ["image/svg+xml", "image/png\r\nX-Injected: 1", "image/anything"]) {
+      const payload = golden();
+      payload.attachments[0]!.mediaType = bad;
+      const err = find(run(payload).errors, "attachment_media_type");
+      expect(err.field).toBe("attachments[0].mediaType");
+    }
+    const ok = golden();
+    ok.attachments[0]!.mediaType = "image/webp";
+    expect(run(ok).errors.find((e) => e.rule === "attachment_media_type")).toBeUndefined();
+  });
+
   test("evidence naming an attachment that was not uploaded is rejected", () => {
     const payload = golden();
     payload.statements[2]!.evidence = [{ type: "attachment", attachment: { id: "att_ghost" } }];

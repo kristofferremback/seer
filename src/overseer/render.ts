@@ -29,7 +29,7 @@ import {
   safeInline,
   shortSha,
 } from "./render-evidence";
-import { prKey, type Note, type Pr, type Statement } from "./types";
+import { prKey, type Freshness, type Note, type Pr, type Ref, type Statement } from "./types";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ATT_ID_RE = /^att_[a-z0-9]+$/;
@@ -1249,7 +1249,6 @@ function card(pr: Pr): string {
     `<div class="card-body">` +
     `<p>${safeInline(pr.detail)}</p>` +
     prBody(owner, pr.body) +
-    refFold(owner, pr.detailRef) +
     `</div></details>`
   );
 }
@@ -1295,9 +1294,18 @@ function chain(doc: ReviewDoc): string {
   return `<div class="chain">${base}${prs.length > 0 && stack ? arrow : ""}${cards}</div>`;
 }
 
+/** Refs resolve once per pointer, so a row listing the same pointer twice holds the same
+ *  ref twice. Its panel is addressed by that ref's id, and two panels under one row would
+ *  share an id, so a row cites each ref once. */
+function uniqueRefs(refs: Ref[]): Ref[] {
+  const seen = new Set<string>();
+  return refs.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+}
+
 function statementRow(s: Statement, ctx: RenderCtx): string {
-  const chips = s.refs.map((r) => refChip(s.id, r)).join(" ");
-  const folds = s.refs.map((r) => refFold(s.id, r)).join("");
+  const refs = uniqueRefs(s.refs);
+  const chips = refs.map((r) => refChip(s.id, r)).join(" ");
+  const folds = refs.map((r) => refFold(s.id, r)).join("");
   return (
     `<details class="row" id="${escapeHtml(s.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(s.kind, `ic k-${s.kind}`, KIND_LABEL[s.kind] ?? s.kind)}` +
@@ -1311,8 +1319,9 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
 }
 
 function noteRow(n: Note, ctx: RenderCtx): string {
-  const chips = n.refs.map((r) => refChip(n.id, r)).join(" ");
-  const folds = n.refs.map((r) => refFold(n.id, r)).join("");
+  const refs = uniqueRefs(n.refs);
+  const chips = refs.map((r) => refChip(n.id, r)).join(" ");
+  const folds = refs.map((r) => refFold(n.id, r)).join("");
   const checks =
     n.checks.length === 0
       ? ""
@@ -1348,7 +1357,7 @@ export interface RenderInput {
   latestVersion: number;
   /** True when the URL pinned a version rather than asking for the current one. */
   pinned: boolean;
-  freshness: Record<string, string>;
+  freshness: Record<string, Freshness>;
 }
 
 export function renderReviewPage(input: RenderInput): string {

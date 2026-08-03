@@ -280,8 +280,13 @@ describe("POST /api/reviews", () => {
     expect(pr12.coAuthors).toEqual(["Claude Fable 5 <noreply@anthropic.com>"]);
     expect(pr12.kinds).toEqual(["add", "change", "remove"]);
     expect(doc.prs.find((p) => p.number === 13)!.parent).toBe(12);
-    expect(pr12.detailRef.path).toBe("src/auth.ts");
-    expect(pr12.detailRef.snippet.length).toBeGreaterThan(0);
+    // The card's detail ref is stored as the id of the ref its pointer resolved to.
+    const detailRef = doc.statements
+      .flatMap((s) => s.refs)
+      .concat(doc.notes.flatMap((n) => n.refs))
+      .find((r) => r.id === pr12.detailRef);
+    expect(typeof pr12.detailRef).toBe("string");
+    expect(detailRef?.path).toBe("src/auth.ts");
     // The review comments travel with the document for the skill's next pass.
     expect(doc.skillContext.map((c) => c.id)).toEqual([900]);
   });

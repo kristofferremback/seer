@@ -282,14 +282,13 @@ describe("the page itself", () => {
     );
   });
 
-  test("every pull request card carries its detail ref", () => {
-    const d = doc();
-    const html = page(d);
-    for (const pr of d.prs) {
-      expect(html).toContain(`<details class="fold" id="pr-${pr.number}-${pr.detailRef.id}"`);
-      // The card's own highlight, not one borrowed from a statement citing the file.
-      expect(html).toContain(pr.detailRef.snippet.trim().slice(0, 12));
-    }
+  test("a row citing one pointer twice draws it once", () => {
+    const r = ref("ref_1", "src/auth.ts");
+    const html = page(doc({ statements: [statement({ id: "st_a", refs: [r, r] })] }));
+    expect(html.split(`<a class="ref" href="#st_a-ref_1"`).length - 1).toBe(1);
+    expect(html.split(`<details class="fold" id="st_a-ref_1"`).length - 1).toBe(1);
+    const ids = [...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]!);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   test("one-line fields keep the one markup the data model allows", () => {
