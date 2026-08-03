@@ -44,6 +44,7 @@ import {
   type SessionUser,
 } from "./auth";
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
+import { handleShare } from "./shares";
 import { handlePublishReview } from "./overseer/routes";
 import { handleReadReview } from "./overseer/read";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
@@ -622,6 +623,23 @@ export async function startServer() {
       },
       "/r/:slug/a/:id": {
         GET: (req) => handleReviewAttachment(req, req.params.slug, req.params.id),
+      },
+
+      // A share: one revocable, read-only link to one asset, at one URL shape whatever
+      // the asset is. The token is the whole of the authorisation, which is why it
+      // travels in the path rather than on the asset's own URL: the secret and the
+      // canonical URL stay separate things, and this is the one place that sets
+      // Referrer-Policy so following a link out of a shared page cannot leak it.
+      "/s/:token": {
+        GET: (req) => handleShare(req, req.params.token, null, null),
+      },
+      "/s/:token/v/:n": {
+        GET: (req) => handleShare(req, req.params.token, req.params.n, null),
+      },
+      // The evidence a shared page draws. Without it a shared review with an attachment
+      // renders a broken image, because its own /a/ route asks for membership.
+      "/s/:token/a/:id": {
+        GET: (req) => handleShare(req, req.params.token, null, req.params.id),
       },
 
       "/api/images": {

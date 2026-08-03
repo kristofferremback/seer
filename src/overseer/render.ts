@@ -17,10 +17,11 @@
 
 import { escapeHtml } from "../escape";
 import { getWorkspace, listUserWorkspaces } from "../db";
-import { sessionUser } from "../auth";
+import { sessionUser, type SessionUser } from "../auth";
 import { openAttachment, attachmentLocation } from "../store";
 import {
   getAttachment,
+  getReview,
   getReviewRead,
   getReviewVersion,
   listAnnotations,
@@ -1760,6 +1761,14 @@ export interface TimelineEntry {
 export interface RenderInput {
   wsId: string;
   slug: string;
+  /** The path this page is served under. Defaults to the review's own workspace-scoped
+   *  path; a share passes `/s/<token>`, so every link the page draws is one the holder
+   *  can actually follow. */
+  basePath?: string;
+  /** Whether the page opens the review's freshness channel. False for a page served to
+   *  someone who is not a member: that channel asks for membership, so the script could
+   *  only fail, and it would print the workspace id into a page served on a secret. */
+  live?: boolean;
   doc: ReviewDoc;
   version: number;
   latestVersion: number;
@@ -1863,7 +1872,12 @@ export function renderReviewPage(input: RenderInput): string {
     if (list) list.push(a);
     else byTarget.set(key, [a]);
   }
-  const ctx: RenderCtx = { wsId, basePath: `/${wsId}/r/${slug}`, delta, annotations: byTarget };
+  const ctx: RenderCtx = {
+    wsId,
+    basePath: input.basePath ?? `/${wsId}/r/${slug}`,
+    delta,
+    annotations: byTarget,
+  };
   const review = delta ? delta.get("review", "review") : null;
   const summaryDelta = delta ? delta.get("summary", "summary") : null;
 
@@ -1938,8 +1952,9 @@ export function renderReviewPage(input: RenderInput): string {
     )} · <a href="/overseer/agent.md">give your own agent this</a></p>\n` +
     `</main>\n<script>${PAGE_SCRIPT}</script>\n` +
     // A pinned version is a record of what was published, so it gets no live channel:
-    // only the page reading the current version can go behind while it is open.
-    (input.pinned ? "" : `<script>${freshnessScript(wsId, slug)}</script>\n`) +
+    // only the page reading the current version can go behind while it is open. A page
+    // whose reader could not subscribe to that channel gets none either.
+    (input.pinned || input.live === false ? "" : `<script>${freshnessScript(wsId, slug)}</script>\n`) +
     `</body>\n</html>\n`
   );
 }
@@ -1948,8 +1963,9 @@ export function renderReviewPage(input: RenderInput): string {
 
 /** The one refusal this path has. Built from nothing the request carried, so a review
  *  in another workspace, a signed-out browser and a slug nobody ever published are one
- *  answer with one set of bytes. */
-function softNotFound(): Response {
+ *  answer with one set of bytes. Exported as `reviewSoftNotFound` for the share route,
+ *  which owes a dead token the same page a private review gives a stranger. */
+export function softNotFound(): Response {
   return new Response(
     `<!doctype html>\n<html lang="en">\n<head>\n` +
       `<meta charset="utf-8">\n` +
@@ -2090,6 +2106,56 @@ export function handleReviewPage(
 ): Response {
   const review = resolveFor(req, slug, wsId);
   if (!review) return softNotFound();
+  return reviewPage({
+    review,
+    slug,
+    version,
+    from: new URL(req.url).searchParams.get("from"),
+    reader: sessionUser(req),
+    sharePath: null,
+  });
+}
+
+/**
+ * The same page, reached with a share token instead of a session.
+ *
+ * The gate is the caller's: a share resolves to exactly one workspace and one slug, so
+ * this looks the review up there and nowhere else, and a token for one review cannot
+ * name another. What changes about the page is passed in rather than inferred: it hangs
+ * off the share path, it renders no annotations, and it offers no write. The request is
+ * not read at all, which is what makes that true by construction — there is no session
+ * here to widen the page, and no reader whose read state an outsider could move.
+ */
+export function handleSharedReviewPage(
+  wsId: string,
+  slug: string,
+  version: string | null,
+  basePath: string,
+  from: string | null = null,
+): Response {
+  if (!SLUG_RE.test(slug)) return softNotFound();
+  const review = getReview(wsId, slug);
+  if (!review) return softNotFound();
+  return reviewPage({ review, slug, version, from, reader: null, sharePath: basePath });
+}
+
+/** The page itself, once the review has been resolved by whichever gate.
+ *
+ *  It takes a reader rather than a request, so a share cannot acquire one: the share
+ *  route has no identity to hand in and there is no header here to read one out of.
+ *  `sharePath` set and `reader` null move together, and between them they are the whole
+ *  difference a share makes to the page: it hangs off the token path, it records no
+ *  read, it draws no annotations, it offers no write, and it opens no live channel. */
+function reviewPage(args: {
+  review: { workspace_id: string; latest_version: number };
+  slug: string;
+  version: string | null;
+  from: string | null;
+  reader: SessionUser | null;
+  sharePath: string | null;
+}): Response {
+  const { review, slug, version, sharePath } = args;
+  const shared = sharePath !== null;
   const ws = review.workspace_id;
 
   const asked = version === null ? review.latest_version : versionNumber(version);
@@ -2099,9 +2165,9 @@ export function handleReviewPage(
   // writes the row and the pointer in one transaction.
   if (!row) throw new Error(`Review ${ws}/${slug} has no version row for version ${asked}`);
 
-  const reader = sessionUser(req);
+  const reader = args.reader;
   const read = reader ? getReviewRead(ws, slug, reader.id) : null;
-  const base = baseVersion(new URL(req.url).searchParams.get("from"), asked, read ? read.version : null);
+  const base = baseVersion(args.from, asked, read ? read.version : null);
   // Read before render, written after the base is fixed: a reader who opens v3
   // sees it against what they last read, and the next open moves on.
   if (reader && (!read || read.version < asked)) setReviewRead(ws, slug, reader.id, asked);
@@ -2149,6 +2215,8 @@ export function handleReviewPage(
   const html = renderReviewPage({
     wsId: ws,
     slug,
+    basePath: sharePath ?? undefined,
+    live: !shared,
     doc: row.doc,
     version: asked,
     latestVersion: review.latest_version,
@@ -2158,8 +2226,11 @@ export function handleReviewPage(
     delta,
     timeline,
     // Annotations belong to the review, not to the version being read, so a question
-    // asked on v1 is still on the page at v3, saying v1.
-    annotations: listAnnotations(ws, slug),
+    // asked on v1 is still on the page at v3, saying v1. A shared page carries none of
+    // them: the questions and answers are the workspace talking to itself about a
+    // change, and a link handed to an outsider carries the account rather than the
+    // discussion.
+    annotations: shared ? [] : listAnnotations(ws, slug),
     // Filing is a member's act, so the form is drawn for a session that belongs to
     // this workspace and for nobody else. A page reached with an API key alone can be
     // read; it cannot be asked from.
@@ -2174,7 +2245,9 @@ export function handleReviewPage(
   // Looking at a review is what checks it. This is fired after the page is built and
   // never awaited, so a slow GitHub cannot hold a render: the reader gets the stored
   // document now, and a head that moved arrives on the live channel or on the next load.
-  if (asked === review.latest_version) refreshOnView(ws, slug, row.doc);
+  // A share holder's look does not count: it is not a member's attention, and a link
+  // that anyone can open must not be a way to spend the deployment's GitHub budget.
+  if (!shared && asked === review.latest_version) refreshOnView(ws, slug, row.doc);
 
   return new Response(html, {
     status: 200,
@@ -2197,8 +2270,23 @@ export async function handleReviewAttachment(
   if (!ATT_ID_RE.test(id)) return softNotFound();
   const review = resolveFor(req, slug, wsId);
   if (!review) return softNotFound();
-  const ws = review.workspace_id;
+  return attachmentBytes(review.workspace_id, slug, id);
+}
 
+/** The same bytes behind a share token. The share names the workspace and the slug, and
+ *  the id is scoped to that review, so a token cannot be pointed at another review's
+ *  attachment any more than a session can. */
+export async function handleSharedReviewAttachment(
+  wsId: string,
+  slug: string,
+  id: string,
+): Promise<Response> {
+  if (!ATT_ID_RE.test(id) || !SLUG_RE.test(slug)) return softNotFound();
+  if (!getReview(wsId, slug)) return softNotFound();
+  return attachmentBytes(wsId, slug, id);
+}
+
+async function attachmentBytes(ws: string, slug: string, id: string): Promise<Response> {
   const row = getAttachment(ws, slug, id);
   if (!row) return softNotFound();
   const bytes = await openAttachment(ws, id);
