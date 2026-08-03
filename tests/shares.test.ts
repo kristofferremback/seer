@@ -412,6 +412,59 @@ describe("the shares API", () => {
     expect(await (await fetch(`${base}/api/shares?workspace=${wsOut}`)).status).toBe(404);
   });
 
+  test("the settings page lists the workspace's shares and never a token", async () => {
+    const listed = createShare({
+      wsId: rootWs,
+      kind: "review",
+      target: "own-review",
+      label: "on the settings page",
+      userId: rootUser,
+      expiresAt: Date.now() + 86_400_000,
+    });
+    const html = await (await fetch(`${base}/settings/${rootWs}`)).text();
+    expect(html).toContain("on the settings page");
+    expect(html).toContain("own-review");
+    expect(html).toContain(`/settings/${rootWs}/shares/${listed.id}/revoke`);
+    expect(html).not.toContain(listed.token);
+    expect(html).not.toContain("seer_sh_");
+
+    // Another workspace's shares are not on this page.
+    const elsewhere = mint({ label: "belongs to wsOut" });
+    expect(html).not.toContain("belongs to wsOut");
+    expect(await (await fetch(`${base}/settings/${rootWs}`)).text()).not.toContain(elsewhere.token);
+  });
+
+  test("the settings revoke control revokes, and only its own workspace's shares", async () => {
+    const own = createShare({
+      wsId: rootWs,
+      kind: "review",
+      target: "own-review",
+      label: "revoked from settings",
+      userId: rootUser,
+      expiresAt: null,
+    });
+    const res = await fetch(`${base}/settings/${rootWs}/shares/${own.id}/revoke`, {
+      method: "POST",
+      redirect: "manual",
+    });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe(`/settings/${rootWs}`);
+    expect(resolveShare(own.token)).toBeNull();
+    expect(await (await fetch(`${base}/settings/${rootWs}`)).text()).not.toContain(
+      "revoked from settings",
+    );
+
+    // A share in another workspace, revoked through this one's settings: a 404, and the
+    // share is untouched.
+    const theirs = mint({ label: "not revocable from here" });
+    const refused = await fetch(`${base}/settings/${rootWs}/shares/${theirs.id}/revoke`, {
+      method: "POST",
+      redirect: "manual",
+    });
+    expect(refused.status).toBe(404);
+    expect(resolveShare(theirs.token)).not.toBeNull();
+  });
+
   test("DELETE revokes, and only for a member of the owning workspace", async () => {
     const mine = (await (
       await post({ workspace: rootWs, kind: "review", target: "own-review", label: "to revoke" })

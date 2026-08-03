@@ -1135,6 +1135,17 @@ export interface SettingsKey {
   lastUsed: string;
   isLegacy: boolean;
 }
+/** One share as the settings page shows it. There is no token here and there is no
+ *  field that could carry one: only the hash survived the mint. */
+export interface SettingsShare {
+  id: string;
+  label: string;
+  kind: string;
+  target: string;
+  created: string;
+  expires: string;
+  isExpired: boolean;
+}
 export type SettingsReveal =
   | { kind: "key"; token: string }
   | { kind: "invite"; url: string; expires: string };
@@ -1146,6 +1157,7 @@ export interface SettingsData {
   email: string;
   members: SettingsMember[];
   keys: SettingsKey[];
+  shares: SettingsShare[];
   reveal?: SettingsReveal;
 }
 
@@ -1176,6 +1188,24 @@ export function settingsPage(d: SettingsData): string {
         <td class="act">
           <form method="post" action="${s(`/keys/${k.id}/roll`)}"><button type="submit">roll</button></form>
           <form method="post" action="${s(`/keys/${k.id}/revoke`)}"><button type="submit">revoke</button></form>
+        </td>
+      </tr>`,
+          )
+          .join("\n");
+
+  const shareRows =
+    d.shares.length === 0
+      ? `<tr><td colspan="6" class="empty">Nothing shared yet.</td></tr>`
+      : d.shares
+          .map(
+            (sh) => `<tr>
+        <td>${escapeHtml(sh.label)}</td>
+        <td class="mono">${escapeHtml(sh.kind)}</td>
+        <td class="mono">${escapeHtml(sh.target)}</td>
+        <td class="mono">${escapeHtml(sh.created)}</td>
+        <td class="mono">${escapeHtml(sh.expires)}${sh.isExpired ? ` <span class="pill">expired</span>` : ""}</td>
+        <td class="act">
+          <form method="post" action="${s(`/shares/${sh.id}/revoke`)}"><button type="submit">revoke</button></form>
         </td>
       </tr>`,
           )
@@ -1270,6 +1300,16 @@ ${head(`Settings · ${d.name} · Seer`, og)}
       <p class="panel-note dim">Keys are yours alone: each member mints and rolls their own.
       <em>Roll</em> mints a replacement and revokes this one in the same breath. Uploads made with a
       key land in this workspace and are attributed to you.</p>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">Shares</p>
+      <div class="ledger scroll-x">
+        <table>
+          <tr><th>Label</th><th>Kind</th><th>Target</th><th>Created</th><th>Expires</th><th></th></tr>
+          ${shareRows}
+        </table>
+      </div>
     </div>
 
   </div>

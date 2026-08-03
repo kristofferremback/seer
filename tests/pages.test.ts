@@ -31,6 +31,17 @@ function settings(over: Partial<SettingsData> = {}): SettingsData {
       { id: "key_aaaaaaaaaa", name: "macbook agent", hint: "seer_sk_9f3K····sD2e", created: "2026-07-18", lastUsed: "3 min ago", isLegacy: false },
       { id: "key_bbbbbbbbbb", name: "imported from env", hint: "(pre-workspace key)", created: "2026-06-02", lastUsed: "2 days ago", isLegacy: true },
     ],
+    shares: [
+      {
+        id: "shr_2n7kq4xbvm",
+        label: "for Anna",
+        kind: "review",
+        target: "gate-rewrite",
+        created: "2026-07-20",
+        expires: "never",
+        isExpired: false,
+      },
+    ],
     ...over,
   };
 }
@@ -86,6 +97,52 @@ describe("settings markers", () => {
     expect(html).toContain('action="/settings/ws_7g2kq4xbvm/keys/key_aaaaaaaaaa/revoke"');
     expect(html).toContain('action="/settings/ws_7g2kq4xbvm/invites"');
     expect(html).toContain('action="/settings/ws_7g2kq4xbvm/keys"');
+  });
+
+  test("a share is listed with what it is, and with a way to revoke it", () => {
+    const html = settingsPage(settings());
+    expect(html).toContain("<p class=\"eyebrow\">Shares</p>");
+    expect(html).toContain("for Anna");
+    expect(html).toContain("gate-rewrite");
+    expect(html).toContain("2026-07-20");
+    expect(html).toContain("never");
+    expect(html).toContain('action="/settings/ws_7g2kq4xbvm/shares/shr_2n7kq4xbvm/revoke"');
+  });
+
+  test("an expired share says so; a live one does not", () => {
+    const live = settings().shares[0]!;
+    expect(settingsPage(settings())).not.toContain('<span class="pill">expired</span>');
+    const html = settingsPage(
+      settings({ shares: [{ ...live, expires: "2026-07-01", isExpired: true }] }),
+    );
+    expect(html).toContain('<span class="pill">expired</span>');
+  });
+
+  test("a workspace with no shares says so and still draws the panel", () => {
+    const html = settingsPage(settings({ shares: [] }));
+    expect(html).toContain("<p class=\"eyebrow\">Shares</p>");
+    expect(html).toContain("Nothing shared yet.");
+    expect(html).not.toContain("/shares/shr_");
+  });
+
+  test("a share's label is html-escaped", () => {
+    const html = settingsPage(
+      settings({
+        shares: [
+          {
+            id: "shr_dddddddddd",
+            label: "<b>anna</b>",
+            kind: "review",
+            target: "gate-rewrite",
+            created: "2026-07-20",
+            expires: "never",
+            isExpired: false,
+          },
+        ],
+      }),
+    );
+    expect(html).toContain("&lt;b&gt;anna&lt;/b&gt;");
+    expect(html).not.toContain("<b>anna</b>");
   });
 
   test("workspace name and key name are html-escaped", () => {
