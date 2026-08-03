@@ -562,6 +562,20 @@ function buildDocument(args: {
     groups,
     hunks,
     skillContext: review.skillContext,
+    // What the account could not cover. Derived here from the same MissingPatch the
+    // publish warning is built from, so the page and the publisher are told the
+    // same thing by the same fact.
+    unaccounted: review.prs.flatMap((pr) =>
+      pr.files
+        .filter((f) => f.missing !== null)
+        .map((f) => ({
+          repo: pr.repo,
+          prNumber: pr.number,
+          path: f.missing!.path,
+          status: f.missing!.status,
+          reason: f.missing!.reason,
+        })),
+    ),
     createdAt: args.createdAt,
     updatedAt: args.updatedAt,
   };

@@ -938,6 +938,24 @@ const STYLE = `  @font-face {
   .fhead { grid-column: 2; grid-row: 1; display: flex; align-items: center; flex-wrap: wrap; column-gap: 10px; row-gap: 2px; min-width: 0; }
   .fpath { font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; color: hsl(var(--ink)); overflow-wrap: anywhere; min-width: 0; }
   .fstat { font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); white-space: nowrap; }
+  /* what the partition could not claim. It sits above the groups because it is a
+     qualification on all of them, and it wears the risk mark because an account
+     with a hole in it is exactly what a reader needs told. */
+  .unaccounted {
+    margin: 0 0 18px; padding: 12px 14px;
+    border: 1px solid hsl(var(--risk) / 0.35);
+    border-radius: 6px;
+    background: hsl(var(--risk) / 0.05);
+  }
+  .unhead {
+    display: flex; align-items: flex-start; gap: 9px;
+    margin: 0; font-size: 14px; line-height: 1.55; color: hsl(var(--ink));
+  }
+  .unhead .ic { flex: none; margin-top: 3px; }
+  .unlist { list-style: none; margin: 9px 0 0; padding: 0 0 0 25px; display: grid; gap: 6px; }
+  .unlist li { display: grid; gap: 1px; }
+  .unpath { font-family: var(--font-mono); font-size: 12px; color: hsl(var(--ink)); overflow-wrap: anywhere; }
+  .unwhy { font-size: 12.5px; line-height: 1.5; color: hsl(var(--muted)); overflow-wrap: anywhere; }
   .fnote { grid-column: 2; grid-row: 2; font-size: 13.5px; line-height: 1.5; color: hsl(var(--ink-soft)); }
   .frow:has(.filediff.clipped) > summary .cue { display: block; }
   .frow-body { padding: 3px 0 13px; }
@@ -1912,16 +1930,45 @@ export function renderReviewPage(input: RenderInput): string {
  *  answer with one set of bytes. */
 function softNotFound(): Response {
   return new Response(
-    `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n` +
-      `<meta name="viewport" content="width=device-width, initial-scale=1">\n` +
-      `<meta name="robots" content="noindex, nofollow">\n<title>No such review</title>\n` +
-      `</head>\n<body>\n<p>No such review</p>\n</body>\n</html>\n`,
+    `<!doctype html>\n<html lang="en">\n<head>\n` +
+      `<meta charset="utf-8">\n` +
+      `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n` +
+      `<meta name="robots" content="noindex, nofollow">\n` +
+      `<script>${THEME_SCRIPT}</script>\n` +
+      `<title>No such review · Overseer</title>\n` +
+      `<link rel="icon" type="image/svg+xml" href="${FAVICON}">\n` +
+      `<link rel="preload" href="/fonts/switzer.woff2" as="font" type="font/woff2" crossorigin>\n` +
+      `<style>\n${STYLE}\n${GONE_STYLE}</style>\n` +
+      `</head>\n<body>\n${SPRITE}\n<main class="doc gone">\n` +
+      `<p class="gone-mark">${icon("eye", "gone-eye")}</p>\n` +
+      `<h1 class="gone-title">No such review</h1>\n` +
+      `<p class="gone-line">Either it does not exist, or it is not yours to read. ` +
+      `This page cannot tell you which, and that is deliberate: a review that exists ` +
+      `somewhere you cannot see it must look exactly like one that was never ` +
+      `published, or the difference between the two answers is itself a leak.</p>\n` +
+      `</main>\n</body>\n</html>\n`,
     {
       status: 404,
       headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
     },
   );
 }
+
+/** The refusal page's own few rules. It shares the document's tokens and type, so a
+ *  reader who lands here is plainly still inside the same thing, and it carries
+ *  nothing built from the request: every refusal is these exact bytes. */
+const GONE_STYLE = `
+  .gone { max-width: 560px; padding-top: 18vh; }
+  .gone-mark { margin: 0 0 22px; }
+  .gone-eye { width: 30px; height: 30px; color: hsl(var(--ink)); }
+  .gone-title {
+    font-family: var(--font-display); font-size: 27px; font-weight: 500;
+    letter-spacing: -0.015em; line-height: 1.2; color: hsl(var(--ink));
+    margin: 0 0 14px;
+  }
+  .gone-line { font-size: 14.5px; line-height: 1.62; color: hsl(var(--ink-soft)); margin: 0; }
+  @media (min-width: 700px) { .gone-title { font-size: 30px; } }
+`;
 
 /**
  * The version the marks are measured against.

@@ -29,7 +29,7 @@ import {
   type EntityDelta,
 } from "./delta";
 import { icon, safeBlock, safeInline, shortSha } from "./render-evidence";
-import type { Group, Hunk, HunkLine, StatementKind } from "./types";
+import type { Group, Hunk, HunkLine, StatementKind, UnaccountedFile } from "./types";
 
 /** The anchor a target grows once something has been asked about it, supplied by the
  *  page rather than built here: the questions themselves live in one place. */
@@ -504,5 +504,37 @@ export function walkthroughSection(
         )
         .join("")
     : "";
-  return `<section id="walkthrough"><h2>Walkthrough</h2><div class="walk">${groups}${removed}</div></section>`;
+  return (
+    `<section id="walkthrough"><h2>Walkthrough</h2>` +
+    unaccountedBlock(doc.unaccounted ?? []) +
+    `<div class="walk">${groups}${removed}</div></section>`
+  );
+}
+
+/** What the walkthrough could not cover. The partition rule makes one promise, that
+ *  absence on the page means absence in the diff, and a file GitHub served no diff
+ *  for is the one thing that can break it: it carries no hunks, so no group was ever
+ *  asked to claim it, and it would otherwise leave the page silently. Saying so is
+ *  the only way the promise stays true. */
+function unaccountedBlock(files: UnaccountedFile[]): string {
+  if (files.length === 0) return "";
+  const rows = files
+    .map(
+      (f) =>
+        `<li><span class="unpath">${escapeHtml(f.path)}</span>` +
+        `<span class="unwhy">${escapeHtml(f.reason)}</span></li>`,
+    )
+    .join("");
+  const what =
+    files.length === 1
+      ? "One file of this change is not in the walkthrough below."
+      : `${files.length} files of this change are not in the walkthrough below.`;
+  return (
+    `<div class="unaccounted">` +
+    `<p class="unhead">${icon("risk", "ic k-risk", "not accounted for")}` +
+    `<span>${escapeHtml(what)} GitHub served no diff for them, so no hunk of them ` +
+    `reached this review and nothing here can account for what they changed.</span></p>` +
+    `<ul class="unlist">${rows}</ul>` +
+    `</div>`
+  );
 }

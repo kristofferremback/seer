@@ -56,6 +56,7 @@ function doc(title: string): Omit<ReviewDoc, "id" | "slug" | "version"> {
     hunks: [],
     attachments: [],
     skillContext: [],
+    unaccounted: [],
     createdAt: 1000,
     updatedAt: 1000,
   };

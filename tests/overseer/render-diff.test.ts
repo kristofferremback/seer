@@ -434,3 +434,32 @@ describe("payload as a diff", () => {
     expect(a).toBe(b);
   });
 });
+
+describe("what the walkthrough could not cover", () => {
+  test("a file with no diff is named above the groups, or the partition promise is a lie", () => {
+    const d = doc({
+      groups: twoGroups(),
+      unaccounted: [
+        {
+          repo: "acme/seer",
+          prNumber: 12,
+          path: "tests/fixtures/huge.json",
+          status: "added",
+          reason: "GitHub returned no patch for this file, and the pull request diff could not be read: too large.",
+        },
+      ],
+    });
+    const html = walkthroughSection(d);
+    expect(html).toContain("One file of this change is not in the walkthrough below.");
+    expect(html).toContain("tests/fixtures/huge.json");
+    expect(html).toContain("too large");
+    // Above the groups: it qualifies all of them.
+    expect(html.indexOf("unaccounted")).toBeLessThan(html.indexOf('class="walk"'));
+  });
+
+  test("a review that accounts for everything says nothing", () => {
+    const html = walkthroughSection(doc({ groups: twoGroups(), unaccounted: [] }));
+    expect(html).not.toContain("unaccounted");
+    expect(html).not.toContain("not in the walkthrough");
+  });
+});

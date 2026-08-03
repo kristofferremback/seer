@@ -92,6 +92,7 @@ export function goldenStoredDoc(): Omit<ReviewDoc, "id" | "slug" | "version"> {
     ],
     hunks,
     skillContext: [],
+    unaccounted: [],
     attachments: [],
     createdAt: now,
     updatedAt: now,

@@ -53,6 +53,15 @@ export type Evidence =
   | { type: "attachment"; attachment: AttachmentRef }
   | { type: "bundle"; bundle: BundleRef };
 
+/** A file the review could not account for, and why. */
+export interface UnaccountedFile {
+  repo: string;
+  prNumber: number;
+  path: string;
+  status: string;
+  reason: string;
+}
+
 export interface Review {
   /** Opaque, `rev_` + tinyId. */
   id: string;
@@ -82,6 +91,11 @@ export interface Review {
   /** Derived and never rendered: the pull request review comments, handed back to the
    *  skill on its next pass. See the data model's "Rendering comment threads". */
   skillContext: ReviewComment[];
+  /** Derived: files the change touches that no hunk could be built for, because
+   *  GitHub served no diff for them. The walkthrough cannot account for these, and
+   *  the page says so: a reader who is not told is a reader who believes the
+   *  partition covered everything. */
+  unaccounted: UnaccountedFile[];
   createdAt: number;
   updatedAt: number;
   /** Derived per pr, keyed by `${repo}#${number}`. */
