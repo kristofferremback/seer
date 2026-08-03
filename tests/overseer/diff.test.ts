@@ -454,3 +454,48 @@ describe("patches with nothing to parse", () => {
     expect(result.files[0]!.hunks).toEqual([]);
   });
 });
+
+describe("the pull request diff cannot be read", () => {
+  test("a patchless file is reported, and the other files still derive", async () => {
+    // GitHub refuses a whole-pull-request diff past twenty thousand lines, and it
+    // omits per-file patches on exactly those large pull requests: the two conditions
+    // arrive together. That refusal must cost the review only the files it could not
+    // serve, never the sixty it could.
+    const client = {
+      listFiles: async () => [
+        { filename: "src/small.ts", status: "modified", additions: 1, deletions: 1,
+          patch: "@@ -1,1 +1,1 @@\n-a\n+b" },
+        { filename: "src/huge.ts", status: "added", additions: 9000, deletions: 0 },
+      ],
+      getPullDiff: async () => {
+        throw new Error("GitHub 406 for .../pulls/5: the diff exceeded the maximum number of lines (20000)");
+      },
+    } as never;
+    const out = await collectPullDiff(client, "a/b", 5, "f".repeat(40));
+    expect(out.files).toHaveLength(2);
+    expect(out.files[0]!.hunks).toHaveLength(1);
+    expect(out.files[1]!.hunks).toHaveLength(0);
+    expect(out.missing).toHaveLength(1);
+    expect(out.missing[0]!.path).toBe("src/huge.ts");
+    // The reason names the upstream failure rather than claiming the file was absent.
+    expect(out.missing[0]!.reason).toContain("20000");
+  });
+
+  test("the failing diff is fetched once, however many files need it", async () => {
+    let calls = 0;
+    const client = {
+      listFiles: async () => [
+        { filename: "a.ts", status: "added", additions: 1, deletions: 0 },
+        { filename: "b.ts", status: "added", additions: 1, deletions: 0 },
+        { filename: "c.ts", status: "added", additions: 1, deletions: 0 },
+      ],
+      getPullDiff: async () => {
+        calls++;
+        throw new Error("too large");
+      },
+    } as never;
+    const out = await collectPullDiff(client, "a/b", 5, "f".repeat(40));
+    expect(calls).toBe(1);
+    expect(out.missing).toHaveLength(3);
+  });
+});

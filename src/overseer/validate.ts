@@ -282,8 +282,19 @@ function required(errors: ValidationError[], field: string, value: string): bool
 }
 
 /** A multi-line authored body: the constrained markdown subset from step 5. */
+/** The longest authored field the schema can accept. Nothing above this can ever be
+ *  valid, so nothing above this is worth parsing: the markdown scanners are quadratic
+ *  in pathological input, and the body limit is megabytes. A field that has already
+ *  failed its cap gains nothing from a second error naming a construct inside it, and
+ *  the parse is a single-threaded server stalling on one authenticated request. */
+const PARSE_LIMIT = Math.max(...Object.values(BUDGETS.chars));
+
+function tooLongToParse(value: string): boolean {
+  return value.length > PARSE_LIMIT;
+}
+
 function checkBody(errors: ValidationError[], field: string, value: string): void {
-  if (typeof value !== "string") return;
+  if (typeof value !== "string" || tooLongToParse(value)) return;
   const result = validateMarkdown(value);
   if (!result.ok) {
     errors.push({
@@ -296,7 +307,7 @@ function checkBody(errors: ValidationError[], field: string, value: string): voi
 
 /** A one-line field: plain text and inline code, nothing else. */
 function checkLine(errors: ValidationError[], field: string, value: string): void {
-  if (typeof value !== "string") return;
+  if (typeof value !== "string" || tooLongToParse(value)) return;
   const result = validateInline(value);
   if (!result.ok) {
     errors.push({

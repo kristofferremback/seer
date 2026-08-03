@@ -473,14 +473,26 @@ export async function collectPullDiff(
     binary: Set<string>;
     modeOnly: Set<string>;
   } | null = null;
+  // The whole-pull-request diff is how a file with no per-file patch gets recovered,
+  // and it is the one upstream call that fails *because* the change is large: GitHub
+  // refuses a diff past twenty thousand lines. That refusal must not cost the review
+  // the other sixty files it could serve. It is recorded once, every patchless file
+  // is reported as missing with that reason, and derivation carries on.
+  let fallbackFailure: string | null = null;
   const loadFallback = async () => {
+    if (fallbackFailure !== null) return null;
     if (!fallback) {
-      const diff = await client.getPullDiff(repo, prNumber);
-      fallback = {
-        patches: splitUnifiedDiff(diff),
-        binary: binaryPathsOfDiff(diff),
-        modeOnly: modeChangePathsOfDiff(diff),
-      };
+      try {
+        const diff = await client.getPullDiff(repo, prNumber);
+        fallback = {
+          patches: splitUnifiedDiff(diff),
+          binary: binaryPathsOfDiff(diff),
+          modeOnly: modeChangePathsOfDiff(diff),
+        };
+      } catch (err) {
+        fallbackFailure = err instanceof Error ? err.message : String(err);
+        return null;
+      }
     }
     return fallback;
   };
@@ -494,9 +506,11 @@ export async function collectPullDiff(
     let modeOnly = false;
     if (patch === undefined) {
       const loaded = await loadFallback();
-      patch = loaded.patches.get(file.filename);
-      binary = loaded.binary.has(file.filename);
-      modeOnly = loaded.modeOnly.has(file.filename);
+      if (loaded) {
+        patch = loaded.patches.get(file.filename);
+        binary = loaded.binary.has(file.filename);
+        modeOnly = loaded.modeOnly.has(file.filename);
+      }
     }
     const entry: FileDiff = {
       path: file.filename,
@@ -527,7 +541,10 @@ export async function collectPullDiff(
           ? "This file is binary, so the pull request diff carries no lines for it."
           : modeOnly
             ? "Only this file's mode changed, so the pull request diff carries no lines for it."
-            : "GitHub returned no patch for this file and it is absent from the pull request diff.",
+            : fallbackFailure !== null
+              ? `GitHub returned no patch for this file, and the pull request diff it would ` +
+                `have been recovered from could not be read: ${fallbackFailure}`
+              : "GitHub returned no patch for this file and it is absent from the pull request diff.",
       };
       missing.push(entry.missing);
     } else {

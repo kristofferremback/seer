@@ -693,6 +693,22 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     prior,
     { bundleExists },
   );
+  // A file GitHub served no diff for carries no hunks, so the partition asks nothing
+  // of it and it would otherwise leave no trace in a published review: the change is
+  // simply absent from the account, silently. It is reported to the publisher on every
+  // response, which is the promise diff.ts makes when it builds a MissingPatch.
+  for (const pr of review.prs) {
+    for (const file of pr.files) {
+      if (!file.missing) continue;
+      result.warnings.push({
+        field: `prs[${pr.number}]`,
+        rule: "missing_patch",
+        message:
+          `${pr.repo}#${pr.number} carries no diff for ${file.missing.path}, so no hunk of it ` +
+          `reached this review and the walkthrough cannot account for it. ${file.missing.reason}`,
+      });
+    }
+  }
   // The rules run first and alone: every check after this one reads the payload's
   // lists directly, and a payload that failed here may not have any.
   if (result.errors.length > 0) return unprocessable(result.errors, result.warnings);

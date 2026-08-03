@@ -1496,3 +1496,31 @@ describe("sentence counting", () => {
     expect(rules(run(payload).errors)).not.toContain("cap_sentences");
   });
 });
+
+describe("a field far past its cap is not parsed", () => {
+  test("an oversized body fails its cap without running the markdown scanners", () => {
+    // The scanners are quadratic on pathological input and the request body limit is
+    // megabytes, so parsing something no cap could ever accept is a single-threaded
+    // server stalling on one authenticated publish. Measured at 80k before the guard:
+    // about nine seconds.
+    const big = "<".repeat(80_000);
+    const payload = golden();
+    payload.statements[0]!.body = big;
+    const started = Date.now();
+    const { errors } = run(payload);
+    expect(Date.now() - started).toBeLessThan(1000);
+    // It still fails, and it fails naming the cap rather than a construct inside it.
+    const named = errors.filter((e) => e.field === "statements[0].body");
+    expect(named.length).toBeGreaterThan(0);
+    // Whatever the cap rule is called, the point is that the parse did not run:
+    // no construct inside the oversized field is reported.
+    expect(named.some((e) => e.rule === "markdown_construct")).toBe(false);
+  });
+
+  test("a body inside its cap is still parsed and still refused by construct", () => {
+    const payload = golden();
+    payload.statements[0]!.body = "# a heading";
+    const { errors } = run(payload);
+    expect(errors.some((e) => e.field === "statements[0].body" && e.rule === "markdown_construct")).toBe(true);
+  });
+});
