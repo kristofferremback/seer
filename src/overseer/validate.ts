@@ -964,7 +964,10 @@ export function reindexSignificance(
 
 // ---- refs and evidence ----
 
-function checkRef(
+/** The rules a ref pointer answers before anything fetches it. Exported because an
+ *  annotation's answer cites refs too, and "validated like any ref" has to mean this
+ *  function rather than a second copy of these rules that can drift from it. */
+export function checkRef(
   errors: ValidationError[],
   field: string,
   ref: RefPointerInput | undefined,

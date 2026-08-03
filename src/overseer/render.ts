@@ -16,13 +16,14 @@
 // review that does not exist all answer with the same bytes.
 
 import { escapeHtml } from "../escape";
-import { getWorkspace } from "../db";
+import { getWorkspace, listUserWorkspaces } from "../db";
 import { sessionUser } from "../auth";
 import { openAttachment, attachmentLocation } from "../store";
 import {
   getAttachment,
   getReviewRead,
   getReviewVersion,
+  listAnnotations,
   listReviewVersions,
   resolveReview,
   setReviewRead,
@@ -55,6 +56,7 @@ import {
 } from "./render-evidence";
 import {
   prKey,
+  type Annotation,
   type Evidence,
   type Freshness,
   type Note,
@@ -1288,6 +1290,64 @@ const DELTA_STYLE = `
   .rv-from { margin-left: auto; }
 `;
 
+// The prototype's Q/A grammar. A question is one line marked Q, its answer one line
+// marked A, and the refs an answer cites hang under it as the same folds every other
+// citation on the page uses. The state and the version it was filed against sit in a
+// mono line beneath, because both are machine facts about the question rather than
+// part of what was asked.
+const QUESTION_STYLE = `
+  .qa { margin: 0 0 26px; padding-bottom: 20px; border-bottom: 1px solid hsl(var(--line)); }
+  .qa:last-of-type { border-bottom: 0; }
+  .qa .qline, .qa .aline { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 0 4px; font-size: 14.5px; }
+  .qa .qline { color: hsl(var(--ink)); margin: 0 0 8px; }
+  .qa .aline { color: hsl(var(--ink-soft)); margin: 0; }
+  .qa .mk { font-family: var(--font-mono); font-size: 12px; color: hsl(var(--muted)); line-height: 1.6; }
+  .qa .fold { margin-top: 10px; }
+  .qa .qquote { margin: 0 0 8px 26px; padding-left: 10px; border-left: 2px solid hsl(var(--line)); color: hsl(var(--ink-soft)); font-size: 14px; }
+  .qmeta { font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); margin: 10px 0 0; letter-spacing: 0.01em; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .qmeta .is-open { color: hsl(var(--change)); }
+  .qhere { margin: 10px 0 0; font-size: 12.5px; color: hsl(var(--muted)); }
+  .qhere a { color: inherit; }
+  .qnone { color: hsl(var(--muted)); font-size: 14px; }
+  .ask { margin-top: 24px; }
+  .ask-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+  .ask-form label { font-size: 12.5px; color: hsl(var(--muted)); display: block; margin-bottom: 4px; }
+  .ask-where { flex: 0 1 240px; min-width: 0; }
+  .ask-what { flex: 1 1 260px; min-width: 0; }
+  .ask-form select, .ask-form textarea {
+    width: 100%;
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.5;
+    color: hsl(var(--ink));
+    background: hsl(var(--paper-sunk));
+    border: 1px solid hsl(var(--line));
+    border-radius: 6px;
+    padding: 10px 12px;
+    resize: none;
+  }
+  .ask-form select { min-height: 44px; }
+  .ask-form textarea { min-height: 72px; }
+  .ask-form textarea::placeholder { color: hsl(var(--muted)); }
+  .ask-form button {
+    font-family: var(--font-body);
+    font-size: 14.5px;
+    font-weight: 500;
+    color: hsl(var(--paper));
+    background: hsl(var(--accent));
+    border: 0;
+    border-radius: 6px;
+    padding: 0 18px;
+    min-height: 44px;
+    cursor: pointer;
+  }
+  .ask-form button:active { background: hsl(var(--ink-soft)); }
+  @media (hover: hover) and (pointer: fine) {
+    .ask-form button { transition: background-color 160ms ease; }
+    .ask-form button:hover { background: hsl(var(--ink)); }
+  }
+`;
+
 const FAVICON =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' " +
   "stroke='%231f1614' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath " +
@@ -1442,6 +1502,7 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
     `<span class="rrefs">${chip(d)}${chips}</span>` +
     `</summary>` +
     `<div class="row-body">${marked(safeBlock(s.body), d, "body", s.id)}${folds}` +
+    questionsHere(ctx, "statement", s.id) +
     kindMark(d, s.id, s.kind) +
     renderEvidence(s.evidence, s.id, ctx, evidenceMarks(d, s.id), evidenceFieldNames(s.evidence)) +
     `</div></details>`
@@ -1498,10 +1559,132 @@ function noteRow(n: Note, ctx: RenderCtx): string {
     `${chip(d) === "" ? "" : `<span class="rrefs">${chip(d)}</span>`}` +
     `</summary>` +
     `<div class="note-body">${marked(safeBlock(n.body), d, "body", n.id)}${checks}${chips === "" ? "" : `<p class="rrefs">${chips}</p>`}${folds}` +
+    questionsHere(ctx, "note", n.id) +
     kindMark(d, n.id, n.kind) +
     renderEvidence(n.evidence, n.id, ctx, evidenceMarks(d, n.id), evidenceFieldNames(n.evidence)) +
     `</div></details>`
   );
+}
+
+// ---- questions ----
+
+function targetKey(type: string, id: string): string {
+  return `${type}:${id}`;
+}
+
+/** The element on this page a target names, or null when the target is not something
+ *  the page gives an id to. A file target names a path, which no element is keyed by. */
+function targetAnchor(a: Annotation): string | null {
+  switch (a.target.type) {
+    case "statement":
+    case "note":
+    case "group":
+    case "hunk":
+      return a.target.id;
+    case "summary":
+      return "summary";
+    case "file":
+      return null;
+  }
+}
+
+/** What a question says about itself: whether it is answered, and which version of the
+ *  review it was asked about. A question filed against v1 keeps saying v1 on v3,
+ *  because that is the text its quote resolves against. */
+function questionMeta(a: Annotation, version: number, at: string): string {
+  const state =
+    a.status === "open"
+      ? `<span class="is-open">open</span>`
+      : `<span class="is-answered">answered</span>`;
+  const filed = `filed against v${a.version}`;
+  // A question asked about an older version is worth saying twice: the reader is
+  // looking at different words than the asker was.
+  const stale = a.version === version ? "" : `<span>${escapeHtml(`reading v${version}`)}</span>`;
+  return `<p class="qmeta">${state}<span>${escapeHtml(filed)}</span>${stale}<span>on ${at}</span></p>`;
+}
+
+/** One question, with its answer when it has one. Bodies are typed by people, so
+ *  nothing here is parsed as markup: they are escaped text with their line breaks
+ *  kept. The answer's refs are chips over the same folds a statement's refs use. */
+function questionBlock(a: Annotation, version: number): string {
+  const quote =
+    a.quote === null || a.quote === ""
+      ? ""
+      : `<p class="qquote">${plainText(a.quote)}</p>`;
+  const anchor = targetAnchor(a);
+  const where = `${a.target.type} ${a.target.id}`;
+  const at =
+    anchor === null
+      ? `<span>${escapeHtml(where)}</span>`
+      : `<a href="#${escapeHtml(anchor)}">${escapeHtml(where)}</a>`;
+  const refs = a.answer ? uniqueRefs(a.answer.refs) : [];
+  const chips = refs.map((r) => ` ${refChip(a.id, r)}`).join("");
+  const folds = refs.map((r) => refFold(a.id, r)).join("");
+  const answer = a.answer
+    ? `<p class="aline"><span class="mk">A:</span><span>${plainText(a.answer.body)}${chips}</span></p>` +
+      folds
+    : "";
+  return (
+    `<div class="qa" id="${escapeHtml(a.id)}">` +
+    `<p class="qline"><span class="mk">Q:</span><span>${plainText(a.body)}</span></p>` +
+    quote +
+    answer +
+    questionMeta(a, version, at) +
+    `</div>`
+  );
+}
+
+/** Text a person typed, escaped and with its line breaks kept. Never markdown: an
+ *  annotation is the one string on the page no validator ever saw. */
+function plainText(source: string): string {
+  return escapeHtml(source).split("\n").join("<br>");
+}
+
+/** The link a target row grows once something has been asked about it. The question
+ *  itself lives once, in the questions section, so this is an anchor rather than a
+ *  second copy that could say something different. */
+function questionsHere(ctx: RenderCtx, type: string, id: string): string {
+  const asked = ctx.annotations.get(targetKey(type, id));
+  if (!asked || asked.length === 0) return "";
+  const links = asked
+    .map(
+      (a) =>
+        `<a href="#${escapeHtml(a.id)}">${escapeHtml(a.status === "open" ? "open question" : "answered question")}</a>`,
+    )
+    .join(" · ");
+  return `<p class="qhere">${links}</p>`;
+}
+
+/** One target's options in the ask form, so a reader without scripting can still say
+ *  what they are asking about. */
+function targetOptions(doc: ReviewDoc): string {
+  const option = (type: string, id: string, label: string) =>
+    `<option value="${escapeHtml(`${type}:${id}`)}">${escapeHtml(label)}</option>`;
+  return (
+    option("summary", "summary", "the summary") +
+    doc.statements.map((s) => option("statement", s.id, s.text)).join("") +
+    doc.notes.map((n) => option("note", n.id, n.text)).join("") +
+    doc.groups.map((g) => option("group", g.id, g.title)).join("")
+  );
+}
+
+/** The questions section. Nothing here needs scripting: the form is a plain POST to
+ *  the annotations route, which answers a form with the page it came from. */
+function questionsSection(input: RenderInput, annotations: Annotation[]): string {
+  const blocks =
+    annotations.length === 0
+      ? `<p class="qnone">Nothing has been asked about this review.</p>`
+      : annotations.map((a) => questionBlock(a, input.version)).join("");
+  const form = !input.canFile
+    ? ""
+    : `<div class="ask"><form class="ask-form" method="post" ` +
+      `action="/api/reviews/${escapeHtml(input.slug)}/annotations">` +
+      `<div class="ask-where"><label for="ask-target">About</label>` +
+      `<select id="ask-target" name="target" required>${targetOptions(input.doc)}</select></div>` +
+      `<div class="ask-what"><label for="ask-body">Question</label>` +
+      `<textarea id="ask-body" name="body" rows="2" required></textarea></div>` +
+      `<button type="submit">Ask</button></form></div>`;
+  return `<section id="questions"><h2>Questions</h2>${blocks}${form}</section>\n`;
 }
 
 /** Risks first, then notes, each keeping the order it was authored in. A risk is the
@@ -1524,6 +1707,10 @@ interface RenderCtx {
   basePath: string;
   /** What moved since the base version, or null when this page has no base. */
   delta: DeltaIndex | null;
+  /** Every annotation on the review, by `${targetType}:${targetId}`. Annotations
+   *  belong to the review rather than to a version, so this is the same map whichever
+   *  version is being read. */
+  annotations: Map<string, Annotation[]>;
 }
 
 /** One row of the revision menu. Counts are derived from the delta between a
@@ -1556,6 +1743,11 @@ export interface RenderInput {
   delta?: DeltaIndex | null;
   /** Newest first. Empty leaves the revision menu off the page. */
   timeline?: TimelineEntry[];
+  /** Every annotation on the review, oldest first. */
+  annotations?: Annotation[];
+  /** Whether this reader may file one. False draws the questions that exist without
+   *  the form: a page served to a key holder is not a page anyone can ask from. */
+  canFile?: boolean;
 }
 
 /** The revision menu: every published version, what moved in it, and the two
@@ -1634,7 +1826,15 @@ function freshnessScript(wsId: string, slug: string): string {
 export function renderReviewPage(input: RenderInput): string {
   const { doc, slug, wsId } = input;
   const delta = input.delta ?? null;
-  const ctx: RenderCtx = { wsId, basePath: `/${wsId}/r/${slug}`, delta };
+  const annotations = input.annotations ?? [];
+  const byTarget = new Map<string, Annotation[]>();
+  for (const a of annotations) {
+    const key = targetKey(a.target.type, a.target.id);
+    const list = byTarget.get(key);
+    if (list) list.push(a);
+    else byTarget.set(key, [a]);
+  }
+  const ctx: RenderCtx = { wsId, basePath: `/${wsId}/r/${slug}`, delta, annotations: byTarget };
   const review = delta ? delta.get("review", "review") : null;
   const summaryDelta = delta ? delta.get("summary", "summary") : null;
 
@@ -1669,7 +1869,7 @@ export function renderReviewPage(input: RenderInput): string {
     `<link rel="icon" type="image/svg+xml" href="${FAVICON}">\n` +
     `<link rel="preload" href="/fonts/switzer.woff2" as="font" type="font/woff2" crossorigin>\n` +
     `<link rel="preload" href="/fonts/commit-mono-400.woff2" as="font" type="font/woff2" crossorigin>\n` +
-    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${DELTA_STYLE}</style>\n` +
+    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${DELTA_STYLE}${QUESTION_STYLE}</style>\n` +
     `</head>\n<body>\n` +
     SPRITE +
     `\n<main class="doc">\n` +
@@ -1692,11 +1892,13 @@ export function renderReviewPage(input: RenderInput): string {
     `<div class="rows">${rows}</div>` +
     `<p class="contents"><span class="nb"><a href="#summary">summary</a> ·</span> ` +
     `<span class="nb"><a href="#notes">review notes</a> ·</span> ` +
-    `<span class="nb"><a href="#walkthrough">walkthrough</a></span></p>` +
+    `<span class="nb"><a href="#walkthrough">walkthrough</a> ·</span> ` +
+    `<span class="nb"><a href="#questions">questions</a></span></p>` +
     `</section>\n` +
     `<section id="notes"><h2>Review notes</h2><div class="notes">${notes}</div></section>\n` +
     walkthroughSection(doc, delta) +
     `\n` +
+    questionsSection(input, annotations) +
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
     )}</p>\n` +
@@ -1859,8 +2061,10 @@ export function handleReviewPage(
           // was written at but not the version it was answered at, so the base side
           // cannot be reconstructed. Rather than approximate it and over-report every
           // answer, the route asks the delta nothing about annotations until the
-          // storage can answer honestly. The step that draws annotations has to add
-          // an answered-at column and wire both sides here; until it does,
+          // storage can answer honestly. Annotations do render now, in the questions
+          // section below, but each says its own state rather than claiming one
+          // changed between two versions. Marking answers in the delta needs an
+          // answered-at column and both sides wired here; until it exists,
           // `DeltaIndex.answered` is empty in production by construction.
           computeDelta({ doc: baseDoc, annotations: [] }, { doc: row.doc, annotations: [] }),
         );
@@ -1890,6 +2094,13 @@ export function handleReviewPage(
     baseVersion: delta ? base : null,
     delta,
     timeline,
+    // Annotations belong to the review, not to the version being read, so a question
+    // asked on v1 is still on the page at v3, saying v1.
+    annotations: listAnnotations(ws, slug),
+    // Filing is a member's act, so the form is drawn for a session that belongs to
+    // this workspace and for nobody else. A page reached with an API key alone can be
+    // read; it cannot be asked from.
+    canFile: reader !== null && listUserWorkspaces(reader.id).some((w) => w.id === ws),
   });
   // Looking at a review is what checks it. This is fired after the page is built and
   // never awaited, so a slow GitHub cannot hold a render: the reader gets the stored

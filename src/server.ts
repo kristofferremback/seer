@@ -46,6 +46,7 @@ import {
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
 import { handlePublishReview } from "./overseer/routes";
 import { handleReadReview } from "./overseer/read";
+import { handleAnnotation } from "./overseer/annotations";
 import {
   handleRefreshReview,
   reviewTopic,
@@ -577,6 +578,11 @@ export async function startServer() {
       // renderer and the witness both hold a slug, not a workspace id.
       "/api/reviews/:slug": {
         GET: (req) => handleReadReview(req, req.params.slug, null),
+      },
+      // The one thing written to a review after publication. A member files, an API
+      // key answers, and the route decides which by the body it was sent.
+      "/api/reviews/:slug/annotations": {
+        POST: (req) => handleAnnotation(req, req.params.slug),
       },
       "/api/reviews/:slug/refresh": {
         POST: (req) => handleRefreshReview(req, req.params.slug),
