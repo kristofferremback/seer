@@ -31,8 +31,8 @@ export function icon(id: string, cls = "ic", label?: string): string {
 /** Block markdown from a stored document. A published document passed the validator,
  *  so a rejection here means the document predates a rule or the parser moved under it.
  *  Neither is worth a blank page: the source is shown as the characters it is. */
-export function safeBlock(source: string): string {
-  if (source.trim() === "") return "";
+export function safeBlock(source: string | null | undefined): string {
+  if (source == null || source.trim() === "") return "";
   try {
     return renderMarkdown(source);
   } catch (err) {
@@ -44,8 +44,11 @@ export function safeBlock(source: string): string {
   }
 }
 
-/** Inline markdown (plain text and inline code) for one-line fields. Same fallback. */
-export function safeInline(source: string): string {
+/** Inline markdown (plain text and inline code) for one-line fields. Same fallback.
+ *  Nullish in, empty out: a stored document may predate a field becoming required,
+ *  and an absent optional field must never cost the page. */
+export function safeInline(source: string | null | undefined): string {
+  if (source == null) return "";
   try {
     return renderInline(source);
   } catch (err) {

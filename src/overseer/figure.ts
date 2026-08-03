@@ -103,7 +103,7 @@ export function figureLabel(figure: Figure): string {
     .map((e) => {
       const from = byId.get(e.from)!;
       const to = byId.get(e.to)!;
-      return e.label === "" ? `${from} to ${to}` : `${from} to ${to}, ${e.label}`;
+      return e.label == null || e.label === "" ? `${from} to ${to}` : `${from} to ${to}, ${e.label}`;
     })
     .join(". ");
   const head = nodes === "" ? "A flow figure with no nodes." : `A flow figure: ${nodes}.`;
@@ -129,7 +129,7 @@ export function figureSvg(figure: Figure): string {
     })
     .join("");
   const labels = edges
-    .filter((e) => e.label !== "")
+    .filter((e) => e.label != null && e.label !== "")
     .map((e) => {
       const a = byId.get(e.from)!;
       const b = byId.get(e.to)!;

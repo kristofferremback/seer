@@ -325,6 +325,23 @@ describe("figures", () => {
     expect(figureSvg(figure)).toContain(`role="img" aria-label="${figureLabel(figure)}"`);
   });
 
+  test("an edge with no label at all draws, and does not cost the page", () => {
+    // A stored document may omit an optional field entirely rather than send "".
+    // The renderer must treat absent and empty the same way: no label, no throw.
+    const bare = {
+      kind: "flow" as const,
+      nodes: figure.nodes,
+      edges: [{ from: "in", to: "res" }, { from: "old", to: "res", label: "" }],
+    } as unknown as typeof figure;
+    const svg = figureSvg(bare);
+    expect(svg.match(/<path class="fig-edge/g)!.length).toBe(2);
+    expect(svg).not.toContain("undefined");
+    expect(figureLabel(bare)).toBe(
+      "A flow figure: GET /s/:token, resolve, GET /b/:slug (muted). " +
+        "GET /s/:token to resolve. GET /b/:slug to resolve.",
+    );
+  });
+
   test("the layout is layered top-down and stable", () => {
     const svg = figureSvg(figure);
     const ys = [...svg.matchAll(/<rect class="[^"]*" x="[^"]*" y="([^"]*)"/g)].map((m) => Number(m[1]));

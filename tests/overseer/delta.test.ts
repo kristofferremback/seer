@@ -17,6 +17,7 @@ import {
   computeDelta,
   DeltaIndex,
   diffField,
+  evidenceFieldNames,
   markField,
   MAX_DIFF_WORDS,
   prBodyHtml,
@@ -1021,5 +1022,18 @@ describe("the revision timeline over the routes", () => {
     const pinned = await (await fetch(`${host}/${ws}/r/${slug}?from=1`)).text();
     const again = await (await fetch(`${host}/${ws}/r/${slug}?from=1`)).text();
     expect(pinned).toBe(again);
+  });
+});
+
+describe("evidence fields a stored document does not carry", () => {
+  test("an absent optional field is not a delta target and does not throw", () => {
+    // The witness may omit an optional field rather than send "". Naming it as a
+    // field would claim the next version removed something that was never there.
+    const evidence = [
+      { type: "figure", figure: { kind: "flow", nodes: [{ id: "a", label: "A", state: "normal" }], edges: [{ from: "a", to: "a" }] } },
+      { type: "bundle", bundle: { slug: "b", version: null } },
+    ] as never;
+    const names = evidenceFieldNames(evidence);
+    expect(names).toEqual(["ev-0-node-a"]);
   });
 });

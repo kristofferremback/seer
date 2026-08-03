@@ -318,22 +318,29 @@ function evidenceFields(evidence: Evidence[]): FieldSpec[] {
   const out: FieldSpec[] = [];
   evidence.forEach((e, i) => {
     const p = `ev-${i}`;
+    // A field a stored document does not carry gets no spec at all: an absent
+    // optional (or pre-rule) field is not a revision target and must not crash
+    // the walk. String(x ?? "") never reaches here for those.
+    const push = (name: string, inline: boolean, value: string | null | undefined, html?: string) => {
+      if (value == null) return;
+      out.push(spec(name, inline, html ?? safeInline(value)));
+    };
     switch (e.type) {
       case "example":
-        out.push(spec(`${p}-text`, false, exampleBodyHtml(e.example.text)));
-        out.push(spec(`${p}-caption`, true, safeInline(e.example.caption)));
+        push(`${p}-text`, false, e.example.text, exampleBodyHtml(e.example.text));
+        push(`${p}-caption`, true, e.example.caption);
         break;
       case "attachment":
-        out.push(spec(`${p}-alt`, true, safeInline(e.attachment.alt)));
-        out.push(spec(`${p}-caption`, true, safeInline(e.attachment.caption)));
+        push(`${p}-alt`, true, e.attachment.alt);
+        push(`${p}-caption`, true, e.attachment.caption);
         break;
       case "bundle":
-        out.push(spec(`${p}-caption`, true, safeInline(e.bundle.caption)));
+        push(`${p}-caption`, true, e.bundle.caption);
         break;
       case "figure":
-        for (const n of e.figure.nodes) out.push(spec(`${p}-node-${n.id}`, true, safeInline(n.label)));
+        for (const n of e.figure.nodes) push(`${p}-node-${n.id}`, true, n.label);
         e.figure.edges.forEach((edge, j) => {
-          out.push(spec(`${p}-edge-${j}`, true, safeInline(edge.label)));
+          push(`${p}-edge-${j}`, true, edge.label);
         });
         break;
       case "ref":
