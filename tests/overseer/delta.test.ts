@@ -19,6 +19,8 @@ import {
   diffField,
   markField,
   MAX_DIFF_WORDS,
+  prBodyHtml,
+  safeId,
   textOf,
 } from "../../src/overseer/delta";
 import { baseVersion, renderReviewPage } from "../../src/overseer/render";
@@ -320,8 +322,83 @@ describe("the marks on the page", () => {
     }
     // The page says what it is measuring against.
     expect(html).toContain("marks since v1");
-    // The summary is diffed like any other body.
-    expect(html.slice(html.indexOf('id="summary"'))).toContain('class="dw');
+    // The summary is diffed like any other body. Bounded to the summary block
+    // itself, which ends where the statement rows begin, so the assertion cannot
+    // pass on some other section's ink.
+    const summaryBlock = html.slice(
+      html.indexOf('id="summary"'),
+      html.indexOf('<div class="rows">'),
+    );
+    expect(summaryBlock).toContain('class="dw');
+    expect(summaryBlock).toMatch(/<ins class="dw dnew">[^<]*grew/);
+  });
+
+  test("a chip on a card whose description was emptied still has a mark under it", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.prs[0]!.body = "";
+    });
+    expect(before.prs[0]!.body).not.toBe("");
+    const html = page(after, before);
+    const chips = [...html.matchAll(/<span class="rev">/g)];
+    expect(chips.length).toBe(1);
+    for (const m of chips) {
+      const unit = unitAround(html, m.index!);
+      expect(/class="(dw|dp|dw dnew|dw dall|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
+      // The prior description is in the page, behind its own disclosure.
+      expect(unit).toContain(textOf(prBodyHtml(before.prs[0]!.body)).split(" ")[0]!);
+    }
+  });
+
+  test("a note that dropped a check says so, and the check comes back", () => {
+    const before = doc((d) => {
+      d.notes[0]!.checks = ["alpha check", "beta check", "gamma check"];
+    });
+    const after = doc((d) => {
+      d.notes[0]!.checks = ["alpha check"];
+    });
+    const delta = computeDelta(side(before), side(after));
+    const e = delta.entities.find((x) => x.kind === "note" && x.id === before.notes[0]!.id)!;
+    expect(e).toBeDefined();
+    expect(e.status).toBe("revised");
+    expect(e.fields.map((f) => f.field).sort()).toEqual(["check-1", "check-2"]);
+    for (const f of e.fields) {
+      expect(f.mode).toBe("whole");
+      expect(f.density).toBe(1);
+    }
+    expect(e.fields.find((f) => f.field === "check-1")!.priorWords.join(" ")).toBe("beta check");
+
+    const html = page(after, before);
+    const at = html.indexOf(`id="${before.notes[0]!.id}"`);
+    const unit = unitAround(html, at + 20);
+    expect(unit).toContain("beta check");
+    expect(unit).toContain("gamma check");
+    expect(unit).toContain('class="dp dpb"');
+    expect(unit).toContain('<span class="rev">revised</span>');
+  });
+
+  test("two keys that differ anywhere still differ as ids", () => {
+    expect(safeId("acme/seer#1")).not.toBe(safeId("acme-seer-1"));
+    expect(safeId("a_b")).not.toBe(safeId("a/b"));
+    expect(safeId("st_gate")).toBe(safeId("st_gate"));
+    expect(/^[a-zA-Z0-9_-]+$/.test(safeId("acme/seer#1"))).toBe(true);
+  });
+
+  test("a note that dropped every check still says a check went", () => {
+    const before = doc((d) => {
+      d.notes[0]!.checks = ["alpha check"];
+    });
+    const after = doc((d) => {
+      d.notes[0]!.checks = [];
+    });
+    const e = computeDelta(side(before), side(after)).entities.find(
+      (x) => x.kind === "note" && x.id === before.notes[0]!.id,
+    )!;
+    expect(e.fields.map((f) => f.field)).toEqual(["check-0"]);
+    const html = page(after, before);
+    const unit = unitAround(html, html.indexOf(`id="${before.notes[0]!.id}"`) + 20);
+    expect(unit).toContain("alpha check");
+    expect(unit).toContain('<span class="rev">revised</span>');
   });
 
   test("a page with no base carries no chip and no mark at all", () => {

@@ -19,7 +19,7 @@
 
 import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
-import { chip, marked, type DeltaIndex, type EntityDelta } from "./delta";
+import { chip, marked, safeId, type DeltaIndex, type EntityDelta } from "./delta";
 import { icon, safeBlock, safeInline, shortSha } from "./render-evidence";
 import type { Group, Hunk, HunkLine, StatementKind } from "./types";
 
@@ -386,6 +386,9 @@ function groupBlock(
   const rows = files
     .map((f, i) => fileRow(f, notes.get(f.path), `fd-${group.id}-${i}`))
     .join("");
+  // Marked first, then tested for emptiness: a paragraph cleared between versions
+  // still owes the reader its prior words, and its chip owes them a mark.
+  const gsum = marked(safeBlock(group.paragraph), d, "paragraph", group.id);
   return (
     `<details class="grp" id="${escapeHtml(group.id)}" data-kind="${escapeHtml(group.kind)}">` +
     `<summary>${icon("chev", "tick")}` +
@@ -397,9 +400,7 @@ function groupBlock(
     `<div class="grp-body">` +
     // Block markdown, the way the data model defines it: a group paragraph may carry
     // emphasis, a link, a list or a fenced block.
-    (group.paragraph.trim() === ""
-      ? ""
-      : `<div class="gsum">${marked(safeBlock(group.paragraph), d, "paragraph", group.id)}</div>`) +
+    (gsum === "" ? "" : `<div class="gsum">${gsum}</div>`) +
     `<div class="frows">${rows}</div>` +
     `</div></details>`
   );
@@ -421,7 +422,7 @@ export function walkthroughSection(doc: ReviewDoc, delta: DeltaIndex | null = nu
         .removed("group")
         .map(
           (e) =>
-            `<details class="grp dgoneunit" id="dgone-${escapeHtml(e.id)}">` +
+            `<details class="grp dgoneunit" id="dgone-${safeId(e.id)}">` +
             `<summary>${icon("chev", "tick")}` +
             `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
             chip(e) +

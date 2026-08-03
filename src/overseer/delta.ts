@@ -338,11 +338,28 @@ function compare(
   codeMoved: boolean,
 ): EntityDelta | null {
   const priorByName = new Map(prior.map((f) => [f.field, f]));
+  const nowByName = new Set(current.map((f) => f.field));
   const fields: FieldDelta[] = [];
   for (const spec of current) {
     const was = priorByName.get(spec.field);
     const d = diffField(spec.field, spec.inline, was ? was.html : "", spec.html);
     if (d) fields.push(d);
+  }
+  // A field the base side had and this side does not is a deletion, and a deletion
+  // the page does not draw is exactly the absence the data model forbids. The whole
+  // prior text goes behind one disclosure: there is nothing left to mark in place.
+  for (const spec of prior) {
+    if (nowByName.has(spec.field)) continue;
+    const words = wordToks(spec.html).map((t) => t.raw);
+    if (words.length === 0) continue;
+    fields.push({
+      field: spec.field,
+      inline: false,
+      mode: "whole",
+      regions: [{ d0: 0, d1: words.length, c0: 0, c1: 0 }],
+      priorWords: words,
+      density: 1,
+    });
   }
   if (fields.length === 0 && !codeMoved) return null;
   return { kind, id, status: "revised", fields, former: null, codeMoved };
@@ -364,6 +381,10 @@ function born(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelt
   };
 }
 
+/** A removed entity, carried out as the prose it held: its head line and every
+ *  authored body under it. Evidence, hunks and refs are citations rather than
+ *  authorship, and they belong to a source the removed entity no longer points at,
+ *  so the stub deliberately holds the words and not the quotations. */
 function gone(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelta {
   const [head, ...rest] = specs;
   return {
@@ -484,10 +505,15 @@ export class DeltaIndex {
     let removed = 0;
     let codeMoved = 0;
     for (const e of this.delta.entities) {
+      // The title and the summary carry marks rather than a chip, because neither
+      // sits in a row that could hold one. Counting them here would put a number in
+      // the menu that the page has no chip to account for, so the count is of the
+      // entities that do chip.
+      const chips = e.kind !== "review" && e.kind !== "summary";
       // A pull request whose only movement is its head sha is code moved, not
       // revised: nothing it says on the page changed.
       if (e.status === "revised") {
-        if (e.fields.length > 0) revised++;
+        if (e.fields.length > 0 && chips) revised++;
       }
       else if (e.status === "new") added++;
       else removed++;
@@ -501,10 +527,18 @@ export class DeltaIndex {
 
 const CHEV = `<svg class="dtick" aria-hidden="true"><use href="#i-chev"/></svg>`;
 
+/** An id fragment safe for an attribute, and injective: every character outside the
+ *  safe set becomes its own escape, so two keys that differ anywhere still differ
+ *  here. Collapsing them would pair one checkbox with another entity's label, and
+ *  the whole disclosure grammar is that pairing. */
+export function safeId(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9-]/g, (c) => `_${c.charCodeAt(0).toString(16)}_`);
+}
+
 /** A disclosure id that depends only on where it sits, so two renders of one pair
  *  produce the same bytes. */
 function boxId(owner: string, field: string, k: number): string {
-  return `dp-${owner.replace(/[^a-zA-Z0-9_-]/g, "-")}-${field}-${k}`;
+  return `dp-${safeId(owner)}-${field}-${k}`;
 }
 
 type Edit = { at: number; del: number; ins: string };

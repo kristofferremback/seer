@@ -35,6 +35,7 @@ import {
   DeltaIndex,
   marked,
   prBodyHtml,
+  safeId,
   type EntityDelta,
 } from "./delta";
 import { freshnessOf, readableWorkspaces } from "./read";
@@ -1293,14 +1294,15 @@ const FAVICON =
  *  as any markup at all: paragraphs, escaped. It is also unbounded and derived, so it
  *  gets its own fold rather than sitting between the authored detail and the ref. */
 function prBody(ownerId: string, body: string, d: EntityDelta | null): string {
-  const html = prBodyHtml(body);
-  if (html === "") return "";
+  // Marked first, then tested for emptiness: a description cleared between versions
+  // renders as nothing at all, and dropping the fold there would leave the card's
+  // revised chip pointing at no mark.
+  const inner = marked(prBodyHtml(body), d, "body", `${ownerId}-body`);
+  if (inner === "") return "";
   return (
     `<details class="fold" id="${escapeHtml(ownerId)}-body">` +
     `<summary>${icon("chev", "tick")}<span class="fh"><b>description</b></span></summary>` +
-    `<div class="fold-body prbody-body">` +
-    marked(html, d, "body", `${ownerId}-body`) +
-    `</div></details>`
+    `<div class="fold-body prbody-body">${inner}</div></details>`
   );
 }
 
@@ -1425,7 +1427,7 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
  *  claim they have to take on trust, so the former content comes with it. */
 function removedStub(e: EntityDelta, cls: string): string {
   const former = e.former ?? { head: "", body: [] };
-  const id = `dgone-${e.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  const id = `dgone-${safeId(e.id)}`;
   const body = former.body.map((h) => `<div class="dp dpb">${h}</div>`).join("");
   return (
     `<details class="${cls} dgoneunit" id="${escapeHtml(id)}">` +
@@ -1443,12 +1445,20 @@ function noteRow(n: Note, ctx: RenderCtx): string {
   const chips = refs.map((r) => refChip(n.id, r)).join(" ");
   const folds = refs.map((r) => refFold(n.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("note", n.id) : null;
+  // A check the base version carried and this one dropped keeps its place in the
+  // list, as an item holding only the prior words behind their disclosure. A list
+  // that simply got shorter would be an absence a reader cannot see.
+  const dropped = (d ? d.fields : [])
+    .filter((f) => f.field.startsWith("check-") && Number(f.field.slice(6)) >= n.checks.length)
+    .sort((a, b) => Number(a.field.slice(6)) - Number(b.field.slice(6)));
+  const items = [
+    ...n.checks.map((c, i) => marked(safeInline(c), d, `check-${i}`, n.id)),
+    ...dropped.map((f) => marked("", d, f.field, n.id)),
+  ];
   const checks =
-    n.checks.length === 0
+    items.length === 0
       ? ""
-      : `<ul class="checks">${n.checks
-          .map((c, i) => `<li>${marked(safeInline(c), d, `check-${i}`, n.id)}</li>`)
-          .join("")}</ul>`;
+      : `<ul class="checks">${items.map((h) => `<li>${h}</li>`).join("")}</ul>`;
   return (
     `<details class="note is-${escapeHtml(n.kind)}" id="${escapeHtml(n.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(n.kind, `ic k-${n.kind}`, n.kind)}` +
@@ -1704,12 +1714,6 @@ function timelineCounts(
   return counts;
 }
 
-function annotationsAt(all: Annotation[], version: number): Annotation[] {
-  return all
-    .filter((a) => a.version <= version)
-    .map((a) => ({ ...a, status: "open" as const }));
-}
-
 function versionNumber(raw: string): number | null {
   if (!/^[0-9]{1,9}$/.test(raw)) return null;
   const n = Number(raw);
@@ -1772,15 +1776,17 @@ export function handleReviewPage(
     base === null || !baseDoc
       ? null
       : new DeltaIndex(
-          computeDelta(
-            { doc: baseDoc, annotations: annotationsAt(annotations, base) },
-            { doc: row.doc, annotations },
-          ),
+          // Both sides carry no annotations: an annotation row records the version it
+          // was written at but not the version it was answered at, so the base side
+          // cannot be reconstructed. Rather than approximate it and over-report every
+          // answer, the route asks the delta nothing about annotations until the
+          // storage can answer honestly.
+          computeDelta({ doc: baseDoc, annotations: [] }, { doc: row.doc, annotations: [] }),
         );
 
   const timeline: TimelineEntry[] = [];
   for (const v of listReviewVersions(ws, slug)) {
-      const counts = timelineCounts(ws, slug, v.version, docAt);
+    const counts = timelineCounts(ws, slug, v.version, docAt);
     timeline.push({
       version: v.version,
       createdAt: v.created_at,
