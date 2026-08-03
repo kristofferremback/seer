@@ -89,6 +89,36 @@ export function refChip(ownerId: string, ref: Ref, suffix = ""): string {
   );
 }
 
+/** Every citation a row carries, with the file said once. Three refs into one file
+ *  used to spend the file name three times beside the text, which is the widest
+ *  thing on the row and the least informative repetition on the page. The name
+ *  becomes a label and each line keeps its own link, so nothing is lost but the
+ *  repetition. */
+export function refChips(ownerId: string, refs: Ref[], suffix = ""): string {
+  const byPath = new Map<string, Ref[]>();
+  for (const r of refs) {
+    const at = byPath.get(r.path);
+    if (at) at.push(r);
+    else byPath.set(r.path, [r]);
+  }
+  return [...byPath.entries()]
+    .map(([path, group]) => {
+      if (group.length === 1) return refChip(ownerId, group[0]!, suffix);
+      const lines = group
+        .map(
+          (r) =>
+            `<a class="refline" href="#${escapeHtml(foldId(ownerId, r, suffix))}">` +
+            `${escapeHtml(String(r.startLine))}</a>`,
+        )
+        .join("");
+      return (
+        `<span class="ref refset">${icon("chev", "rtick")}` +
+        `<span class="reffile">${escapeHtml(baseName(path))}</span>${lines}</span>`
+      );
+    })
+    .join("");
+}
+
 function githubBlobUrl(ref: Ref): string {
   return (
     `https://github.com/${ref.repo}/blob/${ref.sha}/${ref.path}` +

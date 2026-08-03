@@ -47,6 +47,7 @@ import { KIND_LABEL, hunkAnchorId, kindMark, stats, walkthroughSection } from ".
 import {
   icon,
   refChip,
+  refChips,
   refFold,
   renderEvidence,
   safeBlock,
@@ -684,6 +685,11 @@ const STYLE = `  @font-face {
   .rwhat { grid-column: 3; grid-row: 1; font-size: 14.5px; line-height: 1.5; color: hsl(var(--ink)); min-width: 0; }
   .rrefs { grid-column: 3; grid-row: 2; display: flex; flex-wrap: wrap; gap: 7px; }
   .rrefs:empty { display: none; }
+  /* a file cited at several lines: the name once, then each line as its own link */
+  .refset { display: inline-flex; align-items: center; gap: 0; }
+  .reffile { margin-right: 2px; }
+  .refline { margin-left: 6px; text-decoration: underline; text-underline-offset: 2px; }
+  .refline:first-of-type { margin-left: 5px; }
   .row-body { padding: 4px 2px 18px calc(4px + 12px + 14px + var(--sgap) * 2); }
   .row-body > *:first-child { margin-top: 0; }
   .row-body p { font-size: 14.5px; line-height: 1.62; color: hsl(var(--ink-soft)); margin-bottom: 13px; }
@@ -691,8 +697,10 @@ const STYLE = `  @font-face {
   .row-body .fold + .fold { margin-top: 8px; }
   @media (min-width: 680px) {
     .row { --sgap: 12px; }
-    .row > summary { grid-template-columns: 12px 14px minmax(0, 1fr) auto; row-gap: 0; }
-    .rrefs { grid-column: 4; grid-row: 1; flex-wrap: nowrap; align-self: start; margin-top: 1px; }
+    /* the citations stay under the claim at every width. Beside it they took the
+       widest column on the row and pushed the sentence into a narrower one, which
+       is backwards: the claim is what is being read. */
+    .rrefs { margin-top: 1px; }
   }
 
   /* ---- review notes ---- */
@@ -1448,7 +1456,7 @@ function evidenceMarks(d: EntityDelta | null, owner: string): EvidenceMarks | nu
 
 function statementRow(s: Statement, ctx: RenderCtx): string {
   const refs = uniqueRefs(s.refs);
-  const chips = refs.map((r) => refChip(s.id, r)).join(" ");
+  const chips = refChips(s.id, refs);
   const folds = refs.map((r) => refFold(s.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("statement", s.id) : null;
   return (
@@ -1491,7 +1499,7 @@ function removedStub(e: EntityDelta, cls: string, headCls: string): string {
 
 function noteRow(n: Note, ctx: RenderCtx): string {
   const refs = uniqueRefs(n.refs);
-  const chips = refs.map((r) => refChip(n.id, r)).join(" ");
+  const chips = refChips(n.id, refs);
   const folds = refs.map((r) => refFold(n.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("note", n.id) : null;
   // A check the base version carried and this one dropped keeps its place in the

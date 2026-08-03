@@ -269,6 +269,27 @@ describe("the page itself", () => {
     expect(html).toContain("</section></div>");
   });
 
+
+  test("a file cited at several lines says the file once", () => {
+    const refs = [
+      ref("ref_a", "src/responsive-dialog.tsx", 97),
+      ref("ref_b", "src/responsive-dialog.tsx", 151),
+      ref("ref_c", "src/other.ts", 12),
+    ];
+    const html = page(doc({ statements: [statement({ id: "st_m", refs })] }));
+    const head = html.slice(html.indexOf('id="st_m"'), html.indexOf("</summary>", html.indexOf('id="st_m"')));
+    // The repeated file name appears once in the row head, and each line keeps
+    // its own link into its own panel.
+    expect((head.match(/responsive-dialog\.tsx/g) ?? []).length).toBe(1);
+    expect(head).toContain('href="#st_m-ref_a"');
+    expect(head).toContain('href="#st_m-ref_b"');
+    expect(head).toContain(">97</a>");
+    expect(head).toContain(">151</a>");
+    // A file cited once is still an ordinary chip carrying file and line.
+    expect(head).toContain("other.ts:12");
+    for (const r of refs) expect(html).toContain(`<details class="fold" id="st_m-${r.id}"`);
+  });
+
   test("authored text arrives escaped", () => {
     const html = page(
       doc({
