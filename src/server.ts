@@ -46,6 +46,11 @@ import {
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
 import { handlePublishReview } from "./overseer/routes";
 import { handleReadReview } from "./overseer/read";
+import {
+  handleRefreshReview,
+  reviewTopic,
+  setFreshnessPublisher,
+} from "./overseer/freshness";
 import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
 import {
   landingPage,
@@ -74,7 +79,10 @@ const WS_REVIEW_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)(?:/(v|a)/([^/]+))?/?$`,
 );
 
-type WSData = { ws: string; slug: string };
+// A live socket is either a bundle's reload channel or a review's freshness channel.
+// The two are gated differently, so which one this is travels with the socket rather
+// than being re-derived at subscribe time.
+type WSData = { ws: string; slug: string; kind: "bundle" | "review" };
 
 function markdownDoc(): Response {
   return new Response(skillDoc(), {
@@ -176,6 +184,13 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
 // members. The same rule gates page serving and the live-reload socket.
 function workspaceViewable(ws: Workspace, req: Request): boolean {
   if (ws.visibility === "public") return true;
+  const user = sessionUser(req);
+  return user ? isMember(ws.id, user.id) : false;
+}
+
+// Membership, whatever the workspace's visibility says. A review holds private source
+// and is never served by visibility alone, so its live channel is not either.
+function workspaceMember(ws: Workspace, req: Request): boolean {
   const user = sessionUser(req);
   return user ? isMember(ws.id, user.id) : false;
 }
@@ -446,7 +461,11 @@ export async function startServer() {
 
   const websocket: WebSocketHandler<WSData> = {
     open(ws) {
-      ws.subscribe(`bundle:${ws.data.ws}:${ws.data.slug}`);
+      ws.subscribe(
+        ws.data.kind === "review"
+          ? reviewTopic(ws.data.ws, ws.data.slug)
+          : `bundle:${ws.data.ws}:${ws.data.slug}`,
+      );
     },
     message() {},
   };
@@ -558,6 +577,9 @@ export async function startServer() {
       // renderer and the witness both hold a slug, not a workspace id.
       "/api/reviews/:slug": {
         GET: (req) => handleReadReview(req, req.params.slug, null),
+      },
+      "/api/reviews/:slug/refresh": {
+        POST: (req) => handleRefreshReview(req, req.params.slug),
       },
       "/api/reviews/:slug/v/:n": {
         GET: (req) => handleReadReview(req, req.params.slug, req.params.n),
@@ -743,13 +765,19 @@ export async function startServer() {
       if (url.pathname === "/ws/livereload") {
         const wsId = url.searchParams.get("ws") ?? "";
         const slug = url.searchParams.get("slug") ?? "";
+        const kind = url.searchParams.get("kind") === "review" ? "review" : "bundle";
         if (!WS_ID_RE.test(wsId) || !SLUG_RE.test(slug)) {
           return new Response("Bad request", { status: 400 });
         }
-        // Same access rule as serving: only upgrade when the viewer could view it.
+        // Same access rule as serving: only upgrade when the viewer could view it. A
+        // review channel is stricter than a bundle's: a public workspace serves its
+        // bundles to anyone, but a review holds private source, so this one asks for
+        // membership rather than viewability.
         const ws = getWorkspace(wsId);
-        if (!ws || !workspaceViewable(ws, req)) return new Response("Not found", { status: 404 });
-        if (srv.upgrade(req, { data: { ws: wsId, slug } }))
+        if (!ws) return new Response("Not found", { status: 404 });
+        const allowed = kind === "review" ? workspaceMember(ws, req) : workspaceViewable(ws, req);
+        if (!allowed) return new Response("Not found", { status: 404 });
+        if (srv.upgrade(req, { data: { ws: wsId, slug, kind } }))
           return undefined as unknown as Response;
         return new Response("WebSocket upgrade failed", { status: 400 });
       }
@@ -783,6 +811,12 @@ export async function startServer() {
     },
 
     websocket,
+  });
+
+  // Freshness pushes go out over this server's sockets. Handed in rather than imported
+  // so the freshness module never has to know a server exists to be tested.
+  setFreshnessPublisher((topic, message) => {
+    server.publish(topic, message);
   });
 
   console.log(`Seer listening on ${config.baseUrl} (port ${server.port})`);

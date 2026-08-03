@@ -41,6 +41,7 @@ import {
   type EntityDelta,
 } from "./delta";
 import { freshnessOf, readableWorkspaces } from "./read";
+import { refreshOnView } from "./freshness";
 import { KIND_LABEL, kindMark, walkthroughSection } from "./render-diff";
 import {
   icon,
@@ -1607,6 +1608,29 @@ function revisionMenu(input: RenderInput, basePath: string): string {
   );
 }
 
+/** The heads chip, as the page draws it and as the live push rewrites it. One
+ *  function so the two cannot drift into two different sentences. */
+function headsChip(behind: number, total: number): string {
+  return behind === 0 ? "heads current" : `${behind} of ${total} behind`;
+}
+
+/** The freshness enhancement: it subscribes to the review's channel and rewrites the
+ *  heads chip when a push says a head moved. Nothing depends on it. Without a script
+ *  the chip is as fresh as the render, which is what the stored rows say. */
+function freshnessScript(wsId: string, slug: string): string {
+  const current = JSON.stringify(headsChip(0, 0));
+  return (
+    `(()=>{const h=document.getElementById("heads");if(!h)return;` +
+    `const c=()=>{const w=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+` +
+    `"/ws/livereload?kind=review&ws="+encodeURIComponent(${JSON.stringify(wsId)})+` +
+    `"&slug="+encodeURIComponent(${JSON.stringify(slug)}));` +
+    `w.onmessage=(e)=>{let m=null;try{m=JSON.parse(e.data)}catch(x){return}` +
+    `if(!m||m.type!=="freshness")return;` +
+    `h.textContent=m.behind===0?${current}:m.behind+" of "+m.total+" behind"};` +
+    `w.onclose=()=>setTimeout(c,2000)};c()})();`
+  );
+}
+
 export function renderReviewPage(input: RenderInput): string {
   const { doc, slug, wsId } = input;
   const delta = input.delta ?? null;
@@ -1615,7 +1639,7 @@ export function renderReviewPage(input: RenderInput): string {
   const summaryDelta = delta ? delta.get("summary", "summary") : null;
 
   const behind = doc.prs.filter((pr) => input.freshness[prKey(pr.repo, pr.number)] === "behind");
-  const heads = behind.length === 0 ? "heads current" : `${behind.length} of ${doc.prs.length} behind`;
+  const heads = headsChip(behind.length, doc.prs.length);
   const count = doc.prs.length === 1 ? "1 pull request" : `${doc.prs.length} pull requests`;
   const marking = input.pinned
     ? `version ${input.version} of ${input.latestVersion}`
@@ -1659,7 +1683,7 @@ export function renderReviewPage(input: RenderInput): string {
     `</div>` +
     `<h1 class="title">${marked(safeInline(doc.title), review, "title", "review", true)}</h1>` +
     `<p class="meta"><span>${escapeHtml(doc.kind)}</span><span>${escapeHtml(count)}</span>` +
-    `<span>${escapeHtml(heads)}</span>${baseMark}</p>` +
+    `<span class="heads" id="heads">${escapeHtml(heads)}</span>${baseMark}</p>` +
     revisionMenu(input, ctx.basePath) +
     chain(doc, ctx) +
     `</header>\n` +
@@ -1676,7 +1700,11 @@ export function renderReviewPage(input: RenderInput): string {
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
     )}</p>\n` +
-    `</main>\n<script>${PAGE_SCRIPT}</script>\n</body>\n</html>\n`
+    `</main>\n<script>${PAGE_SCRIPT}</script>\n` +
+    // A pinned version is a record of what was published, so it gets no live channel:
+    // only the page reading the current version can go behind while it is open.
+    (input.pinned ? "" : `<script>${freshnessScript(wsId, slug)}</script>\n`) +
+    `</body>\n</html>\n`
   );
 }
 
@@ -1863,6 +1891,11 @@ export function handleReviewPage(
     delta,
     timeline,
   });
+  // Looking at a review is what checks it. This is fired after the page is built and
+  // never awaited, so a slow GitHub cannot hold a render: the reader gets the stored
+  // document now, and a head that moved arrives on the live channel or on the next load.
+  if (asked === review.latest_version) refreshOnView(ws, slug, row.doc);
+
   return new Response(html, {
     status: 200,
     headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },

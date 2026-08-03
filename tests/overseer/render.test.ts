@@ -232,8 +232,12 @@ describe("the page itself", () => {
     expect(html).toContain("&lt;svg onload=1&gt;");
     // The escaped characters are text, so no tag on the page grew a handler.
     expect(html).not.toMatch(/<[a-z]+[^>]*\son[a-z]+\s*=/i);
-    // Only the two scripts the renderer writes itself.
-    expect(html.match(/<script/g)!.length).toBe(2);
+    // Only the three scripts the renderer writes itself: the theme floor, the page
+    // enhancement, and the freshness channel an unpinned page subscribes to.
+    expect(html.match(/<script/g)!.length).toBe(3);
+    // A pinned version is a record, so it has no channel and one script fewer.
+    const pinned = page(doc(), { pinned: true });
+    expect(pinned.match(/<script/g)!.length).toBe(2);
   });
 
   test("the chain draws arrows for a stack and none for a set", () => {
