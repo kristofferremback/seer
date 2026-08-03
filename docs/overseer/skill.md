@@ -26,8 +26,10 @@ diff or is not yours to state.
 
 A review names one or more pull requests. Work in this order:
 
-1. Resolve each pull request's base ref. When a base ref names another pull request in
-   the review, that pull request is its parent, and the review is a stack.
+1. Resolve each pull request's base ref. A base ref names a branch, not a pull request,
+   so build the mapping yourself: collect every reviewed pull request's head branch
+   (`headRefName`), and when another's base ref equals one of them, that one is its
+   parent, and the review is a stack.
 2. Read the stack from the bottom up: parent before child. A child's diff is only
    legible against a base its parent already moved.
 3. Read each pull request whole before forming any claim: description, commit messages,
@@ -48,7 +50,11 @@ change exists, what it does, and how it is built. Those are areas to cover, not 
 to print.
 
 Every pull request in the review is realized by at least one statement. A pull request
-that warrants no statement warrants a question about why it is in the review.
+that warrants no statement warrants a question about why it is in the review. A
+statement's `prs[]` lists the pull requests that realize it as `repo#number` strings
+assembled from the pr entity's fields, `"threahq/threa#1730"` shaped, and a statement
+may span several: a change completed across three pull requests is one statement
+listing three, which is exactly the shape a per-pull-request reading hides.
 
 **Notes** are only what a reviewer would otherwise miss. A note is `risk` or `note`. A
 risk carries either `checks[]` (up to 5, each a falsifiable thing to verify) or a ref
@@ -108,10 +114,22 @@ Two details that catch people. A header written `@@ -12 +12,3 @@`, with a count
 omitted, means a count of 1, so the id is `pr41:src/overseer/diff.ts:@@12,1+12,3`. And
 the path is the new path exactly as the diff spells it, with no leading `a/` or `b/`.
 
-Compute the ids from the pull request's own unified diff, the one you read on GitHub.
+Compute the ids from the per-file `patch` fields of the pull request files API:
+`gh api repos/<owner>/<repo>/pulls/<number>/files --paginate`. That is the diff Overseer
+itself derives from. It is not always the diff `gh pr diff` prints: the two can split
+the same change into differently sized hunks (adjacent edits merged in one, separate in
+the other), and ids computed from the wrong one fail to match. The files API also
+settles two edge cases: a deleted file's path is the `filename` field, never
+`/dev/null`, and a renamed file's path is the new name.
+
+In a stack, ids cannot collide across pull requests: the `pr<number>:` prefix keeps
+two pull requests' hunks distinct even when they edit overlapping lines of the same
+file.
+
 Nothing hands you a diff before you publish, and hunks appear in the review document
 only after it exists. If you compute an id that does not match a hunk Overseer derived
-for that pull request, publish fails naming it.
+for that pull request, publish fails naming it, and the unclaimed-hunk errors print the
+ids Overseer actually derived, which is the ground truth to reconcile against.
 
 ## Budgets
 
@@ -132,11 +150,19 @@ caption 120, attachment alt 140, figure node label 40, figure edge label 24.
 Breadth scales with decomposition, not with diff size. 8,000 lines of codegen deserve a
 smaller review than 800 lines of an auth rewrite.
 
+The ceiling wins. On a large stack the per-pull-request increments can add up past the
+ceiling (at 10 pull requests the statement arithmetic reaches 21); the budget is then
+exactly the ceiling, 12 statements and 16 groups, and every pull request still needs
+its one statement, which is what makes the remaining slots scarce and worth spending
+deliberately.
+
 **The decomposition warning.** Spending the entire statement or group budget is not an
 error and does not block publication. The response carries a warning saying this review
-spent its whole budget, which may mean the change warranted further decomposition. It
-is a fact about the change, not about your writing, and the summary should say it out
-loud rather than let the reader discover it.
+spent its whole budget, which may mean the change warranted further decomposition. For
+a review pinned at the ceiling the warning is guaranteed by arithmetic, so weigh it
+accordingly: on a stack that is already well decomposed, the honest sentence in the
+summary is that the stack is bigger than one review comfortably holds, not that it
+should have been split further.
 
 ## Choosing evidence
 
@@ -152,16 +178,21 @@ Beyond the required ref, pick the form that carries the claim:
   authored field, with optional `highlight[]`. Overseer resolves the snippet and derives whether the ref
   is `in_stack` or `outside`. A ref into untouched code is often the most useful thing
   on the page, because it shows what the change reuses.
-- **payload**: a before and after pair, for a contract change. Use it when the shape of
-  the data is the claim.
-- **example**: an invented illustration, a request as a client would send it, a config
-  as it would be written. It is the one evidence kind that is not quoted, so it must
-  read as invented: no file names, no line numbers, and a required caption.
-- **figure**: one constrained flow graph, nodes and edges with short labels. At most one
-  drawing carries a page.
-- **attachment**: an image uploaded with the review, with required `alt`. An attachment
-  nothing references is rejected.
-- **bundle**: a pointer to a Seer bundle in the same workspace, with a required caption.
+- **payload**: `{ lang, before, after, highlight[] }`, a before and after pair for a
+  contract change; `lang` is `json` or `text`, `highlight[]` names the keys or line
+  numbers that moved. Use it when the shape of the data is the claim.
+- **example**: `{ lang, text, caption }`, an invented illustration, a request as a
+  client would send it, a config as it would be written; `lang` is any language name.
+  It is the one evidence kind that is not quoted, so it must read as invented: no file
+  names, no line numbers, and the caption is required.
+- **figure**: `{ kind: "flow", nodes[], edges[] }`, one constrained flow graph. Each
+  node is `{ id, label, state }` with `state` either `normal` or `muted`; each edge is
+  `{ from, to, label }`. At most one drawing carries a page.
+- **attachment**: `{ id, mediaType, alt, caption }`, an image uploaded with the review;
+  `alt` is required, `mediaType` is `image/*`. An attachment nothing references is
+  rejected.
+- **bundle**: `{ slug, version, caption }`, a pointer to a Seer bundle in the same
+  workspace; `version` is a number or null for latest, and the caption is required.
 
 If a claim is provable by quoting the code, quote the code. Reach for an example only
 when the diff cannot show the thing.
@@ -189,11 +220,13 @@ attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries
 `id` you author, unique within the document and stable across versions:
 
 - **pr**: `{ repo, number, gist, detail, detailRef, parent }`. `gist` is one line,
-  `detail` is at most 2 sentences, `detailRef` is a ref pointer into that pull request,
-  and `parent` is the number of its parent in the stack, or `null`.
+  `detail` is at most 2 sentences, `detailRef` is a full ref object
+  (`{ repo, sha, path, startLine, endLine }`) pinned at that pull request's own head
+  SHA, and `parent` is the number of its parent in the stack, or `null`.
 - **statement**: `{ id, kind, text, prs[], refs[], body, evidence[] }`. `kind` is `add`,
-  `change` or `remove`. `prs[]` names the pull requests the statement realizes, each as
-  `repo#number`, spelled exactly as the `prs[]` entries spell them.
+  `change` or `remove`. `prs[]` names the pull requests the statement realizes, each a
+  `repo#number` string assembled from the pr entity's `repo` and `number`, such as
+  `"threahq/threa#1730"`.
 - **note**: `{ id, kind, text, body, checks[], refs[], evidence[] }`. `kind` is `risk`
   or `note`.
 - **group**: `{ id, title, significance, paragraph, hunks[], fileNotes[] }`.
@@ -203,11 +236,14 @@ attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries
 A review names at most 10 pull requests. Success returns the review with its `version`,
 `url`, `versionUrl`, and any `warnings`.
 
-**The other responses.** 400 for a body that is not a usable document or that carries no
-valid `slug`. 413 when the upload is over the server's size limit. 502 when GitHub fails
-to serve a pull request or a ref cannot be read upstream. 503 when Overseer cannot reach
-GitHub because `GITHUB_TOKEN` is unset. None of those four is about your content: do not
-re-author for them, and do not retry a 502 or a 503 as if the document were wrong.
+**The other responses.** 401 when the bearer token is missing or wrong; the token is
+the `seer_sk_` secret itself, not any id that names it, and a 401 means fix the
+credential, never the document. 400 for a body that is not a usable document or that
+carries no valid `slug`. 413 when the upload is over the server's size limit. 502 when
+GitHub fails to serve a pull request or a ref cannot be read upstream. 503 when
+Overseer cannot reach GitHub because `GITHUB_TOKEN` is unset. None of these is about
+your content: do not re-author for them, and do not retry a 502 or a 503 as if the
+document were wrong.
 
 **Reading a 422.** The body is `{ error, errors[], warnings[] }`. Each error carries
 `field` (a JSON path into your payload, such as `statements[2].text`), `rule`, and
