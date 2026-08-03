@@ -13,7 +13,7 @@
 // keep no ranges: the whole line is already marked added or deleted, and painting it
 // a second time says nothing.
 
-import type { GithubClient } from "./github";
+import { GithubError, type GithubClient } from "./github";
 import type { Hunk, HunkLine, HunkLineKind } from "./types";
 
 /** Everything a hunk needs that the patch text does not carry. */
@@ -332,6 +332,113 @@ function splitLines(text: string): string[] {
   return lines;
 }
 
+
+/**
+ * The last resort for a file no diff endpoint will serve: fetch it at both SHAs and
+ * diff it here. The contents API returns bytes rather than a computed diff, so the
+ * size limits that refuse a patch do not reach it.
+ *
+ * The result is one hunk covering the whole file, which is what a reconstruction can
+ * honestly claim: the real hunk boundaries were GitHub's to draw and it declined. The
+ * id follows the same recipe every other hunk uses, so a group claims it the same way.
+ */
+async function rebuildFromBlobs(
+  client: GithubClient,
+  repo: string,
+  prNumber: number,
+  path: string,
+  at: { previousPath: string | null; status: string; headSha: string; baseSha: string },
+): Promise<{ hunks: Hunk[]; reason: string } | { hunks: null; reason: string }> {
+  const read = async (p: string, sha: string): Promise<string | null> => {
+    try {
+      return await client.getFileAtSha(repo, p, sha);
+    } catch (err) {
+      // A side that is not there is the normal shape of an addition or a deletion,
+      // and it is the only failure that means something rather than going wrong.
+      if (err instanceof GithubError && err.status === 404) return null;
+      throw err;
+    }
+  };
+
+  let before: string | null;
+  let after: string | null;
+  try {
+    [before, after] = await Promise.all([
+      at.status === "added" ? Promise.resolve(null) : read(at.previousPath ?? path, at.baseSha),
+      at.status === "removed" ? Promise.resolve(null) : read(path, at.headSha),
+    ]);
+  } catch (err) {
+    return {
+      hunks: null,
+      reason:
+        `GitHub served no patch for this file, and reading it back to rebuild the diff ` +
+        `failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (before === null && after === null) {
+    return { hunks: null, reason: "GitHub served no patch for this file and neither side of it could be read." };
+  }
+  // A file this long is one nobody reads in a review anyway, and holding two copies
+  // of it plus a quadratic alignment is a cost the page never recovers.
+  const lines = (t: string | null) => (t === null ? 0 : t.split("\n").length);
+  if (lines(before) + lines(after) > MAX_REBUILT_LINES) {
+    return {
+      hunks: null,
+      reason:
+        `GitHub served no patch for this file, and it is too long to rebuild the diff from ` +
+        `its contents (${lines(before) + lines(after)} lines across both sides, the limit is ` +
+        `${MAX_REBUILT_LINES}).`,
+    };
+  }
+  if (isProbablyBinary(before) || isProbablyBinary(after)) {
+    return { hunks: null, reason: "This file is binary, so the pull request diff carries no lines for it." };
+  }
+
+  // A side that does not exist has no lines, which is not the same as one empty
+  // line: an added file's header is `@@ -0,0 +1,n @@`, and coercing null to "" would
+  // claim an old line 1 that was never there and change the hunk's id.
+  const rows: PayloadLine[] =
+    before === null
+      ? splitLines(after!).map((content) => ({ kind: "add" as const, content, wordRanges: [] }))
+      : after === null
+        ? splitLines(before).map((content) => ({ kind: "del" as const, content, wordRanges: [] }))
+        : lineDiff(before, after);
+  const oldLines = rows.filter((r) => r.kind !== "add").length;
+  const newLines = rows.filter((r) => r.kind !== "del").length;
+  const oldStart = oldLines === 0 ? 0 : 1;
+  const newStart = newLines === 0 ? 0 : 1;
+  let oldNo = oldStart;
+  let newNo = newStart;
+  const hunk: Hunk = {
+    id: hunkId(prNumber, path, oldStart, oldLines, newStart, newLines),
+    repo,
+    prNumber,
+    path,
+    sha: at.headSha,
+    oldStart,
+    oldLines,
+    newStart,
+    newLines,
+    lines: rows.map((r) => ({
+      kind: r.kind,
+      oldNo: r.kind === "add" ? null : oldNo++,
+      newNo: r.kind === "del" ? null : newNo++,
+      content: r.content,
+      wordRanges: r.wordRanges,
+    })),
+  };
+  return { hunks: [hunk], reason: "" };
+}
+
+/** Two copies of a file plus a quadratic alignment: past this it is not worth it. */
+const MAX_REBUILT_LINES = 12_000;
+
+/** A NUL byte in the first stretch is the same test git uses to call a file binary. */
+function isProbablyBinary(text: string | null): boolean {
+  return text !== null && text.slice(0, 8000).includes("\u0000");
+}
+
 /** Pair each del run with the add run that follows it, line for line, and paint. */
 function paintRuns(lines: { kind: HunkLineKind; content: string; wordRanges: [number, number][] }[]): void {
   let i = 0;
@@ -466,6 +573,7 @@ export async function collectPullDiff(
   repo: string,
   prNumber: number,
   headSha: string,
+  baseSha?: string,
 ): Promise<PullDiff> {
   const files = await client.listFiles(repo, prNumber);
   let fallback: {
@@ -532,6 +640,28 @@ export async function collectPullDiff(
       // nothing is reported. GitHub reports a binary file as 0/0 whether or not its
       // bytes changed, so the pull request diff has to confirm it is not binary
       // before a renamed file is allowed through here.
+    } else if (patch === undefined && baseSha !== undefined) {
+      // Neither diff endpoint would serve this file. The contents API still will:
+      // it returns bytes rather than computing a diff, so the size limits that
+      // refuse a patch do not apply to it. Fetch both sides and diff them here,
+      // which is the same line diff a payload is drawn with.
+      const rebuilt = await rebuildFromBlobs(client, repo, prNumber, file.filename, {
+        previousPath: file.previous_filename ?? null,
+        status: file.status,
+        headSha,
+        baseSha,
+      });
+      if (rebuilt.hunks) {
+        entry.hunks = rebuilt.hunks;
+      } else {
+        entry.missing = {
+          code: "missing_patch",
+          path: file.filename,
+          status: file.status,
+          reason: rebuilt.reason,
+        };
+        missing.push(entry.missing);
+      }
     } else if (patch === undefined) {
       entry.missing = {
         code: "missing_patch",

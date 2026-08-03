@@ -499,3 +499,95 @@ describe("the pull request diff cannot be read", () => {
     expect(out.missing).toHaveLength(3);
   });
 });
+
+describe("rebuilding a diff GitHub will not serve", () => {
+  const HEAD = "a".repeat(40);
+  const BASE = "b".repeat(40);
+
+  function client(files: unknown[], blobs: Record<string, string>) {
+    return {
+      listFiles: async () => files,
+      getPullDiff: async () => {
+        throw new Error("simulated 406: the diff exceeded the maximum number of lines");
+      },
+      getFileAtSha: async (_repo: string, path: string, sha: string) => {
+        const key = `${sha}:${path}`;
+        if (!(key in blobs)) throw new GithubError("not found", 404, key);
+        return blobs[key]!;
+      },
+    } as never;
+  }
+
+  test("an added file is rebuilt whole, with the id the patch path would have produced", async () => {
+    const c = client(
+      [{ filename: "src/new.ts", status: "added", additions: 3, deletions: 0 }],
+      { [`${HEAD}:src/new.ts`]: "one\ntwo\nthree\n" },
+    );
+    const out = await collectPullDiff(c, "a/b", 5, HEAD, BASE);
+    expect(out.missing).toHaveLength(0);
+    const h = out.files[0]!.hunks[0]!;
+    // An added file has no old side at all: `@@ -0,0 +1,3 @@`, not -1,1.
+    expect(h.id).toBe("pr5:src/new.ts:@@0,0+1,3");
+    expect(h.lines.map((l) => l.kind)).toEqual(["add", "add", "add"]);
+    expect(h.lines.map((l) => l.content)).toEqual(["one", "two", "three"]);
+    expect(h.lines.every((l) => l.oldNo === null)).toBe(true);
+  });
+
+  test("a modified file is rebuilt as a real diff, not two blobs", async () => {
+    const c = client(
+      [{ filename: "src/mod.ts", status: "modified", additions: 1, deletions: 1 }],
+      {
+        [`${BASE}:src/mod.ts`]: "keep\nold\ntail\n",
+        [`${HEAD}:src/mod.ts`]: "keep\nnew\ntail\n",
+      },
+    );
+    const out = await collectPullDiff(c, "a/b", 5, HEAD, BASE);
+    const h = out.files[0]!.hunks[0]!;
+    expect(h.lines.map((l) => l.kind)).toEqual(["ctx", "del", "add", "ctx"]);
+    // Word ranges are painted across the pair, as they are for any other hunk.
+    expect(h.lines[1]!.wordRanges.length).toBeGreaterThan(0);
+    // Both sides count, and the numbers are contiguous per side.
+    expect(h.oldLines).toBe(3);
+    expect(h.newLines).toBe(3);
+  });
+
+  test("a deleted file is rebuilt from its base side", async () => {
+    const c = client(
+      [{ filename: "src/gone.ts", status: "removed", additions: 0, deletions: 2 }],
+      { [`${BASE}:src/gone.ts`]: "a\nb\n" },
+    );
+    const out = await collectPullDiff(c, "a/b", 5, HEAD, BASE);
+    const h = out.files[0]!.hunks[0]!;
+    expect(h.id).toBe("pr5:src/gone.ts:@@1,2+0,0");
+    expect(h.lines.every((l) => l.kind === "del")).toBe(true);
+  });
+
+  test("a file too long to rebuild is reported rather than pulled into memory", async () => {
+    const huge = Array.from({ length: 13_000 }, (_, i) => `line ${i}`).join("\n");
+    const c = client(
+      [{ filename: "pnpm-lock.yaml", status: "added", additions: 13_000, deletions: 0 }],
+      { [`${HEAD}:pnpm-lock.yaml`]: huge },
+    );
+    const out = await collectPullDiff(c, "a/b", 5, HEAD, BASE);
+    expect(out.files[0]!.hunks).toHaveLength(0);
+    expect(out.missing).toHaveLength(1);
+    expect(out.missing[0]!.reason).toContain("too long to rebuild");
+  });
+
+  test("a binary file is named as binary rather than rebuilt as text", async () => {
+    const c = client(
+      [{ filename: "logo.png", status: "added", additions: 0, deletions: 0 }],
+      { [`${HEAD}:logo.png`]: "PNG\u0000\u0000binary" },
+    );
+    const out = await collectPullDiff(c, "a/b", 5, HEAD, BASE);
+    expect(out.files[0]!.hunks).toHaveLength(0);
+    expect(out.missing[0]!.reason).toContain("binary");
+  });
+
+  test("without a base sha there is nothing to rebuild against, and it is reported", async () => {
+    const c = client([{ filename: "src/new.ts", status: "added", additions: 1, deletions: 0 }], {});
+    const out = await collectPullDiff(c, "a/b", 5, HEAD);
+    expect(out.missing).toHaveLength(1);
+    expect(out.files[0]!.hunks).toHaveLength(0);
+  });
+});

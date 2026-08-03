@@ -228,7 +228,13 @@ export async function derivePrs(
   for (const pointer of pointers) {
     const pull = await client.getPull(pointer.repo, pointer.number);
     const commits = await client.listCommits(pointer.repo, pointer.number);
-    const diff = await collectPullDiff(client, pointer.repo, pointer.number, pull.head.sha);
+    const diff = await collectPullDiff(
+      client,
+      pointer.repo,
+      pointer.number,
+      pull.head.sha,
+      pull.base.sha,
+    );
     const comments = await client.listReviewComments(pointer.repo, pointer.number);
     for (const comment of comments) {
       skillContext.push({
