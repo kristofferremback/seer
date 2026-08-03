@@ -7,6 +7,8 @@
 // documented exception (a member following a dead link) then has its own workspace to
 // be tested in.
 
+import { join } from "node:path";
+
 import { test, expect, beforeAll, afterAll, describe } from "bun:test";
 
 import { startServer } from "../src/server";
@@ -15,10 +17,19 @@ import { db, legacyWorkspaceId } from "../src/db";
 import { tinyId, hashKey, newShareToken } from "../src/ids";
 import { createAnnotation, createAttachment } from "../src/overseer/db";
 import { saveAttachment } from "../src/store";
-import { createShare, listShares, lookupShare, resolveShare, revokeShare } from "../src/shares";
+import {
+  createShare,
+  listShares,
+  lookupShare,
+  resolveShare,
+  revokeShare,
+} from "../src/shares";
 import { renderReviewPage } from "../src/overseer/render";
 import type { Evidence } from "../src/overseer/types";
-import { goldenStoredDoc, storeGoldenReview } from "./overseer/fixtures/stored-review";
+import {
+  goldenStoredDoc,
+  storeGoldenReview,
+} from "./overseer/fixtures/stored-review";
 
 let server: Awaited<ReturnType<typeof startServer>>;
 let base: string;
@@ -34,24 +45,38 @@ beforeAll(async () => {
   server = await startServer();
   base = `http://localhost:${server.port}`;
   rootWs = legacyWorkspaceId()!;
-  rootUser = db.query<{ id: string }, []>("SELECT id FROM users LIMIT 1").get()!.id;
+  rootUser = db.query<{ id: string }, []>("SELECT id FROM users LIMIT 1").get()!
+    .id;
 
   wsOut = tinyId("ws");
-  db.run("INSERT INTO workspaces (id, name, visibility, created_at) VALUES (?, ?, 'private', ?)", [
-    wsOut,
-    "Outside",
-    Date.now(),
-  ]);
+  db.run(
+    "INSERT INTO workspaces (id, name, visibility, created_at) VALUES (?, ?, 'private', ?)",
+    [wsOut, "Outside", Date.now()],
+  );
   storeGoldenReview(wsOut, "shared-review");
   storeGoldenReview(wsOut, "other-review");
   storeGoldenReview(rootWs, "own-review");
 
   // A question filed on the review, so "a shared page shows no annotations" is asked of
   // a review that has one.
-  createAnnotation(wsOut, "shared-review", { type: "summary", id: "summary" }, "Is the gate reachable?", 1);
+  createAnnotation(
+    wsOut,
+    "shared-review",
+    { type: "summary", id: "summary" },
+    "Is the gate reachable?",
+    1,
+  );
 
   const bytes = new Uint8Array([137, 80, 78, 71]);
-  attachmentId = createAttachment(wsOut, "shared-review", 1, "image/png", bytes.length, "A shot", "");
+  attachmentId = createAttachment(
+    wsOut,
+    "shared-review",
+    1,
+    "image/png",
+    bytes.length,
+    "A shot",
+    "",
+  );
   await saveAttachment(wsOut, attachmentId, bytes);
 });
 
@@ -74,7 +99,9 @@ function mint(over: Partial<Parameters<typeof createShare>[0]> = {}) {
 /** Status, content type and body: "the same 404" has to mean the same response rather
  *  than the same status line. */
 async function shape(res: Response): Promise<string> {
-  return [res.status, res.headers.get("content-type"), await res.text()].join("\n");
+  return [res.status, res.headers.get("content-type"), await res.text()].join(
+    "\n",
+  );
 }
 
 // ---- storage ----
@@ -85,7 +112,9 @@ describe("share storage", () => {
     expect(token).toMatch(/^seer_sh_[A-Za-z0-9_-]{32}$/);
 
     const stored = db
-      .query<{ token_hash: string }, [string]>("SELECT token_hash FROM shares WHERE id = ?")
+      .query<{ token_hash: string }, [string]>(
+        "SELECT token_hash FROM shares WHERE id = ?",
+      )
       .get(id)!;
     expect(stored.token_hash).toBe(hashKey(token));
     expect(stored.token_hash).not.toContain(token);
@@ -174,7 +203,13 @@ describe("the share read route", () => {
     const stored = goldenStoredDoc();
     const attachment: Evidence = {
       type: "attachment",
-      attachment: { id: "att_abc123", mediaType: "image/png", bytes: 12, alt: "A shot", caption: "" },
+      attachment: {
+        id: "att_abc123",
+        mediaType: "image/png",
+        bytes: 12,
+        alt: "A shot",
+        caption: "",
+      },
     };
     const doc = {
       ...stored,
@@ -204,15 +239,21 @@ describe("the share read route", () => {
 
     const revoked = mint();
     revokeShare(revoked.id);
-    expect(await shape(await fetch(`${base}/s/${revoked.token}`))).toBe(unknown);
+    expect(await shape(await fetch(`${base}/s/${revoked.token}`))).toBe(
+      unknown,
+    );
 
     const expired = mint({ expiresAt: Date.now() - 1000 });
-    expect(await shape(await fetch(`${base}/s/${expired.token}`))).toBe(unknown);
+    expect(await shape(await fetch(`${base}/s/${expired.token}`))).toBe(
+      unknown,
+    );
 
     // A token that is not even the right shape, and a version nobody published.
     expect(await shape(await fetch(`${base}/s/nonsense`))).toBe(unknown);
     const live = mint();
-    expect(await shape(await fetch(`${base}/s/${live.token}/v/9`))).toBe(unknown);
+    expect(await shape(await fetch(`${base}/s/${live.token}/v/9`))).toBe(
+      unknown,
+    );
   });
 
   test("Referrer-Policy: no-referrer is on the page and on the refusal", async () => {
@@ -240,7 +281,15 @@ describe("the share read route", () => {
     db.run(
       "INSERT INTO shares (id, workspace_id, kind, target, label, token_hash, created_by, created_at) " +
         "VALUES (?, ?, 'review', ?, ?, ?, ?, ?)",
-      [tinyId("shr"), rootWs, "shared-review", "crossed wires", hashKey(token), rootUser, Date.now()],
+      [
+        tinyId("shr"),
+        rootWs,
+        "shared-review",
+        "crossed wires",
+        hashKey(token),
+        rootUser,
+        Date.now(),
+      ],
     );
     const crossed = await shape(await fetch(`${base}/s/${token}`));
     const unknown = await shape(await fetch(`${base}/s/${newShareToken()}`));
@@ -276,12 +325,20 @@ describe("a share is never a write", () => {
     const { token } = mint();
     const res = await fetch(`${base}/api/reviews/shared-review/annotations`, {
       method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ target: { type: "summary", id: "summary" }, body: "Can I write here?" }),
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        target: { type: "summary", id: "summary" },
+        body: "Can I write here?",
+      }),
     });
     expect(res.status).not.toBe(200);
     const filed = db
-      .query<{ c: number }, [string]>("SELECT COUNT(*) c FROM review_annotations WHERE body = ?")
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) c FROM review_annotations WHERE body = ?",
+      )
       .get("Can I write here?")!.c;
     expect(filed).toBe(0);
   });
@@ -297,7 +354,9 @@ describe("a share is never a write", () => {
       expect(res.status).toBeGreaterThanOrEqual(400);
     }
     const filed = db
-      .query<{ c: number }, [string]>("SELECT COUNT(*) c FROM review_annotations WHERE body = ?")
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) c FROM review_annotations WHERE body = ?",
+      )
       .get("written through a share")!.c;
     expect(filed).toBe(0);
   });
@@ -365,7 +424,12 @@ describe("the shares API", () => {
 
   test("an expiry is honoured, and a past one is refused", async () => {
     const soon = Date.now() + 60_000;
-    const res = await post({ workspace: rootWs, kind: "review", target: "own-review", expiresAt: soon });
+    const res = await post({
+      workspace: rootWs,
+      kind: "review",
+      target: "own-review",
+      expiresAt: soon,
+    });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { id: string; expiresAt: number };
     expect(body.expiresAt).toBe(soon);
@@ -380,21 +444,33 @@ describe("the shares API", () => {
   });
 
   test("an unknown kind is a 422 naming kind", async () => {
-    const res = await post({ workspace: rootWs, kind: "wallpaper", target: "own-review" });
+    const res = await post({
+      workspace: rootWs,
+      kind: "wallpaper",
+      target: "own-review",
+    });
     const error = await errorOf(res);
     expect(error.field).toBe("kind");
     expect(error.rule).toBe("kind_unknown");
   });
 
   test("a kind no route serves is a 422 naming kind, not a link that cannot open", async () => {
-    const res = await post({ workspace: rootWs, kind: "bundle", target: "own-review" });
+    const res = await post({
+      workspace: rootWs,
+      kind: "bundle",
+      target: "own-review",
+    });
     const error = await errorOf(res);
     expect(error.field).toBe("kind");
     expect(error.rule).toBe("kind_not_served");
   });
 
   test("an unknown target is a 422 naming target", async () => {
-    const res = await post({ workspace: rootWs, kind: "review", target: "no-such-review" });
+    const res = await post({
+      workspace: rootWs,
+      kind: "review",
+      target: "no-such-review",
+    });
     const error = await errorOf(res);
     expect(error.field).toBe("target");
     expect(error.rule).toBe("target_unknown");
@@ -414,7 +490,9 @@ describe("the shares API", () => {
     // A refused mint writes nothing.
     expect(
       db
-        .query<{ c: number }, [string]>("SELECT COUNT(*) c FROM shares WHERE label = ?")
+        .query<{ c: number }, [string]>(
+          "SELECT COUNT(*) c FROM shares WHERE label = ?",
+        )
         .get("reaching across")!.c,
     ).toBe(0);
   });
@@ -430,13 +508,22 @@ describe("the shares API", () => {
   });
 
   test("minting into a workspace the caller is not in is a 404", async () => {
-    const res = await post({ workspace: wsOut, kind: "review", target: "shared-review" });
+    const res = await post({
+      workspace: wsOut,
+      kind: "review",
+      target: "shared-review",
+    });
     expect(res.status).toBe(404);
   });
 
   test("GET lists the workspace's shares and never a token", async () => {
     const minted = (await (
-      await post({ workspace: rootWs, kind: "review", target: "own-review", label: "listed by api" })
+      await post({
+        workspace: rootWs,
+        kind: "review",
+        target: "own-review",
+        label: "listed by api",
+      })
     ).json()) as { id: string; token: string };
 
     const res = await fetch(`${base}/api/shares?workspace=${rootWs}`);
@@ -444,11 +531,21 @@ describe("the shares API", () => {
     const text = await res.text();
     expect(text).not.toContain(minted.token);
     expect(text).not.toContain("token");
-    const body = JSON.parse(text) as { shares: { id: string; label: string; target: string }[] };
-    expect(body.shares.some((s) => s.id === minted.id && s.label === "listed by api")).toBe(true);
+    const body = JSON.parse(text) as {
+      shares: { id: string; label: string; target: string }[];
+    };
+    expect(
+      body.shares.some(
+        (s) => s.id === minted.id && s.label === "listed by api",
+      ),
+    ).toBe(true);
 
     // Another workspace's shares are not this list's to hand over.
-    expect(await (await fetch(`${base}/api/shares?workspace=${wsOut}`)).status).toBe(404);
+    expect(
+      await (
+        await fetch(`${base}/api/shares?workspace=${wsOut}`)
+      ).status,
+    ).toBe(404);
   });
 
   test("the settings page lists the workspace's shares and never a token", async () => {
@@ -470,7 +567,9 @@ describe("the shares API", () => {
     // Another workspace's shares are not on this page.
     const elsewhere = mint({ label: "belongs to wsOut" });
     expect(html).not.toContain("belongs to wsOut");
-    expect(await (await fetch(`${base}/settings/${rootWs}`)).text()).not.toContain(elsewhere.token);
+    expect(
+      await (await fetch(`${base}/settings/${rootWs}`)).text(),
+    ).not.toContain(elsewhere.token);
   });
 
   test("the settings revoke control revokes, and only its own workspace's shares", async () => {
@@ -482,34 +581,47 @@ describe("the shares API", () => {
       userId: rootUser,
       expiresAt: null,
     });
-    const res = await fetch(`${base}/settings/${rootWs}/shares/${own.id}/revoke`, {
-      method: "POST",
-      redirect: "manual",
-    });
+    const res = await fetch(
+      `${base}/settings/${rootWs}/shares/${own.id}/revoke`,
+      {
+        method: "POST",
+        redirect: "manual",
+      },
+    );
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe(`/settings/${rootWs}`);
     expect(resolveShare(own.token)).toBeNull();
-    expect(await (await fetch(`${base}/settings/${rootWs}`)).text()).not.toContain(
-      "revoked from settings",
-    );
+    expect(
+      await (await fetch(`${base}/settings/${rootWs}`)).text(),
+    ).not.toContain("revoked from settings");
 
     // A share in another workspace, revoked through this one's settings: a 404, and the
     // share is untouched.
     const theirs = mint({ label: "not revocable from here" });
-    const refused = await fetch(`${base}/settings/${rootWs}/shares/${theirs.id}/revoke`, {
-      method: "POST",
-      redirect: "manual",
-    });
+    const refused = await fetch(
+      `${base}/settings/${rootWs}/shares/${theirs.id}/revoke`,
+      {
+        method: "POST",
+        redirect: "manual",
+      },
+    );
     expect(refused.status).toBe(404);
     expect(resolveShare(theirs.token)).not.toBeNull();
   });
 
   test("DELETE revokes, and only for a member of the owning workspace", async () => {
     const mine = (await (
-      await post({ workspace: rootWs, kind: "review", target: "own-review", label: "to revoke" })
+      await post({
+        workspace: rootWs,
+        kind: "review",
+        target: "own-review",
+        label: "to revoke",
+      })
     ).json()) as { id: string; token: string };
 
-    const res = await fetch(`${base}/api/shares/${mine.id}`, { method: "DELETE" });
+    const res = await fetch(`${base}/api/shares/${mine.id}`, {
+      method: "DELETE",
+    });
     expect(res.status).toBe(200);
     expect(resolveShare(mine.token)).toBeNull();
     expect(lookupShare(mine.token)!.revoked_at).not.toBeNull();
@@ -517,10 +629,39 @@ describe("the shares API", () => {
     // A share in a workspace the caller is not in: the same answer an id that never
     // existed gets, and the row is untouched.
     const theirs = mint({ label: "not yours to revoke" });
-    const refused = await fetch(`${base}/api/shares/${theirs.id}`, { method: "DELETE" });
+    const refused = await fetch(`${base}/api/shares/${theirs.id}`, {
+      method: "DELETE",
+    });
     expect(refused.status).toBe(404);
     expect(resolveShare(theirs.token)).not.toBeNull();
 
-    expect((await fetch(`${base}/api/shares/shr_nosuchsha`, { method: "DELETE" })).status).toBe(404);
+    expect(
+      (await fetch(`${base}/api/shares/shr_nosuchsha`, { method: "DELETE" }))
+        .status,
+    ).toBe(404);
   });
 });
+
+// ---- the reader with no session at all ----
+//
+// Everything above arrives as the root user, because AUTH_DISABLED short-circuits
+// sessionUser. A share's actual reader has no session, and the one branch that treats a
+// dead token differently is keyed on exactly that, so the signed-out questions are asked
+// in their own process where the env can be undone.
+test("share-privacy.script.ts passes with AUTH_DISABLED unset", async () => {
+  const script = join(import.meta.dir, "share-privacy.script.ts");
+  const proc = Bun.spawn(["bun", "run", script], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, AUTH_DISABLED: undefined as unknown as string },
+  });
+  const exitCode = await proc.exited;
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  if (exitCode !== 0) {
+    console.error("subprocess stdout:", stdout);
+    console.error("subprocess stderr:", stderr);
+  }
+  expect(exitCode).toBe(0);
+  expect(stdout).toContain("all assertions passed");
+}, 30_000);

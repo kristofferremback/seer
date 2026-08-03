@@ -55,7 +55,7 @@ than by a forgotten branch.
 **It does not show the workspace's own conversation.** A shared review renders without
 annotations. Questions and answers are the workspace talking to itself about a change,
 and a link handed to an outsider should carry the account rather than the discussion.
-This is a default rather than a law; if it turns out people share reviews *to* discuss
+This is a default rather than a law; if it turns out people share reviews _to_ discuss
 them, a per-share flag is the obvious next move.
 
 **It is not a login.** Following a share never creates a session, never joins the
@@ -102,7 +102,7 @@ for one week is a real thing to want.
 
 ## As built
 
-Two things the sketch above leaves open, settled by the implementation rather than
+Three things the sketch above leaves open, settled by the implementation rather than
 against it.
 
 **The mint names its workspace.** A session reaches several workspaces, so
@@ -110,6 +110,12 @@ against it.
 expiresAt? }` and `?workspace=`. A workspace the caller is not in is a 404, the same
 answer an id that never existed gets. Everything else that is wrong is a 422 naming the
 field, in the shape the publish path already uses.
+
+**Annotations are hidden by accident as much as by design, for now.** The share path
+withholds them, but `QUESTIONS_ON_PAGE` is off, so no page renders an annotation and the
+test that asserts a shared page carries none passes without exercising anything. The
+assertion is kept because it starts testing something real the day the questions UI comes
+back; until then this guarantee is unverified rather than verified.
 
 **Bundles are not shareable yet.** The table's `kind` is the closed list the design
 names, and the resolver is generic as promised, but the read route serves reviews only:
