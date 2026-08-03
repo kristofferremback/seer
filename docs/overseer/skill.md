@@ -101,7 +101,9 @@ A review names one or more pull requests. Work in this order:
 3. Read each pull request whole before forming any claim: description, commit messages,
    the full file list, then the hunks.
 4. Read the threads. A comment that changes what the change is for belongs in the
-   summary or a statement, refd to the code it is about, never quoted as a thread.
+   summary or a statement, refd to the code it is about, never quoted as a thread. Read
+   them with `gh`: Overseer derives them too and hands them back on the published
+   document as `skillContext`, but that is for your next pass, not this one.
 
 `kind` is derived from the shape you publish: one pull request is `single`, a chain
 where each is the base of the next is `stack`, anything else is `set`. You do not
@@ -265,6 +267,12 @@ refs are enough sends `evidence: []`.
   authored field, with optional `highlight[]`. Overseer resolves the snippet and derives whether the ref
   is `in_stack` or `outside`. A ref into untouched code is often the most useful thing
   on the page, because it shows what the change reuses.
+  What a ref is checked for: the file exists at that sha, and the range lies inside it,
+  so a range past the end of the file is a 422. What cannot be checked is whether those
+  are the *right* lines, because that is the judgment you were sent to supply. A ref
+  aimed a few lines off renders a real snippet under a claim it does not support and
+  nothing will say so, which is the one place the page can be wrong while passing every
+  rule. Read back what you cited.
 - **payload**: `{ lang, before, after, highlight[] }`, a before and after pair for a
   contract change; `lang` is `json` or `text`, `highlight[]` names the keys or line
   numbers that moved. Use it when the shape of the data is the claim.

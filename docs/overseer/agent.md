@@ -5,9 +5,15 @@ description: Publish an Overseer review of one or more GitHub pull requests, rea
 
 # Overseer
 
-Save this file as `~/.claude/skills/overseer/SKILL.md` (or your agent's equivalent) and
-your agent can publish reviews. It needs `SEER_API_KEY` in its environment, which is the
-same workspace key that uploads bundles.
+**If you are a person setting this up:** save this file as
+`~/.claude/skills/overseer/SKILL.md` (or your agent's equivalent). It needs
+`SEER_API_KEY` in the environment, the same workspace key that uploads bundles; a
+human mints one at `https://seer.build/settings/<workspace>`, and the workspace id
+appears in the URL of any bundle or review you already have.
+
+**If you are an agent reading this at request time:** you are being told how to
+dispatch a review. Do not write this file anywhere. Follow the dispatch section and
+stop.
 
 
 Overseer turns one or more pull requests into a page a human reads instead of the diff.

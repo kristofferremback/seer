@@ -7,10 +7,12 @@
 
 import { join } from "node:path";
 
+import { config } from "../config";
+
 const DOC_PATH = join(import.meta.dir, "..", "..", "docs", "overseer", "skill.md");
 const AGENT_DOC_PATH = join(import.meta.dir, "..", "..", "docs", "overseer", "agent.md");
 
-async function serveDoc(path: string, what: string): Promise<Response> {
+async function serveDoc(path: string, what: string, rewriteHost = false): Promise<Response> {
   const file = Bun.file(path);
   if (!(await file.exists())) {
     // Loud rather than an empty 200: a deployment missing its own skill doc is broken,
@@ -20,10 +22,18 @@ async function serveDoc(path: string, what: string): Promise<Response> {
       headers: { "content-type": "text/plain;charset=utf-8" },
     });
   }
-  return new Response(file, {
-    headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-cache" },
-  });
+  const headers = { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-cache" };
+  if (!rewriteHost) return new Response(file, { headers });
+  // The dispatch brief is a block the reader is told to copy exactly, so the host in
+  // it has to be this deployment's rather than the canonical one the repo copy names.
+  // A document that is wrong for everyone but one instance is worse than no document.
+  const text = (await file.text()).replaceAll(CANONICAL_BASE, config.baseUrl);
+  return new Response(text, { headers });
 }
+
+/** The base URL the committed documents are written against. Any other deployment has
+ *  its own substituted at serve time. */
+const CANONICAL_BASE = "https://seer.build";
 
 /** What the witness is told: what to write, and how. Fetched at review time. */
 export async function handleOverseerSkill(): Promise<Response> {
@@ -34,5 +44,5 @@ export async function handleOverseerSkill(): Promise<Response> {
  *  two documents: this one is read once by whoever sets it up, that one is read on every
  *  review by the agent doing it. */
 export async function handleOverseerAgentSkill(): Promise<Response> {
-  return serveDoc(AGENT_DOC_PATH, "agent skill document");
+  return serveDoc(AGENT_DOC_PATH, "agent skill document", true);
 }

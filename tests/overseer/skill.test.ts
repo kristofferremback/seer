@@ -1,6 +1,7 @@
 import { test, expect, beforeAll, afterAll, describe } from "bun:test";
 
 import { startServer } from "../../src/server";
+import { config } from "../../src/config";
 import { BUDGETS } from "../../src/overseer/types";
 import { hunkId } from "../../src/overseer/diff";
 
@@ -106,6 +107,21 @@ describe("the agent skill document", () => {
     expect(text).toContain("You do not write the review. A fresh sub-agent does.");
     // It points the witness at the other document rather than repeating it.
     expect(text).toContain("/overseer/skill.md");
+  });
+
+  test("the dispatch brief names this deployment, not the canonical one", async () => {
+    // The brief is a block the reader is told to copy exactly, so a hardcoded
+    // seer.build in it sends every other deployment's witness to the wrong host.
+    const text = await (await fetch(`${base}/overseer/agent.md`)).text();
+    expect(text).toContain(`Review service: \`${config.baseUrl}\``);
+    expect(text).not.toContain("https://seer.build/overseer/skill.md");
+    expect(text).toContain(`${config.baseUrl}/overseer/skill.md`);
+    // The repo copy still names the canonical host, so this is substitution rather
+    // than a document that only works on one deployment.
+    const onDisk = await Bun.file(
+      `${import.meta.dir}/../../docs/overseer/agent.md`,
+    ).text();
+    expect(onDisk).toContain("https://seer.build");
   });
 
   test("the two documents are different documents", async () => {
