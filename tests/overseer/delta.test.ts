@@ -511,6 +511,197 @@ describe("the marks on the page", () => {
   });
 });
 
+describe("authored evidence, and the fields that are not prose", () => {
+  const example = {
+    type: "example" as const,
+    example: { lang: "ts", text: "const a = 1;", caption: "How a caller sees it" },
+  };
+  const attachment = {
+    type: "attachment" as const,
+    attachment: {
+      id: "att_one",
+      mediaType: "image/png",
+      bytes: 10,
+      alt: "The gate as a sequence",
+      caption: "Where the check lands",
+    },
+  };
+  const bundle = {
+    type: "bundle" as const,
+    bundle: { slug: "gate", version: null, caption: "The bundle it came from" },
+  };
+  const figure = {
+    type: "figure" as const,
+    figure: {
+      kind: "flow" as const,
+      nodes: [
+        { id: "n1", label: "request", state: "normal" as const },
+        { id: "n2", label: "gate", state: "normal" as const },
+      ],
+      edges: [{ from: "n1", to: "n2", label: "session" }],
+    },
+  };
+
+  test("an example's text and caption are authored, and both are diffed", () => {
+    const before = doc((d) => {
+      d.statements[0]!.evidence = [example];
+    });
+    const after = doc((d) => {
+      d.statements[0]!.evidence = [
+        {
+          type: "example",
+          example: {
+            lang: "ts",
+            text: "const a = 2;",
+            caption: "How a caller sees it after the rewrite",
+          },
+        },
+      ];
+    });
+    const e = computeDelta(side(before), side(after)).entities.find(
+      (x) => x.kind === "statement",
+    )!;
+    expect(e.status).toBe("revised");
+    expect(e.fields.map((f) => f.field).sort()).toEqual(["ev-0-caption", "ev-0-text"]);
+    expect(new DeltaIndex(computeDelta(side(before), side(after))).counts().revised).toBe(1);
+
+    const html = page(after, before);
+    const unit = unitAround(html, html.indexOf('id="st_gate"'));
+    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(/class="(dw|dp)/.test(unit)).toBe(true);
+    expect(unit).toContain("rewrite");
+    // The words the caption used to say come back with it.
+    expect(unit).toContain("How a caller sees it");
+  });
+
+  test("an attachment's alt text moves the page even though the image did not", () => {
+    const before = doc((d) => {
+      d.statements[0]!.evidence = [attachment];
+    });
+    const after = doc((d) => {
+      d.statements[0]!.evidence = [
+        { type: "attachment", attachment: { ...attachment.attachment, alt: "The gate as a table" } },
+      ];
+    });
+    const e = computeDelta(side(before), side(after)).entities.find(
+      (x) => x.kind === "statement",
+    )!;
+    expect(e.fields.map((f) => f.field)).toEqual(["ev-0-alt"]);
+    const unit = unitAround(page(after, before), page(after, before).indexOf('id="st_gate"'));
+    expect(unit).toContain('class="ev-was"');
+    expect(unit).toContain("table");
+    expect(unit).toContain("sequence");
+    expect(unit).toContain('<span class="rev">revised</span>');
+  });
+
+  test("a bundle caption and a figure label are authored too", () => {
+    const before = doc((d) => {
+      d.notes[0]!.evidence = [bundle, figure];
+    });
+    const after = doc((d) => {
+      d.notes[0]!.evidence = [
+        { type: "bundle", bundle: { ...bundle.bundle, caption: "The bundle it grew from" } },
+        {
+          type: "figure",
+          figure: {
+            ...figure.figure,
+            nodes: [
+              { id: "n1", label: "request", state: "normal" },
+              { id: "n2", label: "session gate", state: "normal" },
+            ],
+          },
+        },
+      ];
+    });
+    const e = computeDelta(side(before), side(after)).entities.find((x) => x.kind === "note")!;
+    expect(e.fields.map((f) => f.field).sort()).toEqual(["ev-0-caption", "ev-1-node-n2"]);
+    const html = page(after, before);
+    const unit = unitAround(html, html.indexOf('id="no_keys"'));
+    expect(unit).toContain("grew");
+    expect(unit).toContain('class="ev-was"');
+  });
+
+  test("evidence the base version carried and this one dropped comes back", () => {
+    const before = doc((d) => {
+      d.statements[0]!.evidence = [example];
+    });
+    const after = doc((d) => {
+      d.statements[0]!.evidence = [];
+    });
+    const e = computeDelta(side(before), side(after)).entities.find(
+      (x) => x.kind === "statement",
+    )!;
+    expect(e.fields.map((f) => f.field).sort()).toEqual(["ev-0-caption", "ev-0-text"]);
+    const html = page(after, before);
+    const unit = unitAround(html, html.indexOf('id="st_gate"'));
+    expect(unit).toContain("How a caller sees it");
+    expect(unit).toContain("const a = 1;");
+    expect(unit).toContain('<span class="rev">revised</span>');
+  });
+
+  test("a risk quietly restated as a note is a movement the page shows", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.notes[0]!.kind = "note";
+    });
+    const e = computeDelta(side(before), side(after)).entities.find((x) => x.kind === "note")!;
+    expect(e.fields.map((f) => f.field)).toEqual(["kind"]);
+    const html = page(after, before);
+    const unit = unitAround(html, html.indexOf('id="no_keys"'));
+    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(unit).toContain("risk");
+    expect(/class="(dw|dp)/.test(unit)).toBe(true);
+  });
+
+  test("a group that lost a file says so, and the path comes back", () => {
+    const before = doc();
+    const dropped = before.hunks[before.hunks.length - 1]!;
+    const kept = before.groups[0]!.hunks.filter((id) => id !== dropped.id);
+    expect(kept.length).toBeLessThan(before.groups[0]!.hunks.length);
+    const after = doc((d) => {
+      d.groups[0]!.hunks = kept;
+    });
+    const e = computeDelta(side(before), side(after)).entities.find((x) => x.kind === "group")!;
+    expect(e.fields.some((f) => f.field === "files")).toBe(true);
+    const html = page(after, before);
+    const unit = unitAround(html, html.indexOf('id="gr_gate"'));
+    expect(unit).toContain('class="gfiles"');
+    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(unit).toContain(dropped.path);
+  });
+
+  test("a removed note keeps the kind it was removed with", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.notes = [];
+    });
+    expect(before.notes[0]!.kind).toBe("risk");
+    const e = computeDelta(side(before), side(after)).entities.find((x) => x.kind === "note")!;
+    expect(e.formerKind).toBe("risk");
+    const html = page(after, before);
+    const at = html.indexOf(`dgone-${safeId("no_keys")}`);
+    expect(at).toBeGreaterThan(-1);
+    const stub = unitAround(html, at);
+    expect(stub).toContain('class="note is-risk dgoneunit"');
+    expect(stub).toContain('href="#i-risk"');
+    expect(stub).toContain('<span class="rev">removed</span>');
+  });
+
+  test("a quoted thing is still never marked inside", () => {
+    const before = doc((d) => {
+      d.statements[0]!.evidence = [
+        { type: "payload", payload: { lang: "json", before: "{a:1}", after: "{a:2}", highlight: [] } },
+      ];
+    });
+    const after = doc((d) => {
+      d.statements[0]!.evidence = [
+        { type: "payload", payload: { lang: "json", before: "{a:1}", after: "{a:9}", highlight: [] } },
+      ];
+    });
+    expect(computeDelta(side(before), side(after)).entities).toEqual([]);
+  });
+});
+
 describe("which version the marks are measured against", () => {
   test("the reader's last-opened version wins, clamped below the one being read", () => {
     expect(baseVersion(null, 3, 1)).toBe(1);
@@ -620,5 +811,49 @@ describe("the revision timeline over the routes", () => {
     // v1 has nothing before it, so it moved nothing.
     expect(html).toContain("nothing moved");
     expect(html).toContain("code moved");
+  });
+
+  test("only a version below the one being read carries a from link", async () => {
+    const slug = "fromlinks";
+    publish(slug, () => {});
+    publish(slug, (d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+    });
+    publish(slug, (d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+      d.notes[0]!.text = "A key minted before the gate reads only its own workspace";
+    });
+    const html = await (await fetch(`${host}/${ws}/r/${slug}/v/2`)).text();
+    // v1 is below v2 and can be a base. v3 is not, and offers no control at all.
+    expect(html).toContain("?from=1");
+    expect(html).not.toContain("?from=3");
+    expect(html).not.toContain("?from=2");
+    // Every from link on the page is one the page would honour.
+    for (const m of html.matchAll(/\?from=([0-9]+)/g)) {
+      expect(Number(m[1])).toBeLessThan(2);
+    }
+  });
+
+  test("opening a version moves the reader's mark, so the next open measures from here", async () => {
+    const slug = "advance";
+    publish(slug, () => {});
+    publish(slug, (d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+    });
+    publish(slug, (d) => {
+      d.statements[0]!.text = "Reviews move behind the workspace login gate";
+      d.notes[0]!.text = "A key minted before the gate reads only its own workspace";
+    });
+    expect((await fetch(`${host}/${ws}/r/${slug}/v/1`)).status).toBe(200);
+    const first = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
+    expect(first).toContain("marks since v1");
+    // The read moved to v3 on that request, so the next one measures from v2. The
+    // page says which base it used both times, so the change is never silent.
+    const second = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
+    expect(second).toContain("marks since v2");
+    // A named base is unaffected by any of it, and repeats byte for byte.
+    const pinned = await (await fetch(`${host}/${ws}/r/${slug}?from=1`)).text();
+    const again = await (await fetch(`${host}/${ws}/r/${slug}?from=1`)).text();
+    expect(pinned).toBe(again);
   });
 });

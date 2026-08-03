@@ -161,46 +161,102 @@ function payloadBlock(payload: Payload): string {
 /** An authored illustration. It is the one evidence kind that is invented rather than
  *  quoted, so it carries no line numbers and no path: nothing in it may look like a
  *  citation. Its caption says what it is, and the caption is required. */
-function exampleBlock(lang: string, text: string, caption: string): string {
+/** The lines of an example, as the page draws them. Exported because the delta
+ *  compares the markup a field is shown as, and this is that markup. */
+export function exampleBodyHtml(text: string): string {
   const lines = text.split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
-  const body = lines.map((line) => `<span class="l">${escapeHtml(line)}</span>`).join("");
+  return lines.map((line) => `<span class="l">${escapeHtml(line)}</span>`).join("");
+}
+
+function exampleBlock(
+  lang: string,
+  text: string,
+  caption: string,
+  p: string,
+  marks: EvidenceMarks | null,
+): string {
+  const body = mark(marks, `${p}-text`, exampleBodyHtml(text));
   return (
     `<figure class="ev ev-example" data-lang="${escapeHtml(lang)}">` +
     `<div class="snipbox"><pre class="snip scroll-x"><code>${body}</code></pre></div>` +
-    `<figcaption>${safeInline(caption)}</figcaption></figure>`
+    `<figcaption>${mark(marks, `${p}-caption`, safeInline(caption))}</figcaption></figure>`
   );
 }
 
 // ---- attachment, bundle, figure ----
 
-function attachmentBlock(basePath: string, id: string, alt: string, caption: string): string {
+function attachmentBlock(
+  basePath: string,
+  id: string,
+  alt: string,
+  caption: string,
+  p: string,
+  marks: EvidenceMarks | null,
+): string {
   const src = `${basePath}/a/${encodeURIComponent(id)}`;
-  const figcaption = caption === "" ? "" : `<figcaption>${safeInline(caption)}</figcaption>`;
+  const cap = mark(marks, `${p}-caption`, caption === "" ? "" : safeInline(caption));
+  const figcaption = cap === "" ? "" : `<figcaption>${cap}</figcaption>`;
   return (
     `<figure class="ev ev-attachment">` +
     `<img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" decoding="async">` +
+    // Alt text is written for a reader who cannot see the image, so it has no place
+    // on the page until it moves. When it moves it comes out where it can be read,
+    // with the words it replaced one tap behind it.
+    whenMoved(marks, `${p}-alt`, safeInline(alt)) +
     `${figcaption}</figure>`
   );
 }
 
 /** A bundle in the same workspace, resolved to the link it is served at rather than to
  *  a URL the author wrote. `version` null is the bundle as it stands. */
-function bundleBlock(wsId: string, slug: string, version: number | null, caption: string): string {
+function bundleBlock(
+  wsId: string,
+  slug: string,
+  version: number | null,
+  caption: string,
+  p: string,
+  marks: EvidenceMarks | null,
+): string {
   const href = version === null ? `/${wsId}/b/${slug}/` : `/${wsId}/b/${slug}/v/${version}/`;
   const label = version === null ? slug : `${slug} v${version}`;
   return (
     `<p class="ev ev-bundle">${icon("eye")}` +
     `<a href="${escapeHtml(href)}">${escapeHtml(label)}</a>` +
-    `<span class="ev-cap">${safeInline(caption)}</span></p>`
+    `<span class="ev-cap">${mark(marks, `${p}-caption`, safeInline(caption))}</span></p>`
   );
 }
 
 /** The figure, drawn. The graph is laid out server-side into one static SVG, and the
- *  whole drawing is a single image with its nodes and edges composed into the label. */
-function figureBlock(figure: Figure): string {
-  return `<div class="ev ev-figure">${figureSvg(figure)}</div>`;
+ *  whole drawing is a single image with its nodes and edges composed into the label.
+ *  A label that moved comes out under the drawing rather than inside it: the SVG is
+ *  laid out to the pixel and has nowhere to put a mark. */
+function figureBlock(figure: Figure, p: string, marks: EvidenceMarks | null): string {
+  const moved =
+    figure.nodes.map((n) => whenMoved(marks, `${p}-node-${n.id}`, safeInline(n.label))).join("") +
+    figure.edges
+      .map((e, j) => whenMoved(marks, `${p}-edge-${j}`, safeInline(e.label)))
+      .join("");
+  return `<div class="ev ev-figure">${figureSvg(figure)}${moved}</div>`;
 }
+
+/** How this row's delta reaches the evidence it hangs off. Handed in rather than
+ *  imported, so the marking module and the drawing module do not import each other. */
+export interface EvidenceMarks {
+  /** The field's markup, marked when the delta touched it and plain when it did not. */
+  mark(field: string, html: string): string;
+  /** Whether the delta touched the field at all. */
+  touched(field: string): boolean;
+  /** Fields the base version carried that this one does not, given the names it does. */
+  dropped(current: string[]): string[];
+}
+
+const mark = (marks: EvidenceMarks | null, field: string, html: string): string =>
+  marks ? marks.mark(field, html) : html;
+
+/** A field that is only on the page when it moved. */
+const whenMoved = (marks: EvidenceMarks | null, field: string, html: string): string =>
+  marks && marks.touched(field) ? `<p class="ev-was">${marks.mark(field, html)}</p>` : "";
 
 /** Every evidence block a statement or a note carries, in the order it was authored.
  *  `ownerId` is the statement or note the evidence hangs off, so its ref panels are
@@ -209,23 +265,43 @@ export function renderEvidence(
   evidence: Evidence[],
   ownerId: string,
   ctx: { wsId: string; basePath: string },
+  marks: EvidenceMarks | null = null,
+  names: string[] = [],
 ): string {
-  return evidence
+  const blocks = evidence
     .map((e, i) => {
+      const p = `ev-${i}`;
       switch (e.type) {
         case "ref":
           return refFold(ownerId, e.ref, `ev${i}-`);
         case "payload":
           return payloadBlock(e.payload);
         case "example":
-          return exampleBlock(e.example.lang, e.example.text, e.example.caption);
+          return exampleBlock(e.example.lang, e.example.text, e.example.caption, p, marks);
         case "attachment":
-          return attachmentBlock(ctx.basePath, e.attachment.id, e.attachment.alt, e.attachment.caption);
+          return attachmentBlock(
+            ctx.basePath,
+            e.attachment.id,
+            e.attachment.alt,
+            e.attachment.caption,
+            p,
+            marks,
+          );
         case "bundle":
-          return bundleBlock(ctx.wsId, e.bundle.slug, e.bundle.version, e.bundle.caption);
+          return bundleBlock(ctx.wsId, e.bundle.slug, e.bundle.version, e.bundle.caption, p, marks);
         case "figure":
-          return figureBlock(e.figure);
+          return figureBlock(e.figure, p, marks);
       }
     })
     .join("");
+  // Evidence the base version carried and this one does not. It keeps its place at
+  // the end of the list rather than vanishing, holding only the prior words behind
+  // their own disclosure, the way a dropped check does.
+  const gone = marks
+    ? marks
+        .dropped(names)
+        .map((f) => `<p class="ev-was">${marks.mark(f, "")}</p>`)
+        .join("")
+    : "";
+  return blocks + gone;
 }

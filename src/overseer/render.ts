@@ -23,7 +23,6 @@ import {
   getAttachment,
   getReviewRead,
   getReviewVersion,
-  listAnnotations,
   listReviewVersions,
   resolveReview,
   setReviewRead,
@@ -33,9 +32,12 @@ import {
   chip,
   computeDelta,
   DeltaIndex,
+  evidenceFieldNames,
   marked,
+  movedChip,
   prBodyHtml,
   safeId,
+  touched,
   type EntityDelta,
 } from "./delta";
 import { freshnessOf, readableWorkspaces } from "./read";
@@ -48,10 +50,10 @@ import {
   safeBlock,
   safeInline,
   shortSha,
+  type EvidenceMarks,
 } from "./render-evidence";
 import {
   prKey,
-  type Annotation,
   type Evidence,
   type Freshness,
   type Note,
@@ -1145,6 +1147,9 @@ const EVIDENCE_STYLE = `
   .ev-bundle { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 9px; font-size: 13.5px; color: hsl(var(--ink-soft)); }
   .ev-bundle .ic { align-self: center; color: hsl(var(--muted)); }
   .ev-bundle .ev-cap { color: hsl(var(--muted)); min-width: 0; }
+  .ev-was { margin: 6px 0 0; color: hsl(var(--muted)); font-size: 12px; }
+  .gfiles { margin: 6px 0 0; color: hsl(var(--muted)); font-size: 12px; }
+  .gfile { font-family: var(--font-mono); }
   .ev-figure { border: 1px solid hsl(var(--line)); border-radius: 6px; padding: 11px 13px; background: hsl(var(--paper-sunk)); }
   /* the drawing is laid out server-side, so the only thing left to say here is what
      its ink is: one weight of line, one type size, and a muted state that steps back
@@ -1405,6 +1410,32 @@ function uniqueRefs(refs: Ref[]): Ref[] {
   return refs.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
 }
 
+/** How a row's delta reaches its evidence. Null when the page has no base, which
+ *  is what leaves a first-ever open with no marks anywhere in it. */
+function evidenceMarks(d: EntityDelta | null, owner: string): EvidenceMarks | null {
+  if (!d) return null;
+  return {
+    // Evidence is drawn in a body rather than a summary, so a one-line field there
+    // grows a control of its own: the row's chevron cannot reveal it.
+    mark: (field, html) => marked(html, d, field, owner, true),
+    touched: (field) => touched(d, field),
+    dropped: (current) => {
+      const has = new Set(current);
+      return d.fields
+        .map((f) => f.field)
+        .filter((f) => f.startsWith("ev-") && !has.has(f));
+    },
+  };
+}
+
+/** An entity's kind, on the page only when it moved. The kind draws the row's icon
+ *  and nothing else, and a risk quietly restated as a note is exactly what a reader
+ *  came back for, so when it moves it comes out as the word it is. */
+function kindMark(d: EntityDelta | null, owner: string, kind: string): string {
+  if (!touched(d, "kind")) return "";
+  return `<p class="ev-was">${marked(safeInline(kind), d, "kind", owner, true)}</p>`;
+}
+
 function statementRow(s: Statement, ctx: RenderCtx): string {
   const refs = uniqueRefs(s.refs);
   const chips = refs.map((r) => refChip(s.id, r)).join(" ");
@@ -1417,7 +1448,8 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
     `<span class="rrefs">${chip(d)}${chips}</span>` +
     `</summary>` +
     `<div class="row-body">${marked(safeBlock(s.body), d, "body", s.id)}${folds}` +
-    renderEvidence(s.evidence, s.id, ctx) +
+    kindMark(d, s.id, s.kind) +
+    renderEvidence(s.evidence, s.id, ctx, evidenceMarks(d, s.id), evidenceFieldNames(s.evidence)) +
     `</div></details>`
   );
 }
@@ -1429,9 +1461,13 @@ function removedStub(e: EntityDelta, cls: string): string {
   const former = e.former ?? { head: "", body: [] };
   const id = `dgone-${safeId(e.id)}`;
   const body = former.body.map((h) => `<div class="dp dpb">${h}</div>`).join("");
+  // A removed row keeps the kind it was removed with, in its class and in its icon:
+  // a risk that left the review is not the same absence as a note that left it.
+  const kind = e.formerKind;
+  const mark = kind === null ? "" : icon(kind, `ic k-${escapeHtml(kind)}`, kind);
   return (
     `<details class="${cls} dgoneunit" id="${escapeHtml(id)}">` +
-    `<summary>${icon("chev", "tick")}` +
+    `<summary>${icon("chev", "tick")}${mark}` +
     `<span class="none"><span class="dp dpstub">${former.head}</span></span>` +
     `<span class="rrefs">${chip(e)}</span>` +
     `</summary>` +
@@ -1466,7 +1502,8 @@ function noteRow(n: Note, ctx: RenderCtx): string {
     `${chip(d) === "" ? "" : `<span class="rrefs">${chip(d)}</span>`}` +
     `</summary>` +
     `<div class="note-body">${marked(safeBlock(n.body), d, "body", n.id)}${checks}${chips === "" ? "" : `<p class="rrefs">${chips}</p>`}${folds}` +
-    renderEvidence(n.evidence, n.id, ctx) +
+    kindMark(d, n.id, n.kind) +
+    renderEvidence(n.evidence, n.id, ctx, evidenceMarks(d, n.id), evidenceFieldNames(n.evidence)) +
     `</div></details>`
   );
 }
@@ -1544,12 +1581,17 @@ function revisionMenu(input: RenderInput, basePath: string): string {
         `<a class="rv-n" href="${escapeHtml(basePath)}/v/${e.version}">v${e.version}</a>` +
         `<span class="rv-on">${escapeHtml(on)}</span>` +
         `<span class="rv-counts">${escapeHtml(counts)}</span>` +
-        (e.codeMoved ? `<span class="rev rev-moved">code moved</span>` : "") +
+        (e.codeMoved ? movedChip() : "") +
+        // A base is a version below the one on screen. An entry at or above it has
+        // no `from` link, because the page could not honour one: an inert control
+        // that looks live is worse than no control.
         (here
           ? `<span class="rv-from">reading</span>`
-          : `<a class="rv-from" href="${escapeHtml(basePath)}${
-              input.pinned ? `/v/${input.version}` : ""
-            }?from=${e.version}">from v${e.version}</a>`) +
+          : e.version < input.version
+            ? `<a class="rv-from" href="${escapeHtml(basePath)}${
+                input.pinned ? `/v/${input.version}` : ""
+              }?from=${e.version}">from v${e.version}</a>`
+            : `<span class="rv-from"></span>`) +
         `</li>`
       );
     })
@@ -1583,7 +1625,7 @@ export function renderReviewPage(input: RenderInput): string {
     notesInOrder(doc.notes)
       .map((n) => noteRow(n, ctx))
       .join("") +
-    (delta ? delta.removed("note").map((e) => removedStub(e, "note is-note")).join("") : "");
+    (delta ? delta.removed("note").map((e) => removedStub(e, `note is-${escapeHtml(e.formerKind ?? "note")}`)).join("") : "");
   // The page says what it is measuring against, once, next to what it is.
   const baseMark =
     input.baseVersion == null
@@ -1678,10 +1720,6 @@ export function baseVersion(
   return want >= 1 ? want : null;
 }
 
-/** The annotations as they stood at a version: the ones filed at or before it.
- *  An annotation carries no answered-at, so an answer that landed before the base
- *  cannot be told from one that landed after; the base side is read as open, which
- *  marks an answer once too often rather than never. */
 type Counts = { revised: number; added: number; removed: number; codeMoved: number };
 
 /** What moved in one version, against the one before it. A published version never
@@ -1709,7 +1747,12 @@ function timelineCounts(
           computeDelta({ doc: before, annotations: [] }, { doc: cur, annotations: [] }),
         ).counts()
       : { revised: 0, added: 0, removed: 0, codeMoved: 0 };
-  if (COUNT_MEMO.size >= COUNT_MEMO_MAX) COUNT_MEMO.clear();
+  // Oldest entry out, rather than the whole table: clearing it would make every
+  // reader on a busy process pay for the next one's first request.
+  if (COUNT_MEMO.size >= COUNT_MEMO_MAX) {
+    const oldest = COUNT_MEMO.keys().next();
+    if (!oldest.done) COUNT_MEMO.delete(oldest.value);
+  }
   COUNT_MEMO.set(key, counts);
   return counts;
 }
@@ -1761,7 +1804,6 @@ export function handleReviewPage(
   // sees it against what they last read, and the next open moves on.
   if (reader && (!read || read.version < asked)) setReviewRead(ws, slug, reader.id, asked);
 
-  const annotations = listAnnotations(ws, slug);
   const docs = new Map<number, ReviewDoc>([[asked, row.doc]]);
   const docAt = (n: number): ReviewDoc | null => {
     const have = docs.get(n);

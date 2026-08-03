@@ -8,12 +8,21 @@
 //
 // WHAT IS DIFFED
 //
-// Authored prose only, plus the one derived prose field the page shows whole:
+// Every authored field, plus the one derived prose field the page shows whole:
 // the review title and summary, a statement's line and body, a note's line,
 // body and checks, a group's title and paragraph, a pull request's gist and
-// detail, and the pull request description GitHub holds. Snippets, hunks and
-// every other quoted thing are citations rather than authorship, and they move
-// whenever the source moves, so nothing is ever marked inside one.
+// detail, and the pull request description GitHub holds. Authorship also reaches
+// into evidence, and it is diffed there too: an example's code and caption, an
+// attachment's alt text and caption, a bundle's caption, and a figure's node and
+// edge labels. Snippets, hunks, payload sides and every other quoted thing are
+// citations rather than authorship, and they move whenever the source moves, so
+// nothing is ever marked inside one.
+//
+// Two fields are neither prose nor a citation and are compared anyway, because a
+// reader who came back for what moved would otherwise miss them: an entity's kind,
+// which draws the row's icon, and a group's file list, which is the partition of
+// the diff that group claims. Both are compared as the words they are, so both
+// carry a mark like anything else.
 //
 // A pull request also carries a head sha. That is not prose and gets no word
 // marks; when it moves between versions the pull request is marked `code moved`,
@@ -44,8 +53,8 @@
 
 import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
-import { safeBlock, safeInline } from "./render-evidence";
-import { prKey, type Annotation } from "./types";
+import { exampleBodyHtml, safeBlock, safeInline } from "./render-evidence";
+import { prKey, type Annotation, type Evidence } from "./types";
 
 /** Past this share of moved words a field is shown whole rather than in place. */
 export const DENSE = 0.4;
@@ -96,6 +105,8 @@ export interface EntityDelta {
    *  showed, so the stub holds everything that version said in the shape it said
    *  it. The markup is what `safeInline` and `safeBlock` already sanitised. */
   former: { head: string; body: string[] } | null;
+  /** Set on a removed entity that had a kind: the icon its stub still deserves. */
+  formerKind: string | null;
   /** Set on a pull request whose head sha moved between the two versions. */
   codeMoved: boolean;
 }
@@ -282,27 +293,108 @@ export function diffField(
 
 // ---- entities ----
 
-type FieldSpec = { field: string; inline: boolean; html: string };
+/** One comparable field. `stub` is whether a removed entity carries it out in its
+ *  former body: the prose it held belongs there, an icon's name does not. */
+type FieldSpec = { field: string; inline: boolean; html: string; stub: boolean };
+
+const spec = (field: string, inline: boolean, html: string, stub = true): FieldSpec => ({
+  field,
+  inline,
+  html,
+  stub,
+});
+
+/** The authored fields inside evidence, in the order the blocks are drawn. A ref,
+ *  a payload and a hunk are quotations and carry none. The index is part of the
+ *  name because evidence is an ordered list with no ids of its own, which is the
+ *  same handle a note's checks are compared by. */
+function evidenceFields(evidence: Evidence[]): FieldSpec[] {
+  const out: FieldSpec[] = [];
+  evidence.forEach((e, i) => {
+    const p = `ev-${i}`;
+    switch (e.type) {
+      case "example":
+        out.push(spec(`${p}-text`, false, exampleBodyHtml(e.example.text)));
+        out.push(spec(`${p}-caption`, true, safeInline(e.example.caption)));
+        break;
+      case "attachment":
+        out.push(spec(`${p}-alt`, true, safeInline(e.attachment.alt)));
+        out.push(spec(`${p}-caption`, true, safeInline(e.attachment.caption)));
+        break;
+      case "bundle":
+        out.push(spec(`${p}-caption`, true, safeInline(e.bundle.caption)));
+        break;
+      case "figure":
+        for (const n of e.figure.nodes) out.push(spec(`${p}-node-${n.id}`, true, safeInline(n.label)));
+        e.figure.edges.forEach((edge, j) => {
+          out.push(spec(`${p}-edge-${j}`, true, safeInline(edge.label)));
+        });
+        break;
+      case "ref":
+      case "payload":
+        break;
+    }
+  });
+  return out;
+}
+
+/** The field names evidence carries at this version. The renderer asks for them so
+ *  it can tell a field the base version had and this one does not from one it is
+ *  already drawing, without knowing how a name is built. */
+export function evidenceFieldNames(evidence: Evidence[]): string[] {
+  return evidenceFields(evidence).map((f) => f.field);
+}
+
+/** A group's file list, as the words the walkthrough partitions the diff into. */
+export function groupFilesHtml(paths: string[]): string {
+  return paths.map((p) => `<span class="gfile">${escapeHtml(p)}</span>`).join(" ");
+}
 
 function statementFields(s: ReviewDoc["statements"][number]): FieldSpec[] {
   return [
-    { field: "text", inline: true, html: safeInline(s.text) },
-    { field: "body", inline: false, html: safeBlock(s.body) },
+    spec("text", true, safeInline(s.text)),
+    spec("body", false, safeBlock(s.body)),
+    ...evidenceFields(s.evidence),
+    spec("kind", true, safeInline(s.kind), false),
   ];
 }
 
 function noteFields(n: ReviewDoc["notes"][number]): FieldSpec[] {
   return [
-    { field: "text", inline: true, html: safeInline(n.text) },
-    { field: "body", inline: false, html: safeBlock(n.body) },
-    ...n.checks.map((c, i) => ({ field: `check-${i}`, inline: false, html: safeInline(c) })),
+    spec("text", true, safeInline(n.text)),
+    spec("body", false, safeBlock(n.body)),
+    ...n.checks.map((c, i) => spec(`check-${i}`, false, safeInline(c))),
+    ...evidenceFields(n.evidence),
+    spec("kind", true, safeInline(n.kind), false),
   ];
 }
 
-function groupFields(g: ReviewDoc["groups"][number]): FieldSpec[] {
+/** The paths a group's hunks touch, in the order the walkthrough draws them:
+ *  document hunk order, each path once. Kept in step with `filesOf` there, so the
+ *  words compared are the words shown. */
+function groupPaths(
+  g: ReviewDoc["groups"][number],
+  hunks: Map<string, { path: string; at: number }>,
+): string[] {
+  const wanted = g.hunks
+    .map((id) => hunks.get(id))
+    .filter((h): h is { path: string; at: number } => h !== undefined)
+    .sort((a, b) => a.at - b.at);
+  const seen: string[] = [];
+  for (const h of wanted) if (!seen.includes(h.path)) seen.push(h.path);
+  return seen;
+}
+
+function groupFieldsWith(
+  g: ReviewDoc["groups"][number],
+  hunks: Map<string, { path: string; at: number }>,
+): FieldSpec[] {
+  const seen = groupPaths(g, hunks);
   return [
-    { field: "title", inline: true, html: safeInline(g.title) },
-    { field: "paragraph", inline: false, html: safeBlock(g.paragraph) },
+    spec("title", true, safeInline(g.title)),
+    spec("paragraph", false, safeBlock(g.paragraph)),
+    spec("files", false, groupFilesHtml(seen)),
+    spec("kind", true, safeInline(g.kind), false),
   ];
 }
 
@@ -319,9 +411,9 @@ export function prBodyHtml(body: string): string {
 
 function prFields(pr: ReviewDoc["prs"][number]): FieldSpec[] {
   return [
-    { field: "gist", inline: true, html: safeInline(pr.gist) },
-    { field: "detail", inline: false, html: safeBlock(pr.detail) },
-    { field: "body", inline: false, html: prBodyHtml(pr.body) },
+    spec("gist", true, safeInline(pr.gist)),
+    spec("detail", false, safeBlock(pr.detail)),
+    spec("body", false, prBodyHtml(pr.body)),
   ];
 }
 
@@ -362,7 +454,7 @@ function compare(
     });
   }
   if (fields.length === 0 && !codeMoved) return null;
-  return { kind, id, status: "revised", fields, former: null, codeMoved };
+  return { kind, id, status: "revised", fields, former: null, formerKind: null, codeMoved };
 }
 
 function born(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelta {
@@ -377,6 +469,7 @@ function born(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelt
     status: "new",
     fields: d ? [d] : [],
     former: null,
+    formerKind: null,
     codeMoved: false,
   };
 }
@@ -385,7 +478,12 @@ function born(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelt
  *  authored body under it. Evidence, hunks and refs are citations rather than
  *  authorship, and they belong to a source the removed entity no longer points at,
  *  so the stub deliberately holds the words and not the quotations. */
-function gone(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelta {
+function gone(
+  kind: DeltaEntityKind,
+  id: string,
+  specs: FieldSpec[],
+  formerKind: string | null = null,
+): EntityDelta {
   const [head, ...rest] = specs;
   return {
     kind,
@@ -394,13 +492,14 @@ function gone(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelt
     fields: [],
     former: {
       head: head!.html,
-      body: rest.map((f) => f.html).filter((h) => h !== ""),
+      body: rest.filter((f) => f.stub).map((f) => f.html).filter((h) => h !== ""),
     },
+    formerKind,
     codeMoved: false,
   };
 }
 
-function walk<T extends { id: string }>(
+function walk<T extends { id: string; kind?: string }>(
   kind: DeltaEntityKind,
   prior: T[],
   current: T[],
@@ -418,7 +517,38 @@ function walk<T extends { id: string }>(
     if (d) out.push(d);
   }
   const now = new Set(current.map((x) => x.id));
-  for (const x of prior) if (!now.has(x.id)) out.push(gone(kind, x.id, fieldsOf(x)));
+  for (const x of prior) if (!now.has(x.id)) out.push(gone(kind, x.id, fieldsOf(x), x.kind ?? null));
+}
+
+/** Groups walk like anything else, except that each side resolves its own hunks:
+ *  a hunk id is a handle into the version it was published with. */
+function walkGroups(
+  prior: ReviewDoc["groups"],
+  current: ReviewDoc["groups"],
+  priorHunks: Map<string, { path: string; at: number }>,
+  curHunks: Map<string, { path: string; at: number }>,
+  out: EntityDelta[],
+): void {
+  const was = new Map(prior.map((g) => [g.id, g]));
+  for (const g of current) {
+    const p = was.get(g.id);
+    if (!p) {
+      out.push(born("group", g.id, groupFieldsWith(g, curHunks)));
+      continue;
+    }
+    const d = compare(
+      "group",
+      g.id,
+      groupFieldsWith(p, priorHunks),
+      groupFieldsWith(g, curHunks),
+      false,
+    );
+    if (d) out.push(d);
+  }
+  const now = new Set(current.map((g) => g.id));
+  for (const g of prior) {
+    if (!now.has(g.id)) out.push(gone("group", g.id, groupFieldsWith(g, priorHunks), g.kind));
+  }
 }
 
 /**
@@ -431,8 +561,8 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
   const title = compare(
     "review",
     "review",
-    [{ field: "title", inline: true, html: safeInline(prev.doc.title) }],
-    [{ field: "title", inline: true, html: safeInline(cur.doc.title) }],
+    [spec("title", true, safeInline(prev.doc.title))],
+    [spec("title", true, safeInline(cur.doc.title))],
     false,
   );
   if (title) entities.push(title);
@@ -441,8 +571,8 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
   const summary = compare(
     "summary",
     "summary",
-    [{ field: "summary", inline: false, html: safeBlock(prev.doc.summary) }],
-    [{ field: "summary", inline: false, html: safeBlock(cur.doc.summary) }],
+    [spec("summary", false, safeBlock(prev.doc.summary))],
+    [spec("summary", false, safeBlock(cur.doc.summary))],
     false,
   );
   if (summary) entities.push(summary);
@@ -465,7 +595,11 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
 
   walk("statement", prev.doc.statements, cur.doc.statements, statementFields, entities);
   walk("note", prev.doc.notes, cur.doc.notes, noteFields, entities);
-  walk("group", prev.doc.groups, cur.doc.groups, groupFields, entities);
+  const hunksOf = (doc: ReviewDoc) =>
+    new Map(doc.hunks.map((h, i) => [h.id, { path: h.path, at: i }] as const));
+  const priorHunks = hunksOf(prev.doc);
+  const curHunks = hunksOf(cur.doc);
+  walkGroups(prev.doc.groups, cur.doc.groups, priorHunks, curHunks, entities);
 
   const wasOpen = new Map(prev.annotations.map((a) => [a.id, a.status]));
   const answered = cur.annotations
@@ -538,7 +672,7 @@ export function safeId(raw: string): string {
 /** A disclosure id that depends only on where it sits, so two renders of one pair
  *  produce the same bytes. */
 function boxId(owner: string, field: string, k: number): string {
-  return `dp-${safeId(owner)}-${field}-${k}`;
+  return `dp-${safeId(owner)}-${safeId(field)}-${k}`;
 }
 
 type Edit = { at: number; del: number; ins: string };
@@ -675,12 +809,25 @@ export function marked(
   return d ? markField(html, d, owner, control) : html;
 }
 
-/** The chip an entity carries, or nothing. The only place a chip is minted: the
- *  page has no other path to one, so every chip on it is derived. */
+/** Whether the delta touched one field of one entity. The renderer asks before it
+ *  draws a field that is only on the page when it moved. */
+export function touched(entity: EntityDelta | null, field: string): boolean {
+  return entity !== null && entity.fields.some((f) => f.field === field);
+}
+
+/** The code-moved chip. Minted here rather than at each site that shows one, so a
+ *  chip on a card and the same chip in the revision menu cannot drift apart. */
+export function movedChip(): string {
+  return `<span class="rev rev-moved">code moved</span>`;
+}
+
+/** The chip an entity carries, or nothing. Chips are minted here and in `movedChip`
+ *  and nowhere else, and both take what they say from a delta, so every chip on the
+ *  page is derived rather than authored. */
 export function chip(entity: EntityDelta | null): string {
   if (!entity) return "";
   const word = entity.status === "new" ? "new" : entity.status === "removed" ? "removed" : "revised";
-  const moved = entity.codeMoved ? `<span class="rev rev-moved">code moved</span>` : "";
+  const moved = entity.codeMoved ? movedChip() : "";
   if (entity.status === "revised" && entity.fields.length === 0) return moved;
   return `<span class="rev">${word}</span>${moved}`;
 }

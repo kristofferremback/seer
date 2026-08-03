@@ -19,7 +19,15 @@
 
 import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
-import { chip, marked, safeId, type DeltaIndex, type EntityDelta } from "./delta";
+import {
+  chip,
+  groupFilesHtml,
+  marked,
+  safeId,
+  touched,
+  type DeltaIndex,
+  type EntityDelta,
+} from "./delta";
 import { icon, safeBlock, safeInline, shortSha } from "./render-evidence";
 import type { Group, Hunk, HunkLine, StatementKind } from "./types";
 
@@ -389,6 +397,12 @@ function groupBlock(
   // Marked first, then tested for emptiness: a paragraph cleared between versions
   // still owes the reader its prior words, and its chip owes them a mark.
   const gsum = marked(safeBlock(group.paragraph), d, "paragraph", group.id);
+  // The file list is the partition of the diff this group claims. It is already on
+  // the page as rows, but a row that left it leaves no trace there, so when the
+  // membership moves the paths come out as the words they are.
+  const gfiles = touched(d, "files")
+    ? `<p class="gfiles">${marked(groupFilesHtml(files.map((f) => f.path)), d, "files", group.id)}</p>`
+    : "";
   return (
     `<details class="grp" id="${escapeHtml(group.id)}" data-kind="${escapeHtml(group.kind)}">` +
     `<summary>${icon("chev", "tick")}` +
@@ -401,6 +415,7 @@ function groupBlock(
     // Block markdown, the way the data model defines it: a group paragraph may carry
     // emphasis, a link, a list or a fenced block.
     (gsum === "" ? "" : `<div class="gsum">${gsum}</div>`) +
+    gfiles +
     `<div class="frows">${rows}</div>` +
     `</div></details>`
   );
