@@ -269,28 +269,24 @@ const STYLE = `  @font-face {
   }
 
   /* ---- the lede: the account and the stack it belongs to ----
-     Stacked by default. Once there is room for a second column the chain moves
-     beside the summary rather than above it, so the account starts at the top of
-     the page and the width the chain was spending on empty card is spent on prose
-     instead. Only this row widens: everything below keeps the reading measure and
-     the same left edge, so the page has one column of text, not two rhythms. */
+     One tube on a phone. Once there is room the stack becomes an aside in the
+     right gutter, and the account keeps its reading measure in the middle of the
+     page. The left gutter is the one that collapses first, so a window with just
+     enough room left-aligns the account rather than squeezing the aside, and on a
+     very wide screen the account sits centred with the aside capped beside it
+     rather than sprawling. */
   .lede > .chain { margin-top: 20px; }
-  @media (min-width: 1100px) {
-    .doc { max-width: 1132px; }
-    .head, #notes, #walkthrough, #questions, .colophon { max-width: 760px; }
-    .lede { display: flex; align-items: flex-start; gap: 36px; }
-    .lede > #summary { order: 1; flex: 1 1 760px; max-width: 760px; min-width: 0; margin-top: 0; }
-    /* the stack is a sidebar here: it holds its own scroll and stays put while
-       the account moves, so a reader deep in the walkthrough can still see which
-       pull request they are in. It never scrolls the page to reach its own end. */
-    .lede > .chain {
-      order: 2; flex: 0 0 296px; min-width: 0; margin-top: 4px;
-      position: sticky; top: 20px;
-      max-height: calc(100vh - 40px);
-      overflow-y: auto;
-      overscroll-behavior: contain;
-      scrollbar-width: thin;
+  @media (min-width: 1160px) {
+    .doc { max-width: none; }
+    .head, #notes, #walkthrough, .colophon { width: min(760px, 100%); margin-left: auto; margin-right: auto; }
+    .lede {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 760px) minmax(300px, 1fr);
+      column-gap: 40px;
+      align-items: start;
     }
+    .lede > #summary { grid-column: 2; margin-top: 0; }
+    .lede > .chain { grid-column: 3; width: 100%; max-width: 420px; margin-top: 4px; }
   }
 
   /* ---- type ---- */
@@ -827,8 +823,10 @@ const STYLE = `  @font-face {
   .c-stat { font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); white-space: nowrap; }
   /* what a tap adds: the marks and the gist, then the author's own account
      behind one more fold */
-  .c-open { padding: 0 var(--spine) 12px; }
-  .c-kinds { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+  .c-open { padding: 2px var(--spine) 12px; }
+  /* the marks are the first thing a tap reveals, so they get room to land in
+     rather than butting against the line they opened from */
+  .c-kinds { display: flex; align-items: center; gap: 9px; margin: 4px 0 7px; }
   .c-more > summary {
     display: flex; align-items: center; gap: 7px;
     margin-top: 10px; padding: 0;
@@ -866,7 +864,7 @@ const STYLE = `  @font-face {
     .chain { --spine: 16px; margin-top: 24px; }
     .arw { margin-top: 6px; margin-bottom: 6px; }
     .card > summary { padding: 13px var(--spine) 14px; }
-    .c-open { padding: 0 var(--spine) 14px; }
+    .c-open { padding: 2px var(--spine) 14px; }
     .card-body { padding: 0; }
     .c-title { font-size: 15px; }
     .c-line { font-size: 13.5px; }
