@@ -31,6 +31,8 @@ const V3_TABLES = [
   "ref_snippets",
 ];
 
+const V4_TABLES = ["shares"];
+
 // ---- seed a v0-with-data database + zip layout BEFORE importing app modules ----
 function seedV0() {
   mkdirSync(dataDir, { recursive: true });
@@ -73,7 +75,7 @@ if (SCENARIO === "v0") {
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 3, `user_version should be 3, got ${uv}`);
+  assert(uv === 4, `user_version should be 4, got ${uv}`);
 
   const user = db.query("SELECT * FROM users").get() as { id: string; email: string } | null;
   assert(!!user, "root user exists");
@@ -136,7 +138,7 @@ if (SCENARIO === "fresh") {
   const wsId = getMeta("legacy_workspace_id")!;
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 3, `user_version should be 3, got ${uv}`);
+  assert(uv === 4, `user_version should be 4, got ${uv}`);
   const iCount = (db.query("SELECT COUNT(*) c FROM images").get() as { c: number }).c;
   assert(iCount === 0, `fresh db has an empty images table, got ${iCount}`);
   const user = db.query("SELECT * FROM users").get() as { email: string } | null;
@@ -149,11 +151,13 @@ if (SCENARIO === "fresh") {
   // No bundles table leftovers from a v0 rebuild.
   const bCount = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount === 0, `fresh db has no bundles, got ${bCount}`);
-  // v3: the overseer tables exist on a fresh boot too.
-  for (const table of V3_TABLES) {
+  // v3/v4: the overseer tables and the shares table exist on a fresh boot too.
+  for (const table of [...V3_TABLES, ...V4_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} exists on a fresh db`);
   }
+  const shCount = (db.query("SELECT COUNT(*) c FROM shares").get() as { c: number }).c;
+  assert(shCount === 0, `fresh db has an empty shares table, got ${shCount}`);
 
   console.log("migrate fresh: all assertions passed");
   process.exit(0);
@@ -203,41 +207,130 @@ if (SCENARIO === "v2") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 3, `user_version should be 3, got ${uv}`);
+  assert(uv === 4, `user_version should be 4, got ${uv}`);
 
-  for (const table of V3_TABLES) {
+  for (const table of [...V3_TABLES, ...V4_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
-    assert(!!row, `table ${table} created by v3`);
+    assert(!!row, `table ${table} created on the walk up from v2`);
   }
 
-  // v1/v2 data survives untouched: v3 is purely additive.
+  // v1/v2 data survives untouched: v3 and v4 are purely additive.
   const uCount = (db.query("SELECT COUNT(*) c FROM users").get() as { c: number }).c;
   assert(uCount === 1, `seeded user survives, got ${uCount}`);
   const bCount = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount === 1, `seeded bundle survives, got ${bCount}`);
 
-  // A second run is a no-op: still v3, no duplicate rows, no throw.
+  // A second run is a no-op: still v4, no duplicate rows, no throw.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 3, `user_version stays 3 after re-run, got ${uv2}`);
+  assert(uv2 === 4, `user_version stays 4 after re-run, got ${uv2}`);
   const bCount2 = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount2 === 1, `no duplicate bundles after re-run, got ${bCount2}`);
   const rCount = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount === 0, `reviews table starts empty, got ${rCount}`);
 
   // A database from a newer binary is refused rather than half-read.
-  db.run("PRAGMA user_version = 4");
+  db.run("PRAGMA user_version = 5");
   let threw = false;
   try {
     migrate();
   } catch (err) {
     threw = true;
-    assert(/user_version 4/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
+    assert(/user_version 5/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
   }
   assert(threw, "migrate must throw on a user_version newer than it knows");
-  db.run("PRAGMA user_version = 3");
+  db.run("PRAGMA user_version = 4");
 
   console.log("migrate v2: all assertions passed");
+  process.exit(0);
+}
+
+// ---- seed a v3 database (v1 + images + the reviews tables, user_version 3) ----
+//
+// Only the v3 tables this scenario reads back are seeded: v4 creates one table and
+// touches nothing else, so what the assertions have to show is that a database
+// already at 3 gains `shares` and keeps everything it had.
+function seedV3() {
+  seedV2();
+  const seed = new Database(join(dataDir, "seer.db"), { create: true });
+  seed.exec(`
+    CREATE TABLE reviews (workspace_id TEXT NOT NULL, slug TEXT NOT NULL,
+      latest_version INTEGER NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace_id, slug));
+    CREATE TABLE review_versions (workspace_id TEXT NOT NULL, slug TEXT NOT NULL,
+      version INTEGER NOT NULL, doc TEXT NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace_id, slug, version));
+    PRAGMA user_version = 3;
+  `);
+  seed.run("INSERT INTO reviews (workspace_id, slug, latest_version, created_at) VALUES ('ws_seed', 'golden', 1, 1000)");
+  seed.close();
+}
+
+if (SCENARIO === "v3") {
+  process.env.AUTH_DISABLED = "true";
+  delete process.env.ALLOWED_EMAILS;
+  seedV3();
+
+  const { migrate } = await import("../src/migrate");
+  const { db } = await import("../src/db");
+
+  const before = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(before === 3, `seeded db starts at 3, got ${before}`);
+
+  migrate();
+
+  const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(uv === 4, `user_version should be 4, got ${uv}`);
+  for (const table of V4_TABLES) {
+    const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    assert(!!row, `table ${table} created by v4`);
+  }
+
+  // The shares table has the columns the design names, and the kind list is closed.
+  const cols = (db.query("PRAGMA table_info(shares)").all() as { name: string }[]).map((c) => c.name);
+  for (const col of [
+    "id",
+    "workspace_id",
+    "kind",
+    "target",
+    "label",
+    "token_hash",
+    "created_by",
+    "created_at",
+    "expires_at",
+    "revoked_at",
+  ]) {
+    assert(cols.includes(col), `shares.${col} exists, got columns ${cols.join(",")}`);
+  }
+  let kindRefused = false;
+  try {
+    db.run(
+      "INSERT INTO shares (id, workspace_id, kind, target, label, token_hash, created_by, created_at) " +
+        "VALUES ('shr_x', 'ws_seed', 'wallpaper', 'golden', '', 'hash-x', 'usr_seed', 1000)",
+    );
+  } catch {
+    kindRefused = true;
+  }
+  assert(kindRefused, "shares.kind is a closed list and refuses an unknown kind");
+
+  // v1/v2/v3 data survives untouched: v4 is purely additive.
+  const uCount = (db.query("SELECT COUNT(*) c FROM users").get() as { c: number }).c;
+  assert(uCount === 1, `seeded user survives, got ${uCount}`);
+  const bCount = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
+  assert(bCount === 1, `seeded bundle survives, got ${bCount}`);
+  const rCount = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
+  assert(rCount === 1, `seeded review survives, got ${rCount}`);
+
+  // A second run is a no-op.
+  migrate();
+  const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(uv2 === 4, `user_version stays 4 after re-run, got ${uv2}`);
+  const rCount2 = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
+  assert(rCount2 === 1, `no duplicate reviews after re-run, got ${rCount2}`);
+  const sCount = (db.query("SELECT COUNT(*) c FROM shares").get() as { c: number }).c;
+  assert(sCount === 0, `shares table starts empty, got ${sCount}`);
+
+  console.log("migrate v3: all assertions passed");
   process.exit(0);
 }
 
