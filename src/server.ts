@@ -46,6 +46,7 @@ import {
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
 import { handlePublishReview } from "./overseer/routes";
 import { handleReadReview } from "./overseer/read";
+import { handleOverseerSkill } from "./overseer/skill";
 import { handleAnnotation } from "./overseer/annotations";
 import {
   handleRefreshReview,
@@ -575,6 +576,10 @@ export async function startServer() {
         PUT: (req, srv) => handleUpload(req, req.params.slug, srv),
         POST: (req, srv) => handleUpload(req, req.params.slug, srv),
       },
+
+      // The witness skill doc. Public, no auth, same contract as /skill.md: an agent
+      // reads this before it publishes a review.
+      "/overseer/skill.md": () => handleOverseerSkill(),
 
       // Overseer: a review is authored in one shot, so publishing is one POST.
       "/api/reviews": {
