@@ -92,9 +92,27 @@ function blob(path: string): string {
 let missingBlob: string | null = null;
 let unreachable = false;
 
+/** How many pull requests the route has asked GitHub for, so a test can hold the route
+ *  to refusing an oversized pointer list before it spends a single call. */
+let pullCalls = 0;
+
 const fake: GithubClient = {
-  async getPull(_repo, number) {
-    return PULLS[number]!;
+  async getPull(repo, number) {
+    pullCalls++;
+    // What the real client throws for a number it will not put in a URL, before any
+    // request goes out, and for a pull request GitHub does not have. Both are pointer
+    // mistakes, so the route has to tell them apart from GitHub answering badly.
+    if (!Number.isInteger(number) || number <= 0) {
+      throw new GithubError(
+        `Malformed pull request number ${JSON.stringify(number)}: expected a positive integer.`,
+        0,
+        "",
+      );
+    }
+    const url = `https://api.github.com/repos/${repo}/pulls/${number}`;
+    const pull = PULLS[number];
+    if (!pull) throw new GithubError(`GitHub 404 for ${url}`, 404, url);
+    return pull;
   },
   async listCommits(_repo, number) {
     const message =
@@ -267,6 +285,31 @@ describe("POST /api/reviews", () => {
     expect(doc.skillContext.map((c) => c.id)).toEqual([900]);
   });
 
+  test("each group's kind is derived from the lines its hunks change", async () => {
+    const doc = getReviewVersion(wsA, "golden", 1)!.doc;
+    // gr_gate holds the adding hunk in src/auth.ts beside the deleting one in
+    // src/server.ts, so it is a change; gr_api's three hunks only add.
+    expect(doc.groups.map((g) => g.kind)).toEqual(["change", "add"]);
+    const gate = doc.groups[0]!;
+    const lines = doc.hunks.filter((h) => gate.hunks.includes(h.id)).flatMap((h) => h.lines);
+    expect(lines.some((l) => l.kind === "add")).toBe(true);
+    expect(lines.some((l) => l.kind === "del")).toBe(true);
+  });
+
+  test("a group whose hunks only delete is marked remove", async () => {
+    const payload = noAttachments();
+    const [gate, api] = [payload.groups[0]!, payload.groups[1]!];
+    const deleting = GOLDEN_HUNKS.serverGate.id;
+    // The same partition, regrouped: the deleting hunk alone, everything else together.
+    const rest = [...gate.hunks.filter((id) => id !== deleting), ...api.hunks];
+    gate.hunks = [deleting];
+    api.hunks = rest;
+    const res = await publish("kind-remove", payload);
+    expect(res.status).toBe(200);
+    const doc = getReviewVersion(wsA, "kind-remove", 1)!.doc;
+    expect(doc.groups.map((g) => g.kind)).toEqual(["remove", "add"]);
+  });
+
   test("republishing the same slug creates version 2 and keeps the review id", async () => {
     const res = await publish("golden", noAttachments());
     expect(res.status).toBe(200);
@@ -424,6 +467,50 @@ describe("publish refusals", () => {
     expect(counts()).toEqual(before);
   });
 
+  test("a pull request GitHub does not have -> 422 naming it, not a 502", async () => {
+    const before = counts();
+    const payload = noAttachments();
+    payload.prs[1]!.number = 4242;
+    const res = await publish("gone-pr", payload);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    const err = json.errors.find((e: { rule: string }) => e.rule === "pr_not_derivable");
+    expect(err.field).toBe("prs[1]");
+    expect(err.message).toContain("4242");
+    expect(counts()).toEqual(before);
+  });
+
+  test("a pull request number the client will not fetch -> 422 naming it, not a 502", async () => {
+    const before = counts();
+    const payload = noAttachments();
+    payload.prs[1]!.number = -5;
+    const res = await publish("bad-pr-number", payload);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    const err = json.errors.find((e: { rule: string }) => e.rule === "pr_not_derivable");
+    expect(err.field).toBe("prs[1]");
+    expect(err.message).toContain("-5");
+    expect(counts()).toEqual(before);
+  });
+
+  test("more pull requests than a review can name -> 422 before a single GitHub call", async () => {
+    const before = counts();
+    const payload = noAttachments();
+    const first = payload.prs[0]!;
+    while (payload.prs.length < 12) {
+      payload.prs.push({ ...structuredClone(first), number: 100 + payload.prs.length });
+    }
+    const calls = pullCalls;
+    const res = await publish("too-many-prs", payload);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    expect(json.errors[0].rule).toBe("pr_count");
+    expect(json.errors[0].field).toBe("prs");
+    expect(json.errors[0].overage).toBe(2);
+    expect(pullCalls).toBe(calls);
+    expect(counts()).toEqual(before);
+  });
+
   test("an attachment declared with no bytes -> 422 naming it", async () => {
     const before = counts();
     const res = await publish("no-bytes", goldenPayload());
@@ -563,6 +650,7 @@ describe("attachments", () => {
     expect(res.status).toBe(422);
     const json = await readJson(res);
     expect(json.errors[0].rule).toBe("attachment_part_undeclared");
+    expect(json.errors[0].field).toBe("attachments");
     expect(json.errors[0].message).toContain("att_stray");
     expect(counts()).toEqual(before);
   });
@@ -577,6 +665,8 @@ describe("attachments", () => {
     expect(res.status).toBe(422);
     const json = await readJson(res);
     expect(json.errors[0].rule).toBe("attachment_not_image");
+    // The declaring index, not the bare list: att_gate is attachments[0].
+    expect(json.errors[0].field).toBe("attachments[0]");
     expect(counts()).toEqual(before);
   });
 
@@ -641,6 +731,15 @@ describe("without GITHUB_TOKEN", () => {
 // ---- what the response carries back ----
 
 describe("the publish response and the stored document", () => {
+  // The attachment fixture these tests read is published here rather than borrowed from
+  // the attachments describe above, so neither depends on the order the file runs in.
+  beforeAll(async () => {
+    const res = await postForm(
+      multipart("handles", goldenPayload(), [["att_gate", png(), "gate.png"]]),
+    );
+    expect(res.status).toBe(200);
+  });
+
   test("a review that spends its whole statement budget publishes with the warning", async () => {
     const payload = noAttachments();
     const cap = maxStatements(2);
@@ -688,20 +787,20 @@ describe("the publish response and the stored document", () => {
   });
 
   test("the stored document records each attachment's authored handle", async () => {
-    const doc = getReviewVersion(wsA, "with-image", 1)!.doc;
+    const doc = getReviewVersion(wsA, "handles", 1)!.doc;
     expect(doc.attachments.length).toBe(1);
     const a = doc.attachments[0]!;
     expect(a.authoredId).toBe("att_gate");
     expect(a.id).toMatch(ATT_ID_RE);
     expect(a.alt).toBe(goldenPayload().attachments[0]!.alt);
-    expect(a.bytes).toBe(listAttachments(wsA, "with-image")[0]!.bytes);
+    expect(a.bytes).toBe(listAttachments(wsA, "handles")[0]!.bytes);
   });
 
   test("an id that named an attachment cannot come back as a statement -> 422", async () => {
     const before = counts();
     const payload = noAttachments();
     payload.statements[0]!.id = "att_gate";
-    const res = await publish("with-image", payload);
+    const res = await publish("handles", payload);
     expect(res.status).toBe(422);
     const json = await readJson(res);
     const err = json.errors.find((e: { rule: string }) => e.rule === "id_type_changed");

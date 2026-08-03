@@ -162,6 +162,13 @@ function slugOf(parsed: unknown): unknown {
  *  the deriver. An empty list and a repeated pull request are readable as pointers, so
  *  they go to derivePrs(), which refuses both before any request goes out and whose
  *  PrPointerError the route answers as a 422. */
+/** More pull requests than a review can be about. derivePrs() spends four GitHub calls
+ *  per pointer, so the list is bounded before the first request goes out rather than
+ *  by the body size alone: a body well inside maxUploadBytes holds tens of thousands of
+ *  pointers. The budgets stop scaling breadth at four pull requests, so this is loose
+ *  enough that no review a skill would author meets it. */
+const MAX_PRS = 10;
+
 function pointersOf(payload: PublishPayload): PrPointer[] | null {
   const prs = payload?.prs;
   if (!Array.isArray(prs)) return null;
@@ -173,6 +180,21 @@ function pointersOf(payload: PublishPayload): PrPointer[] | null {
     out.push({ repo, number, parent: pr.parent ?? null });
   }
   return out;
+}
+
+/** Which authored pull request a GitHub failure was about, or null when the failure
+ *  does not name one. A request that went out carries its URL, which spells the repo
+ *  and the number; a pointer the client refused before any request went out carries no
+ *  URL and names the offending value in its message instead. */
+function prIndexFor(err: GithubError, pointers: PrPointer[]): number | null {
+  const byUrl = pointers.findIndex((p) => err.url.includes(`/repos/${p.repo}/pulls/${p.number}`));
+  if (byUrl >= 0) return byUrl;
+  const byValue = pointers.findIndex(
+    (p) =>
+      err.message.includes(JSON.stringify(p.repo)) ||
+      err.message.includes(JSON.stringify(p.number)),
+  );
+  return byValue >= 0 ? byValue : null;
 }
 
 // ---- resolution ----
@@ -281,10 +303,12 @@ function extOf(filename: string, type: string): string | null {
  *  or a part that is not an image. */
 function pairAttachments(payload: PublishPayload, body: PublishBody): ValidationError[] {
   const errors: ValidationError[] = [];
-  const declared = new Set<string>();
+  // The declaring index by id, so every error here names attachments[i] the way the
+  // rest of the system names the field the skill has to fix.
+  const declared = new Map<string, number>();
   payload.attachments.forEach((a, i) => {
     if (typeof a.id !== "string" || a.id === "") return; // validatePublish names it
-    declared.add(a.id);
+    declared.set(a.id, i);
     if (!body.parts.has(a.id)) {
       errors.push({
         field: `attachments[${i}]`,
@@ -294,7 +318,10 @@ function pairAttachments(payload: PublishPayload, body: PublishBody): Validation
     }
   });
   for (const [name, part] of body.parts) {
-    if (!declared.has(name)) {
+    const at = declared.get(name);
+    if (at === undefined) {
+      // The one error here with no index to name: nothing in the document declares this
+      // part, so the fix is at the list itself, and the message carries the part name.
       errors.push({
         field: "attachments",
         rule: "attachment_part_undeclared",
@@ -305,7 +332,7 @@ function pairAttachments(payload: PublishPayload, body: PublishBody): Validation
     const ext = extOf(part.filename, part.type);
     if (ext === null || !sniffOk(ext, part.bytes)) {
       errors.push({
-        field: "attachments",
+        field: `attachments[${at}]`,
         rule: "attachment_not_image",
         message: `part ${name} is not an image; attachments are image/* to start`,
       });
@@ -498,7 +525,17 @@ function buildDocument(args: {
     paragraph: g.paragraph,
     hunks: g.hunks,
     fileNotes: g.fileNotes,
-    kind: groupKind(g.hunks.map((id) => hunkById.get(id)!).filter(Boolean)),
+    kind: groupKind(
+      g.hunks.map((id) => {
+        const hunk = hunkById.get(id);
+        // Step 6 refuses a group naming a hunk the review does not have, so a miss here
+        // is that rule having regressed, not an authored mistake. Deriving the mark from
+        // whatever is left would draw a group as an addition because its deletions went
+        // missing, so this is loud instead.
+        if (!hunk) throw new Error(`group ${g.id} names hunk ${id}, which this review has no facts for`);
+        return hunk;
+      }),
+    ),
   }));
 
   return {
@@ -595,6 +632,18 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     }
     return unprocessable(errors, warnings);
   }
+  if (pointers.length > MAX_PRS) {
+    // Before the first fetch: the cheap rules cost nothing, and derivation costs four
+    // GitHub calls per pointer.
+    return unprocessable([
+      {
+        field: "prs",
+        rule: "pr_count",
+        message: `a review names at most ${MAX_PRS} pull requests; this one names ${pointers.length}`,
+        overage: pointers.length - MAX_PRS,
+      },
+    ]);
+  }
 
   let review: DerivedReview;
   try {
@@ -605,6 +654,16 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     // invalid would have it re-author correct content against a network fault.
     if (err instanceof PrPointerError) {
       return unprocessable([{ field: "prs", rule: "pr_not_derivable", message: err.message }]);
+    }
+    // The same status rule the ref path reads: a 404 is a pointer at a pull request
+    // that is not there, and a 0 is a pointer the client refused before any request
+    // went out, a malformed repo or a number that is not one. Both are the skill's to
+    // fix, and answering 502 would have it retry a typo as though it were a fault.
+    if (err instanceof GithubError && (err.status === 0 || err.status === 404)) {
+      const i = prIndexFor(err, pointers);
+      return unprocessable([
+        { field: i === null ? "prs" : `prs[${i}]`, rule: "pr_not_derivable", message: err.message },
+      ]);
     }
     return json(
       { error: `Overseer could not read the pull requests from GitHub: ${(err as Error).message}` },

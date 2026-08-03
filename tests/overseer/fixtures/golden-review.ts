@@ -68,14 +68,17 @@ const H_AUTH = makeHunk({
   newStart: 40,
   newLines: 9,
 });
+// The one hunk of the review that deletes more than it adds, so a group of it alone
+// derives `remove` and a group holding it beside an adding hunk derives `change`. A
+// fixture where every hunk only adds would leave both marks unreachable.
 const H_SERVER_GATE = makeHunk({
   prNumber: 12,
   path: "src/server.ts",
   sha: GOLDEN_HEAD_SHA_12,
   oldStart: 120,
-  oldLines: 4,
+  oldLines: 9,
   newStart: 120,
-  newLines: 7,
+  newLines: 4,
 });
 const H_SERVER_API = makeHunk({
   prNumber: 13,
