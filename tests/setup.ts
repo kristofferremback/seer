@@ -13,5 +13,20 @@ process.env.DATA_DIR = dataDir;
 process.env.PORT = "0";
 // TTL 0 makes every cached extraction immediately eligible for sweepCache().
 process.env.CACHE_TTL_MS = "0";
+// Tests authenticate with API_TOKEN above; a developer's real API_KEY (from a
+// local .env, which Bun auto-loads) would otherwise win in config.ts.
+delete process.env.API_KEY;
 // Tests always run against the disk blob store, whatever the developer's shell has.
 delete process.env.S3_BUCKET;
+// Tests never reach the real GitHub API, whatever the developer's shell has.
+delete process.env.GITHUB_TOKEN;
+
+// ...and nothing else reaches it either. Deleting the token above only makes an
+// outbound call anonymous; this makes one impossible. Every GitHub call in the suite
+// goes through the injection seam, so the default here is a client that refuses,
+// loudly and offline. A test that wants GitHub installs its own fake with
+// setGithubClient(), and clearing the seam with setGithubClient(null) still exposes
+// the real fetch-backed default to the one test that asks for it by name.
+const { setGithubClient } = await import("../src/overseer/github");
+const { offlineGithubClient } = await import("./offline-github");
+setGithubClient(offlineGithubClient());

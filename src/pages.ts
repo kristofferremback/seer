@@ -1,12 +1,11 @@
 import { config } from "./config";
+import { escapeHtml } from "./escape";
+
+export { escapeHtml };
 
 // Where the source lives; kept as a named const so it is trivial to re-point.
 export const GITHUB_URL = "https://github.com/kristofferremback/seer";
 export const CONTACT_EMAIL = "kristoffer.remback@gmail.com";
-
-export function escapeHtml(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
-}
 
 const NAMED_ENTITIES: Record<string, string> = {
   amp: "&",
@@ -675,6 +674,59 @@ function footer(links: string[]): string {
 // publish an HTML bundle. config.baseUrl is interpolated so every curl example is
 // copy-pasteable against this exact deployment. Served as text/markdown, no-cache.
 
+/**
+ * The front door for an agent. One page that says what this deployment can do and
+ * where each capability's own instructions live, because the alternative is a person
+ * remembering three URLs and telling their agent the right one.
+ *
+ * It is also the file a person installs: with the frontmatter it is a skill that takes
+ * one argument and fetches the right document. That only works once installed. A
+ * document fetched over HTTP is text an agent reads, never a command it runs, so the
+ * routing lives in what the installed skill does with the argument rather than in the
+ * fetch itself.
+ */
+export function skillRouter(): string {
+  const base = config.baseUrl;
+  return `---
+name: seer
+description: Publish to Seer: HTML bundles a human can open in a browser, and Overseer reviews of GitHub pull requests. Takes one argument naming what you want to do. Use when asked to publish a page, share a built artifact, or review a pull request.
+---
+
+# Seer
+
+Seer holds things a human is meant to look at: HTML bundles you built, and Overseer
+reviews of pull requests. Each capability has its own instructions; this page says which
+one you want and where it lives.
+
+You need an API key, \`$SEER_API_KEY\`, which belongs to one workspace and is the same key
+for everything below. A human mints it at \`${base}/settings/<workspace>\`.
+
+## Pick one
+
+| you were asked to | fetch |
+|---|---|
+| publish a page, dashboard, report or small app | \`${base}/bundles/skill.md\` |
+| review a pull request, or a stack of them | \`${base}/overseer/agent.md\` |
+
+Fetch the one that matches and follow it. Do not guess at an API from this page: each
+document carries the exact calls, and they are the current ones.
+
+\`\`\`bash
+# whichever fits the request
+curl -s ${base}/bundles/skill.md
+curl -s ${base}/overseer/agent.md
+\`\`\`
+
+## One thing worth knowing before you route
+
+A pull request review is written by a **fresh sub-agent**, never by you. If you wrote the
+change, or watched it get built, you will describe what it was meant to do rather than
+what the diff says. \`${base}/overseer/agent.md\` is the document that tells you how to
+dispatch one correctly; \`${base}/overseer/skill.md\` is what that sub-agent reads, and
+you do not need it yourself.
+`;
+}
+
 export function skillDoc(): string {
   const base = config.baseUrl;
   return `# Seer — publishing HTML bundles as an agent
@@ -888,7 +940,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
   <div class="shell spine">
     ${navRow(action)}
     <h1 class="h-display">Preview what your <span class="accent">agents</span> build.</h1>
-    <p class="subtitle">A private instrument for previewing HTML&nbsp;bundles.</p>
+    <p class="subtitle">A private instrument for previewing HTML&nbsp;bundles, and for reading pull&nbsp;requests.</p>
     <div class="prose">
       <p class="lede">An agent builds a page, zips it, and pushes it here. Seer keeps every
       version and hands back a URL that reloads itself the moment a new build lands.</p>
@@ -913,6 +965,32 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
         ${markSvg("mark mark-fig")}
         <figcaption>Fig. 1 &middot; the scrying glass</figcaption>
       </figure>
+    </div>
+  </div>
+</div>
+<div class="frame warm">
+  <div class="shell spine">
+    <h2 class="h-section">Overseer</h2>
+    <div class="prose">
+      <p class="lede">The same deployment reads pull requests. Point it at one, or at a
+      stack of them, and it publishes a page you read instead of the diff: what changed,
+      what it costs, what to look at closely, every claim one tap from the lines it
+      stands on.</p>
+      <p>It derives the facts itself, so the file list, the hunks, every line number and
+      every commit come from GitHub rather than from an agent's memory. The judgment
+      comes from a sub-agent that did not write the change, because one that did
+      describes what it meant to do rather than what the diff says. Reviews are private
+      to their workspace, and a review of the same pull requests published twice keeps
+      its link and shows you what moved between the passes.</p>
+    </div>
+    <div class="specimen-grid">
+      <div class="specimen">
+        <p class="eyebrow">To give an agent the ability</p>
+        <pre class="cmd scroll-x">curl -s ${escapeHtml(config.baseUrl)}/skill.md</pre>
+        <p class="specimen-note">One file, saved as a skill. Then ask it to review a
+        pull request. Full instructions at
+        <a href="/overseer/agent.md"><code>overseer/agent.md</code></a>.</p>
+      </div>
     </div>
   </div>
 </div>

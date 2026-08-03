@@ -34,4 +34,7 @@ export const WS_ID_RE = new RegExp(`^ws_${TINY}$`);
 export const INV_ID_RE = new RegExp(`^inv_${TINY}$`);
 export const KEY_ID_RE = new RegExp(`^key_${TINY}$`);
 export const IMG_ID_RE = new RegExp(`^img_${TINY}$`);
+export const REV_ID_RE = new RegExp(`^rev_${TINY}$`);
+export const ANN_ID_RE = new RegExp(`^ann_${TINY}$`);
+export const ATT_ID_RE = new RegExp(`^att_${TINY}$`);
 export const API_KEY_RE = /^seer_sk_[A-Za-z0-9_-]{32}$/;

@@ -8,6 +8,9 @@ import {
   WS_ID_RE,
   INV_ID_RE,
   KEY_ID_RE,
+  REV_ID_RE,
+  ANN_ID_RE,
+  ATT_ID_RE,
   API_KEY_RE,
 } from "../src/ids";
 
@@ -26,7 +29,13 @@ describe("tinyId", () => {
     expect(WS_ID_RE.test(tinyId("ws"))).toBe(true);
     expect(INV_ID_RE.test(tinyId("inv"))).toBe(true);
     expect(KEY_ID_RE.test(tinyId("key"))).toBe(true);
+    expect(REV_ID_RE.test(tinyId("rev"))).toBe(true);
+    expect(ANN_ID_RE.test(tinyId("ann"))).toBe(true);
+    expect(ATT_ID_RE.test(tinyId("att"))).toBe(true);
     expect(WS_ID_RE.test(tinyId("usr"))).toBe(false);
+    expect(REV_ID_RE.test(tinyId("ann"))).toBe(false);
+    expect(ANN_ID_RE.test(tinyId("att"))).toBe(false);
+    expect(ATT_ID_RE.test(tinyId("rev"))).toBe(false);
     // No ambiguous Crockford letters (i, l, o, u) in the alphabet.
     for (let i = 0; i < 200; i++) {
       expect(/[ilou]/.test(tinyId("ws").slice(3))).toBe(false);

@@ -119,13 +119,27 @@ describe("landing page", () => {
 });
 
 describe("agent skill doc", () => {
-  test("GET /skill.md -> 200 text/markdown with configured base URL and bearer header, no auth", async () => {
+  test("GET /skill.md -> 200 text/markdown routing to each capability, no auth", async () => {
     const r = await fetch(`${base}/skill.md`);
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
     expect(r.headers.get("cache-control")).toBe("no-cache");
     const md = await r.text();
-    // The copy-pasteable upload curl carries the configured base URL and bearer header.
+    // The front door names every capability and where its own instructions live, with
+    // this deployment's own base URL, so an agent never has to guess a second URL.
+    expect(md).toContain(`${config.baseUrl}/bundles/skill.md`);
+    expect(md).toContain(`${config.baseUrl}/overseer/agent.md`);
+    // It is installable as a skill itself, so it carries frontmatter.
+    expect(md.startsWith("---\nname: seer\n")).toBe(true);
+    // It routes rather than teaching: the calls belong to the documents it points at.
+    expect(md).not.toContain("--data-binary @bundle.zip");
+  });
+
+  test("GET /bundles/skill.md -> the bundle instructions, with the copy-pasteable curl", async () => {
+    const r = await fetch(`${base}/bundles/skill.md`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    const md = await r.text();
     expect(md).toContain(`${config.baseUrl}/api/bundles/`);
     expect(md).toContain(`-H "Authorization: Bearer $API_TOKEN"`);
     expect(md).toContain("--data-binary @bundle.zip");

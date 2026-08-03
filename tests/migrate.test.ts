@@ -43,6 +43,12 @@ test("fresh/empty db bootstraps the root workspace", async () => {
   expect(out).toContain("all assertions passed");
 });
 
+test("a v2 db gains the overseer tables and re-running is a no-op", async () => {
+  const { code, out } = await runScenario("v2");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("no resolvable root email with auth enabled fails loudly", async () => {
   const { code, out } = await runScenario("noemail");
   expect(code).toBe(0);

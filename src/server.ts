@@ -44,12 +44,23 @@ import {
   type SessionUser,
 } from "./auth";
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
+import { handlePublishReview } from "./overseer/routes";
+import { handleReadReview } from "./overseer/read";
+import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
+import { handleAnnotation } from "./overseer/annotations";
+import {
+  handleRefreshReview,
+  reviewTopic,
+  setFreshnessPublisher,
+} from "./overseer/freshness";
+import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
 import {
   landingPage,
   bundlesPage,
   invitePage,
   settingsPage,
   skillDoc,
+  skillRouter,
   softNotFoundPage,
   injectBundleMeta,
   type BundleMeta,
@@ -64,11 +75,26 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const WS_BUNDLE_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/b/`);
 // Workspace-scoped image path: /<ws_id>/i/<img_id>/<filename>.
 const WS_IMG_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/i/`);
+// Workspace-scoped review path: /<ws_id>/r/<slug>[/v/N | /a/<att_id>]. This is the
+// URL publish hands back; the bare /r/<slug> routes resolve the same review across
+// every workspace the reader can reach.
+const WS_REVIEW_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)(?:/(v|a)/([^/]+))?/?$`,
+);
 
-type WSData = { ws: string; slug: string };
+// The write a review page makes, under the workspace that page is served from: the
+// slug alone is ambiguous across workspaces, so the form posts the workspace with it.
+const WS_ANNOTATIONS_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/annotations/?$`,
+);
 
-function markdownDoc(): Response {
-  return new Response(skillDoc(), {
+// A live socket is either a bundle's reload channel or a review's freshness channel.
+// The two are gated differently, so which one this is travels with the socket rather
+// than being re-derived at subscribe time.
+type WSData = { ws: string; slug: string; kind: "bundle" | "review" };
+
+function markdown(body: string): Response {
+  return new Response(body, {
     headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-cache" },
   });
 }
@@ -167,6 +193,13 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
 // members. The same rule gates page serving and the live-reload socket.
 function workspaceViewable(ws: Workspace, req: Request): boolean {
   if (ws.visibility === "public") return true;
+  const user = sessionUser(req);
+  return user ? isMember(ws.id, user.id) : false;
+}
+
+// Membership, whatever the workspace's visibility says. A review holds private source
+// and is never served by visibility alone, so its live channel is not either.
+function workspaceMember(ws: Workspace, req: Request): boolean {
   const user = sessionUser(req);
   return user ? isMember(ws.id, user.id) : false;
 }
@@ -437,7 +470,11 @@ export async function startServer() {
 
   const websocket: WebSocketHandler<WSData> = {
     open(ws) {
-      ws.subscribe(`bundle:${ws.data.ws}:${ws.data.slug}`);
+      ws.subscribe(
+        ws.data.kind === "review"
+          ? reviewTopic(ws.data.ws, ws.data.slug)
+          : `bundle:${ws.data.ws}:${ws.data.slug}`,
+      );
     },
     message() {},
   };
@@ -464,8 +501,11 @@ export async function startServer() {
 
       // Agent-facing usage doc. Public, no auth — agents (and llms.txt probers)
       // fetch this to learn how to publish. Both paths serve identical markdown.
-      "/skill.md": () => markdownDoc(),
-      "/llms.txt": () => markdownDoc(),
+      // The front door: what this deployment can do, and where each capability's own
+      // instructions are. Bundle publishing kept its document, one hop further in.
+      "/skill.md": () => markdown(skillRouter()),
+      "/llms.txt": () => markdown(skillRouter()),
+      "/bundles/skill.md": () => markdown(skillDoc()),
 
       // The signed-in ledger of held bundles, grouped by the user's workspaces.
       "/bundles": (req) => {
@@ -539,6 +579,49 @@ export async function startServer() {
       "/api/bundles/:slug": {
         PUT: (req, srv) => handleUpload(req, req.params.slug, srv),
         POST: (req, srv) => handleUpload(req, req.params.slug, srv),
+      },
+
+      // The witness skill doc. Public, no auth, same contract as /skill.md: an agent
+      // reads this before it publishes a review.
+      "/overseer/skill.md": () => handleOverseerSkill(),
+
+      // What a person installs into their own agent so it can dispatch a witness.
+      // The witness never reads this one; whoever sets Overseer up reads it once.
+      "/overseer/agent.md": () => handleOverseerAgentSkill(),
+
+      // Overseer: a review is authored in one shot, so publishing is one POST.
+      "/api/reviews": {
+        POST: (req) => handlePublishReview(req),
+      },
+      // Reading takes a bare slug, resolved across the caller's workspaces: the
+      // renderer and the witness both hold a slug, not a workspace id.
+      "/api/reviews/:slug": {
+        GET: (req) => handleReadReview(req, req.params.slug, null),
+      },
+      // The one thing written to a review after publication. A member files, an API
+      // key answers, and the route decides which by the body it was sent.
+      "/api/reviews/:slug/annotations": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleAnnotation(req, req.params.slug);
+        },
+      },
+      "/api/reviews/:slug/refresh": {
+        POST: (req) => handleRefreshReview(req, req.params.slug),
+      },
+      "/api/reviews/:slug/v/:n": {
+        GET: (req) => handleReadReview(req, req.params.slug, req.params.n),
+      },
+
+      // The review itself, as a page. Same gate as the JSON, same soft-404.
+      "/r/:slug": {
+        GET: (req) => handleReviewPage(req, req.params.slug, null),
+      },
+      "/r/:slug/v/:n": {
+        GET: (req) => handleReviewPage(req, req.params.slug, req.params.n),
+      },
+      "/r/:slug/a/:id": {
+        GET: (req) => handleReviewAttachment(req, req.params.slug, req.params.id),
       },
 
       "/api/images": {
@@ -710,13 +793,19 @@ export async function startServer() {
       if (url.pathname === "/ws/livereload") {
         const wsId = url.searchParams.get("ws") ?? "";
         const slug = url.searchParams.get("slug") ?? "";
+        const kind = url.searchParams.get("kind") === "review" ? "review" : "bundle";
         if (!WS_ID_RE.test(wsId) || !SLUG_RE.test(slug)) {
           return new Response("Bad request", { status: 400 });
         }
-        // Same access rule as serving: only upgrade when the viewer could view it.
+        // Same access rule as serving: only upgrade when the viewer could view it. A
+        // review channel is stricter than a bundle's: a public workspace serves its
+        // bundles to anyone, but a review holds private source, so this one asks for
+        // membership rather than viewability.
         const ws = getWorkspace(wsId);
-        if (!ws || !workspaceViewable(ws, req)) return new Response("Not found", { status: 404 });
-        if (srv.upgrade(req, { data: { ws: wsId, slug } }))
+        if (!ws) return new Response("Not found", { status: 404 });
+        const allowed = kind === "review" ? workspaceMember(ws, req) : workspaceViewable(ws, req);
+        if (!allowed) return new Response("Not found", { status: 404 });
+        if (srv.upgrade(req, { data: { ws: wsId, slug, kind } }))
           return undefined as unknown as Response;
         return new Response("WebSocket upgrade failed", { status: 400 });
       }
@@ -726,6 +815,20 @@ export async function startServer() {
 
       const wsImage = url.pathname.match(WS_IMG_RE);
       if (wsImage) return handleWorkspaceImage(req, wsImage[1]!);
+
+      const wsAnnotations = url.pathname.match(WS_ANNOTATIONS_RE);
+      if (wsAnnotations) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+        return handleAnnotation(req, wsAnnotations[2]!, wsAnnotations[1]!);
+      }
+
+      const wsReview = url.pathname.match(WS_REVIEW_RE);
+      if (wsReview) {
+        const [, wsId, slug, part, value] = wsReview;
+        if (part === "a") return handleReviewAttachment(req, slug!, value!, wsId!);
+        return handleReviewPage(req, slug!, part === "v" ? value! : null, wsId!);
+      }
 
       // Legacy /b/<slug>[...] → 301 to the bootstrap workspace, preserving the full
       // remainder and query. No legacy workspace recorded → a plain 404.
@@ -743,6 +846,12 @@ export async function startServer() {
     },
 
     websocket,
+  });
+
+  // Freshness pushes go out over this server's sockets. Handed in rather than imported
+  // so the freshness module never has to know a server exists to be tested.
+  setFreshnessPublisher((topic, message) => {
+    server.publish(topic, message);
   });
 
   console.log(`Seer listening on ${config.baseUrl} (port ${server.port})`);
