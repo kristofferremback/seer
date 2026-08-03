@@ -31,6 +31,10 @@ import {
 import { icon, safeBlock, safeInline, shortSha } from "./render-evidence";
 import type { Group, Hunk, HunkLine, StatementKind } from "./types";
 
+/** The anchor a target grows once something has been asked about it, supplied by the
+ *  page rather than built here: the questions themselves live in one place. */
+export type QuestionsHere = (type: string, id: string) => string;
+
 /** An entity's kind, on the page only when it moved. The kind draws the row's icon
  *  and nothing else, and a risk quietly restated as a note is exactly what a reader
  *  came back for, so when it moves it comes out as the word it is. Every entity the
@@ -284,7 +288,19 @@ function sourceOf(hunk: Hunk): string {
   return `#${hunk.prNumber} ${shortSha(hunk.sha)}`;
 }
 
-function hunkBlock(hunk: Hunk, previous: Hunk | undefined, lang: "ts" | "json" | null): string {
+/** The id a hunk's element carries, so a question filed against a hunk has somewhere
+ *  to point. The hunk's own id holds characters a fragment reads badly, so the anchor
+ *  is the escaped form both sides derive the same way. */
+export function hunkAnchorId(hunkId: string): string {
+  return `h-${safeId(hunkId)}`;
+}
+
+function hunkBlock(
+  hunk: Hunk,
+  previous: Hunk | undefined,
+  lang: "ts" | "json" | null,
+  here: QuestionsHere,
+): string {
   const broke = previous !== undefined && sourceOf(previous) !== sourceOf(hunk);
   const lines = hunk.lines.map((l) => hunkLine(l, lang)).join("");
   return (
@@ -292,10 +308,11 @@ function hunkBlock(hunk: Hunk, previous: Hunk | undefined, lang: "ts" | "json" |
     // is an attribute the page can be checked against: the groups partition the
     // document's hunks, and a partition drawn on the page is one every id reaches
     // exactly once.
-    `<div class="hunk" data-hunk="${escapeHtml(hunk.id)}"${broke ? " data-src-break" : ""}>` +
+    `<div class="hunk" id="${escapeHtml(hunkAnchorId(hunk.id))}" data-hunk="${escapeHtml(hunk.id)}"${broke ? " data-src-break" : ""}>` +
     `<div class="hh"><span class="hh-at">${escapeHtml(hunkRange(hunk))}</span>` +
     `<span class="hh-src">${escapeHtml(sourceOf(hunk))}</span></div>` +
     `<pre class="snip scroll-x"><code>${lines}</code></pre>` +
+    here("hunk", hunk.id) +
     `</div>`
   );
 }
@@ -354,12 +371,13 @@ function fileRow(
   file: { path: string; hunks: Hunk[] },
   note: string | undefined,
   domId: string,
+  here: QuestionsHere,
 ): string {
   const { added, removed } = stats(file.hunks);
   const kind = kindOf(file.hunks);
   const lang = langOfPath(file.path);
   const lines = file.hunks
-    .map((hunk, i) => hunkBlock(hunk, file.hunks[i - 1], lang))
+    .map((hunk, i) => hunkBlock(hunk, file.hunks[i - 1], lang, here))
     .join("");
   return (
     `<details class="frow">` +
@@ -372,6 +390,7 @@ function fileRow(
     (note === undefined ? "" : `<span class="fnote">${safeInline(note)}</span>`) +
     `</summary>` +
     `<div class="frow-body">` +
+    here("file", file.path) +
     `<div class="filediff" id="${escapeHtml(domId)}">${lines}</div>` +
     `</div></details>`
   );
@@ -390,6 +409,7 @@ function groupBlock(
   byId: Map<string, Hunk>,
   order: Map<string, number>,
   d: EntityDelta | null,
+  here: QuestionsHere,
 ): string {
   const files = filesOf(group, byId, order);
   // The badge counts hunks, not files: a group is a set of hunks, and the number beside
@@ -401,7 +421,7 @@ function groupBlock(
   const notes = new Map<string, string>();
   for (const n of group.fileNotes) if (!notes.has(n.path)) notes.set(n.path, n.text);
   const rows = files
-    .map((f, i) => fileRow(f, notes.get(f.path), `fd-${group.id}-${i}`))
+    .map((f, i) => fileRow(f, notes.get(f.path), `fd-${group.id}-${i}`, here))
     .join("");
   // Marked first, then tested for emptiness: a paragraph cleared between versions
   // still owes the reader its prior words, and its chip owes them a mark.
@@ -426,6 +446,7 @@ function groupBlock(
     (gsum === "" ? "" : `<div class="gsum">${gsum}</div>`) +
     gfiles +
     kindMark(d, group.id, group.kind) +
+    here("group", group.id) +
     `<div class="frows">${rows}</div>` +
     `</div></details>`
   );
@@ -433,11 +454,15 @@ function groupBlock(
 
 /** The whole section. Every hunk the document carries reaches the page exactly once,
  *  because the groups partition them and each group draws the ones it names. */
-export function walkthroughSection(doc: ReviewDoc, delta: DeltaIndex | null = null): string {
+export function walkthroughSection(
+  doc: ReviewDoc,
+  delta: DeltaIndex | null = null,
+  here: QuestionsHere = () => "",
+): string {
   const byId = new Map(doc.hunks.map((h) => [h.id, h] as const));
   const order = new Map(doc.hunks.map((h, i) => [h.id, i] as const));
   const groups = groupsInOrder(doc.groups)
-    .map((g) => groupBlock(g, byId, order, delta ? delta.get("group", g.id) : null))
+    .map((g) => groupBlock(g, byId, order, delta ? delta.get("group", g.id) : null, here))
     .join("");
   // A group the base version had and this one does not is a stub, like any other
   // removed entity: the walkthrough is a partition of the diff, and a partition

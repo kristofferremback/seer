@@ -125,17 +125,93 @@ describe("filing", () => {
     expect(html).toMatch(/<p class="qhere"><a href="#ann_[a-z0-9]+">open question<\/a><\/p>/);
   });
 
-  test("every target type the review actually has is fileable", async () => {
+  test("every target type the review actually has is fileable, and each is drawn on its target", async () => {
     storeGoldenReview(ws, "targets");
-    for (const target of [
+    const targets = [
       { type: "note", id: "no_keys" },
       { type: "group", id: "gr_gate" },
       { type: "summary", id: "summary" },
-    ]) {
+      { type: "hunk", id: "pr12:src/auth.ts:@@40,6+40,9" },
+      { type: "file", id: "src/auth.ts" },
+    ];
+    for (const target of targets) {
       const res = await file("targets", { target, body: `About ${target.type}` });
       expect(res.status).toBe(200);
     }
-    expect(listAnnotations(ws, "targets")).toHaveLength(3);
+    const stored = listAnnotations(ws, "targets");
+    expect(stored).toHaveLength(5);
+
+    const html = await (await page("targets")).text();
+    // One anchor on the target itself per filing, and the anchors are the ids the page
+    // really carries: a link into nothing is the same as no link at all.
+    for (const a of stored) {
+      expect(html).toContain(`<p class="qhere"><a href="#${a.id}">open question</a></p>`);
+    }
+    expect((html.match(/class="qhere"/g) ?? []).length).toBe(5);
+    for (const anchor of ["no_keys", "gr_gate", "summary", "h-pr12_3a_src_2f_auth_2e_ts_3a__40__40_40_2c_6_2b_40_2c_9"]) {
+      expect(html).toContain(`id="${anchor}"`);
+      expect(html).toContain(`href="#${anchor}"`);
+    }
+    // A file names a path, which is drawn once per group that claims it, so no single
+    // element is it: the question says where it is without pretending to link there.
+    expect(html).toContain(`<span>file src/auth.ts</span>`);
+  });
+
+  test("a question filed from one workspace's page stays in that workspace", async () => {
+    const owner = listMembers(legacyWorkspaceId()!)[0]!.id;
+    const twin = createWorkspace("Twin", owner);
+    storeGoldenReview(ws, "sameslug");
+    storeGoldenReview(twin, "sameslug");
+    const res = await fetch(`${base}/${ws}/r/sameslug/annotations`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ target: "summary:summary", body: "Which review is this?" }),
+      redirect: "manual",
+    });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toContain(`/${ws}/r/sameslug#`);
+    expect(listAnnotations(ws, "sameslug")).toHaveLength(1);
+    expect(listAnnotations(twin, "sameslug")).toHaveLength(0);
+  });
+
+  test("a workspace that does not hold the slug is the read path's 404", async () => {
+    const owner = listMembers(legacyWorkspaceId()!)[0]!.id;
+    const empty = createWorkspace("Empty", owner);
+    const res = await fetch(`${base}/${empty}/r/sameslug/annotations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target: { type: "summary", id: "summary" }, body: "Anyone?" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test("a cross-site form post is refused before anything is written", async () => {
+    storeGoldenReview(ws, "origin");
+    for (const url of [`${base}/api/reviews/origin/annotations`, `${base}/${ws}/r/origin/annotations`]) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          origin: "https://evil.example",
+        },
+        body: new URLSearchParams({ target: "summary:summary", body: "Filed from elsewhere" }),
+        redirect: "manual",
+      });
+      expect(res.status).toBe(403);
+    }
+    expect(listAnnotations(ws, "origin")).toHaveLength(0);
+  });
+
+  test("the ask form is drawn on the current version and not on a pinned older one", async () => {
+    storeGoldenReview(ws, "pinned");
+    storeGoldenReview(ws, "pinned");
+    const current = await (await page("pinned")).text();
+    expect(current).toContain(`action="/${ws}/r/pinned/annotations"`);
+    // v1 is not the version a filing would be stamped with, so the page reading it
+    // does not offer to file.
+    const older = await (await fetch(`${base}/r/pinned/v/1`)).text();
+    expect(older).toContain(`<section id="questions">`);
+    expect(older).not.toContain(`class="ask-form"`);
   });
 
   test("a target the version does not have is a 422 naming it", async () => {
@@ -203,7 +279,9 @@ describe("the plain form", () => {
 
   test("the page carries a plain form for a member, posting to the route", async () => {
     const html = await (await page("formfiled")).text();
-    expect(html).toContain(`action="/api/reviews/formfiled/annotations"`);
+    // Workspace-scoped, like the page it is served from: a bare slug two workspaces
+    // both hold would resolve to whichever published last.
+    expect(html).toContain(`action="/${ws}/r/formfiled/annotations"`);
     expect(html).toContain(`method="post"`);
     expect(html).toContain(`<option value="statement:st_gate">`);
     // No scripting anywhere in the ask block: the form is the whole mechanism.

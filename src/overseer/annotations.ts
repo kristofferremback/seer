@@ -294,9 +294,18 @@ async function resolveAnswerRefs(
  *
  * Files an annotation for a member session, or answers an open one for an API key.
  */
-export async function handleAnnotation(req: Request, slug: string): Promise<Response> {
+export async function handleAnnotation(
+  req: Request,
+  slug: string,
+  wsId: string | null = null,
+): Promise<Response> {
   if (!SLUG_RE.test(slug)) return softNotFound();
-  const review = resolveReview(readableWorkspaces(req), slug);
+  // A page is served under one workspace, so a write from it names that workspace.
+  // Without it a slug two readable workspaces both hold resolves to whichever
+  // published last, and a question filed from one page lands on the other's review.
+  const readable = readableWorkspaces(req);
+  const ids = wsId === null ? readable : readable.filter((id) => id === wsId);
+  const review = ids.length === 0 ? null : resolveReview(ids, slug);
   if (!review) return softNotFound();
   const ws = review.workspace_id;
   const row = getReviewVersion(ws, slug, review.latest_version);

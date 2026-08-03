@@ -43,7 +43,7 @@ import {
 } from "./delta";
 import { freshnessOf, readableWorkspaces } from "./read";
 import { refreshOnView } from "./freshness";
-import { KIND_LABEL, kindMark, walkthroughSection } from "./render-diff";
+import { KIND_LABEL, hunkAnchorId, kindMark, walkthroughSection } from "./render-diff";
 import {
   icon,
   refChip,
@@ -1573,14 +1573,17 @@ function targetKey(type: string, id: string): string {
 }
 
 /** The element on this page a target names, or null when the target is not something
- *  the page gives an id to. A file target names a path, which no element is keyed by. */
+ *  the page gives an id to. A file target names a path, which no element is keyed by:
+ *  one path is drawn once per group that claims it, so no single element is it. A hunk
+ *  is keyed by the escaped form of its id, which is what its element carries. */
 function targetAnchor(a: Annotation): string | null {
   switch (a.target.type) {
     case "statement":
     case "note":
     case "group":
-    case "hunk":
       return a.target.id;
+    case "hunk":
+      return hunkAnchorId(a.target.id);
     case "summary":
       return "summary";
     case "file":
@@ -1670,7 +1673,7 @@ function targetOptions(doc: ReviewDoc): string {
 
 /** The questions section. Nothing here needs scripting: the form is a plain POST to
  *  the annotations route, which answers a form with the page it came from. */
-function questionsSection(input: RenderInput, annotations: Annotation[]): string {
+function questionsSection(input: RenderInput, annotations: Annotation[], basePath: string): string {
   const blocks =
     annotations.length === 0
       ? `<p class="qnone">Nothing has been asked about this review.</p>`
@@ -1678,7 +1681,7 @@ function questionsSection(input: RenderInput, annotations: Annotation[]): string
   const form = !input.canFile
     ? ""
     : `<div class="ask"><form class="ask-form" method="post" ` +
-      `action="/api/reviews/${escapeHtml(input.slug)}/annotations">` +
+      `action="${escapeHtml(basePath)}/annotations">` +
       `<div class="ask-where"><label for="ask-target">About</label>` +
       `<select id="ask-target" name="target" required>${targetOptions(input.doc)}</select></div>` +
       `<div class="ask-what"><label for="ask-body">Question</label>` +
@@ -1889,6 +1892,7 @@ export function renderReviewPage(input: RenderInput): string {
     `</header>\n` +
     `<section id="summary"><h2>Summary</h2>` +
     `${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary")}` +
+    questionsHere(ctx, "summary", "summary") +
     `<div class="rows">${rows}</div>` +
     `<p class="contents"><span class="nb"><a href="#summary">summary</a> ·</span> ` +
     `<span class="nb"><a href="#notes">review notes</a> ·</span> ` +
@@ -1896,9 +1900,9 @@ export function renderReviewPage(input: RenderInput): string {
     `<span class="nb"><a href="#questions">questions</a></span></p>` +
     `</section>\n` +
     `<section id="notes"><h2>Review notes</h2><div class="notes">${notes}</div></section>\n` +
-    walkthroughSection(doc, delta) +
+    walkthroughSection(doc, delta, (type, id) => questionsHere(ctx, type, id)) +
     `\n` +
-    questionsSection(input, annotations) +
+    questionsSection(input, annotations, ctx.basePath) +
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
     )}</p>\n` +
@@ -2100,7 +2104,13 @@ export function handleReviewPage(
     // Filing is a member's act, so the form is drawn for a session that belongs to
     // this workspace and for nobody else. A page reached with an API key alone can be
     // read; it cannot be asked from.
-    canFile: reader !== null && listUserWorkspaces(reader.id).some((w) => w.id === ws),
+    // A question is stamped with the current version, so it is asked from the page
+    // that shows it: on a pinned older version the form would record a version the
+    // reader is not looking at.
+    canFile:
+      asked === review.latest_version &&
+      reader !== null &&
+      listUserWorkspaces(reader.id).some((w) => w.id === ws),
   });
   // Looking at a review is what checks it. This is fired after the page is built and
   // never awaited, so a slow GitHub cannot hold a render: the reader gets the stored

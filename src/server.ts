@@ -80,6 +80,12 @@ const WS_REVIEW_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)(?:/(v|a)/([^/]+))?/?$`,
 );
 
+// The write a review page makes, under the workspace that page is served from: the
+// slug alone is ambiguous across workspaces, so the form posts the workspace with it.
+const WS_ANNOTATIONS_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/annotations/?$`,
+);
+
 // A live socket is either a bundle's reload channel or a review's freshness channel.
 // The two are gated differently, so which one this is travels with the socket rather
 // than being re-derived at subscribe time.
@@ -582,7 +588,10 @@ export async function startServer() {
       // The one thing written to a review after publication. A member files, an API
       // key answers, and the route decides which by the body it was sent.
       "/api/reviews/:slug/annotations": {
-        POST: (req) => handleAnnotation(req, req.params.slug),
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleAnnotation(req, req.params.slug);
+        },
       },
       "/api/reviews/:slug/refresh": {
         POST: (req) => handleRefreshReview(req, req.params.slug),
@@ -793,6 +802,13 @@ export async function startServer() {
 
       const wsImage = url.pathname.match(WS_IMG_RE);
       if (wsImage) return handleWorkspaceImage(req, wsImage[1]!);
+
+      const wsAnnotations = url.pathname.match(WS_ANNOTATIONS_RE);
+      if (wsAnnotations) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+        return handleAnnotation(req, wsAnnotations[2]!, wsAnnotations[1]!);
+      }
 
       const wsReview = url.pathname.match(WS_REVIEW_RE);
       if (wsReview) {
