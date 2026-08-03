@@ -43,7 +43,7 @@ import {
 } from "./delta";
 import { freshnessOf, readableWorkspaces } from "./read";
 import { refreshOnView } from "./freshness";
-import { KIND_LABEL, hunkAnchorId, kindMark, walkthroughSection } from "./render-diff";
+import { KIND_LABEL, hunkAnchorId, kindMark, stats, walkthroughSection } from "./render-diff";
 import {
   icon,
   refChip,
@@ -59,6 +59,7 @@ import {
   type Annotation,
   type Evidence,
   type Freshness,
+  type Hunk,
   type Note,
   type Pr,
   type Ref,
@@ -758,7 +759,7 @@ const STYLE = `  @font-face {
   }
   .card > summary {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
     align-items: center;
     column-gap: 10px; row-gap: 3px;
     padding: 11px var(--spine) 12px;
@@ -789,7 +790,14 @@ const STYLE = `  @font-face {
   .c-kinds { grid-column: 2; grid-row: 1; display: flex; align-items: center; gap: 9px; flex: none; }
   /* the marks say what the step does and the chevron says the card opens: two
      different statements, so they do not sit in one cluster. */
-  .card > summary .tick { grid-column: 3; grid-row: 1; margin-left: 5px; }
+  /* what the step costs, in the same mono the file rows count in, so a number on a
+     card and a number in the walkthrough read as the same kind of fact */
+  .c-stat {
+    grid-column: 3; grid-row: 1;
+    font-family: var(--font-mono); font-size: 11.5px;
+    color: hsl(var(--muted)); white-space: nowrap;
+  }
+  .card > summary .tick { grid-column: 4; grid-row: 1; margin-left: 5px; }
   .c-title { grid-column: 1 / -1; grid-row: 2; font-size: 14.5px; font-weight: 500; line-height: 1.35; color: hsl(var(--ink)); margin-top: 3px; }
   .c-line { grid-column: 1 / -1; grid-row: 3; font-size: 13px; line-height: 1.5; color: hsl(var(--ink-soft)); }
   /* open state is the walkthrough group's, on a card: the head keeps its rule
@@ -815,6 +823,10 @@ const STYLE = `  @font-face {
     .card > summary { column-gap: 8px; padding-right: 10px; }
     .c-ref { font-size: 11.5px; gap: 6px; }
     .c-kinds { gap: 8px; }
+    /* four things share the top line here. The count is the one that can move
+       without losing its subject, so on a phone it sits under the title with
+       the gist rather than squeezing the pull request's own name. */
+    .c-stat { grid-column: 1 / -1; grid-row: 4; justify-self: start; margin-top: 2px; }
   }
   @media (min-width: 700px) {
     .chain { --spine: 16px; margin-top: 24px; }
@@ -1366,7 +1378,23 @@ function refsById(doc: ReviewDoc): Map<string, Ref> {
   return byId;
 }
 
-function card(pr: Pr, refs: Map<string, Ref>, ctx: RenderCtx): string {
+/** What one pull request changed, counted off the hunks the document carries for it
+ *  rather than off anything authored or fetched a second time. The chain and the
+ *  walkthrough therefore cannot disagree: they add up the same lines. A pull request
+ *  with no hunks (nothing but a merge, or a diff GitHub would not serve) shows no
+ *  count instead of a confident zero. */
+function prStat(pr: Pr, hunks: Hunk[]): string {
+  const mine = hunks.filter((h) => h.prNumber === pr.number && h.repo === pr.repo);
+  if (mine.length === 0) return "";
+  const { added, removed } = stats(mine);
+  // U+2212, the minus sign: the count is a quantity, not a diff glyph.
+  return (
+    `<span class="c-stat" role="img" aria-label="${added} added, ${removed} removed">` +
+    `+${added} \u2212${removed}</span>`
+  );
+}
+
+function card(pr: Pr, refs: Map<string, Ref>, hunks: Hunk[], ctx: RenderCtx): string {
   const kinds = pr.kinds
     .map((k) => icon(k, `ic k-${k}`, KIND_LABEL[k] ?? k))
     .join("");
@@ -1380,6 +1408,7 @@ function card(pr: Pr, refs: Map<string, Ref>, ctx: RenderCtx): string {
     `<a class="c-ref" href="https://github.com/${escapeHtml(pr.repo)}/pull/${pr.number}">` +
     `${icon("pr")}<span class="c-reftext">${escapeHtml(prKey(pr.repo, pr.number))}</span></a>` +
     `<span class="c-kinds">${kinds}${chip(d)}</span>` +
+    prStat(pr, hunks) +
     `${icon("chev", "tick")}` +
     `<span class="c-title">${escapeHtml(pr.title)}</span>` +
     `<span class="c-line">${marked(safeInline(pr.gist), d, "gist", owner)}</span>` +
@@ -1430,7 +1459,7 @@ function chain(doc: ReviewDoc, ctx: RenderCtx): string {
       : "";
   const arrow = `${icon("arrow", "arw")}`;
   const refs = refsById(doc);
-  const cards = prs.map((pr) => card(pr, refs, ctx)).join(stack ? arrow : "");
+  const cards = prs.map((pr) => card(pr, refs, doc.hunks, ctx)).join(stack ? arrow : "");
   // A pull request the base version carried and this one does not stays in the
   // chain as a stub. A link that quietly leaves the stack is the one change a
   // reader of a stack most needs to see.

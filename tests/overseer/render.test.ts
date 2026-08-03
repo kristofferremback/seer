@@ -224,6 +224,34 @@ describe("the page itself", () => {
     expect(html).toContain('href="/ws_test/b/contact-sheet/v/3/"');
   });
 
+
+  test("each pull request card counts the lines its own hunks carry", () => {
+    const d = doc();
+    const html = page(d);
+    for (const pr of d.prs) {
+      const mine = d.hunks.filter((h) => h.prNumber === pr.number && h.repo === pr.repo);
+      let added = 0;
+      let removed = 0;
+      for (const h of mine) {
+        for (const l of h.lines) {
+          if (l.kind === "add") added++;
+          if (l.kind === "del") removed++;
+        }
+      }
+      // The card counts the document's own hunks, so it cannot drift from the
+      // walkthrough: both add up the same lines.
+      expect(html).toContain(`+${added} \u2212${removed}`);
+      expect(html).toContain(`aria-label="${added} added, ${removed} removed"`);
+    }
+  });
+
+  test("a pull request with no hunks shows no count rather than a confident zero", () => {
+    const d = doc();
+    const html = page({ ...d, hunks: [] });
+    expect(html).not.toContain('class="c-stat"');
+    expect(html).not.toContain("+0 \u22120");
+  });
+
   test("authored text arrives escaped", () => {
     const html = page(
       doc({

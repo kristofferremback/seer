@@ -321,7 +321,10 @@ function hunkBlock(
 
 /** Added and deleted line counts, summed from the hunk lines rather than from a field
  *  beside them: the lines on the page are the ones being counted. */
-function stats(hunks: Hunk[]): { added: number; removed: number } {
+/** The lines a set of hunks adds and removes. Exported so the chain can count a
+ *  pull request's share from the same hunks the walkthrough partitions: two places
+ *  reading one source can disagree about presentation but never about the number. */
+export function stats(hunks: Hunk[]): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
   for (const hunk of hunks) {
