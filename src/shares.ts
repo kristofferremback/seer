@@ -172,8 +172,12 @@ export async function handleShare(
       await handleSharedReviewAttachment(share.workspace_id, share.target, attachment),
     );
   }
+  // `?from=` is the only thing this route reads off the request, and it moves the
+  // version the page's marks are measured against and nothing else. Without it the
+  // revision menu on a shared page would draw controls that do nothing.
+  const from = new URL(req.url).searchParams.get("from");
   return withShareHeaders(
-    handleSharedReviewPage(share.workspace_id, share.target, version, `/s/${token}`),
+    handleSharedReviewPage(share.workspace_id, share.target, version, `/s/${token}`, from),
   );
 }
 

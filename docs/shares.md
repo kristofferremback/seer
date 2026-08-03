@@ -99,3 +99,24 @@ owner forgets, given revocation exists and is visible. Optional, because a clien
 for one week is a real thing to want.
 
 **Annotations hidden.** See above; reversible per share if the need appears.
+
+## As built
+
+Two things the sketch above leaves open, settled by the implementation rather than
+against it.
+
+**The mint names its workspace.** A session reaches several workspaces, so
+`POST /api/shares` and `GET /api/shares` take one: `{ workspace, kind, target, label?,
+expiresAt? }` and `?workspace=`. A workspace the caller is not in is a 404, the same
+answer an id that never existed gets. Everything else that is wrong is a 422 naming the
+field, in the shape the publish path already uses.
+
+**Bundles are not shareable yet.** The table's `kind` is the closed list the design
+names, and the resolver is generic as promised, but the read route serves reviews only:
+a bundle is a tree of files whose every relative URL resolves against the path it is
+served from, so `/s/<token>` for one means the trailing slash, the asset remainder, the
+version pin and the live-reload channel all rewritten onto the token path. That is a
+route rather than a resolver call, and it buys nothing while a bundle is public by link.
+Minting a bundle share is refused with a 422 naming `kind`, because a link that no route
+opens is worse than a refusal that says why. `SERVED_SHARE_KINDS` in `src/shares.ts` is
+the one line that changes when private bundles arrive.

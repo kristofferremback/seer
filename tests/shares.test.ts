@@ -16,7 +16,9 @@ import { tinyId, hashKey, newShareToken } from "../src/ids";
 import { createAnnotation, createAttachment } from "../src/overseer/db";
 import { saveAttachment } from "../src/store";
 import { createShare, listShares, lookupShare, resolveShare, revokeShare } from "../src/shares";
-import { storeGoldenReview } from "./overseer/fixtures/stored-review";
+import { renderReviewPage } from "../src/overseer/render";
+import type { Evidence } from "../src/overseer/types";
+import { goldenStoredDoc, storeGoldenReview } from "./overseer/fixtures/stored-review";
 
 let server: Awaited<ReturnType<typeof startServer>>;
 let base: string;
@@ -151,12 +153,49 @@ describe("the share read route", () => {
     expect(html).not.toContain("/ws/livereload");
   });
 
+  test("following a share is not a login", async () => {
+    const { token } = mint();
+    const res = await fetch(`${base}/s/${token}`);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    // Nor does it widen: the review it names is still the only thing the token opens.
+    const elsewhere = await fetch(`${base}/${wsOut}/r/shared-review`);
+    expect(elsewhere.status).toBe(404);
+  });
+
   test("a shared attachment is served under the token", async () => {
     const { token } = mint();
     const res = await fetch(`${base}/s/${token}/a/${attachmentId}`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
     expect(new Uint8Array(await res.arrayBuffer()).length).toBe(4);
+  });
+
+  test("evidence on a shared page points at the token path", () => {
+    const stored = goldenStoredDoc();
+    const attachment: Evidence = {
+      type: "attachment",
+      attachment: { id: "att_abc123", mediaType: "image/png", bytes: 12, alt: "A shot", caption: "" },
+    };
+    const doc = {
+      ...stored,
+      id: "rev_shared",
+      slug: "shared-review",
+      version: 1,
+      statements: [{ ...stored.statements[0]!, evidence: [attachment] }],
+    };
+    const html = renderReviewPage({
+      wsId: wsOut,
+      slug: "shared-review",
+      basePath: "/s/seer_sh_probe",
+      live: false,
+      doc,
+      version: 1,
+      latestVersion: 1,
+      pinned: false,
+      freshness: {},
+    });
+    expect(html).toContain('src="/s/seer_sh_probe/a/att_abc123"');
+    expect(html).not.toContain(`/${wsOut}/r/`);
   });
 
   test("unknown, revoked and expired tokens are one byte-identical soft-404", async () => {
