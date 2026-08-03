@@ -54,6 +54,20 @@ headlines. Bodies serve the reader who wants the why. Evidence serves the reader
 wants proof. Each layer is complete at its own depth, and no layer may need the one
 below it to make sense.
 
+That shape and the ban on restating collide at the walkthrough, because a group and a
+statement can cover the same code. Split them by subject rather than by depth: the group
+paragraph owns the situation the hunks answer to, and the statement body owns what was
+built. For the drawer example, the group says the drawer is positioned by `translate3d`
+so its bottom fifth is off-screen; the statement says a context publishes the live snap
+and the content renders a spacer sized from it. Neither repeats the other, and each is
+readable alone.
+
+**Some changes have no why, and inventing one is the failure.** A rename, a padding
+token, a dependency bump: the diff shows everything there is. Say what it is in a line
+and move on. A chore group often needs only its title, a trivial statement often needs
+only its one-liner, and a body you had to reach for is a body the reader pays for. The
+why mandate is for changes that have one.
+
 A worked example, from a real review. This group paragraph was 33 words and said nothing
 the file list did not:
 
@@ -68,6 +82,11 @@ Shorter, and it now carries the reason the change exists:
 
 Shorter and more informative is the target, every time. If cutting words costs
 information, you cut the wrong words.
+
+For calibration rather than as a rule: a pull request of about 130 changed lines across
+six files came out well at roughly 2,700 characters of prose, all fields counted. An
+earlier pass over the same change spent 10,900 and said less, because the length went
+into framing and restatement rather than into reasons.
 
 ## Reading a stack
 
@@ -122,7 +141,8 @@ path and the range, so the arithmetic is checked, not trusted.
   groups.
 - Mechanical churn does not get dropped. It gets a group named for the chore it is, and
   that group ranks last.
-- `significance` is a float, ascending, 1.0 most significant. Ties break by id.
+- `significance` is a float. Groups sort ascending and the lowest number is the most
+  significant, so 1.0 leads the walkthrough. Ties break by id.
 - The convention: behavior outranks mechanism outranks tests outranks chore. Beyond
   that the ranking is your judgment, which is the product.
 
@@ -160,9 +180,11 @@ yields:
 pr41:src/overseer/diff.ts:@@141,6+141,15
 ```
 
-Two details that catch people. A header written `@@ -12 +12,3 @@`, with a count
-omitted, means a count of 1, so the id is `pr41:src/overseer/diff.ts:@@12,1+12,3`. And
-the path is the new path exactly as the diff spells it, with no leading `a/` or `b/`.
+Three details that catch people. A header written `@@ -12 +12,3 @@`, with a count
+omitted, means a count of 1, so the id is `pr41:src/overseer/diff.ts:@@12,1+12,3`. A new
+file's `@@ -0,0 +1,55 @@` is already explicit and is used as written, zeros and all:
+`pr41:src/new.ts:@@0,0+1,55`. And the path is the new path exactly as the diff spells
+it, with no leading `a/` or `b/`.
 
 Compute the ids from the per-file `patch` fields of the pull request files API:
 `gh api repos/<owner>/<repo>/pulls/<number>/files --paginate`. That is the diff Overseer
@@ -223,6 +245,12 @@ never flattened onto the entry.
 
 Beyond the required ref, pick the form that carries the claim:
 
+`refs[]` and `evidence[]` are different jobs. `refs[]` is the citation the claim stands
+on and is what the required-ref rule counts; put the pointer there. `evidence[]` is what
+the reader is shown under the prose, in the order you choose, and it may carry a ref
+again when you want that snippet drawn at that point in the reading. A statement whose
+refs are enough sends `evidence: []`.
+
 - **ref**: the default. A SHA-pinned pointer,
   `{ repo, sha, path, startLine, endLine, highlight[] }`, camelCase like every other
   authored field, with optional `highlight[]`. Overseer resolves the snippet and derives whether the ref
@@ -270,7 +298,8 @@ attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries
 `id` you author, unique within the document and stable across versions:
 
 - **pr**: `{ repo, number, gist, detail, detailRef, parent }`. `gist` is one line,
-  `detail` is at most 2 sentences, `detailRef` is a full ref object
+  `detail` is at most 2 sentences and is the one authored field with no character
+  cap, `detailRef` is a full ref object
   (`{ repo, sha, path, startLine, endLine }`) pinned at that pull request's own head
   SHA, and `parent` is the number of its parent in the stack, or `null`.
 - **statement**: `{ id, kind, text, prs[], refs[], body, evidence[] }`. `kind` is `add`,
