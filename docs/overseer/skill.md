@@ -198,6 +198,14 @@ In a stack, ids cannot collide across pull requests: the `pr<number>:` prefix ke
 two pull requests' hunks distinct even when they edit overlapping lines of the same
 file.
 
+On a large pull request the files API omits `patch` for some files, and Overseer
+recovers those from the whole pull request diff, which you have not read. It will
+therefore derive hunks you had no way to compute, and your first publish will come
+back 422 with `hunk_unclaimed` naming them. That round trip is expected rather than a
+mistake: claim the ids the error prints and publish again. Where the recovery also
+fails, those files are reported as unaccounted and the page says so; you have nothing
+to claim for them.
+
 Nothing hands you a diff before you publish, and hunks appear in the review document
 only after it exists. If you compute an id that does not match a hunk Overseer derived
 for that pull request, publish fails naming it, and the unclaimed-hunk errors print the
