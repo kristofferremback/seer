@@ -150,10 +150,25 @@ const STYLE = `  @font-face {
        Two of the four classes carry hue and two do not. The declared name
        stays full ink with weight, because it is the anchor of a hunk and ink
        is stronger than any hue at this size, and a comment stays a recessive
-       neutral, because its job is to be skipped. */
+       neutral, because its job is to be skipped.
+
+       These were quieter until it was measured against a real page. The rule
+       had been that syntax stays under 70% of the quietest semantic mark's
+       chroma, and at that ceiling a keyword cleared the body text by dE 23
+       with a lightness gap of 5.7: distinct to a colorimeter, flat to a
+       person, because at that darkness the whole difference is hue and hue is
+       the first thing to go. Legible syntax was impossible under the rule.
+
+       What actually keeps a keyword from reading as a change marker is hue
+       distance, not quietness: violet and slate sit 63 to 87 degrees from
+       every semantic hue, so nothing here can be mistaken for add, remove or
+       change. The ceiling is now the loudest semantic mark rather than 70% of
+       the quietest, which leaves the change semantics dominant while letting
+       code be read as code. Keyword now clears body text by dE 43 with an 11
+       point lightness gap, and stays below the removal red's chroma. */
     --syn-cm: 8 12% 36%;
-    --syn-kw: 282 22% 30%;
-    --syn-st: 210 41% 28%;
+    --syn-kw: 275 34% 38%;
+    --syn-st: 205 48% 36%;
 
     /* Diff washes. A shade stronger in dark than the other candidates, because
        the oxblood substrate absorbs a wash more than a neutral charcoal does,
@@ -193,8 +208,8 @@ const STYLE = `  @font-face {
     /* same band at the other end: ceiling 0.1118 (the remove red), line 0.06,
        both hues at 57% of the ceiling. Same OKLCh hues as light, 318 and 249. */
     --syn-cm: 16 11% 62%;
-    --syn-kw: 285 34% 77%;
-    --syn-st: 210 58% 77%;
+    --syn-kw: 285 52% 74%;
+    --syn-st: 205 62% 72%;
 
     --wash-add: hsl(var(--add) / 0.19);
     --wash-rem: hsl(var(--remove) / 0.165);
@@ -224,8 +239,8 @@ const STYLE = `  @font-face {
       --note: 14 13% 67%;
 
       --syn-cm: 16 11% 62%;
-      --syn-kw: 285 34% 77%;
-      --syn-st: 210 58% 77%;
+      --syn-kw: 285 52% 74%;
+      --syn-st: 205 62% 72%;
 
       --wash-add: hsl(var(--add) / 0.19);
       --wash-rem: hsl(var(--remove) / 0.165);
