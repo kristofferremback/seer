@@ -267,6 +267,21 @@ const STYLE = `  @font-face {
     .doc { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
   }
 
+  /* ---- the lede: the account and the stack it belongs to ----
+     Stacked by default. Once there is room for a second column the chain moves
+     beside the summary rather than above it, so the account starts at the top of
+     the page and the width the chain was spending on empty card is spent on prose
+     instead. Only this row widens: everything below keeps the reading measure and
+     the same left edge, so the page has one column of text, not two rhythms. */
+  .lede > .chain { margin-top: 20px; }
+  @media (min-width: 1100px) {
+    .doc { max-width: 1132px; }
+    .head, #notes, #walkthrough, #questions, .colophon { max-width: 760px; }
+    .lede { display: flex; align-items: flex-start; gap: 36px; }
+    .lede > #summary { order: 1; flex: 1 1 760px; max-width: 760px; min-width: 0; margin-top: 0; }
+    .lede > .chain { order: 2; flex: 0 0 296px; min-width: 0; margin-top: 4px; }
+  }
+
   /* ---- type ---- */
   h1, h2 { margin: 0; }
   p { margin: 0 0 10px; }
@@ -1896,8 +1911,13 @@ export function renderReviewPage(input: RenderInput): string {
     `<p class="meta"><span>${escapeHtml(doc.kind)}</span><span>${escapeHtml(count)}</span>` +
     `<span class="heads" id="heads">${escapeHtml(heads)}</span>${baseMark}</p>` +
     revisionMenu(input, ctx.basePath) +
-    chain(doc, ctx) +
     `</header>\n` +
+    // The chain and the summary share one row on a wide screen: the stack is a
+    // fixed, narrow column and the account takes the rest. In the markup the chain
+    // still comes first, so a phone and a reader with no styles both meet the pull
+    // request links before the prose, which is the order they are wanted in.
+    `<div class="lede">` +
+    chain(doc, ctx) +
     `<section id="summary"><h2>Summary</h2>` +
     `${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary")}` +
     questionsHere(ctx, "summary", "summary") +
@@ -1906,7 +1926,7 @@ export function renderReviewPage(input: RenderInput): string {
     `<span class="nb"><a href="#notes">review notes</a> ·</span> ` +
     `<span class="nb"><a href="#walkthrough">walkthrough</a> ·</span> ` +
     `<span class="nb"><a href="#questions">questions</a></span></p>` +
-    `</section>\n` +
+    `</section></div>\n` +
     `<section id="notes"><h2>Review notes</h2><div class="notes">${notes}</div></section>\n` +
     walkthroughSection(doc, delta, (type, id) => questionsHere(ctx, type, id)) +
     `\n` +

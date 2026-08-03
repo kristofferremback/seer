@@ -252,6 +252,23 @@ describe("the page itself", () => {
     expect(html).not.toContain("+0 \u22120");
   });
 
+
+  test("the chain still precedes the summary in the markup", () => {
+    // The two sit side by side on a wide screen by CSS order, never by markup
+    // order: a phone and a reader with no styles both meet the pull request
+    // links before the prose.
+    const html = page(doc());
+    const chainAt = html.indexOf('<div class="chain">');
+    const summaryAt = html.indexOf('<section id="summary">');
+    expect(chainAt).toBeGreaterThan(-1);
+    expect(summaryAt).toBeGreaterThan(chainAt);
+    // Both are inside the one row the layout flexes.
+    const ledeAt = html.indexOf('<div class="lede">');
+    expect(ledeAt).toBeGreaterThan(-1);
+    expect(ledeAt).toBeLessThan(chainAt);
+    expect(html).toContain("</section></div>");
+  });
+
   test("authored text arrives escaped", () => {
     const html = page(
       doc({
