@@ -229,10 +229,7 @@ const LABEL_MAX = 80;
  *  one answer, as everywhere else. */
 function memberWorkspace(req: Request, wsId: unknown): { ws: string; userId: string } | Response {
   const user = sessionUser(req);
-  if (!user) return new Response(JSON.stringify({ error: "Sign in required" }), {
-    status: 403,
-    headers: { "content-type": "application/json" },
-  });
+  if (!user) return json({ error: "Sign in required" }, 403);
   if (typeof wsId !== "string" || !WS_ID_RE.test(wsId)) {
     return unprocessable([
       { field: "workspace", rule: "workspace_missing", message: "workspace is required and must be a ws_ id" },
