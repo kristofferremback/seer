@@ -6,6 +6,11 @@ installations are owned by workspaces, and then spends the capability that buys:
 request on a review page says whether it is open, merged, closed or draft, and says it
 within a second of it changing.
 
+> **Line citations in this document are relative to `origin/main` at the commit that
+> merged bundle shares (#8) and the skill-doc pass (#9), plus PR #7. They were verified
+> against that tree, not assumed. If a citation lands somewhere surprising, the tree has
+> moved and the citation is wrong — trust the surrounding prose, which names the symbol.
+
 > **Revision, 2026-08-04.** The first draft of this document was reviewed adversarially
 > by two models against the real tree. They independently found the same critical flaw in
 > the claim flow — the three gates it proposed proved who was asking but never that the
@@ -325,7 +330,7 @@ user and a GitHub identity**. The claim flow has to establish one, transiently.
 Two further corrections fall out:
 
 **The callback must not write.** The first draft attached on the redirect GET. `originOk`
-returns `true` when Origin and Referer are both absent (`server.ts:145`), which is the
+returns `true` when Origin and Referer are both absent (`server.ts:147`), which is the
 normal case for a top-level navigation, so it is no guard at all there — an `<img src>`
 pointing at the callback would have been enough. The callback renders a confirm page; the
 POST from it writes.
