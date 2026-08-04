@@ -4,10 +4,13 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { config } from "../src/config";
 import {
   bundlesPage,
+  bucketFor,
+  utcDay,
   landingPage,
   settingsPage,
   invitePage,
   noSeatPage,
+  type LedgerBundle,
   type LedgerGroup,
   type SettingsData,
   type InviteData,
@@ -160,6 +163,12 @@ describe("settings markers", () => {
 
 // ---- bundles: grouping + new-workspace affordance ----
 
+// A Wednesday, so that "this week" (Monday the 3rd onward) and "last week" are both
+// reachable and distinguishable from yesterday. Every offset below is days back from it.
+const NOW = Date.parse("2026-08-05T09:00:00Z");
+const DAY = 86_400_000;
+const daysAgo = (n: number) => NOW - n * DAY;
+
 function groups(): LedgerGroup[] {
   return [
     {
@@ -167,21 +176,21 @@ function groups(): LedgerGroup[] {
       name: "Crystal Palace",
       visibility: "private",
       bundles: [
-        { slug: "onboarding-report", latestVersion: 3, updated: "2026-07-18 09:41", versions: [3, 2, 1] },
+        { slug: "onboarding-report", latestVersion: 3, updatedAt: daysAgo(18), versions: [3, 2, 1] },
       ],
     },
     {
       wsId: "ws_4n8rp2wcfd",
       name: "Pierre's bench",
       visibility: "public",
-      bundles: [{ slug: "recipe-box", latestVersion: 2, updated: "2026-07-17 14:12", versions: [2, 1] }],
+      bundles: [{ slug: "recipe-box", latestVersion: 2, updatedAt: daysAgo(19), versions: [2, 1] }],
     },
   ];
 }
 
 describe("bundles grouping", () => {
   test("one group head per workspace: name, ws id, visibility pill, settings link", () => {
-    const html = bundlesPage("kristoffer.remback@gmail.com", groups());
+    const html = bundlesPage("kristoffer.remback@gmail.com", groups(), NOW);
     expect(html).toContain("<h2>Crystal Palace</h2>");
     expect(html).toContain("<h2>Pierre's bench</h2>"); // escapeHtml leaves apostrophes alone
     expect(html).toContain("ws_7g2kq4xbvm");
@@ -194,24 +203,223 @@ describe("bundles grouping", () => {
   });
 
   test("bundle and history URLs are workspace-scoped", () => {
-    const html = bundlesPage("me@example.com", groups());
+    const html = bundlesPage("me@example.com", groups(), NOW);
     expect(html).toContain('href="/ws_7g2kq4xbvm/b/onboarding-report/"');
     expect(html).toContain('href="/ws_7g2kq4xbvm/b/onboarding-report/v/3/"');
     expect(html).toContain('href="/ws_4n8rp2wcfd/b/recipe-box/v/1/"');
   });
 
   test("a New workspace button posts to /workspaces", () => {
-    const html = bundlesPage("me@example.com", groups());
+    const html = bundlesPage("me@example.com", groups(), NOW);
     expect(html).toContain('action="/workspaces"');
     expect(html).toContain("New workspace");
   });
 
   test("a workspace with no bundles still gets its head and an empty note", () => {
-    const html = bundlesPage("me@example.com", [
-      { wsId: "ws_0000000000", name: "Empty", visibility: "public", bundles: [] },
-    ]);
+    const html = bundlesPage(
+      "me@example.com",
+      [{ wsId: "ws_0000000000", name: "Empty", visibility: "public", bundles: [] }],
+      NOW,
+    );
     expect(html).toContain("<h2>Empty</h2>");
     expect(html).toContain("No bundles here yet");
+    // No bundles means no sections at all, not five empty ones.
+    expect(html).not.toContain(`<details class="ledger-section"`);
+  });
+});
+
+// ---- bundles: the recency sections ----
+
+/** One workspace holding one bundle per bucket, plus a second bundle sharing "today"
+ *  so a count of more than one is exercised. */
+function dated(): LedgerGroup[] {
+  const at = (slug: string, days: number): LedgerBundle => ({
+    slug,
+    latestVersion: 1,
+    updatedAt: daysAgo(days),
+    versions: [1],
+  });
+  return [
+    {
+      wsId: "ws_7g2kq4xbvm",
+      name: "Crystal Palace",
+      visibility: "private",
+      bundles: [
+        at("fresh", 0),
+        at("also-fresh", 0),
+        at("last-night", 1),
+        at("monday", 2),
+        at("sunday", 3),
+        at("ancient", 10),
+      ],
+    },
+  ];
+}
+
+/** The section element for one bucket, from `<details` to its closing tag. */
+function sectionOf(html: string, key: string): string {
+  const start = html.indexOf(`<details class="ledger-section" data-section="${key}"`);
+  expect(start).toBeGreaterThan(-1);
+  const end = html.indexOf("</details>", start);
+  return html.slice(start, end);
+}
+
+describe("bundles recency sections", () => {
+  test("bucketFor cuts days into the five sections, with the future reading as today", () => {
+    const today = utcDay(NOW);
+    expect(bucketFor(today, today)).toBe("today");
+    expect(bucketFor(today + 3, today)).toBe("today"); // a clock ahead of this one
+    expect(bucketFor(today - 1, today)).toBe("yesterday");
+    expect(bucketFor(today - 2, today)).toBe("this-week"); // Monday the 3rd
+    expect(bucketFor(today - 3, today)).toBe("last-week"); // Sunday the 2nd
+    expect(bucketFor(today - 9, today)).toBe("last-week"); // Monday the 27th, the edge
+    expect(bucketFor(today - 10, today)).toBe("older");
+  });
+
+  test("every bucket is drawn in one order, and each row lands in its own", () => {
+    const html = bundlesPage("me@example.com", dated(), NOW);
+    const order = ["today", "yesterday", "this-week", "last-week", "older"];
+    let at = -1;
+    for (const key of order) {
+      const next = html.indexOf(`data-section="${key}"`);
+      expect(next).toBeGreaterThan(at);
+      at = next;
+    }
+    expect(sectionOf(html, "today")).toContain(">fresh<");
+    expect(sectionOf(html, "today")).toContain(">also-fresh<");
+    expect(sectionOf(html, "yesterday")).toContain(">last-night<");
+    expect(sectionOf(html, "this-week")).toContain(">monday<");
+    expect(sectionOf(html, "last-week")).toContain(">sunday<");
+    expect(sectionOf(html, "older")).toContain(">ancient<");
+  });
+
+  test("each head carries its own count", () => {
+    const html = bundlesPage("me@example.com", dated(), NOW);
+    expect(sectionOf(html, "today")).toContain(">Today</span><span class=\"section-count\" data-section-count>2<");
+    expect(sectionOf(html, "yesterday")).toContain(">Yesterday</span><span class=\"section-count\" data-section-count>1<");
+    expect(sectionOf(html, "older")).toContain(">Older</span><span class=\"section-count\" data-section-count>1<");
+  });
+
+  test("Older ships folded and the rest open; an empty bucket is hidden, not dropped", () => {
+    const html = bundlesPage("me@example.com", dated(), NOW);
+    expect(sectionOf(html, "today").startsWith('<details class="ledger-section" data-section="today" open')).toBe(true);
+    expect(sectionOf(html, "older")).not.toContain(" open");
+
+    // One bundle, one occupied bucket: the other four are still there for the browser
+    // to move rows into when it re-dates them locally.
+    const one = bundlesPage(
+      "me@example.com",
+      [{ wsId: "ws_7g2kq4xbvm", name: "One", visibility: "public", bundles: [
+        { slug: "solo", latestVersion: 1, updatedAt: daysAgo(0), versions: [1] },
+      ] }],
+      NOW,
+    );
+    expect(sectionOf(one, "yesterday")).toContain(" hidden");
+    expect(sectionOf(one, "today")).not.toContain(" hidden");
+  });
+
+  test("the browser's copy of the rule agrees with the server's, day for day", () => {
+    // The sections are cut twice: on the server in UTC, so a scriptless page is still
+    // sectioned, and again in the browser in the reader's own timezone, which is the
+    // one that decides what "today" means for someone working past midnight. The rule
+    // is therefore written twice, and this is what stops the two from drifting: the
+    // browser's copy is lifted out of the page it was emitted into and asked the same
+    // questions the server's answers.
+    const html = bundlesPage("me@example.com", dated(), NOW);
+    const opens = "const bucket = (day, today) => {";
+    const closes = "\n  };";
+    const start = html.indexOf(opens);
+    expect(start).toBeGreaterThan(-1);
+    const src = html.slice(start, html.indexOf(closes, start) + closes.length);
+    const inBrowser = new Function(`${src} return bucket;`)() as (d: number, t: number) => string;
+
+    const server: string[] = [];
+    const browser: string[] = [];
+    // Every weekday as "today" — the Monday boundary is the part that could drift —
+    // and a year of history behind each, plus a few days of clock skew ahead.
+    for (let today = utcDay(NOW); today < utcDay(NOW) + 7; today++) {
+      for (let day = today - 370; day <= today + 3; day++) {
+        server.push(bucketFor(day, today));
+        browser.push(inBrowser(day, today));
+      }
+    }
+    expect(browser).toEqual(server);
+    expect(new Set(server).size).toBe(5); // all five reached, or the sweep proved nothing
+  });
+
+  test("a row carries the raw instant and a machine-readable stamp beside the printed one", () => {
+    const html = bundlesPage("me@example.com", dated(), NOW);
+    expect(html).toContain(`data-at="${daysAgo(0)}"`);
+    expect(html).toContain(`<time datetime="${new Date(daysAgo(1)).toISOString()}">2026-08-04 09:00</time>`);
+  });
+});
+
+// ---- bundles: the row menu, which is where a bundle is shared ----
+
+describe("the bundle row menu", () => {
+  test("every row gets a menu button naming its workspace, slug and URL", () => {
+    const html = bundlesPage("me@example.com", groups(), NOW);
+    expect(html).toContain('data-ws="ws_7g2kq4xbvm" data-slug="onboarding-report" data-url="/ws_7g2kq4xbvm/b/onboarding-report/"');
+    expect(html).toContain('aria-label="Actions for recipe-box"');
+    expect(html).toContain('aria-expanded="false"');
+  });
+
+  test("one popover serves the page, and it mints bundle shares", () => {
+    const html = bundlesPage("me@example.com", groups(), NOW);
+    expect(html.split('<div class="rowmenu"').length - 1).toBe(1);
+    expect(html).toContain("data-share-new");
+    expect(html).toContain("data-share-list");
+    expect(html).toContain("/api/shares");
+    expect(html).toContain(`kind: 'bundle'`);
+    // The link is shown once because only its hash survives; the page says so.
+    expect(html).toContain("cannot be shown again");
+  });
+
+  test("a short history prints in full and asks for no overflow", () => {
+    const html = bundlesPage(
+      "me@example.com",
+      [{ wsId: "ws_7g2kq4xbvm", name: "Five", visibility: "public", bundles: [
+        { slug: "five", latestVersion: 5, updatedAt: daysAgo(0), versions: [5, 4, 3, 2, 1] },
+      ] }],
+      NOW,
+    );
+    for (const v of [5, 4, 3, 2, 1]) {
+      expect(html).toContain(`href="/ws_7g2kq4xbvm/b/five/v/${v}/">v${v}</a>`);
+    }
+    expect(html).not.toContain(`class="more-versions"`);
+  });
+
+  test("a long history prints its head and hands the tail to the menu", () => {
+    const versions = [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
+    const html = bundlesPage(
+      "me@example.com",
+      [{ wsId: "ws_7g2kq4xbvm", name: "Many", visibility: "public", bundles: [
+        { slug: "many", latestVersion: 12, updatedAt: daysAgo(0), versions },
+      ] }],
+      NOW,
+    );
+    // The five newest, inline.
+    for (const v of [12, 11, 10, 9, 8]) {
+      expect(html).toContain(`href="/ws_7g2kq4xbvm/b/many/v/${v}/">v${v}</a>`);
+    }
+    // And not the rest — the row is a glance, not a paragraph.
+    for (const v of [7, 6, 5, 4, 3, 2, 1]) {
+      expect(html).not.toContain(`href="/ws_7g2kq4xbvm/b/many/v/${v}/">v${v}</a>`);
+    }
+    expect(html).toContain(`>+7</button>`);
+    expect(html).toContain(`aria-label="All 12 versions of many"`);
+    // The whole history still travels, as numbers rather than as markup: shorter than
+    // the seven links it replaced, and the menu builds them back.
+    expect(html).toContain(`data-versions="${versions.join(",")}"`);
+  });
+
+  test("no bundles, no menu button — but the popover markup is harmless either way", () => {
+    const html = bundlesPage(
+      "me@example.com",
+      [{ wsId: "ws_0000000000", name: "Empty", visibility: "public", bundles: [] }],
+      NOW,
+    );
+    expect(html).not.toContain(`class="menu-btn"`);
   });
 });
 

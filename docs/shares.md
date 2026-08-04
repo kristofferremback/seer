@@ -3,16 +3,16 @@
 A share is a revocable, read-only link to one asset in a workspace, for someone who is
 not in that workspace.
 
-Seer has two kinds of asset today and will have more. Bundles are public by link, so
-they need no share; reviews are workspace-private, so today they cannot be handed to
+Seer has two kinds of asset today and will have more. Bundles were public by link, so
+they needed no share; reviews are workspace-private, so they could not be handed to
 anyone at all. That asymmetry is the thing to fix, and fixing it per-asset would mean
 inventing the same table twice. So the share is generic from the start: it names a kind
 and a target, and each asset type opts in by teaching the read path to accept one.
 
-The prize beyond reviews: once sharing exists, a bundle no longer has to be public to be
+The prize beyond reviews, and now collected: a bundle no longer has to be public to be
 sendable. Public-by-link stays the default because handing someone a preview is what
-Seer is for, but a workspace that wants private bundles gains the option without a
-second mechanism.
+Seer is for, but a workspace that wants private bundles has the option without a second
+mechanism.
 
 ## The shape
 
@@ -80,8 +80,20 @@ GET    /api/shares          the workspace's shares, without tokens
 DELETE /api/shares/:id      sets revoked_at
 ```
 
-Session-authenticated, member-only, and the response carries the full `/s/<token>` URL
-rather than the bare token, because the URL is the thing a person actually wants.
+The response carries the full `/s/<token>` URL rather than the bare token, because the
+URL is the thing a person actually wants.
+
+**Two credentials mint.** A session, which reaches several workspaces and so has to name
+one; and an API key, which belongs to exactly one workspace and therefore names it by
+existing. The key is the point: the agent that built and uploaded a bundle is the thing
+best placed to hand out the link to it, and asking it to stop and fetch a human breaks
+the one flow this is for — publish a preview, paste the link into the pull request.
+
+That is a real widening of what a leaked key can do. A key could already upload and list,
+but it could not read a private bundle's bytes; a share it mints can. The trade is taken
+deliberately: minting is visible in the workspace's own list, every link is revocable,
+and the alternative is a capability that only works when a human is watching. A share
+token remains not a credential — it authenticates nothing, including this route.
 
 The settings page grows a list: what is shared, why, when it was made, when it expires,
 and a way to revoke. A share nobody can see is a share nobody revokes.
@@ -117,12 +129,29 @@ test that asserts a shared page carries none passes without exercising anything.
 assertion is kept because it starts testing something real the day the questions UI comes
 back; until then this guarantee is unverified rather than verified.
 
-**Bundles are not shareable yet.** The table's `kind` is the closed list the design
-names, and the resolver is generic as promised, but the read route serves reviews only:
-a bundle is a tree of files whose every relative URL resolves against the path it is
-served from, so `/s/<token>` for one means the trailing slash, the asset remainder, the
-version pin and the live-reload channel all rewritten onto the token path. That is a
-route rather than a resolver call, and it buys nothing while a bundle is public by link.
-Minting a bundle share is refused with a 422 naming `kind`, because a link that no route
-opens is worse than a refusal that says why. `SERVED_SHARE_KINDS` in `src/shares.ts` is
-the one line that changes when private bundles arrive.
+**Bundles are shareable, and the tree is what made it work.** A bundle is a tree of
+files whose every relative URL resolves against the path it is served from, so `/s/<token>`
+for one meant the trailing slash, the asset remainder and the version pin all rewritten
+onto the token path. That is a route rather than a resolver call, which is why the whole
+of `/s/` is now matched in the server's fallback rather than declared as three routes:
+the remainder after the token is arbitrary, and what it means is not knowable until the
+token says which kind of asset it opens. `src/serve-bundle.ts` holds the part both the
+workspace path and the share path do identically.
+
+The live-reload channel is the one place a shared bundle is not simply the private one
+re-rooted. A page served at the latest version reloads itself when a new one lands, over
+a socket the workspace gates on membership — which the holder of a share does not have.
+So a shared page's socket carries `?share=<token>` and nothing else: the server reads
+the workspace and the slug off the share row, so a holder cannot widen the channel by
+editing the query, and a token that stops resolving stops reloading. Pinned versions
+open no socket at all, because they never change.
+
+`SERVED_SHARE_KINDS` stays. Both kinds are served today, so the mint's `kind_not_served`
+refusal is a standing check on the next kind rather than a live one — the read route and
+the mint must not drift, and a link no route opens is worse than a refusal that says why.
+
+**Where a share is minted.** From the bundle's own row in `/bundles`, through a menu that
+also lists the links already open on it and revokes them, and from the review's page for a
+review. Both go through `POST /api/shares` and show the token exactly once, because only
+its hash survives. The settings page keeps the workspace-wide list: it is where a link
+someone else made is seen and taken back.

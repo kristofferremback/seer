@@ -17,9 +17,10 @@
 // something was there.
 
 import { config } from "./config";
-import { sessionUser } from "./auth";
-import { db, getBundle, isMember } from "./db";
+import { requireApiKey, sessionUser } from "./auth";
+import { db, getBundle, getVersion, isMember } from "./db";
 import { hashKey, newShareToken, tinyId, SHARE_TOKEN_RE, SHR_ID_RE, WS_ID_RE } from "./ids";
+import { serveBundleFile, type BundleMeta } from "./serve-bundle";
 import { getReview } from "./overseer/db";
 import {
   handleSharedReviewAttachment,
@@ -36,17 +37,12 @@ export type ShareKind = "review" | "bundle";
  *  open. */
 export const SHARE_KINDS: readonly ShareKind[] = ["review", "bundle"];
 
-/** The kinds the read route actually serves today.
- *
- *  THE BUNDLE GAP. Reviews are here; bundles are not, and minting one is refused rather
- *  than half-built. A bundle is a tree of files served under a path whose every relative
- *  URL resolves against it, so serving one through `/s/<token>` means the trailing-slash
- *  redirect, the asset remainder, the version pin and the live-reload channel all
- *  rewritten onto the token path. That is a route, not a resolver call, and it buys
- *  nothing yet: a bundle is public by link today, so no bundle needs a share to be
- *  sendable. When private bundles exist, this is the line that changes and
- *  handleShare() below is where the second branch goes. */
-export const SERVED_SHARE_KINDS: readonly ShareKind[] = ["review"];
+/** The kinds the read route actually serves. A kind in SHARE_KINDS but not here is one
+ *  the resolver understands and no route opens, so minting it is refused rather than
+ *  handing over a link that dead-ends: see handleCreateShare(). Both kinds are served
+ *  today, so the guard is a standing check on the next kind rather than a live refusal,
+ *  and it is deliberately kept — the mint and the read route must not drift. */
+export const SERVED_SHARE_KINDS: readonly ShareKind[] = ["review", "bundle"];
 
 export interface ShareRow {
   id: string;
@@ -102,11 +98,29 @@ export function getShare(id: string): ShareRow | null {
   return db.query<ShareRow, [string]>(`SELECT ${SHARE_COLS} FROM shares WHERE id = ?`).get(id);
 }
 
+/** What a revocation has to reach besides the row: a live-reload socket opened by a
+ *  holder of that share, which was authorised once at upgrade and would otherwise keep
+ *  reporting that new versions exist. Handed in by the server rather than imported, so
+ *  this module never has to know a server exists to be tested — the same shape
+ *  setFreshnessPublisher() uses. */
+type ShareRevokedHook = (shareId: string) => void;
+let onShareRevoked: ShareRevokedHook | null = null;
+export function setShareRevokedHook(fn: ShareRevokedHook): void {
+  onShareRevoked = fn;
+}
+
 /** Revocation stamps the row rather than deleting it, so a link that was handed out and
  *  taken back stays auditable. Guarded on revoked_at IS NULL, so a double submit cannot
- *  rewrite the moment it happened. */
+ *  rewrite the moment it happened.
+ *
+ *  Then it shuts whatever the token still holds open. A socket is authorised once, when
+ *  it is upgraded, so without this a revoked holder keeps a live channel: the reload it
+ *  is told to perform lands on the soft-404, but being told at all says a new version
+ *  exists, and "a token that stops resolving stops reloading" would be true only of
+ *  reconnections. */
 export function revokeShare(id: string): void {
   db.run("UPDATE shares SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", [Date.now(), id]);
+  onShareRevoked?.(id);
 }
 
 /** The row behind a token whatever state it is in, or null when no such token was ever
@@ -140,36 +154,84 @@ function softNotFound(): Response {
   return withShareHeaders(reviewSoftNotFound());
 }
 
-/** `Referrer-Policy: no-referrer` on everything this route answers. A shared page is
- *  read by someone holding a secret in their address bar; following any link out of it
- *  must not hand that secret to a third party. Set here rather than in the renderer so
- *  it cannot be true of the page and false of the refusal. */
+/** The two headers every answer on this route carries, refusal included — set here
+ *  rather than in the renderers so they cannot be true of the page and false of the
+ *  404.
+ *
+ *  `Referrer-Policy: no-referrer`, because a shared page is read by someone holding a
+ *  secret in their address bar and following any link out of it must not hand that
+ *  secret to a third party.
+ *
+ *  `X-Robots-Tag: noindex, nofollow`, because the other way a URL escapes is a crawler.
+ *  A share link is meant to be pasted somewhere, and some of those somewheres are
+ *  fetched by things that index what they find; a token in a search result is a
+ *  revocation nobody performed. */
 function withShareHeaders(res: Response): Response {
   res.headers.set("referrer-policy", "no-referrer");
+  res.headers.set("x-robots-tag", "noindex, nofollow");
   return res;
 }
 
+/** A review's remainder: nothing, a version pin, or one attachment. Trailing slash
+ *  optional; anything else under the token is not part of the review. */
+const REVIEW_TAIL_RE = /^(?:(v|a)\/([^/]+))?\/?$/;
+
+/** A bundle's remainder, when it opens with a version pin: `v/<n>` and then whatever
+ *  the tree is asked for. `undefined` for the third group means the pin arrived without
+ *  the trailing slash its relative URLs need. */
+const BUNDLE_PIN_RE = /^v\/(\d+)(?:\/(.*))?$/;
+
 /**
- * GET /s/:token, GET /s/:token/v/:n and GET /s/:token/a/:id.
+ * GET anything under `/s/`.
  *
- * The asset renders exactly as its private route renders it, with three differences the
- * renderer is told about rather than asked to infer: the page hangs off `/s/<token>` so
- * every link on it is one the holder can follow, it carries no annotations, and it
- * offers no write.
+ * The whole path is parsed here rather than by the router, because what the remainder
+ * after the token means is not knowable until the token is resolved: `v/2/app.css` is a
+ * pinned asset inside a bundle and a nonsense URL on a review. Resolve first, then read
+ * the rest of the path as the kind it turned out to be.
+ *
+ * Either way the asset renders exactly as its private route renders it, with three
+ * differences the renderer is told about rather than asked to infer: the page hangs off
+ * `/s/<token>` so every link on it is one the holder can follow, it carries none of the
+ * workspace's own conversation, and it offers no write.
  */
-export async function handleShare(
-  req: Request,
-  token: string,
-  version: string | null,
-  attachment: string | null,
-): Promise<Response> {
+export async function handleShareRequest(req: Request): Promise<Response> {
+  // Reading is the whole of what a share grants, so this route has no other verb. The
+  // refusal is a plain 405 rather than the soft-404: it says nothing about the token,
+  // which is not even looked at.
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return withShareHeaders(new Response("Method not allowed", { status: 405 }));
+  }
+
+  const url = new URL(req.url);
+  const tail = url.pathname.slice("/s/".length);
+  const cut = tail.indexOf("/");
+  // `rest` is null when the URL ended at the token and "" when it ended at the token's
+  // trailing slash. A bundle needs to tell those apart; a review does not care.
+  const token = cut === -1 ? tail : tail.slice(0, cut);
+  const rest = cut === -1 ? null : tail.slice(cut + 1);
+
   const share = resolveShare(token);
   if (!share) return deadShare(req, token);
-  if (!SERVED_SHARE_KINDS.includes(share.kind)) return softNotFound();
+  if (share.kind === "review") return sharedReview(req, share, token, rest);
+  if (share.kind === "bundle") return sharedBundle(url, share, token, rest);
+  // A kind the resolver knows and no branch here serves. Unreachable while
+  // SERVED_SHARE_KINDS and this switch agree, which is what the mint guard enforces.
+  return softNotFound();
+}
 
-  if (attachment !== null) {
+async function sharedReview(
+  req: Request,
+  share: ShareRow,
+  token: string,
+  rest: string | null,
+): Promise<Response> {
+  const parts = (rest ?? "").match(REVIEW_TAIL_RE);
+  if (!parts) return softNotFound();
+  const [, part, value] = parts;
+
+  if (part === "a") {
     return withShareHeaders(
-      await handleSharedReviewAttachment(share.workspace_id, share.target, attachment),
+      await handleSharedReviewAttachment(share.workspace_id, share.target, value!),
     );
   }
   // `?from=` is the only thing this route reads off the request, and it moves the
@@ -177,8 +239,76 @@ export async function handleShare(
   // revision menu on a shared page would draw controls that do nothing.
   const from = new URL(req.url).searchParams.get("from");
   return withShareHeaders(
-    handleSharedReviewPage(share.workspace_id, share.target, version, `/s/${token}`, from),
+    handleSharedReviewPage(
+      share.workspace_id,
+      share.target,
+      part === "v" ? value! : null,
+      `/s/${token}`,
+      from,
+    ),
   );
+}
+
+/**
+ * A shared bundle: the same tree the workspace path serves, rooted at the token.
+ *
+ * Everything the workspace route does with the path, this does with the token in front
+ * of it — the trailing slash a bundle's relative URLs resolve against, the asset
+ * remainder, the `/v/<n>` pin. The one thing it does differently is the live-reload
+ * channel: the injected socket carries the token instead of the workspace, because the
+ * holder is not a member and the membership gate would refuse them.
+ */
+async function sharedBundle(
+  url: URL,
+  share: ShareRow,
+  token: string,
+  rest: string | null,
+): Promise<Response> {
+  const bundle = getBundle(share.workspace_id, share.target);
+  // A share outliving the bundle it names is the soft-404, same as a dead token: what
+  // the workspace no longer holds is not this route's to describe.
+  if (!bundle) return softNotFound();
+
+  // Require the trailing slash on the bundle root, exactly as /<ws>/b/<slug> does, or
+  // every relative URL in the page resolves one level too high.
+  if (rest === null) {
+    return withShareHeaders(
+      new Response(null, { status: 302, headers: { location: `${url.pathname}/${url.search}` } }),
+    );
+  }
+
+  const pin = rest.match(BUNDLE_PIN_RE);
+  const pinned = pin !== null;
+  const version = pinned ? Number(pin[1]) : bundle.latest_version;
+  if (pinned && (version < 1 || version > bundle.latest_version)) return softNotFound();
+  if (pinned && pin[2] === undefined) {
+    return withShareHeaders(
+      new Response(null, { status: 302, headers: { location: `${url.pathname}/${url.search}` } }),
+    );
+  }
+  const file = pinned ? pin[2]! : rest;
+
+  const meta: BundleMeta = {
+    slug: share.target,
+    version,
+    updatedAt: getVersion(share.workspace_id, share.target, version)?.created_at ?? bundle.created_at,
+    // No canonical URL: the only URL this page has is the token. See BundleMeta.url.
+    url: null,
+  };
+  return withShareHeaders(
+    await serveBundleFile(share.workspace_id, meta, file, {
+      live: pinned ? null : { via: "share", token },
+      shared: true,
+    }),
+  );
+}
+
+/** Where a member landing on a dead link is sent instead of the refusal: the asset's
+ *  own URL, per kind. */
+function assetPath(row: ShareRow): string | null {
+  if (row.kind === "review") return `/${row.workspace_id}/r/${row.target}`;
+  if (row.kind === "bundle") return `/${row.workspace_id}/b/${row.target}/`;
+  return null;
 }
 
 /** A token that is unknown, revoked or expired. The one exception in the design: a
@@ -188,15 +318,11 @@ export async function handleShare(
  *  one refusal. */
 function deadShare(req: Request, token: string): Response {
   const row = lookupShare(token);
-  if (row && row.kind === "review") {
+  const path = row ? assetPath(row) : null;
+  if (row && path) {
     const user = sessionUser(req);
     if (user && isMember(row.workspace_id, user.id)) {
-      return withShareHeaders(
-        new Response(null, {
-          status: 302,
-          headers: { location: `/${row.workspace_id}/r/${row.target}` },
-        }),
-      );
+      return withShareHeaders(new Response(null, { status: 302, headers: { location: path } }));
     }
   }
   return softNotFound();
@@ -224,21 +350,47 @@ function unprocessable(errors: ApiError[]): Response {
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const LABEL_MAX = 80;
 
-/** The workspace a request names, once membership is checked. A member reaches their
- *  own workspaces and no others; a non-member and a workspace that does not exist are
- *  one answer, as everywhere else. */
-function memberWorkspace(req: Request, wsId: unknown): { ws: string; userId: string } | Response {
+/**
+ * The workspace a request names, once the caller is checked. Two credentials reach
+ * here, and they name their workspace differently.
+ *
+ * A **session** reaches several workspaces, so it has to say which one, and a workspace
+ * it is not a member of is a 404 — the same answer an id that never existed gets.
+ *
+ * An **API key** belongs to exactly one workspace, so it names one by existing; this is
+ * the credential an agent holds, and it is the one that lets the agent that built a
+ * bundle also hand out the link to it. `workspace` is optional for a key and must match
+ * when given, so a key can never be pointed at a workspace it does not belong to. A
+ * share token is not a credential here and never becomes one: it is not an API key, so
+ * it fails this lookup like any other string.
+ *
+ * A key mints shares, and that is a real widening of what a leaked key can do — it can
+ * already upload, but it could not read a private bundle's bytes, and a share it minted
+ * can. That is the trade the capability is: an agent that publishes a preview can also
+ * hand it to a reviewer, and the workspace can revoke either at any time.
+ */
+function callerWorkspace(req: Request, wsId: unknown): { ws: string; userId: string } | Response {
   const user = sessionUser(req);
-  if (!user) return json({ error: "Sign in required" }, 403);
-  if (typeof wsId !== "string" || !WS_ID_RE.test(wsId)) {
-    return unprocessable([
-      { field: "workspace", rule: "workspace_missing", message: "workspace is required and must be a ws_ id" },
-    ]);
+  if (user) {
+    if (typeof wsId !== "string" || !WS_ID_RE.test(wsId)) {
+      return unprocessable([
+        { field: "workspace", rule: "workspace_missing", message: "workspace is required and must be a ws_ id" },
+      ]);
+    }
+    if (!isMember(wsId, user.id)) {
+      return json({ error: "No such workspace" }, 404);
+    }
+    return { ws: wsId, userId: user.id };
   }
-  if (!isMember(wsId, user.id)) {
-    return json({ error: "No such workspace" }, 404);
-  }
-  return { ws: wsId, userId: user.id };
+
+  // No session. An Authorization header is a claim to be an API key; anything else,
+  // including no header at all, is asked to sign in.
+  if (!req.headers.get("authorization")) return json({ error: "Sign in required" }, 403);
+  const key = requireApiKey(req);
+  if (key instanceof Response) return key;
+  const named = wsId === undefined || wsId === null || wsId === "" ? key.workspaceId : wsId;
+  if (named !== key.workspaceId) return json({ error: "No such workspace" }, 404);
+  return { ws: key.workspaceId, userId: key.userId };
 }
 
 /** An `expiresAt` as a body may write it: an epoch in milliseconds or an ISO 8601
@@ -281,7 +433,7 @@ export async function handleCreateShare(req: Request): Promise<Response> {
     return json({ error: "Body must be a JSON object: { workspace, kind, target, label?, expiresAt? }" }, 400);
   }
 
-  const gate = memberWorkspace(req, body.workspace);
+  const gate = callerWorkspace(req, body.workspace);
   if (gate instanceof Response) return gate;
 
   const errors: ApiError[] = [];
@@ -294,12 +446,12 @@ export async function handleCreateShare(req: Request): Promise<Response> {
       message: `kind must be one of ${SHARE_KINDS.join(", ")}`,
     });
   } else if (!(SERVED_SHARE_KINDS as readonly string[]).includes(kind as string)) {
-    // See SERVED_SHARE_KINDS: a bundle share would mint a link no route opens, and a
-    // link that cannot be followed is worse than a refusal that says why.
+    // See SERVED_SHARE_KINDS: a kind no route opens would mint a link that dead-ends,
+    // and that is worse than a refusal which says why.
     errors.push({
       field: "kind",
       rule: "kind_not_served",
-      message: `kind ${kind} cannot be shared yet; a bundle is public by link, so it needs no share`,
+      message: `kind ${kind} cannot be shared yet; no read route serves it`,
     });
   }
 
@@ -360,7 +512,7 @@ export async function handleCreateShare(req: Request): Promise<Response> {
  *  whole point of hashing them. */
 export function handleListShares(req: Request): Response {
   const wsId = new URL(req.url).searchParams.get("workspace");
-  const gate = memberWorkspace(req, wsId);
+  const gate = callerWorkspace(req, wsId);
   if (gate instanceof Response) return gate;
   return json({
     workspace: gate.ws,
@@ -379,12 +531,22 @@ export function handleListShares(req: Request): Response {
 /** DELETE /api/shares/:id. A share in a workspace the caller is not in is a 404, the
  *  same answer an id that never existed gets. */
 export function handleRevokeShare(req: Request, id: string): Response {
-  const user = sessionUser(req);
-  if (!user) {
-    return json({ error: "Sign in required" }, 403);
-  }
   const share = SHR_ID_RE.test(id) ? getShare(id) : null;
-  if (!share || !isMember(share.workspace_id, user.id)) return json({ error: "No such share" }, 404);
+  // An id that does not exist and one belonging to a workspace the caller has no claim
+  // on are the same 404 throughout, so this route cannot be used to ask which share ids
+  // are real. The two credentials are spelled out rather than folded together: the
+  // session's failure is a 404 and the key's is a 401, and neither should be quietly
+  // rewritten into the other.
+  const user = sessionUser(req);
+  if (user) {
+    if (!share || !isMember(share.workspace_id, user.id)) return json({ error: "No such share" }, 404);
+  } else {
+    // An agent takes back what it handed out, with the key it handed it out with.
+    if (!req.headers.get("authorization")) return json({ error: "Sign in required" }, 403);
+    const key = requireApiKey(req);
+    if (key instanceof Response) return key;
+    if (!share || share.workspace_id !== key.workspaceId) return json({ error: "No such share" }, 404);
+  }
   revokeShare(id);
   return json({ id, revoked: true });
 }
