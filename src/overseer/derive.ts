@@ -391,7 +391,19 @@ export function refResolver(client: GithubClient, review: DerivedReview): RefRes
   // served cached bytes with no GitHub call at all. It is not a per-caller check and
   // proves nothing about who is publishing; there is one process-global token today,
   // and if per-workspace tokens ever arrive this gate has to be rebuilt around them.
-  const proven = new Set(review.prs.map((pr) => pr.repo));
+  //
+  // The set starts EMPTY, and the only thing that puts a repository in it is a
+  // successful fetch below. It used to be seeded from `review.prs`, which made the
+  // sentence above false: a review's own repositories opened the cache having fetched
+  // nothing, because deriving a pull request reads pulls, files and commits and never
+  // reads file contents at all. That mattered most where the review is not a live
+  // derivation but a stored document — `annotations.ts` rebuilds a resolver from a
+  // published doc to answer a question, so `proven` was seeded from what the document
+  // claimed rather than from anything this caller had been allowed to read, and a ref
+  // into one of those repositories was served private bytes with no GitHub call to
+  // check it. The cost of the fix is one fetch per repository per resolver; the first
+  // ref pays it and every later ref is still free.
+  const proven = new Set<string>();
 
   async function fileAt(pointer: RefPointer): Promise<string> {
     if (proven.has(pointer.repo)) {
