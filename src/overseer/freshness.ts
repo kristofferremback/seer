@@ -12,10 +12,12 @@
 // render and now persist until someone repairs them, which is why the repair is visible
 // (`observed_at` on every row, delivery health in settings) rather than automatic.
 //
-// The freshness table this module used to write is gone (schema v6). It held a second
-// recording of one fact beside the status row, and two writers of one fact is the drift
-// this design exists to remove; the drop waited a release after the write stopped, so an
-// old container still reading it during a redeploy found it there.
+// The freshness table this module used to write is still on disk, and nothing here
+// writes it any more. It held a second recording of one fact beside the status row, and
+// two writers of one fact is the drift this design exists to remove — so this release
+// stops the write and leaves the table standing. The drop is v6, a release later
+// (src/migrate.ts), so an old container still reading it during a redeploy finds it
+// there and a rollback still recognises the database.
 //
 // The rate limit is process-local on purpose. It is a courtesy to the GitHub API, not
 // a correctness rule: two processes checking the same review a second apart write the

@@ -237,18 +237,20 @@ describe("read state", () => {
   });
 });
 
-// v6 dropped `review_freshness`. The observation it used to hold lives in
-// `review_prs` joined to `github_pr_status`, so the drop is only safe if that pair
-// still answers the question — which is why the absence and the survivor are asserted
-// together rather than the absence alone.
-describe("the dropped freshness table", () => {
-  test("no review_freshness table survives the migration", () => {
+// This release stops writing `review_freshness` and leaves it standing; v6 drops it a
+// release later, so the previous image keeps finding what it reads through a redeploy.
+// The observation it used to hold lives in `review_prs` joined to `github_pr_status`,
+// so the survivor is asserted beside the table rather than on its own.
+describe("the freshness table the write path abandoned", () => {
+  test("review_freshness still exists after migration in this release", () => {
     const row = db
       .query<{ name: string }, [string]>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
       )
       .get("review_freshness");
-    expect(row).toBeNull();
+    expect(row).not.toBeNull();
+    // Standing and readable, not just named in sqlite_master.
+    expect(db.query("SELECT * FROM review_freshness").all()).toEqual([]);
   });
 
   test("the pull requests a review names are still recorded, per repo", () => {

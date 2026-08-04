@@ -24,6 +24,8 @@ function assert(cond: boolean, msg: string) {
 
 const V3_TABLES = [
   "reviews",
+  // Still created, and still standing in this release: the drop is v6, a release later.
+  "review_freshness",
   "review_versions",
   "review_attachments",
   "review_annotations",
@@ -83,7 +85,7 @@ if (SCENARIO === "v0") {
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 6, `user_version should be 6, got ${uv}`);
+  assert(uv === 5, `user_version should be 5, got ${uv}`);
 
   const user = db.query("SELECT * FROM users").get() as { id: string; email: string } | null;
   assert(!!user, "root user exists");
@@ -146,7 +148,7 @@ if (SCENARIO === "fresh") {
   const wsId = getMeta("legacy_workspace_id")!;
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 6, `user_version should be 6, got ${uv}`);
+  assert(uv === 5, `user_version should be 5, got ${uv}`);
   const iCount = (db.query("SELECT COUNT(*) c FROM images").get() as { c: number }).c;
   assert(iCount === 0, `fresh db has an empty images table, got ${iCount}`);
   const user = db.query("SELECT * FROM users").get() as { email: string } | null;
@@ -240,7 +242,7 @@ if (SCENARIO === "v2") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 6, `user_version should be 6, got ${uv}`);
+  assert(uv === 5, `user_version should be 5, got ${uv}`);
 
   for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
@@ -256,7 +258,7 @@ if (SCENARIO === "v2") {
   // A second run is a no-op: still v4, no duplicate rows, no throw.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 6, `user_version stays 6 after re-run, got ${uv2}`);
+  assert(uv2 === 5, `user_version stays 5 after re-run, got ${uv2}`);
   const bCount2 = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount2 === 1, `no duplicate bundles after re-run, got ${bCount2}`);
   const rCount = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
@@ -272,7 +274,7 @@ if (SCENARIO === "v2") {
     assert(/user_version 7/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
   }
   assert(threw, "migrate must throw on a user_version newer than it knows");
-  db.run("PRAGMA user_version = 6");
+  db.run("PRAGMA user_version = 5");
 
   console.log("migrate v2: all assertions passed");
   process.exit(0);
@@ -320,7 +322,7 @@ if (SCENARIO === "v3") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 6, `user_version should be 6, got ${uv}`);
+  assert(uv === 5, `user_version should be 5, got ${uv}`);
   for (const table of [...V4_TABLES, ...V5_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} created by v4`);
@@ -364,7 +366,7 @@ if (SCENARIO === "v3") {
   // A second run is a no-op.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 6, `user_version stays 6 after re-run, got ${uv2}`);
+  assert(uv2 === 5, `user_version stays 5 after re-run, got ${uv2}`);
   const rCount2 = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount2 === 1, `no duplicate reviews after re-run, got ${rCount2}`);
   const sCount = (db.query("SELECT COUNT(*) c FROM shares").get() as { c: number }).c;
@@ -582,9 +584,44 @@ function seedV5() {
   seed.close();
 }
 
+// ---- the default boot of THIS release stops at v5 ----
+//
+// The drop is its own release (docs/overseer/github-app.md, "Why the drop is its own
+// release"). An ordinary boot of this image must therefore leave `review_freshness`
+// standing: the previous image calls listFreshness() on every review render and is
+// still serving during the graceful-shutdown overlap, and a rollback to it must find a
+// user_version it recognises.
+if (SCENARIO === "v5stops") {
+  process.env.AUTH_DISABLED = "true";
+  delete process.env.ALLOWED_EMAILS;
+  delete process.env.SEER_DROP_FRESHNESS;
+  seedV5();
+
+  const { migrate } = await import("../src/migrate");
+  const { db } = await import("../src/db");
+
+  migrate();
+
+  const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(uv === 5, `an ordinary boot stops at 5, got ${uv}`);
+  const still = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
+    .get();
+  assert(!!still, "review_freshness is still standing after an ordinary boot");
+  const rows = db.query("SELECT * FROM review_freshness").all() as unknown[];
+  assert(rows.length === 1, `and still readable, with its row: got ${rows.length}`);
+
+  // A v4 database walks the same ladder and stops in the same place, with the table v3
+  // creates present rather than created-and-dropped in one run.
+  console.log("migrate v5stops: all assertions passed");
+  process.exit(0);
+}
+
 if (SCENARIO === "v5drop") {
   process.env.AUTH_DISABLED = "true";
   delete process.env.ALLOWED_EMAILS;
+  // v6 is opt-in for one release. The scenario that asserts the drop has to ask for it.
+  process.env.SEER_DROP_FRESHNESS = "1";
   seedV5();
 
   const { migrate } = await import("../src/migrate");

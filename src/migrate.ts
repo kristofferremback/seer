@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 6.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 5 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -19,7 +19,7 @@ import { hashKey, tinyId } from "./ids";
 // v2 adds the images table (single-file image uploads). Purely additive.
 //
 // v3 adds the Overseer review tables (reviews, versions, attachments, annotations,
-// read state, and the ref snippet cache). Purely additive: no existing
+// read state, freshness, and the ref snippet cache). Purely additive: no existing
 // table is touched, so a v1 or v2 database walks straight up to it.
 //
 // v4 adds the shares table: one revocable read-only link to one asset. Purely
@@ -29,9 +29,17 @@ import { hashKey, tinyId } from "./ids";
 // latest version. Purely additive as DDL, and the one migration in this repo that
 // reads an application-level document rather than doing pure DDL — see backfillReviewPrs.
 //
-// v6 drops the freshness table, a release after v5 stopped writing it. Splitting the
-// drop off its own release is what makes a v5 rollback survivable and what keeps a
-// redeploy overlap from serving `no such table` out of the old container.
+// v6 drops the freshness table — and it does NOT run in this release. This is the
+// release where v5 lands and the write stops; the drop is the release after. Splitting
+// them is what makes a rollback to the previous image survivable (it refuses to start on
+// a user_version it does not know) and what keeps the graceful-shutdown redeploy overlap
+// from serving `no such table: review_freshness` out of the old container, which calls
+// listFreshness() on every review render.
+//
+// SEER_DROP_FRESHNESS=1 opts a database in early, so the drop can be exercised and so the
+// next release is a one-line change (delete the gate) rather than a new migration. A
+// database already at 6 is accepted either way: having opted in is not a reason to be
+// refused at the next boot.
 
 const V1_SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
@@ -160,9 +168,12 @@ const V2_IMAGES = `
 // Annotations belong to the review rather than to a version and record the version
 // they were filed against, so a question asked on pass one is still open on pass
 // three. `ref_snippets` is a pure cache keyed by (repo, sha, path): SHA-pinned, so
-// an entry is never stale and never needs invalidating. The freshness table v3
-// originally created is not here: v6 drops it, and a fresh database has no reason to
-// create a table the same migrate() run would immediately drop.
+// an entry is never stale and never needs invalidating. `review_freshness` keys on
+// (repo, pr_number) rather than the number alone: today's write path allows one repo
+// per review, but two pull requests numbered alike in different repos must never
+// collide if that constraint is ever lifted. Nothing writes it as of v5 and v6 drops it,
+// but it is still created here — a fresh database in this release must have the shape
+// the previous image reads, because that image is still serving during a redeploy.
 const V3_REVIEWS = `
   CREATE TABLE IF NOT EXISTS reviews (
     workspace_id TEXT NOT NULL,
@@ -210,6 +221,15 @@ const V3_REVIEWS = `
     version INTEGER NOT NULL,
     opened_at INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, slug, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS review_freshness (
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    observed_head_sha TEXT NOT NULL,
+    checked_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, slug, repo, pr_number)
   );
   -- Process-global cache of SHA-pinned source files. The key is deliberately
   -- (repo, sha, path) with no workspace column: the same key always names the same
@@ -466,7 +486,7 @@ export function migrate(): void {
   if (userVersion() < 3) migrateToV3();
   if (userVersion() < 4) migrateToV4();
   if (userVersion() < 5) migrateToV5();
-  if (userVersion() < 6) migrateToV6();
+  if (userVersion() < 6 && process.env.SEER_DROP_FRESHNESS === "1") migrateToV6();
   ensureAdditiveColumns();
 }
 
@@ -490,8 +510,8 @@ function ensureAdditiveColumns(): void {
 
 // The one destructive migration in the repo, and it only removes a second recording of
 // a fact `review_prs` already holds. Nothing has read or written the table since v5, so
-// there is nothing to carry forward; IF EXISTS because a database created after v5
-// stopped creating it never had one.
+// there is nothing to carry forward; IF EXISTS in case a future release stops creating
+// it in V3_REVIEWS. Gated on SEER_DROP_FRESHNESS in this release — see the header.
 function migrateToV6(): void {
   db.transaction(() => {
     db.run("DROP TABLE IF EXISTS review_freshness");
