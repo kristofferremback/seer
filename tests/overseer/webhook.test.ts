@@ -19,6 +19,7 @@ import {
   getLiveInstallation,
   getPrStatus,
   listReviewPrs,
+  reviewStatusTally,
   setReviewPrs,
   sweepOrphanPrStatus,
   upsertPrStatus,
@@ -508,6 +509,83 @@ describe("attribution", () => {
     );
     expect(res.status).toBe(200);
     expect(statusA(12)!.repo).toBe("acme/seer-renamed");
+  });
+
+  test("a repository renamed after publish still renders: glyph, chip, tally and refresh", async () => {
+    reviewNaming(wsA, "renamed-read");
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
+
+    // The account renamed the repository after the review was published. The stored
+    // document — and every reading taken from it — still says `acme/seer` forever.
+    const renamed = "acme/seer-renamed";
+    for (const [number, head] of [
+      [12, GOLDEN_HEAD_SHA_12],
+      [13, GOLDEN_HEAD_SHA_13],
+    ] as const) {
+      const res = await deliver(
+        "pull_request",
+        prEvent({
+          number,
+          repo: renamed,
+          action: "closed",
+          state: "closed",
+          merged: true,
+          head,
+          updatedAt: "2026-08-04T15:00:00Z",
+        }),
+      );
+      expect(res.status).toBe(200);
+    }
+    // The observations landed under the numeric id.
+    expect(statusA(12)!.merged).toBe(1);
+    expect(statusA(13)!.merged).toBe(1);
+
+    // And the reader can see them. The page draws the merged glyph and the chip says
+    // the heads are current, rather than losing both at the moment the merge arrived.
+    const page = await fetch(`${base}/r/renamed-read`, {
+      headers: { authorization: `Bearer ${keyA}` },
+    });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("c-status s-merged");
+    expect(html).toContain("heads current");
+
+    // The reviews index reads the same rows through its own query.
+    expect(reviewStatusTally(wsA, "renamed-read")).toEqual({
+      merged: 2,
+      closed: 0,
+      draft: 0,
+      open: 0,
+      unknown: 0,
+      total: 2,
+    });
+
+    // And refresh — which reads the known row before it writes — neither loses the
+    // observation nor rolls it back with a staler answer from GitHub.
+    resetChecks();
+    const fake = countingClient((repo, number) => ({
+      number,
+      state: "closed",
+      merged: true,
+      head: { sha: number === 12 ? GOLDEN_HEAD_SHA_12 : GOLDEN_HEAD_SHA_13, ref: "topic" },
+      base: { sha: "1".repeat(40), ref: "main", repo: { id: REPO_ID, full_name: repo } },
+      updated_at: "2026-08-04T16:00:00Z",
+    }));
+    setGithubClientFactory(() => fake.client);
+    const refreshed = await fetch(`${base}/api/reviews/renamed-read/refresh`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${keyA}` },
+    });
+    expect(refreshed.status).toBe(200);
+    setGithubClientFactory(offlineGithubClientFactory());
+
+    expect(statusA(12)!.merged).toBe(1);
+    const after = await fetch(`${base}/r/renamed-read`, {
+      headers: { authorization: `Bearer ${keyA}` },
+    });
+    const afterHtml = await after.text();
+    expect(afterHtml).toContain("c-status s-merged");
+    expect(afterHtml).toContain("heads current");
   });
 });
 

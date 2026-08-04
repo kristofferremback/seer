@@ -25,7 +25,7 @@ import { getReviewVersion, resolveReview, type ReviewDoc } from "./db";
 import { parseUpdatedAt } from "./derive";
 import type { GithubClient } from "./github";
 import { githubClientFor } from "./github-app";
-import { findPrStatus, upsertPrStatus } from "./installations";
+import { lookupPrStatus, upsertPrStatus } from "./installations";
 import { freshnessOf, readableWorkspaces, statusesOf } from "./read";
 import { prKey, type Freshness } from "./types";
 
@@ -128,7 +128,7 @@ export async function checkReview(
   let changed = false;
   for (const pr of doc.prs) {
     const key = prKey(pr.repo, pr.number);
-    const known = findPrStatus(wsId, pr.repo, pr.number);
+    const known = lookupPrStatus(wsId, pr.repo, pr.number);
     const was: Freshness = known ? (known.head_sha === pr.headSha ? "current" : "behind") : "unknown";
     let freshness = was;
     try {
@@ -140,7 +140,10 @@ export async function checkReview(
       if (installationId !== null && repoId !== null) {
         upsertPrStatus(wsId, installationId, {
           repoId,
-          repo: pr.repo,
+          // GitHub's answer names the repository as it is called now; the document
+          // names it as it was called at publication. The row's name is display only
+          // and must be the current one.
+          repo: pull.base?.repo?.full_name ?? known?.repo ?? pr.repo,
           prNumber: pr.number,
           state: pull.state,
           merged: pull.merged === true,

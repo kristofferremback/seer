@@ -563,9 +563,10 @@ export function getPrStatus(wsId: string, repoId: number, prNumber: number): PrS
 /**
  * The observation for one pull request as a page names it: "owner/name" and a number.
  *
- * The read path has no numeric repository id — a stored document carries none — so it
- * asks by the display name, which every observation keeps current. Absence is null and
- * the caller says `unknown` rather than guessing `current`.
+ * This is the *fallback* half of the join, not the join. It exists for rows that have
+ * no numeric id on either side — the transitional backfilled ones — and it is wrong
+ * whenever a repository has been renamed since publication. Readers call
+ * `lookupPrStatus`, which resolves the id first.
  */
 export function findPrStatus(wsId: string, repo: string, prNumber: number): PrStatusRow | null {
   return db
@@ -574,6 +575,46 @@ export function findPrStatus(wsId: string, repo: string, prNumber: number): PrSt
         "ORDER BY updated_at DESC LIMIT 1",
     )
     .get(wsId, repo.toLowerCase(), prNumber);
+}
+
+/**
+ * The numeric repository id for a pull request a document names, or null when nothing
+ * has ever told us one.
+ *
+ * A stored document carries no repository id — that is why `review_prs` exists — but
+ * `review_prs` does, healed by the first observation, and its `repo` is the name the
+ * document was published with. So the document's name is a key into the id, and it
+ * stays one across a rename precisely because that row's name is never rewritten
+ * underneath the document that named it.
+ */
+export function repoIdForNamedPr(wsId: string, repo: string, prNumber: number): number | null {
+  return (
+    db
+      .query<{ repo_id: number }, [string, string, number]>(
+        "SELECT repo_id FROM review_prs WHERE workspace_id = ? AND lower(repo) = ? AND pr_number = ? " +
+          "AND repo_id IS NOT NULL LIMIT 1",
+      )
+      .get(wsId, repo.toLowerCase(), prNumber)?.repo_id ?? null
+  );
+}
+
+/**
+ * The read side of the join, in the shape the design states it:
+ *
+ * ```
+ * match on repo_id            when the review knows one
+ * fall back to lower(repo)    only for rows nothing has healed
+ * ```
+ *
+ * Joining on the name alone was the silent failure the numeric key exists to prevent:
+ * the write path stores the *current* name, every reader passes the name frozen in the
+ * stored document, and so a rename made every reading vanish at the moment the merge
+ * arrived — glyph, chip, tally and refresh together, with correct rows in the table.
+ */
+export function lookupPrStatus(wsId: string, repo: string, prNumber: number): PrStatusRow | null {
+  const repoId = repoIdForNamedPr(wsId, repo, prNumber);
+  if (repoId !== null) return getPrStatus(wsId, repoId, prNumber);
+  return findPrStatus(wsId, repo, prNumber);
 }
 
 /**
@@ -713,7 +754,12 @@ export type StatusTally = Record<PrStatusWord | "unknown", number> & { total: nu
 export function reviewStatusTally(wsId: string, slug: string): StatusTally {
   const tally: StatusTally = { merged: 0, closed: 0, draft: 0, open: 0, unknown: 0, total: 0 };
   for (const pr of listReviewPrs(wsId, slug)) {
-    const row = findPrStatus(wsId, pr.repo, pr.pr_number);
+    // This side has the numeric id in hand, so it never needs the name at all except
+    // for the backfilled rows that carry no id yet.
+    const row =
+      pr.repo_id !== null
+        ? getPrStatus(wsId, pr.repo_id, pr.pr_number)
+        : findPrStatus(wsId, pr.repo, pr.pr_number);
     tally[row ? statusOf(row) : "unknown"] += 1;
     tally.total += 1;
   }

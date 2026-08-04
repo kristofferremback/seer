@@ -20,7 +20,7 @@ import {
   resolveReview,
   type ReviewDoc,
 } from "./db";
-import { findPrStatus, statusOf, type PrStatusWord } from "./installations";
+import { lookupPrStatus, statusOf, type PrStatusWord } from "./installations";
 import { prKey, type Freshness, type Review } from "./types";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -79,7 +79,7 @@ export function freshnessOf(
 ): Record<string, Freshness> {
   const out: Record<string, Freshness> = {};
   for (const pr of doc.prs) {
-    const row = findPrStatus(wsId, pr.repo, pr.number);
+    const row = lookupPrStatus(wsId, pr.repo, pr.number);
     out[prKey(pr.repo, pr.number)] = row
       ? row.head_sha === pr.headSha
         ? "current"
@@ -95,7 +95,7 @@ export function freshnessOf(
 export function statusesOf(wsId: string, doc: ReviewDoc): Record<string, PrStatusWord> {
   const out: Record<string, PrStatusWord> = {};
   for (const pr of doc.prs) {
-    const row = findPrStatus(wsId, pr.repo, pr.number);
+    const row = lookupPrStatus(wsId, pr.repo, pr.number);
     if (row) out[prKey(pr.repo, pr.number)] = statusOf(row);
   }
   return out;
@@ -112,7 +112,7 @@ export function statusesOf(wsId: string, doc: ReviewDoc): Record<string, PrStatu
 export function observedAtOf(wsId: string, doc: ReviewDoc): number | null {
   let oldest: number | null = null;
   for (const pr of doc.prs) {
-    const row = findPrStatus(wsId, pr.repo, pr.number);
+    const row = lookupPrStatus(wsId, pr.repo, pr.number);
     if (!row) continue;
     if (oldest === null || row.observed_at < oldest) oldest = row.observed_at;
   }
