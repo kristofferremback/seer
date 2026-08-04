@@ -57,6 +57,15 @@ import {
 } from "./shares";
 import { serveBundleFile } from "./serve-bundle";
 import { handlePublishReview } from "./overseer/routes";
+import {
+  handleClaimInstallation,
+  handleConnectGithub,
+  handleDisconnectGithub,
+  handleGithubSetupCallback,
+  installUrl,
+} from "./overseer/github-claim";
+import { dbWorkspaceHoldings, listWorkspaceInstallations } from "./overseer/installations";
+import { setWorkspaceHoldings } from "./overseer/github-app";
 import { handleReadReview } from "./overseer/read";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
 import { handleAnnotation } from "./overseer/annotations";
@@ -198,6 +207,20 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
       // The workspace's shares, not the viewer's: a share is the workspace's to see and
       // to revoke, or a link nobody can see is a link nobody takes back. No token is in
       // this list, because none survived the mint.
+      // What this workspace may derive through. Unclaimed and disconnected installations
+      // are not in here: listWorkspaceInstallations answers the same question routing
+      // asks, so the panel cannot claim a reach the client would refuse.
+      installations: listWorkspaceInstallations(wsId).map((g) => ({
+        id: g.id,
+        installationId: g.installation_id,
+        account: g.account_login,
+        accountType: g.account_type,
+        repositorySelection: g.repository_selection,
+        connected: g.connected_at ? fmtDate(g.connected_at) : "—",
+        isSuspended: g.suspended_at !== null,
+      })),
+      githubAppConfigured: !!config.githubApp,
+      githubInstallUrl: installUrl(),
       shares: listShares(wsId).map((sh) => ({
         id: sh.id,
         label: sh.label,
@@ -454,6 +477,12 @@ export async function startServer() {
   // Then move any local blobs into S3 (no-op when already done or disk-only).
   // Runs before the server binds so requests never race a half-moved store.
   await migrateBlobsToS3();
+
+  // The database-backed answer to "which installations may this workspace act through",
+  // installed once the schema is known to be current. Without it githubClientFor() has
+  // no holdings source and refuses to build a client at all, which is the loud failure
+  // the alternative — a client that routes against nothing — would not be.
+  setWorkspaceHoldings(dbWorkspaceHoldings());
 
   // Only the sockets a share opened, so revocation can find them. Membership-gated
   // sockets are not in here: nothing revokes a membership mid-connection today, and a
@@ -773,6 +802,38 @@ export async function startServer() {
           }
           revokeShare(share.id);
           return redirect(`/settings/${req.params.ws}`);
+        },
+      },
+
+      // The claim flow. The callback RENDERS and this POST WRITES, which is the whole
+      // reason they are two routes: originOk() passes when Origin and Referer are both
+      // absent, the normal case for a top-level navigation, so it is no guard at all on
+      // the redirect GET GitHub sends.
+      "/github/setup": {
+        GET: (req) => handleGithubSetupCallback(req),
+      },
+      "/github/claim": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleClaimInstallation(req);
+        },
+      },
+
+      "/settings/:ws/github/connect": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          return handleConnectGithub(req.params.ws, gate.id);
+        },
+      },
+
+      "/settings/:ws/github/:id/disconnect": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          return handleDisconnectGithub(req.params.ws, req.params.id);
         },
       },
 

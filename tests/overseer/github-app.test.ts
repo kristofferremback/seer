@@ -18,11 +18,13 @@ import {
   GithubRoutingError,
   JWT_BACKDATE_SECONDS,
   setGithubClientFactory,
+  setWorkspaceHoldings,
   TOKEN_REMINT_EARLY_MS,
   type AppApi,
   type WorkspaceHoldings,
 } from "../../src/overseer/github-app";
 import { githubOAuth } from "../../src/overseer/github-oauth";
+import { dbWorkspaceHoldings } from "../../src/overseer/installations";
 import { offlineGithubClientFactory } from "../offline-github";
 
 migrate();
@@ -356,9 +358,14 @@ test("the suite cannot reach the network through either seam", async () => {
 
 test("with no factory installed, no client is built without a holdings source", () => {
   setGithubClientFactory(null);
+  // startServer() installs the database-backed holdings, and other files in this suite
+  // start a server, so the "no source at all" state has to be asked for explicitly
+  // rather than assumed to be the default.
+  setWorkspaceHoldings(null);
   try {
     expect(() => githubClientFor("ws_a")).toThrow(/holdings source/);
   } finally {
     setGithubClientFactory(offlineGithubClientFactory());
+    setWorkspaceHoldings(dbWorkspaceHoldings());
   }
 });

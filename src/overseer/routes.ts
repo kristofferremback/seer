@@ -17,6 +17,7 @@ import { saveAttachment } from "../store";
 import { tinyId } from "../ids";
 import { requireApiKey } from "../auth";
 import { createAttachment, createReviewVersion, getReview, getReviewVersion, type ReviewDoc } from "./db";
+import { setReviewPrs } from "./installations";
 import {
   derivePrs,
   PrPointerError,
@@ -761,6 +762,12 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   // corruption on read; a blob without its row is garbage nothing points at.
   const version = db.transaction(() => {
     const v = createReviewVersion(ws, slug, doc);
+    // The pull request set this review names, replaced wholesale in the same
+    // transaction: a republish that drops #4 and adds #9 must delete #4's row, or an
+    // observation keeps landing on a review that no longer mentions it. The numeric
+    // repository id is left null here for the same reason the backfill leaves it null —
+    // the document has none — and heals on the first observation.
+    setReviewPrs(ws, slug, doc.prs.map((p) => ({ repo: p.repo, number: p.number })));
     for (const a of resolved.attachments) {
       createAttachment(ws, slug, v, a.mediaType, a.bytes.length, a.alt, a.caption, a.id);
     }

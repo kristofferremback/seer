@@ -33,6 +33,14 @@ const V3_TABLES = [
 
 const V4_TABLES = ["shares"];
 
+const V5_TABLES = [
+  "github_installations",
+  "github_pr_status",
+  "review_prs",
+  "github_deliveries",
+  "github_app_claims",
+];
+
 // ---- seed a v0-with-data database + zip layout BEFORE importing app modules ----
 function seedV0() {
   mkdirSync(dataDir, { recursive: true });
@@ -75,7 +83,7 @@ if (SCENARIO === "v0") {
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 4, `user_version should be 4, got ${uv}`);
+  assert(uv === 5, `user_version should be 5, got ${uv}`);
 
   const user = db.query("SELECT * FROM users").get() as { id: string; email: string } | null;
   assert(!!user, "root user exists");
@@ -138,7 +146,7 @@ if (SCENARIO === "fresh") {
   const wsId = getMeta("legacy_workspace_id")!;
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 4, `user_version should be 4, got ${uv}`);
+  assert(uv === 5, `user_version should be 5, got ${uv}`);
   const iCount = (db.query("SELECT COUNT(*) c FROM images").get() as { c: number }).c;
   assert(iCount === 0, `fresh db has an empty images table, got ${iCount}`);
   const user = db.query("SELECT * FROM users").get() as { email: string } | null;
@@ -152,7 +160,7 @@ if (SCENARIO === "fresh") {
   const bCount = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount === 0, `fresh db has no bundles, got ${bCount}`);
   // v3/v4: the overseer tables and the shares table exist on a fresh boot too.
-  for (const table of [...V3_TABLES, ...V4_TABLES]) {
+  for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} exists on a fresh db`);
   }
@@ -207,9 +215,9 @@ if (SCENARIO === "v2") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 4, `user_version should be 4, got ${uv}`);
+  assert(uv === 5, `user_version should be 5, got ${uv}`);
 
-  for (const table of [...V3_TABLES, ...V4_TABLES]) {
+  for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} created on the walk up from v2`);
   }
@@ -223,23 +231,23 @@ if (SCENARIO === "v2") {
   // A second run is a no-op: still v4, no duplicate rows, no throw.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 4, `user_version stays 4 after re-run, got ${uv2}`);
+  assert(uv2 === 5, `user_version stays 5 after re-run, got ${uv2}`);
   const bCount2 = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount2 === 1, `no duplicate bundles after re-run, got ${bCount2}`);
   const rCount = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount === 0, `reviews table starts empty, got ${rCount}`);
 
   // A database from a newer binary is refused rather than half-read.
-  db.run("PRAGMA user_version = 5");
+  db.run("PRAGMA user_version = 6");
   let threw = false;
   try {
     migrate();
   } catch (err) {
     threw = true;
-    assert(/user_version 5/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
+    assert(/user_version 6/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
   }
   assert(threw, "migrate must throw on a user_version newer than it knows");
-  db.run("PRAGMA user_version = 4");
+  db.run("PRAGMA user_version = 5");
 
   console.log("migrate v2: all assertions passed");
   process.exit(0);
@@ -263,6 +271,13 @@ function seedV3() {
     PRAGMA user_version = 3;
   `);
   seed.run("INSERT INTO reviews (workspace_id, slug, latest_version, created_at) VALUES ('ws_seed', 'golden', 1, 1000)");
+  // A version row behind the head pointer, because v5 backfills from it. A review whose
+  // latest_version has no document is corruption, and the migration says so rather than
+  // quietly indexing nothing.
+  seed.run(
+    "INSERT INTO review_versions (workspace_id, slug, version, doc, created_at) VALUES ('ws_seed', 'golden', 1, ?, 1000)",
+    [JSON.stringify({ prs: [{ repo: "ThreaHQ/Threa", number: 1723 }] })],
+  );
   seed.close();
 }
 
@@ -280,8 +295,8 @@ if (SCENARIO === "v3") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 4, `user_version should be 4, got ${uv}`);
-  for (const table of V4_TABLES) {
+  assert(uv === 5, `user_version should be 5, got ${uv}`);
+  for (const table of [...V4_TABLES, ...V5_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} created by v4`);
   }
@@ -324,13 +339,165 @@ if (SCENARIO === "v3") {
   // A second run is a no-op.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 4, `user_version stays 4 after re-run, got ${uv2}`);
+  assert(uv2 === 5, `user_version stays 5 after re-run, got ${uv2}`);
   const rCount2 = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount2 === 1, `no duplicate reviews after re-run, got ${rCount2}`);
   const sCount = (db.query("SELECT COUNT(*) c FROM shares").get() as { c: number }).c;
   assert(sCount === 0, `shares table starts empty, got ${sCount}`);
 
   console.log("migrate v3: all assertions passed");
+  process.exit(0);
+}
+
+// ---- v4, with reviews to backfill: the one migration that reads a document ----
+//
+// v5 is the first migration in this repo that parses an application-level JSON format,
+// so it gets its own two scenarios: one where the documents are sound and the rows it
+// writes are shown to be joinable, and one where a document is malformed and the whole
+// thing has to abort naming the exact row.
+function seedV4(docs: { ws: string; slug: string; version: number; doc: unknown }[]) {
+  seedV3();
+  const seed = new Database(join(dataDir, "seer.db"), { create: true });
+  seed.exec(`
+    CREATE TABLE shares (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, kind TEXT NOT NULL,
+      target TEXT NOT NULL, label TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+      created_by TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER, revoked_at INTEGER);
+    PRAGMA user_version = 4;
+  `);
+  for (const d of docs) {
+    seed.run(
+      "INSERT OR REPLACE INTO reviews (workspace_id, slug, latest_version, created_at) VALUES (?, ?, ?, 1000)",
+      [d.ws, d.slug, d.version],
+    );
+    seed.run(
+      "INSERT OR REPLACE INTO review_versions (workspace_id, slug, version, doc, created_at) VALUES (?, ?, ?, ?, 1000)",
+      [d.ws, d.slug, d.version, JSON.stringify(d.doc)],
+    );
+  }
+  seed.close();
+}
+
+if (SCENARIO === "v4backfill") {
+  process.env.AUTH_DISABLED = "true";
+  delete process.env.ALLOWED_EMAILS;
+  // Two versions of one review: v1 names #4, v2 (the head) names #9. Only the head is
+  // backfilled, or a delivery would push to a review that no longer names the pull
+  // request.
+  seedV4([
+    { ws: "ws_seed", slug: "stack", version: 1, doc: { prs: [{ repo: "threahq/threa", number: 4 }] } },
+    {
+      ws: "ws_seed",
+      slug: "stack",
+      version: 2,
+      doc: { prs: [{ repo: "ThreaHQ/Threa", number: 9 }, { repo: "threahq/other", number: 11 }] },
+    },
+  ]);
+
+  const { migrate } = await import("../src/migrate");
+  const { db } = await import("../src/db");
+
+  migrate();
+
+  const rows = db
+    .query("SELECT * FROM review_prs ORDER BY slug, pr_number")
+    .all() as { workspace_id: string; slug: string; repo_id: number | null; pr_number: number; repo: string }[];
+  const forStack = rows.filter((r) => r.slug === "stack");
+  assert(forStack.length === 2, `head version's two prs backfilled, got ${forStack.length}`);
+  assert(
+    forStack.every((r) => r.repo_id === null),
+    "backfilled rows carry no repo_id: the v4 document has no numeric repository id anywhere",
+  );
+  assert(
+    !forStack.some((r) => r.pr_number === 4),
+    "a pull request only an older version named is NOT backfilled",
+  );
+  // The golden review seeded by seedV3 is backfilled too, so the walk covers every review
+  // rather than the ones this scenario happened to write.
+  assert(rows.some((r) => r.slug === "golden" && r.pr_number === 1723), "every review is backfilled");
+
+  // The rows are joinable the way a delivery joins them: case-insensitively on the name
+  // while repo_id is null. Without this the backfill would look successful and match
+  // nothing forever.
+  const { matchReviewPrs } = await import("../src/overseer/installations");
+  const matched = matchReviewPrs(55501, "threahq/threa", 9);
+  assert(matched.length === 1 && matched[0]!.slug === "stack", `a delivery joins a backfilled row, got ${matched.length}`);
+  const wrongNumber = matchReviewPrs(55501, "threahq/threa", 4);
+  assert(wrongNumber.length === 0, "and does not join a pull request no review names");
+
+  // The whole point of the backfill: an observation delivered for a backfilled review
+  // has to land. A sentinel repo_id would have passed every assertion above and matched
+  // nothing here, forever, while delivery health looked perfectly fine.
+  const { observePullRequest, getPrStatus, listReviewPrs } = await import(
+    "../src/overseer/installations"
+  );
+  db.run(
+    "INSERT INTO github_installations (id, workspace_id, installation_id, account_login, account_id, " +
+      "account_type, repository_selection, connected_by, connected_at, created_at) " +
+      "VALUES ('ghi_seed0000', 'ws_seed', 77, 'threahq', 7, 'Organization', 'all', 'usr_seed', 1000, 1000)",
+  );
+  const applied = observePullRequest(77, {
+    repoId: 55501,
+    repo: "threahq/threa",
+    prNumber: 9,
+    state: "closed",
+    merged: true,
+    draft: false,
+    headSha: "a".repeat(40),
+    updatedAt: 2000,
+  });
+  assert(applied === 1, `the observation lands on the backfilled review, got ${applied}`);
+  const status = getPrStatus("ws_seed", 55501, 9);
+  assert(!!status && status.merged === 1, "and github_pr_status now holds the fact");
+  const healed = listReviewPrs("ws_seed", "stack").find((r) => r.pr_number === 9)!;
+  assert(healed.repo_id === 55501, `the transitional row heals to the numeric id, got ${healed.repo_id}`);
+
+  // An installation nobody claimed writes nothing, whatever it delivers.
+  db.run("UPDATE github_installations SET workspace_id = NULL WHERE installation_id = 77");
+  const orphan = observePullRequest(77, {
+    repoId: 55501,
+    repo: "threahq/threa",
+    prNumber: 11,
+    state: "open",
+    merged: false,
+    draft: false,
+    headSha: "b".repeat(40),
+    updatedAt: 3000,
+  });
+  assert(orphan === 0, "an unclaimed installation belongs to no workspace, so it writes none");
+
+  console.log("migrate v4backfill: all assertions passed");
+  process.exit(0);
+}
+
+if (SCENARIO === "v4malformed") {
+  process.env.AUTH_DISABLED = "true";
+  delete process.env.ALLOWED_EMAILS;
+  seedV4([{ ws: "ws_seed", slug: "broken", version: 3, doc: { title: "no prs here" } }]);
+
+  const { migrate } = await import("../src/migrate");
+  const { db } = await import("../src/db");
+
+  let threw = false;
+  try {
+    migrate();
+  } catch (err) {
+    threw = true;
+    const message = (err as Error).message;
+    for (const part of ["ws_seed", "broken", "3"]) {
+      assert(message.includes(part), `message names the exact row (${part}), got: ${message}`);
+    }
+  }
+  assert(threw, "a malformed document aborts the migration rather than skipping it");
+
+  // Aborted loudly means aborted wholly: still v4, and no half-written index.
+  const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(uv === 4, `user_version stays 4 after the abort, got ${uv}`);
+  const table = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_prs'")
+    .get();
+  assert(!table, "the transaction rolled back, so review_prs does not exist");
+
+  console.log("migrate v4malformed: all assertions passed");
   process.exit(0);
 }
 

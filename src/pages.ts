@@ -1790,6 +1790,18 @@ export type SettingsReveal =
   | { kind: "key"; token: string }
   | { kind: "invite"; url: string; expires: string };
 
+/** One GitHub App installation this workspace holds. Nothing here is a secret: an
+ *  installation id is a small public integer, and no token was ever stored to leak. */
+export interface SettingsInstallation {
+  id: string;
+  installationId: number;
+  account: string;
+  accountType: string;
+  repositorySelection: string;
+  connected: string;
+  isSuspended: boolean;
+}
+
 export interface SettingsData {
   wsId: string;
   name: string;
@@ -1798,6 +1810,12 @@ export interface SettingsData {
   members: SettingsMember[];
   keys: SettingsKey[];
   shares: SettingsShare[];
+  installations: SettingsInstallation[];
+  /** False when the deployment has no App credentials: the panel then explains itself
+   *  rather than offering a button that could only fail. */
+  githubAppConfigured: boolean;
+  /** Where to install the app on a fresh account, when there is an app to install. */
+  githubInstallUrl: string | null;
   reveal?: SettingsReveal;
 }
 
@@ -1846,6 +1864,23 @@ export function settingsPage(d: SettingsData): string {
         <td class="mono">${escapeHtml(sh.expires)}${sh.isExpired ? ` <span class="pill">expired</span>` : ""}</td>
         <td class="act">
           <form method="post" action="${s(`/shares/${sh.id}/revoke`)}"><button type="submit">revoke</button></form>
+        </td>
+      </tr>`,
+          )
+          .join("\n");
+
+  const installRows =
+    d.installations.length === 0
+      ? `<tr><td colspan="5" class="empty">No GitHub account connected yet.</td></tr>`
+      : d.installations
+          .map(
+            (g) => `<tr>
+        <td>${escapeHtml(g.account)}${g.isSuspended ? ` <span class="pill">suspended</span>` : ""}</td>
+        <td class="mono">${escapeHtml(g.accountType)}</td>
+        <td class="mono">${escapeHtml(g.repositorySelection)}</td>
+        <td class="mono">${escapeHtml(g.connected)}</td>
+        <td class="act">
+          <form method="post" action="${s(`/github/${g.id}/disconnect`)}"><button type="submit">disconnect</button></form>
         </td>
       </tr>`,
           )
@@ -1943,6 +1978,29 @@ ${head(`Settings · ${d.name} · Seer`, og)}
     </div>
 
     <div class="panel">
+      <p class="eyebrow">GitHub</p>
+      <div class="ledger scroll-x">
+        <table>
+          <tr><th>Account</th><th>Kind</th><th>Repositories</th><th>Connected</th><th></th></tr>
+          ${installRows}
+        </table>
+      </div>
+      ${
+        d.githubAppConfigured
+          ? `<form class="panel-row stack-gap" method="post" action="${s("/github/connect")}">
+        <button class="btn primary" type="submit">Connect a GitHub account</button>
+      </form>
+      <p class="panel-note">Connecting sends you to GitHub and back. Seer asks GitHub which
+      installations <em>you</em> can reach, and only those can be connected here — naming an
+      installation id is not enough, and never was.</p>
+      ${d.githubInstallUrl ? `<p class="panel-note dim">Not installed on that account yet? <a href="${escapeHtml(d.githubInstallUrl)}" rel="noreferrer">Install the app first</a>, then come back and connect it.</p>` : ""}`
+          : `<p class="panel-note">This deployment has no GitHub App configured, so there is nothing to connect yet.</p>`
+      }
+      <p class="panel-note dim">Disconnecting keeps the record and releases the installation,
+      so the same account can be connected again later — here or anywhere.</p>
+    </div>
+
+    <div class="panel">
       <p class="eyebrow">Shares</p>
       <div class="ledger scroll-x">
         <table>
@@ -1957,6 +2015,89 @@ ${head(`Settings · ${d.name} · Seer`, og)}
 <div class="frame night">
   <div class="shell">
     ${footer([`<a href="/bundles">bundles</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+</body>
+</html>`;
+}
+
+// ---- the GitHub claim page ----
+//
+// What the setup callback renders. It has one job the settings page cannot do: present
+// the installations a person just proved they can reach, and carry the one-time handle
+// that lets the following POST attach one of them. Every refusal renders through the
+// same function with no choices and no handle, so a refused page cannot accidentally
+// grow a form.
+
+export interface GithubClaimChoice {
+  installationId: number;
+  account: string;
+  accountType: string;
+  repositorySelection: string;
+  /** Already this workspace's. Offered anyway — reconnecting is a no-op, and hiding it
+   *  would read as "GitHub does not know about this one". */
+  held: boolean;
+}
+
+export interface GithubClaimData {
+  /** Null when the claim could not be identified at all, in which case there is no
+   *  workspace to send anyone back to. */
+  wsId: string | null;
+  headline: string;
+  note: string;
+  login: string | null;
+  /** The one-time attach handle. Null on every refusal, which is what makes a refusal
+   *  incapable of writing. */
+  claimToken: string | null;
+  choices: GithubClaimChoice[];
+}
+
+export function githubClaimPage(d: GithubClaimData): string {
+  const og = { "og:title": "Connect GitHub · Seer", "og:type": "website", robots: "noindex" };
+
+  const options = d.choices
+    .map(
+      (c, i) => `<label class="panel-row">
+        <input type="radio" name="installation_id" value="${c.installationId}"${i === 0 ? " checked" : ""}>
+        <span>${escapeHtml(c.account)} <span class="mono">${escapeHtml(c.accountType)}</span>
+        <span class="mono">${escapeHtml(c.repositorySelection)}</span>${c.held ? ` <span class="pill">connected</span>` : ""}</span>
+      </label>`,
+    )
+    .join("\n");
+
+  const form =
+    d.claimToken && d.choices.length > 0
+      ? `<form method="post" action="/github/claim">
+          <input type="hidden" name="claim" value="${escapeHtml(d.claimToken)}">
+          ${options}
+          <div class="panel-row stack-gap"><button class="btn primary" type="submit">Connect it</button></div>
+        </form>`
+      : "";
+
+  const back = d.wsId
+    ? `<p class="panel-note dim"><a href="/settings/${escapeHtml(d.wsId)}">Back to workspace settings</a></p>`
+    : `<p class="panel-note dim"><a href="/bundles">Back to Seer</a></p>`;
+
+  return `<!doctype html>
+<html lang="en">
+${head("Connect GitHub · Seer", og)}
+<body>
+<div class="frame warm grow">
+  <div class="shell spine">
+    ${navRow(null)}
+    <p class="eyebrow">GitHub${d.login ? ` · <span class="email-tag">${escapeHtml(d.login)}</span>` : ""}</p>
+    <h1 class="h-section">${escapeHtml(d.headline)}</h1>
+    <p class="subtitle">${escapeHtml(d.note)}</p>
+    <div class="panel">
+      ${form}
+      ${back}
+    </div>
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/bundles">bundles</a>`])}
   </div>
 </div>
 ${themeToggleScript()}

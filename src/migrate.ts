@@ -24,6 +24,12 @@ import { hashKey, tinyId } from "./ids";
 //
 // v4 adds the shares table: one revocable read-only link to one asset. Purely
 // additive too, on the same terms.
+//
+// v5 adds the GitHub App tables and backfills `review_prs` from every review's
+// latest version. Purely additive as DDL, and the one migration in this repo that
+// reads an application-level document rather than doing pure DDL — see backfillReviewPrs.
+// The drop of `review_freshness` is deliberately NOT here: it is v6, a release later,
+// so a rollback to a v4 image still finds the table it reads on every render.
 
 const V1_SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
@@ -264,13 +270,219 @@ const V4_SHARES = `
   CREATE INDEX IF NOT EXISTS idx_shares_workspace ON shares (workspace_id);
 `;
 
+// The GitHub App. An installation is GitHub's, a workspace is Seer's, and this table is
+// the only place the two are bound together.
+//
+// `workspace_id` is NULLABLE because a row can exist before anybody claims it:
+// `installation.created` records an installation the moment GitHub says it exists, and
+// nobody owns it until a person proves they can reach it. Three consequences run
+// through the rest of the code: every workspace-keyed query filters
+// `workspace_id IS NOT NULL`, routing refuses an unclaimed installation rather than
+// treating it as a match, and the unique index below still reserves the id — which is
+// what stops a claim race from producing two rows for one installation.
+//
+// That index is PARTIAL, on purpose. A column-level UNIQUE plus a soft `removed_at`
+// would strand an installation id forever: disconnecting it would mean nobody could
+// ever reconnect it, and no user action recovers that because only reinstalling on
+// GitHub mints a new id. The claim and the audit trail are different things, so the
+// audit row survives a disconnect and the id is released with it.
+//
+// `github_pr_status` carries facts and no words: "merged | closed | draft | open" and
+// "current | behind | unknown" are both derived from this row at render. It keys on
+// GitHub's numeric repository id rather than "owner/name", because GitHub compares
+// those case-insensitively and a rename changes them outright. `repo_id` is nullable
+// only for the transitional rows a backfill wrote, which have no numeric id anywhere
+// to be found; they are healed on first observation. `installation_id` is here so
+// `installation.deleted` can find its own rows after the installation is already gone.
+//
+// `review_prs` is the filter the webhook upsert runs through: an installation covering
+// a busy org delivers an event for every pull request anyone opens anywhere, and
+// writing a row for each would grow `github_pr_status` without bound for pull requests
+// no page renders.
+//
+// `github_deliveries` is the replay guard: the delivery id and every effect of that
+// delivery commit in one transaction, so a failed apply is retried rather than
+// classified as a duplicate.
+//
+// The claim row is the proof crossing a request boundary. The callback proves which
+// installations a person can actually reach and records their ids here; the attach POST
+// consumes that record. It is in SQLite rather than in memory because old and new
+// containers overlap by design during a redeploy, so the two requests can land on
+// different processes. Both bearer handles are hashed exactly as an API key or a share
+// token is — `hashKey` and nothing else — and the row burns twice: `consumed_at` when
+// the callback spends the nonce, `attached_at` when the POST spends the attach handle.
+const V5_GITHUB_APP = `
+  CREATE TABLE IF NOT EXISTS github_installations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT,
+    installation_id INTEGER NOT NULL,
+    account_login TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    account_type TEXT NOT NULL,
+    repository_selection TEXT NOT NULL,
+    connected_by TEXT,
+    connected_at INTEGER,
+    created_at INTEGER NOT NULL,
+    suspended_at INTEGER,
+    removed_at INTEGER
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_github_installations_live
+    ON github_installations (installation_id) WHERE removed_at IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_github_installations_workspace
+    ON github_installations (workspace_id);
+
+  CREATE TABLE IF NOT EXISTS github_pr_status (
+    workspace_id TEXT NOT NULL,
+    repo_id INTEGER,
+    pr_number INTEGER NOT NULL,
+    installation_id INTEGER NOT NULL,
+    repo TEXT NOT NULL,
+    state TEXT NOT NULL,
+    merged INTEGER NOT NULL DEFAULT 0,
+    draft INTEGER NOT NULL DEFAULT 0,
+    head_sha TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    observed_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, repo_id, pr_number)
+  );
+  -- SQLite lets a PRIMARY KEY column hold NULL, and NULLs never compare equal, so the
+  -- primary key above does not constrain a row whose repo_id is still null. These two
+  -- indexes are what actually keep the transitional rows unique, per table.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_github_pr_status_unresolved
+    ON github_pr_status (workspace_id, lower(repo), pr_number) WHERE repo_id IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_github_pr_status_installation
+    ON github_pr_status (installation_id);
+
+  CREATE TABLE IF NOT EXISTS review_prs (
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    repo_id INTEGER,
+    pr_number INTEGER NOT NULL,
+    repo TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, slug, repo_id, pr_number)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_review_prs_unresolved
+    ON review_prs (workspace_id, slug, lower(repo), pr_number) WHERE repo_id IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_review_prs_lookup
+    ON review_prs (workspace_id, pr_number);
+
+  CREATE TABLE IF NOT EXISTS github_deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    received_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS github_app_claims (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    nonce_hash TEXT NOT NULL UNIQUE,
+    attach_hash TEXT UNIQUE,
+    proven_ids TEXT,
+    github_login TEXT,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    consumed_at INTEGER,
+    attached_at INTEGER
+  );
+`;
+
+/** One pull request as a v4 document names it. Deliberately not `Pr` from
+ *  overseer/types: this parser reads the shape that is *stored*, and keeps reading it
+ *  forever. Importing the live type would make a migration over old rows change
+ *  meaning the day someone edits the document model. */
+interface StoredPrPointer {
+  repo: unknown;
+  number: unknown;
+}
+
+/**
+ * Backfill `review_prs` from each review's `latest_version` only.
+ *
+ * Only the latest version, because backfilling every stored version would index pull
+ * requests that later versions dropped: webhooks would then push to reviews that no
+ * longer name them. The consequence is stated rather than hidden — a reader on an old
+ * pinned version may see a pull request as unchecked, which is honest.
+ *
+ * There is no `repo_id` to write. The v4 document has no numeric repository id
+ * anywhere, and a migration cannot invent one: reaching the network from a migration is
+ * unprecedented here and impossible for a repository no installation covers any more,
+ * while a sentinel would make every backfilled row unjoinable forever *and* look
+ * healthy. So the rows go in with a null id and the join falls back to the name until
+ * an observation heals them.
+ *
+ * A malformed document aborts the whole transaction naming the exact row. Skipping
+ * would leave an incomplete security index that nothing ever reports, which is worse
+ * than a boot failure that says which document to look at.
+ */
+function backfillReviewPrs(): number {
+  const reviews = db
+    .query<{ workspace_id: string; slug: string; latest_version: number }, []>(
+      "SELECT workspace_id, slug, latest_version FROM reviews",
+    )
+    .all();
+
+  let written = 0;
+  for (const review of reviews) {
+    const where = `(${review.workspace_id}, ${review.slug}, ${review.latest_version})`;
+    const row = db
+      .query<{ doc: string }, [string, string, number]>(
+        "SELECT doc FROM review_versions WHERE workspace_id = ? AND slug = ? AND version = ?",
+      )
+      .get(review.workspace_id, review.slug, review.latest_version);
+    if (!row) {
+      throw new Error(
+        `Cannot backfill review_prs: review ${where} has no version row behind its latest_version.`,
+      );
+    }
+    let doc: { prs?: unknown };
+    try {
+      doc = JSON.parse(row.doc) as { prs?: unknown };
+    } catch (err) {
+      throw new Error(`Cannot backfill review_prs: document ${where} is not JSON (${String(err)}).`);
+    }
+    if (!Array.isArray(doc.prs)) {
+      throw new Error(`Cannot backfill review_prs: document ${where} has no iterable prs array.`);
+    }
+    for (const pr of doc.prs as StoredPrPointer[]) {
+      const repo = pr?.repo;
+      const number = pr?.number;
+      if (typeof repo !== "string" || repo === "" || !Number.isInteger(number)) {
+        throw new Error(
+          `Cannot backfill review_prs: document ${where} names a pull request with no readable ` +
+            `repo/number pair (repo=${JSON.stringify(repo)}, number=${JSON.stringify(number)}).`,
+        );
+      }
+      db.run(
+        "INSERT OR IGNORE INTO review_prs (workspace_id, slug, repo_id, pr_number, repo) " +
+          "VALUES (?, ?, NULL, ?, ?)",
+        [review.workspace_id, review.slug, number as number, repo],
+      );
+      written++;
+    }
+  }
+  return written;
+}
+
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 4) throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, 2, 3, or 4`);
+  if (uv > 5) {
+    throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, 2, 3, 4, or 5`);
+  }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
   if (userVersion() < 3) migrateToV3();
   if (userVersion() < 4) migrateToV4();
+  if (userVersion() < 5) migrateToV5();
+}
+
+function migrateToV5(): void {
+  let written = 0;
+  db.transaction(() => {
+    db.exec(V5_GITHUB_APP);
+    written = backfillReviewPrs();
+    db.run("PRAGMA user_version = 5");
+  })();
+  console.log(`[seer] migrated to schema v5 (github app); backfilled ${written} review_prs rows.`);
 }
 
 function migrateToV4(): void {
