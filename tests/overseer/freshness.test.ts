@@ -45,7 +45,8 @@ function countingClient(head: (repo: string, number: number) => string): {
         state: "open",
         user: { login: "someone" },
         head: { sha: head(repo, number), ref: "topic" },
-        base: { sha: "1".repeat(40), ref: "main" },
+        base: { sha: "1".repeat(40), ref: "main", repo: { id: 1301620029, full_name: repo } },
+        updated_at: "2026-07-19T06:27:55Z",
       };
     },
   } as unknown as GithubClient;

@@ -24,8 +24,16 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-annotations-roles-
 // anywhere reaches the real API. Nothing below answers with refs, so nothing needs a
 // GitHub that responds.
 const { setGithubClient } = await import("../../src/overseer/github");
-const { offlineGithubClient } = await import("../offline-github");
+const { setGithubClientFactory } = await import("../../src/overseer/github-app");
+const { setGithubOAuth } = await import("../../src/overseer/github-oauth");
+const { offlineGithubClient, offlineGithubClientFactory, offlineGithubOAuth } = await import(
+  "../offline-github"
+);
 setGithubClient(offlineGithubClient());
+// Both seams, not just the first: a per-workspace client is built by a factory, and
+// the OAuth transport is not a GithubClient at all.
+setGithubClientFactory(offlineGithubClientFactory());
+setGithubOAuth(offlineGithubOAuth());
 
 const { sessionCookie } = await import("../../src/auth");
 const { db, mintApiKey } = await import("../../src/db");

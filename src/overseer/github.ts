@@ -13,6 +13,13 @@ export interface GithubUser {
   login: string;
 }
 
+/** The repository a pull request sits on. `id` is the only stable identity it has:
+ *  GitHub compares "owner/name" case-insensitively and a rename changes it outright. */
+export interface GithubRepoRef {
+  id: number;
+  full_name: string;
+}
+
 export interface GithubPull {
   number: number;
   title: string;
@@ -22,7 +29,11 @@ export interface GithubPull {
   merged?: boolean;
   user: GithubUser | null;
   head: { sha: string; ref: string };
-  base: { sha: string; ref: string };
+  /** `repo` is absent only on a pull request whose base repository is gone. */
+  base: { sha: string; ref: string; repo?: GithubRepoRef | null };
+  /** GitHub's own timestamp. Two observations of one pull request are ordered by this
+   *  and by nothing else, since neither delivery order nor our clock is trustworthy. */
+  updated_at: string;
 }
 
 export interface GithubCommit {
@@ -95,7 +106,7 @@ const MAX_PAGES = 20;
  */
 const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
-function assertRepo(repo: string): void {
+export function assertRepo(repo: string): void {
   const parts = repo.split("/");
   const bad =
     parts.length !== 2 ||

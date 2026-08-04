@@ -34,6 +34,48 @@ if (s3) {
   }
 }
 
+// The GitHub App. All six variables or none: a half-configured app is a boot that
+// succeeds and then fails at the first publish, which is exactly the silent
+// misconfiguration this repo refuses elsewhere. They are not `required()` yet —
+// the token still works, and the step that deletes it is the step that makes these
+// mandatory (docs/overseer/github-app.md, "Removing the token").
+const APP_VARS = [
+  "GITHUB_APP_ID",
+  "GITHUB_APP_SLUG",
+  "GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_APP_CLIENT_ID",
+  "GITHUB_APP_CLIENT_SECRET",
+  "GITHUB_WEBHOOK_SECRET",
+] as const;
+
+function githubAppConfig() {
+  const present = APP_VARS.filter((name) => Boolean(process.env[name]));
+  if (present.length === 0) return null;
+  if (present.length !== APP_VARS.length) {
+    const missing = APP_VARS.filter((name) => !process.env[name]);
+    throw new Error(
+      `GitHub App is partially configured: missing ${missing.join(", ")}. Set all of ${APP_VARS.join(", ")} or none.`,
+    );
+  }
+  // The PEM arrives base64-encoded because a raw PEM's newlines do not survive a
+  // Railway environment variable. An unparseable key fails here, naming the variable,
+  // rather than at the first JWT signature.
+  const pem = Buffer.from(process.env.GITHUB_APP_PRIVATE_KEY!, "base64").toString("utf8");
+  if (!pem.includes("-----BEGIN") || !pem.includes("PRIVATE KEY")) {
+    throw new Error(
+      "GITHUB_APP_PRIVATE_KEY is not a base64-encoded PEM private key (decoded value has no PEM header).",
+    );
+  }
+  return {
+    appId: process.env.GITHUB_APP_ID!,
+    slug: process.env.GITHUB_APP_SLUG!,
+    privateKeyPem: pem,
+    clientId: process.env.GITHUB_APP_CLIENT_ID!,
+    clientSecret: process.env.GITHUB_APP_CLIENT_SECRET!,
+    webhookSecret: process.env.GITHUB_WEBHOOK_SECRET!,
+  };
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   baseUrl: (process.env.BASE_URL ?? `http://localhost:${process.env.PORT ?? 3000}`).replace(/\/$/, ""),
@@ -48,6 +90,8 @@ export const config = {
   // Optional: Overseer derives pull request facts from the GitHub API. Absent, only
   // public repositories resolve and the rate limit is the unauthenticated one.
   githubToken: process.env.GITHUB_TOKEN,
+
+  githubApp: githubAppConfig(),
 
   // Viewer auth (Google OIDC). AUTH_DISABLED=true skips it entirely — local dev only.
   authDisabled,

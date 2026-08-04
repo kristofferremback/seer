@@ -67,7 +67,8 @@ const PULLS: Record<number, GithubPull> = {
     state: "open",
     user: { login: "kremback" },
     head: { sha: GOLDEN_HEAD_SHA_12, ref: "reviews-session-gate" },
-    base: { sha: GOLDEN_BASE_SHA, ref: "main" },
+    base: { sha: GOLDEN_BASE_SHA, ref: "main", repo: { id: 1301620029, full_name: "kristofferremback/seer" } },
+    updated_at: "2026-07-19T06:27:55Z",
   },
   13: {
     number: 13,
@@ -76,7 +77,8 @@ const PULLS: Record<number, GithubPull> = {
     state: "open",
     user: { login: "kremback" },
     head: { sha: GOLDEN_HEAD_SHA_13, ref: "reviews-api" },
-    base: { sha: GOLDEN_HEAD_SHA_12, ref: "reviews-session-gate" },
+    base: { sha: GOLDEN_HEAD_SHA_12, ref: "reviews-session-gate", repo: { id: 1301620029, full_name: "kristofferremback/seer" } },
+    updated_at: "2026-07-19T08:12:28Z",
   },
 };
 
