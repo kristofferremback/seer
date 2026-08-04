@@ -122,6 +122,43 @@ test("disconnect releases the id rather than stranding it, and keeps the audit r
   expect(getLiveInstallation(111)!.workspace_id).toBe(WS_B);
 });
 
+test("disconnect takes the installation's observations with it, so no glyph outlives it", () => {
+  const row = attach(WS_A, 111);
+  const id = (row as { id: string }).id;
+  upsertPrStatus(WS_A, 111, {
+    repoId: 55501,
+    repo: "acme/seer",
+    prNumber: 12,
+    state: "open",
+    merged: false,
+    draft: false,
+    headSha: "a".repeat(40),
+    updatedAt: 1000,
+  });
+  // A second workspace's row, through a different installation, is not this
+  // disconnect's to delete — the installation_id column is what makes that true.
+  attach(WS_B, 222);
+  upsertPrStatus(WS_B, 222, {
+    repoId: 55502,
+    repo: "other/app",
+    prNumber: 7,
+    state: "open",
+    merged: false,
+    draft: false,
+    headSha: "b".repeat(40),
+    updatedAt: 1000,
+  });
+  expect(getPrStatus(WS_A, 55501, 12)).not.toBeNull();
+
+  expect(disconnectInstallation(WS_B, id)).toBe(false);
+  // The refusal took nothing with it either.
+  expect(getPrStatus(WS_A, 55501, 12)).not.toBeNull();
+
+  expect(disconnectInstallation(WS_A, id)).toBe(true);
+  expect(getPrStatus(WS_A, 55501, 12)).toBeNull();
+  expect(getPrStatus(WS_B, 55502, 7)).not.toBeNull();
+});
+
 // ---- the claim row ----
 
 test("the nonce burns once, and the burn is what records the proof", () => {
@@ -132,7 +169,7 @@ test("the nonce burns once, and the burn is what records the proof", () => {
   expect(claim.user_id).toBe(USER);
   expect(claimProvenIds(claim)).toEqual([]); // nothing is proved until the callback
 
-  const proven = [{ id: 111, login: "acme", type: "Organization", selection: "all" }];
+  const proven = [{ id: 111, login: "acme", accountId: 4242, type: "Organization", selection: "all" }];
   const first = consumeClaim(id, proven, "acme");
   expect(first).not.toBeNull();
   // A replayed state changes nothing and mints no second handle.
@@ -141,6 +178,8 @@ test("the nonce burns once, and the burn is what records the proof", () => {
   const after = findClaimByAttachToken(first!.attachToken)!;
   expect(claimProvenIds(after)).toEqual([111]);
   expect(claimProven(after, 111)!.login).toBe("acme");
+  // The rename-proof half of the account facts survives the round trip through JSON.
+  expect(claimProven(after, 111)!.accountId).toBe(4242);
   expect(claimProven(after, 222)).toBeNull();
 
   expect(burnClaimAttach(after.id)).toBe(true);

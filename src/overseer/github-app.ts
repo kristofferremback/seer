@@ -175,6 +175,25 @@ export function createAppApi(options: AppApiOptions): AppApi {
 
   async function failed(res: Response, url: string): Promise<never> {
     const body = (await res.text().catch(() => "")).slice(0, 400);
+    // Two of GitHub's refusals are not faults to retry, and the failure table says so:
+    // the app-JWT rate limit is shared across every workspace and every installation, so
+    // hammering it is the worst possible response; and a suspended installation stays
+    // suspended until a human on that account unsuspends it. Both are read off GitHub
+    // refusing rather than off a column that a lost webhook could leave stale forever.
+    if (isRateLimited(res, body)) {
+      throw new GithubRateLimitError(
+        `GitHub's rate limit for this Seer instance's App is exhausted (GitHub answered ${res.status}). ` +
+          "It is shared by every workspace here and resets on GitHub's own schedule. Nothing was read, " +
+          "and no repository is at fault.",
+      );
+    }
+    if (res.status === 403 && /suspend/i.test(body)) {
+      throw new GithubSuspendedError(
+        installationIdIn(url),
+        "The GitHub App installation is suspended, so GitHub refused to mint a token for it. " +
+          "Unsuspend it on GitHub, then try again.",
+      );
+    }
     throw new GithubError(`GitHub ${res.status} for ${url}: ${body}`, res.status, url);
   }
 
@@ -248,12 +267,61 @@ export function createAppApi(options: AppApiOptions): AppApi {
 
 // ---- routing a repository to one of the workspace's installations ----
 
-/** A refusal that is about who may read what, rather than about GitHub being unhappy. */
-export class GithubRoutingError extends GithubError {
+/**
+ * A refusal the caller must not retry as though GitHub had faltered.
+ *
+ * These are the rows of the failure table that answer 422 rather than 502: an access
+ * problem, a suspended installation, an exhausted app-JWT rate limit. Telling the skill
+ * to retry any of them is worse than useless — the rate limit is shared by the whole
+ * instance — so they are one type the routes can match, and every one of them carries a
+ * message a human can act on.
+ */
+export class GithubAppRefusal extends GithubError {
   constructor(message: string) {
     super(message, 422, "");
+    this.name = "GithubAppRefusal";
+  }
+}
+
+/** A refusal that is about who may read what, rather than about GitHub being unhappy. */
+export class GithubRoutingError extends GithubAppRefusal {
+  constructor(message: string) {
+    super(message);
     this.name = "GithubRoutingError";
   }
+}
+
+/** GitHub refused to mint for a suspended installation. The refusal is the fact: the
+ *  `suspended_at` column is a display hint a lost `unsuspend` could leave stale. */
+export class GithubSuspendedError extends GithubAppRefusal {
+  readonly installationId: number | null;
+  constructor(installationId: number | null, message: string) {
+    super(message);
+    this.name = "GithubSuspendedError";
+    this.installationId = installationId;
+  }
+}
+
+/** The app JWT's rate limit, which is shared across every workspace on this instance. */
+export class GithubRateLimitError extends GithubAppRefusal {
+  constructor(message: string) {
+    super(message);
+    this.name = "GithubRateLimitError";
+  }
+}
+
+/** GitHub says rate limit two ways: a 429, or a 403 whose body says so with the
+ *  remaining budget at zero. Both are read, because the App endpoints use the 403. */
+function isRateLimited(res: Response, body: string): boolean {
+  if (res.status === 429) return true;
+  if (res.status !== 403) return false;
+  if (res.headers.get("x-ratelimit-remaining") === "0") return true;
+  return /rate limit|abuse detection|secondary rate/i.test(body);
+}
+
+function installationIdIn(url: string): number | null {
+  const m = /\/app\/installations\/(\d+)\//.exec(url);
+  return m ? Number(m[1]) : null;
 }
 
 /**
@@ -280,6 +348,11 @@ export interface WorkspaceClientOptions {
  * the validator allows later, a call for a repository this workspace does not hold never
  * acquires a credential to make it with.
  */
+/** The account half of `owner/name`: the thing a person has to install the App on. */
+function accountOf(repo: string): string {
+  return repo.split("/")[0] ?? repo;
+}
+
 export function createWorkspaceGithubClient(options: WorkspaceClientOptions): GithubClient {
   const { workspaceId, holdings, app } = options;
 
@@ -288,20 +361,36 @@ export function createWorkspaceGithubClient(options: WorkspaceClientOptions): Gi
     const installationId = await app.installationForRepo(repo);
     if (installationId === null) {
       throw new GithubRoutingError(
-        `No GitHub App installation covers ${repo}. Install the app on that account, then connect it to this workspace.`,
+        `No GitHub App installation covers ${repo}. Install the app on the ${accountOf(repo)} account, ` +
+          "then connect it to this workspace.",
       );
     }
     const held = await holdings.installationIds(workspaceId);
     if (!held.includes(installationId)) {
       throw new GithubRoutingError(
-        `This workspace does not hold the GitHub App installation that covers ${repo}. Connect that account in workspace settings.`,
+        `This workspace does not hold the GitHub App installation that covers ${repo}. ` +
+          `Connect the ${accountOf(repo)} account in workspace settings.`,
       );
     }
     const id = app.repositoryId(repo);
-    const token = await app.installationToken(
-      installationId,
-      id === undefined ? { repositories: [repo.split("/")[1]!] } : { repositoryIds: [id] },
-    );
+    let token: string;
+    try {
+      token = await app.installationToken(
+        installationId,
+        id === undefined ? { repositories: [repo.split("/")[1]!] } : { repositoryIds: [id] },
+      );
+    } catch (err) {
+      // The mint layer knows an installation id; only here is there a repository, and
+      // therefore an account, to name — which is what the failure table promises.
+      if (err instanceof GithubSuspendedError) {
+        throw new GithubSuspendedError(
+          err.installationId,
+          `The GitHub App installation for the ${accountOf(repo)} account is suspended, so GitHub ` +
+            `refused to mint a token for ${repo}. Unsuspend it on GitHub, then try again.`,
+        );
+      }
+      throw err;
+    }
     return createFetchGithubClient({
       token,
       apiBase: options.apiBase,

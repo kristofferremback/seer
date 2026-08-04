@@ -261,15 +261,30 @@ export function deletePrStatusForRepo(
 
 /** Disconnect: stamp the row rather than delete it, so what was connected stays
  *  auditable — and release the installation id, because the partial unique index only
- *  covers live rows and a stranded id is one nobody can ever reconnect. */
-export function disconnectInstallation(wsId: string, id: string): boolean {
-  return (
+ *  covers live rows and a stranded id is one nobody can ever reconnect.
+ *
+ *  The observations go with it, exactly as they do for `installation.deleted`: an
+ *  installation going away is one rule and not two. After a disconnect no delivery can
+ *  ever arrive for those rows and no refresh can reach the repository, so leaving them
+ *  would draw a glyph from a fact nothing can ever correct — and the settings row that
+ *  was meant to make the staleness visible has just been removed too. Deletion is by
+ *  `installation_id`, so a sibling installation still covering that repository keeps
+ *  its own rows. */
+export const disconnectInstallation = db.transaction((wsId: string, id: string): boolean => {
+  const row = db
+    .query<{ installation_id: number }, [string, string]>(
+      "SELECT installation_id FROM github_installations WHERE id = ? AND workspace_id = ? AND removed_at IS NULL",
+    )
+    .get(id, wsId);
+  if (!row) return false;
+  const changed =
     db.run(
       "UPDATE github_installations SET removed_at = ? WHERE id = ? AND workspace_id = ? AND removed_at IS NULL",
       [Date.now(), id, wsId],
-    ).changes > 0
-  );
-}
+    ).changes > 0;
+  if (changed) deletePrStatusForInstallation(row.installation_id);
+  return changed;
+});
 
 /**
  * The database-backed answer to "which installations may this workspace act through".
@@ -397,6 +412,9 @@ export function burnClaimAttach(claimId: string): boolean {
 export interface ProvenInstallation {
   id: number;
   login: string;
+  /** GitHub's numeric account id. A login can be renamed and this cannot, which is why
+   *  `github_installations.account_id` exists — so the proof has to carry it. */
+  accountId: number;
   type: string;
   selection: string;
 }
@@ -411,6 +429,7 @@ function parseProven(claim: ClaimRow): ProvenInstallation[] {
       .map((p) => ({
         id: p.id,
         login: typeof p.login === "string" ? p.login : `installation ${p.id}`,
+        accountId: Number.isInteger(p.accountId) ? p.accountId : 0,
         type: typeof p.type === "string" ? p.type : "User",
         selection: typeof p.selection === "string" ? p.selection : "selected",
       }));

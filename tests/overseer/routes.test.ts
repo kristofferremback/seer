@@ -16,7 +16,12 @@ import {
   type GithubFile,
   type GithubPull,
 } from "../../src/overseer/github";
-import { GithubRoutingError, setGithubClientFactory } from "../../src/overseer/github-app";
+import {
+  GithubRateLimitError,
+  GithubRoutingError,
+  GithubSuspendedError,
+  setGithubClientFactory,
+} from "../../src/overseer/github-app";
 import { offlineGithubClient, offlineGithubClientFactory } from "../offline-github";
 import { REINDEX_EPSILON, validatePublish, type PublishPayload } from "../../src/overseer/validate";
 import { maxStatements } from "../../src/overseer/types";
@@ -809,6 +814,61 @@ describe("a workspace that holds no installation", () => {
     expect(ok.status).toBe(200);
     expect(detail.repo).toBe(GOLDEN_REPO);
     expect(getReviewVersion(wsA, "unheld-ref", 1)).not.toBeNull();
+  });
+
+  test("a suspended installation and a spent rate limit are 422s, not 502s", async () => {
+    // Both are faults the skill must not retry, and a 502 carrying GitHub's own string
+    // is exactly the instruction to retry. The account is named because a human on it
+    // is the only one who can unsuspend; the limit is named because no repository is
+    // at fault for it.
+    const throwing = (err: Error): GithubClient => {
+      const refuse = (): never => {
+        throw err;
+      };
+      return {
+        getPull: refuse,
+        listCommits: refuse,
+        listFiles: refuse,
+        listReviewComments: refuse,
+        getFileAtSha: refuse,
+        getPullDiff: refuse,
+      };
+    };
+    const account = GOLDEN_REPO.split("/")[0]!;
+
+    for (const [err, expected] of [
+      [
+        new GithubSuspendedError(
+          77,
+          `The GitHub App installation for the ${account} account is suspended, so GitHub refused ` +
+            `to mint a token for ${GOLDEN_REPO}. Unsuspend it on GitHub, then try again.`,
+        ),
+        account,
+      ],
+      [
+        new GithubRateLimitError(
+          "GitHub's rate limit for this Seer instance's App is exhausted (GitHub answered 403).",
+        ),
+        "rate limit",
+      ],
+    ] as [Error, string][]) {
+      setGithubClientFactory((ws) => (ws === wsA ? throwing(err) : fake));
+      let res: Response;
+      try {
+        res = await publish("app-refusal", noAttachments(), keyA);
+      } finally {
+        setGithubClientFactory((ws) => (ws === wsNone ? unheldClient() : fake));
+      }
+      expect(res.status).toBe(422);
+      expect((await readJson(res)).error).toContain(expected);
+      expect(getReviewVersion(wsA, "app-refusal", 1)).toBeNull();
+    }
+
+    // The success beside the refusals: the same document, the same workspace, with
+    // GitHub answering normally.
+    const ok = await publish("app-refusal", noAttachments(), keyA);
+    expect(ok.status).toBe(200);
+    expect(getReviewVersion(wsA, "app-refusal", 1)).not.toBeNull();
   });
 });
 

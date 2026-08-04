@@ -215,6 +215,9 @@ let attachTokenA: string;
   const row = installationRow(A_INSTALLATION);
   assert(!!row && row.workspace_id === wsA, "installation 111 is now workspace A's");
   assert(row!.account_login === "acme", `account facts came off the proof, got ${row?.account_login}`);
+  // The login is renameable and the id is not, which is the whole reason the column
+  // exists — so a claim has to record GitHub's numeric account id, not a placeholder.
+  assert(row!.account_id === 1, `the numeric account id came off the proof, got ${row?.account_id}`);
   assert(tokensIssued === 1, `exactly one user token was ever minted, got ${tokensIssued}`);
 }
 

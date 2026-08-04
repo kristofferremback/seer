@@ -15,7 +15,9 @@ import {
   createAppApi,
   createWorkspaceGithubClient,
   githubClientFor,
+  GithubRateLimitError,
   GithubRoutingError,
+  GithubSuspendedError,
   JWT_BACKDATE_SECONDS,
   setGithubClientFactory,
   setWorkspaceHoldings,
@@ -339,6 +341,71 @@ test("a repository no installation covers is refused, naming the repository", as
     new RegExp(`No GitHub App installation covers ${REPO}`),
   );
   expect(t.minted).toHaveLength(0);
+});
+
+// ---- the two rows of the failure table that are not about holdings ----
+
+test("a suspended installation is a 422 naming the account, not a 502 with GitHub's string", async () => {
+  const t = transport();
+  const inner = t.fetchImpl;
+  t.fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (/access_tokens$/.test(String(input))) {
+      return new Response(JSON.stringify({ message: "This installation has been suspended" }), {
+        status: 403,
+      });
+    }
+    return inner(input as string, init);
+  }) as unknown as typeof fetch;
+  const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
+
+  const err = await client.getPull(REPO, 1723).then(
+    () => null,
+    (e: unknown) => e as GithubSuspendedError,
+  );
+  expect(err).toBeInstanceOf(GithubSuspendedError);
+  // 422 and not 502: this is not a fault to retry, and only a human on that account can
+  // clear it — so the account is named.
+  expect(err!.status).toBe(422);
+  expect(err!.message).toContain("suspended");
+  expect(err!.message).toContain(REPO.split("/")[0]!);
+  expect(err!.installationId).toBe(INSTALLATION);
+});
+
+test("the app's exhausted rate limit is a 422 naming the limit, not the repository", async () => {
+  const t = transport();
+  t.fetchImpl = (async (input: string | URL | Request) => {
+    // Routing is the first app-JWT call any publish makes, so it is where a spent
+    // budget shows up.
+    expect(String(input)).toContain("/installation");
+    return new Response(JSON.stringify({ message: "API rate limit exceeded for installation" }), {
+      status: 403,
+      headers: { "x-ratelimit-remaining": "0" },
+    });
+  }) as unknown as typeof fetch;
+  const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
+
+  const err = await client.getPull(REPO, 1723).then(
+    () => null,
+    (e: unknown) => e as GithubRateLimitError,
+  );
+  expect(err).toBeInstanceOf(GithubRateLimitError);
+  expect(err!.status).toBe(422);
+  expect(err!.message).toMatch(/rate limit/i);
+  // The repository is not the problem, and naming it would send the skill to fix the
+  // wrong thing: the limit is shared by every workspace on this instance.
+  expect(err!.message).not.toContain(REPO);
+  expect(t.minted).toHaveLength(0);
+});
+
+test("a repository no installation covers names the account that needs the app", async () => {
+  const t = transport();
+  t.installationFor = () => null;
+  const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
+  await expect(client.getPull(REPO, 1723)).rejects.toThrow(/Install the app on the threahq account/);
+  // And the held-by-somebody-else refusal names it too.
+  const t2 = transport();
+  const { client: other } = clientFor(t2, "ws_b", { ws_b: [999] });
+  await expect(other.getPull(REPO, 1723)).rejects.toThrow(/Connect the threahq account/);
 });
 
 test("assertRepo runs before routing, so a malformed name never reaches the transport", async () => {

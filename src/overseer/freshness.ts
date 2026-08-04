@@ -27,7 +27,7 @@ import { getReviewVersion, resolveReview, type ReviewDoc } from "./db";
 import { parseUpdatedAt } from "./derive";
 import type { GithubClient } from "./github";
 import { githubClientFor } from "./github-app";
-import { lookupPrStatus, upsertPrStatus } from "./installations";
+import { lookupPrStatus, statusOf, upsertPrStatus } from "./installations";
 import { freshnessOf, readableWorkspaces, statusesOf } from "./read";
 import { prKey, type Freshness } from "./types";
 
@@ -132,6 +132,10 @@ export async function checkReview(
     const key = prKey(pr.repo, pr.number);
     const known = lookupPrStatus(wsId, pr.repo, pr.number);
     const was: Freshness = known ? (known.head_sha === pr.headSha ? "current" : "behind") : "unknown";
+    // One observation, two derivations — so a check has changed something when *either*
+    // derivation moved. A pull request merged with its head unmoved changes status and
+    // not freshness, and the message this decides whether to send carries both.
+    const wasStatus = known ? statusOf(known) : null;
     let freshness = was;
     try {
       const pull = await client.getPull(pr.repo, pr.number);
@@ -161,6 +165,8 @@ export async function checkReview(
       console.error(`[seer] freshness check failed for ${key} in ${wsId}/${slug}: ${String(err)}`);
     }
     if (freshness !== was) changed = true;
+    const nowRow = lookupPrStatus(wsId, pr.repo, pr.number);
+    if ((nowRow ? statusOf(nowRow) : null) !== wasStatus) changed = true;
     prs.push({ pr: key, repo: pr.repo, number: pr.number, freshness });
   }
   return { prs, changed };

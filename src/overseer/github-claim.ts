@@ -183,6 +183,7 @@ export async function handleGithubSetupCallback(req: Request): Promise<Response>
     .map((i) => ({
       id: i.id,
       login: i.account?.login ?? `installation ${i.id}`,
+      accountId: Number.isInteger(i.account?.id) ? i.account!.id : 0,
       type: i.account?.type ?? "User",
       selection: i.repository_selection ?? "selected",
     }));
@@ -334,7 +335,10 @@ export async function handleClaimInstallation(req: Request): Promise<Response> {
     userId: user.id,
     installationId: chosen,
     accountLogin: facts.login,
-    accountId: existing?.account_id ?? 0,
+    // The proof first: on the ordinary connect there is no pre-existing row, and the
+    // OAuth response carried the numeric account id all along. The existing row is the
+    // fallback, for an installation first seen through `installation.created`.
+    accountId: facts.accountId || existing?.account_id || 0,
     accountType: facts.type,
     repositorySelection: facts.selection,
   });

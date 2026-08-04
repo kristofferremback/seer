@@ -801,6 +801,73 @@ describe("the single live message", () => {
     socket.close();
   });
 
+  test("a merge with an unmoved head still pushes, because status is half the observation", async () => {
+    reviewNaming(wsA, "merged-push");
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
+    // Both pull requests observed open at exactly the heads the document names, so
+    // freshness is "current" before the refresh and "current" after it. The only thing
+    // that changes is status — the case a freshness-only `changed` misses.
+    for (const [number, sha] of [
+      [12, GOLDEN_HEAD_SHA_12],
+      [13, GOLDEN_HEAD_SHA_13],
+    ] as [number, string][]) {
+      upsertPrStatus(wsA, INSTALL_A, {
+        repoId: REPO_ID,
+        repo: GOLDEN_REPO,
+        prNumber: number,
+        state: "open",
+        merged: false,
+        draft: false,
+        headSha: sha,
+        updatedAt: 1000,
+      });
+    }
+
+    const socket = new WebSocket(
+      `ws://localhost:${server.port}/ws/livereload?kind=review&ws=${wsA}&slug=merged-push`,
+    );
+    await new Promise<void>((resolve) => {
+      socket.onopen = () => resolve();
+    });
+    const heard = new Promise<string | null>((resolve) => {
+      socket.onmessage = (e) => resolve(String(e.data));
+      setTimeout(() => resolve(null), 1500);
+    });
+
+    resetChecks();
+    const fake = countingClient((_repo, number) => ({
+      number,
+      state: "closed",
+      merged: number === 12,
+      head: { sha: number === 12 ? GOLDEN_HEAD_SHA_12 : GOLDEN_HEAD_SHA_13, ref: "topic" },
+      updated_at: "2026-08-05T13:00:00Z",
+    }));
+    setGithubClientFactory(() => fake.client);
+    const refreshed = await fetch(`${base}/api/reviews/merged-push/refresh`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${keyA}` },
+    });
+    expect(refreshed.status).toBe(200);
+    expect(((await refreshed.json()) as { checked: boolean }).checked).toBe(true);
+
+    // The other pages open on this review hear about the merge. Without this the human
+    // who pressed refresh sees it (their page reloads) and nobody else ever does.
+    const message = await heard;
+    expect(message).not.toBeNull();
+    expect(JSON.parse(message!)).toEqual({
+      type: "review",
+      prs: [
+        { pr: `${GOLDEN_REPO}#12`, status: "merged", freshness: "current" },
+        { pr: `${GOLDEN_REPO}#13`, status: "closed", freshness: "current" },
+      ],
+      behind: 0,
+      unknown: 0,
+      total: 2,
+    });
+    socket.close();
+    setGithubClientFactory(offlineGithubClientFactory());
+  });
+
   test("the page carries the anchor the message is keyed to", async () => {
     reviewNaming(wsA, "anchored");
     const html = await (await fetch(`${base}/${wsA}/r/anchored`)).text();

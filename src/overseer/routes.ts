@@ -30,7 +30,7 @@ import {
   type PrPointer,
 } from "./derive";
 import { GithubError, type GithubClient } from "./github";
-import { GithubRoutingError, githubClientFor } from "./github-app";
+import { GithubAppRefusal, githubClientFor } from "./github-app";
 import {
   publishUsage,
   validatePublish,
@@ -260,7 +260,7 @@ async function resolveRefs(
       // A repository this workspace holds no installation for is neither the skill's
       // ref to rewrite nor GitHub failing: it is a refusal by our own transport, and it
       // travels as itself so the route can answer 422 naming the repository.
-      if (err.cause instanceof GithubRoutingError) throw err.cause;
+      if (err.cause instanceof GithubAppRefusal) throw err.cause;
       const upstreamCause = err.cause !== undefined && !(err.cause instanceof GithubError);
       if (upstreamCause || (err.status !== null && err.status !== 0 && err.status !== 404)) {
         throw new UpstreamError(err.message);
@@ -671,7 +671,9 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     // Routing refused before any request went out: the workspace holds no installation
     // covering this repository. Naming it is the actionable answer; a 502 would have
     // the skill retry an access problem as though GitHub had faltered.
-    if (err instanceof GithubRoutingError) return json({ error: err.message }, 422);
+    // Routing refused, the installation is suspended, or the App's shared rate limit is
+    // spent: all three are 422, and none of them is a fault to retry.
+    if (err instanceof GithubAppRefusal) return json({ error: err.message }, 422);
     // The same status rule the ref path reads: a 404 is a pointer at a pull request
     // that is not there, and a 0 is a pointer the client refused before any request
     // went out, a malformed repo or a number that is not one. Both are the skill's to
@@ -739,7 +741,9 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   try {
     ({ refs, errors: refErrors } = await resolveRefs(github, review, payload));
   } catch (err) {
-    if (err instanceof GithubRoutingError) return json({ error: err.message }, 422);
+    // Routing refused, the installation is suspended, or the App's shared rate limit is
+    // spent: all three are 422, and none of them is a fault to retry.
+    if (err instanceof GithubAppRefusal) return json({ error: err.message }, 422);
     if (!(err instanceof UpstreamError)) throw err;
     return json({ error: `Overseer could not read a ref from GitHub: ${err.message}` }, 502);
   }

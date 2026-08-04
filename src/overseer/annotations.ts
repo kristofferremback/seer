@@ -29,7 +29,7 @@ import {
 } from "./db";
 import { refResolver, RefResolveError, type DerivedPr, type DerivedReview } from "./derive";
 import { GithubError, type GithubClient } from "./github";
-import { GithubRoutingError, githubClientFor } from "./github-app";
+import { GithubAppRefusal, githubClientFor } from "./github-app";
 import { readableWorkspaces } from "./read";
 import { checkRef, type RefPointerInput, type ValidationError } from "./validate";
 import { BUDGETS, type Annotation, type AnnotationTargetType, type Ref } from "./types";
@@ -284,7 +284,7 @@ async function resolveAnswerRefs(
       // author's to fix, and anything else GitHub said, or failed to say, is ours.
       // The publish route's other rule, unchanged too: a repository this workspace
       // holds no installation for is our own transport refusing, and travels as itself.
-      if (err.cause instanceof GithubRoutingError) throw err.cause;
+      if (err.cause instanceof GithubAppRefusal) throw err.cause;
       const upstreamCause = err.cause !== undefined && !(err.cause instanceof GithubError);
       if (upstreamCause || (err.status !== null && err.status !== 0 && err.status !== 404)) {
         throw new UpstreamError(err.message);
@@ -467,7 +467,7 @@ async function answerHere(
     try {
       ({ refs, errors: refErrors } = await resolveAnswerRefs(githubClientFor(ws), doc, pointers));
     } catch (err) {
-      if (err instanceof GithubRoutingError) return json({ error: err.message }, 422);
+      if (err instanceof GithubAppRefusal) return json({ error: err.message }, 422);
       if (!(err instanceof UpstreamError)) throw err;
       return json({ error: `Overseer could not read a ref from GitHub: ${err.message}` }, 502);
     }
