@@ -29,9 +29,11 @@ const { setGithubClient } = await import("../src/overseer/github");
 const { offlineGithubClient } = await import("./offline-github");
 setGithubClient(offlineGithubClient());
 
+const { zipSync, strToU8 } = await import("fflate");
 const { sessionCookie } = await import("../src/auth");
-const { db } = await import("../src/db");
+const { createVersion, db } = await import("../src/db");
 const { tinyId } = await import("../src/ids");
+const { saveZip } = await import("../src/store");
 const { startServer } = await import("../src/server");
 const { createShare, revokeShare } = await import("../src/shares");
 const { storeGoldenReview } = await import("./overseer/fixtures/stored-review");
@@ -270,6 +272,204 @@ for (const [what, token] of [
     res.status === 404,
     `a token must not reach the workspace's other reviews, got ${res.status}`,
   );
+}
+
+// ---- a private workspace's bundle, which is the whole point of sharing one ----
+//
+// A bundle in a public workspace is already sendable, so a share buys nothing there.
+// The question worth asking is the private one: the canonical URL refuses a stranger,
+// the token serves them, and neither fact is inferable from the other.
+{
+  const zip = zipSync({
+    "index.html": strToU8("<!doctype html><title>preview</title><body>the preview</body>"),
+    "assets/app.css": strToU8("/* the preview */"),
+  });
+  const version = createVersion(ws, "preview", zip.length, 2);
+  await saveZip(ws, "preview", version, zip);
+
+  const bundleShare = (label: string, expiresAt: number | null = null) =>
+    createShare({ wsId: ws, kind: "bundle", target: "preview", label, expiresAt, userId: member });
+
+  // The control: the member can open it, so what the stranger is refused demonstrably
+  // exists to be refused.
+  const mine = await fetch(`${base}/${ws}/b/preview/`, { headers: memberCookie });
+  assert(mine.status === 200, `a member should reach their own bundle, got ${mine.status}`);
+  assert(
+    (await mine.text()).includes("the preview"),
+    "the member's own bundle should render its page",
+  );
+
+  // And the stranger is refused at the canonical URL, with or without a token in hand:
+  // a share is a URL, never a credential for another one.
+  const shared = bundleShare("live bundle");
+  for (const [what, headers] of [
+    ["signed out", {}],
+    ["holding the token as a bearer", { authorization: `Bearer ${shared.token}` }],
+  ] as const) {
+    const res = await fetch(`${base}/${ws}/b/preview/`, { headers, redirect: "manual" });
+    assert(
+      res.status === 404,
+      `a private bundle should 404 a stranger ${what}, got ${res.status}`,
+    );
+  }
+
+  // The token, though, opens it — for nobody in particular, tree and all.
+  const page = await fetch(`${base}/s/${shared.token}/`, { redirect: "manual" });
+  assert(page.status === 200, `a live bundle token should 200 signed out, got ${page.status}`);
+  assert(
+    page.headers.get("referrer-policy") === "no-referrer",
+    "a shared bundle must not leak its token in a referrer",
+  );
+  const html = await page.text();
+  assert(html.includes("the preview"), "the live share should render the bundle it names");
+  assert(
+    !html.includes(`/${ws}/b/preview`),
+    "a shared bundle should not print the private url it stands in for",
+  );
+  // It reloads over the token, because the workspace channel would refuse the holder.
+  assert(
+    html.includes(`/ws/livereload?share=${shared.token}`),
+    "a shared bundle should listen on its own token's channel",
+  );
+
+  const asset = await fetch(`${base}/s/${shared.token}/assets/app.css`);
+  assert(asset.status === 200, `a shared bundle's asset should 200, got ${asset.status}`);
+
+  // Dead is dead, everywhere under the token, byte for byte.
+  const gone = bundleShare("revoked bundle");
+  revokeShare(gone.id);
+  const stale = bundleShare("expired bundle", now - 1000);
+  for (const [what, token] of [
+    ["a revoked bundle token", gone.token],
+    ["an expired bundle token", stale.token],
+  ] as const) {
+    for (const path of ["/", "/assets/app.css", "/v/1/"]) {
+      const res = await fetch(`${base}/s/${token}${path}`, { redirect: "manual" });
+      assert(!res.headers.get("location"), `${what} should not redirect a signed-out reader`);
+      assert(
+        (await shape(res)) === missing,
+        `${what} on /s/<token>${path} should be byte-identical to one that never existed`,
+      );
+    }
+  }
+
+  // The member exception holds for bundles too: for them it does exist.
+  const back = await fetch(`${base}/s/${gone.token}`, {
+    headers: memberCookie,
+    redirect: "manual",
+  });
+  assert(
+    back.status === 302 && back.headers.get("location") === `/${ws}/b/preview/`,
+    `a member following a dead bundle link should land on the bundle, got ${back.status} ${back.headers.get("location")}`,
+  );
+
+  // And the reload channel is gated on the share, not merely on naming a workspace.
+  const socket = await fetch(`${base}/ws/livereload?share=${gone.token}`);
+  assert(socket.status === 404, `a revoked token should open no channel, got ${socket.status}`);
+  const strangerSocket = await fetch(`${base}/ws/livereload?ws=${ws}&slug=preview`);
+  assert(
+    strangerSocket.status === 404,
+    `a stranger should open no channel on a private workspace, got ${strangerSocket.status}`,
+  );
+}
+
+// ---- an agent mints its own share, so it can paste one into a pull request ----
+//
+// This is the credential question, and it can only be asked here: with AUTH_DISABLED
+// set, every request is a signed-in root user and the session branch shadows the key
+// branch entirely. An API key belongs to one workspace and one user, which is exactly
+// what a mint needs, and it is what the agent that uploaded the bundle is already
+// holding.
+{
+  const { mintApiKey } = await import("../src/db");
+  const key = mintApiKey(member, ws, "agent key").token;
+  const bearer = { authorization: `Bearer ${key}`, "content-type": "application/json" };
+
+  const minted = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: bearer,
+    // No `workspace` in the body: a key names one by existing.
+    body: JSON.stringify({ kind: "bundle", target: "preview", label: "for the PR" }),
+  });
+  assert(minted.status === 200, `a key should be able to mint, got ${minted.status}`);
+  const made = (await minted.json()) as { id: string; token: string; url: string };
+  assert(
+    made.url === `http://localhost:3000/s/${made.token}`,
+    `the mint should hand back the full URL, got ${made.url}`,
+  );
+
+  // And the link works for someone with no account, which is the whole point of an
+  // agent minting one.
+  const opened = await fetch(`${base}/s/${made.token}/`, { redirect: "manual" });
+  assert(opened.status === 200, `an agent-minted link should open signed out, got ${opened.status}`);
+  assert(
+    (await opened.text()).includes("the preview"),
+    "an agent-minted link should render the bundle",
+  );
+
+  // A key lists and revokes within its own workspace too.
+  const listed = await fetch(`${base}/api/shares`, { headers: bearer });
+  assert(listed.status === 200, `a key should be able to list, got ${listed.status}`);
+  const text = await listed.text();
+  assert(!text.includes(made.token), "a listing must never hand back a token");
+  assert(text.includes("for the PR"), "the listing should hold the share just minted");
+
+  const revoked = await fetch(`${base}/api/shares/${made.id}`, {
+    method: "DELETE",
+    headers: bearer,
+  });
+  assert(revoked.status === 200, `a key should be able to revoke, got ${revoked.status}`);
+  const dead = await fetch(`${base}/s/${made.token}/`, { redirect: "manual" });
+  assert((await shape(dead)) === missing, "a revoked agent-minted link should be the soft-404");
+
+  // A key reaches its own workspace and no other. The root workspace ALLOWED_EMAILS
+  // bootstrapped is a second one this key does not belong to.
+  const elsewhere = db
+    .query<{ id: string }, [string]>("SELECT id FROM workspaces WHERE id != ? LIMIT 1")
+    .get(ws)!.id;
+  const crossed = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: bearer,
+    body: JSON.stringify({ workspace: elsewhere, kind: "bundle", target: "preview" }),
+  });
+  assert(
+    crossed.status === 404,
+    `a key naming another workspace should 404, got ${crossed.status}`,
+  );
+
+  // A share token still is not a credential. It never was, and widening the mint to
+  // accept API keys is exactly the change that could have made it one by accident.
+  const withShareToken = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${live.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ kind: "bundle", target: "preview" }),
+  });
+  assert(
+    withShareToken.status === 401,
+    `a share token must not mint shares, got ${withShareToken.status}`,
+  );
+
+  // Nor is a revoked key.
+  const { revokeApiKey } = await import("../src/db");
+  const doomed = mintApiKey(member, ws, "revoked key");
+  revokeApiKey(doomed.id);
+  const withDeadKey = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${doomed.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ kind: "bundle", target: "preview" }),
+  });
+  assert(
+    withDeadKey.status === 401,
+    `a revoked key must not mint shares, got ${withDeadKey.status}`,
+  );
+
+  // And no credential at all is still asked to sign in rather than told anything.
+  const anonymous = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workspace: ws, kind: "bundle", target: "preview" }),
+  });
+  assert(anonymous.status === 403, `an anonymous mint should 403, got ${anonymous.status}`);
 }
 
 console.log("all assertions passed");

@@ -1,5 +1,5 @@
-import type { Server, WebSocketHandler } from "bun";
-import { join, normalize, resolve } from "node:path";
+import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
+import { join, resolve } from "node:path";
 import { config } from "./config";
 import {
   db,
@@ -29,7 +29,7 @@ import {
   type Workspace,
 } from "./db";
 import { migrate } from "./migrate";
-import { inspectZip, saveZip, ensureExtracted, openImage, imageLocation, saveImage, s3 } from "./store";
+import { inspectZip, saveZip, openImage, imageLocation, saveImage, s3 } from "./store";
 import { migrateBlobsToS3 } from "./migrate-blobs";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
 import {
@@ -49,10 +49,13 @@ import {
   handleCreateShare,
   handleListShares,
   handleRevokeShare,
-  handleShare,
+  handleShareRequest,
   listShares,
+  resolveShare,
   revokeShare,
+  setShareRevokedHook,
 } from "./shares";
+import { serveBundleFile } from "./serve-bundle";
 import { handlePublishReview } from "./overseer/routes";
 import { handleReadReview } from "./overseer/read";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
@@ -71,7 +74,6 @@ import {
   skillDoc,
   skillRouter,
   softNotFoundPage,
-  injectBundleMeta,
   type BundleMeta,
   type LedgerGroup,
   type SettingsReveal,
@@ -99,8 +101,10 @@ const WS_ANNOTATIONS_RE = new RegExp(
 
 // A live socket is either a bundle's reload channel or a review's freshness channel.
 // The two are gated differently, so which one this is travels with the socket rather
-// than being re-derived at subscribe time.
-type WSData = { ws: string; slug: string; kind: "bundle" | "review" };
+// than being re-derived at subscribe time. `shareId` is set when the socket was
+// authorised by a share token rather than by membership: a socket is gated once, at
+// upgrade, so revocation has to be able to find this one again and shut it.
+type WSData = { ws: string; slug: string; kind: "bundle" | "review"; shareId?: string };
 
 function markdown(body: string): Response {
   return new Response(body, {
@@ -233,51 +237,10 @@ function softNotFound(req: Request): Response {
   });
 }
 
-// ---- live reload ----
-
-function liveReloadScript(wsId: string, slug: string): string {
-  return `<script>(()=>{const c=()=>{const w=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+"/ws/livereload?ws=${wsId}&slug=${slug}");w.onmessage=e=>{if(e.data==="reload")location.reload()};w.onclose=()=>setTimeout(c,2000)};c()})();</script>`;
-}
-
 // ---- bundle serving ----
-
-async function serveBundleFile(
-  wsId: string,
-  meta: BundleMeta,
-  filePath: string,
-  injectReload: boolean,
-): Promise<Response> {
-  const dir = await ensureExtracted(wsId, meta.slug, meta.version);
-  const clean = normalize(filePath || "index.html");
-  if (clean.startsWith("..") || clean.startsWith("/")) {
-    return new Response("Not found", { status: 404 });
-  }
-  let file = Bun.file(join(dir, clean));
-  if (!(await file.exists())) {
-    // directory request → try its index.html
-    const withIndex = Bun.file(join(dir, clean, "index.html"));
-    if (!(await withIndex.exists())) return new Response("Not found", { status: 404 });
-    file = withIndex;
-  }
-
-  // Latest (unpinned) content changes underneath viewers on every upload, and the
-  // live-reload push means a stale-asset window breaks reloads (new HTML, old CSS/JS)
-  // — so everything is no-cache. Pinned /v/N/ content is immutable by construction:
-  // the injected social tags derive only from that version's own fixed data.
-  const cacheControl = injectReload ? "no-cache" : "public, max-age=31536000, immutable";
-
-  if (file.type.startsWith("text/html")) {
-    let html = injectBundleMeta(await file.text(), meta);
-    if (injectReload) {
-      const script = liveReloadScript(wsId, meta.slug);
-      html = html.includes("</body>") ? html.replace("</body>", `${script}</body>`) : html + script;
-    }
-    return new Response(html, {
-      headers: { "content-type": "text/html;charset=utf-8", "cache-control": cacheControl },
-    });
-  }
-  return new Response(file, { headers: { "cache-control": cacheControl } });
-}
+//
+// The file-by-file part lives in ./serve-bundle, because the share route serves the
+// same trees. What is left here is the workspace path's own reading of the URL.
 
 // Workspace-scoped serving: /<ws_id>/b/<slug>[/v/N][/rest]. Public workspaces serve
 // anyone; private ones only members. Every denial, unknown workspace, unknown bundle,
@@ -311,7 +274,10 @@ async function handleWorkspaceBundle(req: Request, wsId: string): Promise<Respon
     updatedAt: getVersion(wsId, slug!, version)?.created_at ?? bundle.created_at,
     url: `${config.baseUrl}${url.pathname}`,
   };
-  return serveBundleFile(wsId, meta, rest.slice(1), !pinned);
+  return serveBundleFile(wsId, meta, rest.slice(1), {
+    live: pinned ? null : { via: "workspace", wsId, slug: slug! },
+    shared: false,
+  });
 }
 
 // ---- upload ----
@@ -463,19 +429,19 @@ function ledgerGroups(userId: string): LedgerGroup[] {
     wsId: ws.id,
     name: ws.name,
     visibility: ws.visibility,
-    bundles: listBundles(ws.id).map((b) => {
-      const versions = listVersions(ws.id, b.slug);
-      const updated = new Date(versions[0]?.created_at ?? b.created_at)
-        .toISOString()
-        .slice(0, 16)
-        .replace("T", " ");
-      return {
-        slug: b.slug,
-        latestVersion: b.latest_version,
-        updated,
-        versions: versions.map((v) => v.version),
-      };
-    }),
+    // Newest first, and the raw instant rather than a rendered one: the page sorts by
+    // it, sections by it, and decides how it should read.
+    bundles: listBundles(ws.id)
+      .map((b) => {
+        const versions = listVersions(ws.id, b.slug);
+        return {
+          slug: b.slug,
+          latestVersion: b.latest_version,
+          updatedAt: versions[0]?.created_at ?? b.created_at,
+          versions: versions.map((v) => v.version),
+        };
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt),
   }));
 }
 
@@ -489,6 +455,11 @@ export async function startServer() {
   // Runs before the server binds so requests never race a half-moved store.
   await migrateBlobsToS3();
 
+  // Only the sockets a share opened, so revocation can find them. Membership-gated
+  // sockets are not in here: nothing revokes a membership mid-connection today, and a
+  // registry of every open socket would be a leak waiting to happen.
+  const shareSockets = new Set<ServerWebSocket<WSData>>();
+
   const websocket: WebSocketHandler<WSData> = {
     open(ws) {
       ws.subscribe(
@@ -496,6 +467,10 @@ export async function startServer() {
           ? reviewTopic(ws.data.ws, ws.data.slug)
           : `bundle:${ws.data.ws}:${ws.data.slug}`,
       );
+      if (ws.data.shareId) shareSockets.add(ws);
+    },
+    close(ws) {
+      shareSockets.delete(ws);
     },
     message() {},
   };
@@ -643,23 +618,6 @@ export async function startServer() {
       },
       "/r/:slug/a/:id": {
         GET: (req) => handleReviewAttachment(req, req.params.slug, req.params.id),
-      },
-
-      // A share: one revocable, read-only link to one asset, at one URL shape whatever
-      // the asset is. The token is the whole of the authorisation, which is why it
-      // travels in the path rather than on the asset's own URL: the secret and the
-      // canonical URL stay separate things, and this is the one place that sets
-      // Referrer-Policy so following a link out of a shared page cannot leak it.
-      "/s/:token": {
-        GET: (req) => handleShare(req, req.params.token, null, null),
-      },
-      "/s/:token/v/:n": {
-        GET: (req) => handleShare(req, req.params.token, req.params.n, null),
-      },
-      // The evidence a shared page draws. Without it a shared review with an attachment
-      // renders a broken image, because its own /a/ route asks for membership.
-      "/s/:token/a/:id": {
-        GET: (req) => handleShare(req, req.params.token, null, req.params.id),
       },
 
       // Minting and revoking, session-authenticated and member-only. The mint answers
@@ -862,6 +820,24 @@ export async function startServer() {
       const url = new URL(req.url);
 
       if (url.pathname === "/ws/livereload") {
+        // A shared bundle page names its token and nothing else: the workspace and the
+        // slug come off the share row, so a holder cannot widen the channel by editing
+        // the query, and a token that stops resolving stops reloading. Everyone else
+        // names the workspace and is gated on it.
+        const shareToken = url.searchParams.get("share");
+        if (shareToken !== null) {
+          const share = resolveShare(shareToken);
+          if (!share || share.kind !== "bundle") return new Response("Not found", { status: 404 });
+          const data: WSData = {
+            ws: share.workspace_id,
+            slug: share.target,
+            kind: "bundle",
+            shareId: share.id,
+          };
+          if (srv.upgrade(req, { data })) return undefined as unknown as Response;
+          return new Response("WebSocket upgrade failed", { status: 400 });
+        }
+
         const wsId = url.searchParams.get("ws") ?? "";
         const slug = url.searchParams.get("slug") ?? "";
         const kind = url.searchParams.get("kind") === "review" ? "review" : "bundle";
@@ -880,6 +856,17 @@ export async function startServer() {
           return undefined as unknown as Response;
         return new Response("WebSocket upgrade failed", { status: 400 });
       }
+
+      // A share: one revocable, read-only link to one asset, at one URL shape whatever
+      // the asset is. The token is the whole of the authorisation, which is why it
+      // travels in the path rather than on the asset's own URL: the secret and the
+      // canonical URL stay separate things, and this is the one place that sets
+      // Referrer-Policy so following a link out of a shared page cannot leak it.
+      //
+      // It is matched here rather than declared as routes because a shared bundle is a
+      // whole tree: the remainder after the token is arbitrary, and what it means is
+      // not knowable until the token says which kind of asset it opens.
+      if (url.pathname.startsWith("/s/")) return handleShareRequest(req);
 
       const wsBundle = url.pathname.match(WS_BUNDLE_RE);
       if (wsBundle) return handleWorkspaceBundle(req, wsBundle[1]!);
@@ -923,6 +910,16 @@ export async function startServer() {
   // so the freshness module never has to know a server exists to be tested.
   setFreshnessPublisher((topic, message) => {
     server.publish(topic, message);
+  });
+
+  // A revoked share loses its live channel in the same breath as its link. Without this
+  // a holder whose page is already open keeps being told that new versions exist —
+  // the reload lands on the soft-404, but being told at all is more than a revoked
+  // token should be able to learn.
+  setShareRevokedHook((shareId) => {
+    for (const socket of shareSockets) {
+      if (socket.data.shareId === shareId) socket.close();
+    }
   });
 
   console.log(`Seer listening on ${config.baseUrl} (port ${server.port})`);

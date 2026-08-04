@@ -10,19 +10,22 @@
 import { join } from "node:path";
 
 import { test, expect, beforeAll, afterAll, describe } from "bun:test";
+import { zipSync, strToU8 } from "fflate";
 
 import { startServer } from "../src/server";
 import { config } from "../src/config";
-import { db, legacyWorkspaceId } from "../src/db";
+import { createVersion, db, legacyWorkspaceId } from "../src/db";
 import { tinyId, hashKey, newShareToken } from "../src/ids";
 import { createAnnotation, createAttachment } from "../src/overseer/db";
-import { saveAttachment } from "../src/store";
+import { saveAttachment, saveZip } from "../src/store";
 import {
   createShare,
   listShares,
   lookupShare,
   resolveShare,
   revokeShare,
+  SHARE_KINDS,
+  SERVED_SHARE_KINDS,
 } from "../src/shares";
 import { renderReviewPage } from "../src/overseer/render";
 import type { Evidence } from "../src/overseer/types";
@@ -78,7 +81,28 @@ beforeAll(async () => {
     "",
   );
   await saveAttachment(wsOut, attachmentId, bytes);
+
+  // Two versions of a bundle in the workspace the reader is a stranger to, one more in
+  // the reader's own, and a sibling nothing points at.
+  await publish(wsOut, "shared-bundle", "one");
+  await publish(wsOut, "shared-bundle", "two");
+  await publish(wsOut, "other-bundle", "not this one");
+  await publish(rootWs, "own-bundle", "mine");
 });
+
+/** A bundle version, as an upload would leave it: a row, then its bytes. A nested asset
+ *  and a subdirectory come with every one, because a bundle is a tree and the share
+ *  route has to serve all of it, not just the page at the root. */
+async function publish(wsId: string, slug: string, body: string): Promise<number> {
+  const zip = zipSync({
+    "index.html": strToU8(`<!doctype html><title>${slug}</title><body>${body}</body>`),
+    "assets/app.css": strToU8(`/* ${body} */`),
+    "deep/index.html": strToU8(`<!doctype html><body>deep ${body}</body>`),
+  });
+  const version = createVersion(wsId, slug, zip.length, 3);
+  await saveZip(wsId, slug, version, zip);
+  return version;
+}
 
 afterAll(() => {
   server.stop(true);
@@ -318,6 +342,227 @@ describe("the share read route", () => {
   });
 });
 
+// ---- a shared bundle ----
+//
+// A bundle is a tree, not a page, so the questions here are the ones a review never
+// raised: does the trailing slash arrive, does a relative asset resolve, does the
+// version pin work through the token, and does the page that reloads itself reload
+// itself for someone who is not a member.
+
+function bundleShare(over: Partial<Parameters<typeof createShare>[0]> = {}) {
+  return createShare({
+    wsId: wsOut,
+    kind: "bundle",
+    target: "shared-bundle",
+    label: "the preview",
+    userId: rootUser,
+    expiresAt: null,
+    ...over,
+  });
+}
+
+describe("a shared bundle", () => {
+  test("the token's root redirects onto its trailing slash, then serves the page", async () => {
+    const { token } = bundleShare();
+
+    // Without the slash every relative URL in the page would resolve one level too high.
+    const bare = await fetch(`${base}/s/${token}`, { redirect: "manual" });
+    expect(bare.status).toBe(302);
+    expect(bare.headers.get("location")).toBe(`/s/${token}/`);
+
+    const page = await fetch(`${base}/s/${token}/`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toBe("text/html;charset=utf-8");
+    const html = await page.text();
+    expect(html).toContain("two"); // the latest version, as a share link should show
+    expect(html).not.toContain("one");
+  });
+
+  test("the whole tree comes with it, not just the page at the root", async () => {
+    const { token } = bundleShare();
+
+    const css = await fetch(`${base}/s/${token}/assets/app.css`);
+    expect(css.status).toBe(200);
+    expect(await css.text()).toContain("two");
+
+    // A directory request falls back to its index.html, exactly as the private route does.
+    const deep = await fetch(`${base}/s/${token}/deep/`);
+    expect(deep.status).toBe(200);
+    expect(await deep.text()).toContain("deep two");
+
+    expect((await fetch(`${base}/s/${token}/nothing-here.js`)).status).toBe(404);
+  });
+
+  test("a version pins through the token, and an unpublished one is the soft-404", async () => {
+    const { token } = bundleShare();
+
+    const pinned = await fetch(`${base}/s/${token}/v/1/`);
+    expect(pinned.status).toBe(200);
+    expect(await pinned.text()).toContain("one");
+    // Pinned content never changes, so it opens no socket — but see the caching test
+    // below for why it is still not cached the way the workspace path caches it.
+    expect(pinned.headers.get("content-type")).toBe("text/html;charset=utf-8");
+
+    const bare = await fetch(`${base}/s/${token}/v/1`, { redirect: "manual" });
+    expect(bare.status).toBe(302);
+    expect(bare.headers.get("location")).toBe(`/s/${token}/v/1/`);
+
+    expect(await shape(await fetch(`${base}/s/${token}/v/9/`))).toBe(
+      await shape(await fetch(`${base}/s/${newShareToken()}`)),
+    );
+  });
+
+  test("the live page reloads over the token, never over the workspace", async () => {
+    const { token } = bundleShare();
+    const html = await (await fetch(`${base}/s/${token}/`)).text();
+    // The holder is not a member, so the workspace channel would refuse them; the
+    // socket carries the token and the server reads the workspace off the share.
+    expect(html).toContain(`/ws/livereload?share=${token}`);
+    expect(html).not.toContain(`ws=${wsOut}`);
+    expect(html).not.toContain(`/${wsOut}/b/`);
+  });
+
+  test("the socket opens for a live token and shuts for a dead one", async () => {
+    const live = bundleShare();
+    const opened = await new Promise<boolean>((resolve) => {
+      const ws = new WebSocket(`ws://localhost:${server.port}/ws/livereload?share=${live.token}`);
+      ws.onopen = () => { ws.close(); resolve(true); };
+      ws.onerror = () => resolve(false);
+    });
+    expect(opened).toBe(true);
+
+    const dead = bundleShare();
+    revokeShare(dead.id);
+    const refused = await fetch(`${base}/ws/livereload?share=${dead.token}`);
+    expect(refused.status).toBe(404);
+    // And a review's token opens no bundle channel, whatever it names.
+    expect((await fetch(`${base}/ws/livereload?share=${mint().token}`)).status).toBe(404);
+  });
+
+  test("a dead token is the same refusal at the root and everywhere under it", async () => {
+    const unknown = await shape(await fetch(`${base}/s/${newShareToken()}`));
+
+    const revoked = bundleShare();
+    revokeShare(revoked.id);
+    for (const path of ["", "/", "/assets/app.css", "/v/1/"]) {
+      expect(await shape(await fetch(`${base}/s/${revoked.token}${path}`))).toBe(unknown);
+    }
+
+    const expired = bundleShare({ expiresAt: Date.now() - 1000 });
+    expect(await shape(await fetch(`${base}/s/${expired.token}/`))).toBe(unknown);
+  });
+
+  test("a token opens its own bundle and no sibling", async () => {
+    const { token } = bundleShare();
+    const html = await (await fetch(`${base}/s/${token}/`)).text();
+    expect(html).toContain("shared-bundle");
+    expect(html).not.toContain("other-bundle");
+    // The workspace's other bundle stays where it was: private to a workspace this
+    // reader is not in.
+    expect((await fetch(`${base}/${wsOut}/b/other-bundle/`)).status).toBe(404);
+  });
+
+  test("a member following a revoked bundle link reaches the bundle", async () => {
+    const own = createShare({
+      wsId: rootWs,
+      kind: "bundle",
+      target: "own-bundle",
+      label: "stale",
+      userId: rootUser,
+      expiresAt: null,
+    });
+    revokeShare(own.id);
+    const res = await fetch(`${base}/s/${own.token}`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`/${rootWs}/b/own-bundle/`);
+  });
+
+  test("Referrer-Policy: no-referrer rides on the page and on its assets", async () => {
+    const { token } = bundleShare();
+    for (const path of ["/", "/assets/app.css", "/v/1/"]) {
+      expect((await fetch(`${base}/s/${token}${path}`)).headers.get("referrer-policy")).toBe(
+        "no-referrer",
+      );
+    }
+  });
+
+  test("nothing a share serves may be cached by anything but the reader", async () => {
+    // What revocation withdraws here is authorization, not content — so the reasoning
+    // the workspace path uses (a pinned version's bytes never change, therefore cache
+    // them forever) does not carry across. A year-long `public` entry is a copy of the
+    // bytes in an intermediary that no revocation can reach.
+    const { token } = bundleShare();
+    for (const path of ["/", "/assets/app.css", "/v/1/", "/v/1/assets/app.css"]) {
+      const res = await fetch(`${base}/s/${token}${path}`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("private, no-cache");
+    }
+
+    // The control: on the workspace path a pinned version still caches forever, which
+    // is what makes the line above a decision rather than a blanket rule.
+    const own = await fetch(`${base}/${rootWs}/b/own-bundle/v/1/`);
+    expect(own.status).toBe(200);
+    expect(own.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  });
+
+  test("a shared page is not indexable and does not print its own token", async () => {
+    const { token } = bundleShare();
+
+    // The other way a URL escapes a page is a crawler that fetched it.
+    for (const path of ["/", "/assets/app.css", "/v/1/"]) {
+      expect((await fetch(`${base}/s/${token}${path}`)).headers.get("x-robots-tag")).toBe(
+        "noindex, nofollow",
+      );
+    }
+    // Including the refusal, or an unknown token would be the indexable one.
+    expect((await fetch(`${base}/s/${newShareToken()}`)).headers.get("x-robots-tag")).toBe(
+      "noindex, nofollow",
+    );
+
+    // og:url would put the token in a meta tag, which is the one part of the page an
+    // unfurler copies onward and a crawler reads as the address to index. The other
+    // social tags stay: a shared link should still unfurl as a Seer card.
+    const html = await (await fetch(`${base}/s/${token}/`)).text();
+    expect(html).toContain(`property="og:title"`);
+    expect(html).toContain(`property="og:image"`);
+    expect(html).not.toContain(`property="og:url"`);
+    for (const tag of html.match(/<meta[^>]*>/g) ?? []) expect(tag).not.toContain(token);
+
+    // The live page does carry the token once, in the reload socket's URL, and has to:
+    // that is how the socket authorises. It is not a leak of the same kind — a script
+    // in the bundle can read location.href regardless, and no unfurler copies a script
+    // tag onward. A pinned page opens no socket, so it holds the token nowhere at all.
+    const pinned = await (await fetch(`${base}/s/${token}/v/1/`)).text();
+    expect(pinned).not.toContain(token);
+
+    // The control: the workspace path does declare its canonical URL, because there the
+    // URL is not a secret.
+    const own = await (await fetch(`${base}/${rootWs}/b/own-bundle/`)).text();
+    expect(own).toContain(`property="og:url"`);
+  });
+
+  test("revoking a share shuts the socket it already had open", async () => {
+    const live = bundleShare();
+    const socket = new WebSocket(`ws://localhost:${server.port}/ws/livereload?share=${live.token}`);
+    const closed = new Promise<boolean>((resolve) => {
+      socket.onopen = () => revokeShare(live.id);
+      socket.onclose = () => resolve(true);
+      socket.onerror = () => resolve(false);
+    });
+    // A socket is authorised once, at upgrade. Without this a revoked holder keeps a
+    // live channel and goes on being told that new versions exist.
+    expect(await closed).toBe(true);
+  });
+
+  test("the share route has no verb but GET", async () => {
+    const { token } = bundleShare();
+    for (const method of ["POST", "PUT", "DELETE"]) {
+      const res = await fetch(`${base}/s/${token}/`, { method, body: method === "DELETE" ? undefined : "x" });
+      expect(res.status).toBe(405);
+    }
+  });
+});
+
 // ---- a share is never a write ----
 
 describe("a share is never a write", () => {
@@ -470,15 +715,38 @@ describe("the shares API", () => {
     expect(error.rule).toBe("kind_unknown");
   });
 
-  test("a kind no route serves is a 422 naming kind, not a link that cannot open", async () => {
+  test("POST mints a bundle share, and the URL it hands back opens the bundle", async () => {
     const res = await post({
       workspace: rootWs,
       kind: "bundle",
-      target: "own-review",
+      target: "own-bundle",
+      label: "for the client",
     });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { token: string; url: string; kind: string };
+    expect(body.kind).toBe("bundle");
+    expect(body.url).toBe(`${config.baseUrl}/s/${body.token}`);
+
+    const page = await fetch(`${base}/s/${body.token}/`);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("mine");
+  });
+
+  test("a bundle target that is not a bundle is a 422 naming target", async () => {
+    // `own-review` exists in this workspace, but as a review. The kind and the target
+    // are checked together, so a share can never name one thing and open another.
+    const res = await post({ workspace: rootWs, kind: "bundle", target: "own-review" });
     const error = await errorOf(res);
-    expect(error.field).toBe("kind");
-    expect(error.rule).toBe("kind_not_served");
+    expect(error.field).toBe("target");
+    expect(error.rule).toBe("target_unknown");
+  });
+
+  test("every kind the table allows is a kind some route serves", () => {
+    // A kind in SHARE_KINDS but not in SERVED_SHARE_KINDS mints a 422 (kind_not_served)
+    // rather than a link that dead-ends. Nothing is in that state today, so the guard
+    // is asserted here rather than exercised over HTTP: adding a third kind without a
+    // branch in handleShareRequest is what this is here to catch.
+    expect([...SHARE_KINDS].sort()).toEqual([...SERVED_SHARE_KINDS].sort());
   });
 
   test("an unknown target is a 422 naming target", async () => {

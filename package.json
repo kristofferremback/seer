@@ -9,6 +9,7 @@
     "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.11.1",
     "@types/bun": "latest"
   },
   "peerDependencies": {
