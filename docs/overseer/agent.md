@@ -75,6 +75,13 @@ Give the user the url, the warnings, and anything substantive the witness found.
 the friction report too if it named something wrong; that is how the hosted instructions
 get better.
 
+Say plainly that the url needs workspace access. A review is private to the workspace it
+was published in, and a request without a session gets a bare 404 rather than a sign-in
+prompt, deliberately: a review that exists somewhere you cannot see it has to look
+exactly like one that was never published. The cost is that someone forwarded the link
+without access reads it as broken, so tell the user that when you hand it over rather
+than letting them discover it through a colleague.
+
 Two warnings mean something and are worth repeating to the user rather than swallowing:
 
 - `decomposition` says the review spent its whole budget on too few pull requests. On a

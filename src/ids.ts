@@ -17,6 +17,13 @@ export function newApiKey(): string {
   return `seer_sk_${randomBytes(24).toString("base64url")}`;
 }
 
+/** A fresh share token: `seer_sh_` + 32 url-safe base64 chars. Same entropy and the
+ *  same hashing as an API key, because it is the same kind of secret: the row's
+ *  identity, shown once at mint and stored only as its hash. */
+export function newShareToken(): string {
+  return `seer_sh_${randomBytes(24).toString("base64url")}`;
+}
+
 /** SHA-256 hex of the exact full token string; what we store and index on. */
 export function hashKey(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -37,4 +44,6 @@ export const IMG_ID_RE = new RegExp(`^img_${TINY}$`);
 export const REV_ID_RE = new RegExp(`^rev_${TINY}$`);
 export const ANN_ID_RE = new RegExp(`^ann_${TINY}$`);
 export const ATT_ID_RE = new RegExp(`^att_${TINY}$`);
+export const SHR_ID_RE = new RegExp(`^shr_${TINY}$`);
 export const API_KEY_RE = /^seer_sk_[A-Za-z0-9_-]{32}$/;
+export const SHARE_TOKEN_RE = /^seer_sh_[A-Za-z0-9_-]{32}$/;

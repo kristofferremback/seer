@@ -44,6 +44,15 @@ import {
   type SessionUser,
 } from "./auth";
 import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
+import {
+  getShare,
+  handleCreateShare,
+  handleListShares,
+  handleRevokeShare,
+  handleShare,
+  listShares,
+  revokeShare,
+} from "./shares";
 import { handlePublishReview } from "./overseer/routes";
 import { handleReadReview } from "./overseer/read";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
@@ -181,6 +190,18 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
         created: fmtDate(k.created_at),
         lastUsed: k.last_used_at ? fmtDateTime(k.last_used_at) : "never",
         isLegacy: !!k.is_legacy,
+      })),
+      // The workspace's shares, not the viewer's: a share is the workspace's to see and
+      // to revoke, or a link nobody can see is a link nobody takes back. No token is in
+      // this list, because none survived the mint.
+      shares: listShares(wsId).map((sh) => ({
+        id: sh.id,
+        label: sh.label,
+        kind: sh.kind,
+        target: sh.target,
+        created: fmtDate(sh.created_at),
+        expires: sh.expires_at === null ? "never" : fmtDate(sh.expires_at),
+        isExpired: sh.expires_at !== null && sh.expires_at <= Date.now(),
       })),
       reveal,
     }),
@@ -624,6 +645,40 @@ export async function startServer() {
         GET: (req) => handleReviewAttachment(req, req.params.slug, req.params.id),
       },
 
+      // A share: one revocable, read-only link to one asset, at one URL shape whatever
+      // the asset is. The token is the whole of the authorisation, which is why it
+      // travels in the path rather than on the asset's own URL: the secret and the
+      // canonical URL stay separate things, and this is the one place that sets
+      // Referrer-Policy so following a link out of a shared page cannot leak it.
+      "/s/:token": {
+        GET: (req) => handleShare(req, req.params.token, null, null),
+      },
+      "/s/:token/v/:n": {
+        GET: (req) => handleShare(req, req.params.token, req.params.n, null),
+      },
+      // The evidence a shared page draws. Without it a shared review with an attachment
+      // renders a broken image, because its own /a/ route asks for membership.
+      "/s/:token/a/:id": {
+        GET: (req) => handleShare(req, req.params.token, null, req.params.id),
+      },
+
+      // Minting and revoking, session-authenticated and member-only. The mint answers
+      // with the full /s/<token> URL, because the URL is the thing a person wants; the
+      // list answers without tokens, because only their hashes survived the mint.
+      "/api/shares": {
+        GET: (req) => handleListShares(req),
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleCreateShare(req);
+        },
+      },
+      "/api/shares/:id": {
+        DELETE: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleRevokeShare(req, req.params.id);
+        },
+      },
+
       "/api/images": {
         GET: (req) => {
           const auth = requireApiKey(req);
@@ -743,6 +798,22 @@ export async function startServer() {
             return new Response("Not found", { status: 404 });
           }
           revokeApiKey(req.params.keyId);
+          return redirect(`/settings/${req.params.ws}`);
+        },
+      },
+
+      // The same revocation the API does, as a form a browser can post: an HTML form
+      // cannot send a DELETE, and the settings page is where a share is seen.
+      "/settings/:ws/shares/:shareId/revoke": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          const share = getShare(req.params.shareId);
+          if (!share || share.workspace_id !== req.params.ws) {
+            return new Response("Not found", { status: 404 });
+          }
+          revokeShare(share.id);
           return redirect(`/settings/${req.params.ws}`);
         },
       },

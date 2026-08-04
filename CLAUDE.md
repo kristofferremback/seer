@@ -52,6 +52,24 @@ test("hello world", () => {
 });
 ```
 
+### Testing anything that turns on who is asking
+
+`tests/setup.ts` sets `AUTH_DISABLED=true`, and the repo's `.env` sets it too, which Bun
+loads before any script you run by hand. Under it `sessionUser` returns the root user for
+every request, so a fetch with no cookie is not a signed-out visitor. A test that means to
+ask what a stranger sees is silently asking what a signed-in root user sees, and a probe
+you write in the scratchpad has the same problem unless it starts with
+`delete process.env.AUTH_DISABLED`.
+
+Privacy questions therefore run in their own process, spawned from the suite:
+`tests/share-privacy.script.ts` and `tests/overseer/read-privacy.script.ts` are the
+pattern. Copy one. They assert on status, content type and body together, because
+"the same 404" has to mean the same response and not merely the same status line.
+
+When a refusal is the thing under test, check that the corresponding success actually
+works in the same script. A guarantee is only tested when the thing it withholds is
+demonstrably there to withhold.
+
 ## Frontend
 
 Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.

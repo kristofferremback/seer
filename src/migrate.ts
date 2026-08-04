@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 3.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 4.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -21,6 +21,9 @@ import { hashKey, tinyId } from "./ids";
 // v3 adds the Overseer review tables (reviews, versions, attachments, annotations,
 // read state, freshness, and the ref snippet cache). Purely additive: no existing
 // table is touched, so a v1 or v2 database walks straight up to it.
+//
+// v4 adds the shares table: one revocable read-only link to one asset. Purely
+// additive too, on the same terms.
 
 const V1_SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
@@ -233,12 +236,49 @@ const V3_REVIEWS = `
   CREATE INDEX IF NOT EXISTS idx_review_annotations_review ON review_annotations (workspace_id, slug);
 `;
 
+// One share is one revocable read-only link to one asset. The token is the row's
+// identity and its secret at once, exactly as an API key is: it is shown once at mint
+// and only its SHA-256 is stored, so a database copy is not a set of working links.
+// That is also why the lookup runs on token_hash — UNIQUE builds the index this path
+// reads by, so there is no second index on the same column.
+//
+// `kind` is a closed list rather than free text, because a share resolver has to
+// dispatch on it: a row naming a kind no route serves is a link that cannot open.
+// `target` is the asset's slug inside `workspace_id`; the two together name the asset,
+// which is what keeps a token minted in one workspace from reaching into another.
+// Revocation sets `revoked_at` rather than deleting the row, so a link that was handed
+// out and taken back stays auditable.
+const V4_SHARES = `
+  CREATE TABLE IF NOT EXISTS shares (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('review','bundle')),
+    target TEXT NOT NULL,
+    label TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    revoked_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_shares_workspace ON shares (workspace_id);
+`;
+
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 3) throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, 2, or 3`);
+  if (uv > 4) throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, 2, 3, or 4`);
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
   if (userVersion() < 3) migrateToV3();
+  if (userVersion() < 4) migrateToV4();
+}
+
+function migrateToV4(): void {
+  db.transaction(() => {
+    db.exec(V4_SHARES);
+    db.run("PRAGMA user_version = 4");
+  })();
+  console.log("[seer] migrated to schema v4 (shares).");
 }
 
 function migrateToV3(): void {

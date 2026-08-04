@@ -49,6 +49,12 @@ test("a v2 db gains the overseer tables and re-running is a no-op", async () => 
   expect(out).toContain("all assertions passed");
 });
 
+test("a v3 db gains the shares table and re-running is a no-op", async () => {
+  const { code, out } = await runScenario("v3");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("no resolvable root email with auth enabled fails loudly", async () => {
   const { code, out } = await runScenario("noemail");
   expect(code).toBe(0);
