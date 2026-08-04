@@ -18,7 +18,10 @@ process.env.CACHE_TTL_MS = "0";
 delete process.env.API_KEY;
 // Tests always run against the disk blob store, whatever the developer's shell has.
 delete process.env.S3_BUCKET;
-// Tests never reach the real GitHub API, whatever the developer's shell has.
+// GITHUB_TOKEN no longer exists; the App credentials below are what a client is
+// built from, and the offline factory at the bottom is what stops one reaching a
+// network. The delete stays because a developer's shell may still export it and its
+// presence must never be what makes a test pass.
 delete process.env.GITHUB_TOKEN;
 
 // A GitHub App the suite owns, with a keypair generated for this process. config.ts
@@ -36,22 +39,16 @@ process.env.GITHUB_APP_CLIENT_ID = "Iv1.testclientid";
 process.env.GITHUB_APP_CLIENT_SECRET = "test-client-secret";
 process.env.GITHUB_WEBHOOK_SECRET = "test-webhook-secret";
 
-// ...and nothing else reaches it either. Deleting the token above only makes an
-// outbound call anonymous; this makes one impossible. Every GitHub call in the suite
-// goes through the injection seam, so the default here is a client that refuses,
-// loudly and offline. A test that wants GitHub installs its own fake with
-// setGithubClient(), and clearing the seam with setGithubClient(null) still exposes
-// the real fetch-backed default to the one test that asks for it by name.
+// ...and nothing else reaches it either. Every GitHub call in the suite is made by a
+// client the factory below built, so the default here is a factory that returns a
+// client which refuses, loudly and offline. A test that wants GitHub installs its own
+// with setGithubClientFactory().
 //
 // There are two seams to close, not one: the per-workspace client factory and the
 // OAuth transport, which is not a GithubClient. Leaving either open would let the
 // suite make a real request with the app credentials above.
-const { setGithubClient } = await import("../src/overseer/github");
 const { setGithubClientFactory } = await import("../src/overseer/github-app");
 const { setGithubOAuth } = await import("../src/overseer/github-oauth");
-const { offlineGithubClient, offlineGithubClientFactory, offlineGithubOAuth } = await import(
-  "./offline-github"
-);
-setGithubClient(offlineGithubClient());
+const { offlineGithubClientFactory, offlineGithubOAuth } = await import("./offline-github");
 setGithubClientFactory(offlineGithubClientFactory());
 setGithubOAuth(offlineGithubOAuth());

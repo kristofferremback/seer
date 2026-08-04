@@ -25,13 +25,11 @@ process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-share-privacy-"));
 
 // This process does not get bunfig's test preload, so it installs the same offline
 // GitHub client itself: rendering a review page kicks a freshness check.
-const { setGithubClient } = await import("../src/overseer/github");
 const { setGithubClientFactory } = await import("../src/overseer/github-app");
 const { setGithubOAuth } = await import("../src/overseer/github-oauth");
-const { offlineGithubClient, offlineGithubClientFactory, offlineGithubOAuth } = await import(
+const { offlineGithubClientFactory, offlineGithubOAuth } = await import(
   "./offline-github"
 );
-setGithubClient(offlineGithubClient());
 // Both seams, not just the first: a per-workspace client is built by a factory, and
 // the OAuth transport is not a GithubClient at all.
 setGithubClientFactory(offlineGithubClientFactory());

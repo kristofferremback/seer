@@ -385,12 +385,14 @@ export function refResolver(client: GithubClient, review: DerivedReview): RefRes
 
   // ref_snippets has no workspace column: the same (repo, sha, path) is the same bytes
   // for everyone, which makes it a shared cache of private source. The gate below is
-  // per-derivation, against the server's single GitHub token: the cache opens for a
-  // repository only once this derivation has actually fetched from it, so a publish
-  // body naming an unrelated (repo, sha, path) pays a real fetch rather than being
-  // served cached bytes with no GitHub call at all. It is not a per-caller check and
-  // proves nothing about who is publishing; there is one process-global token today,
-  // and if per-workspace tokens ever arrive this gate has to be rebuilt around them.
+  // per-derivation: the cache opens for a repository only once this derivation has
+  // actually fetched from it, so a publish body naming an unrelated (repo, sha, path)
+  // pays a real fetch rather than being served cached bytes with no GitHub call at all.
+  // What that fetch now costs is the point. The client handed in is built for one
+  // workspace and refuses a repository that workspace holds no installation for, so
+  // the only way into this set is a fetch that workspace was entitled to make — which
+  // is what makes the shared snippet cache per-workspace by construction rather than
+  // by the validator's single-repo rule happening to hold.
   //
   // The set starts EMPTY, and the only thing that puts a repository in it is a
   // successful fetch below. It used to be seeded from `review.prs`, which made the

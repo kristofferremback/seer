@@ -51,11 +51,9 @@ process.env.GITHUB_APP_CLIENT_SECRET = "test-client-secret";
 process.env.GITHUB_WEBHOOK_SECRET = "test-webhook-secret";
 
 // This process does not get bunfig's test preload, so it closes both seams itself.
-const { setGithubClient } = await import("../../src/overseer/github");
 const { setGithubClientFactory } = await import("../../src/overseer/github-app");
 const { setGithubOAuth } = await import("../../src/overseer/github-oauth");
-const { offlineGithubClient, offlineGithubClientFactory } = await import("../offline-github");
-setGithubClient(offlineGithubClient());
+const { offlineGithubClientFactory } = await import("../offline-github");
 setGithubClientFactory(offlineGithubClientFactory());
 
 const { sessionCookie } = await import("../../src/auth");

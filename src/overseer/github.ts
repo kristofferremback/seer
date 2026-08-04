@@ -1,13 +1,11 @@
 // The GitHub side of the dividing line. Everything Overseer derives about a pull
 // request comes through this client and nothing else, so the rest of Overseer never
 // holds a token, never builds a URL, and never needs a network to be tested: the
-// client is an interface with one fetch-backed implementation and an injection seam.
+// client is an interface with one fetch-backed implementation, built per workspace.
 //
 // Shapes below are the subset of the GitHub REST payloads Overseer actually reads.
 // They are deliberately partial: recording a whole payload into a type buys nothing
 // and rots on the next API change.
-
-import { config } from "../config";
 
 export interface GithubUser {
   login: string;
@@ -174,7 +172,7 @@ function assertSameOrigin(url: string, base: string): void {
 }
 
 export interface FetchGithubClientOptions {
-  /** A personal access token. Absent, only public repositories resolve. */
+  /** An installation token, minted for the call this client is about to make. */
   token?: string | undefined;
   /** Overridable for tests and for GitHub Enterprise. No trailing slash. */
   apiBase?: string;
@@ -298,20 +296,8 @@ export function nextLink(link: string | null): string | null {
   return null;
 }
 
-// ---- the injection seam ----
-//
-// Overseer code calls githubClient(); tests call setGithubClient() with a fake. The
-// default is built lazily so that importing this module never requires a token.
-
-let injected: GithubClient | null = null;
-let lazyDefault: GithubClient | null = null;
-
-export function githubClient(): GithubClient {
-  if (injected) return injected;
-  lazyDefault ??= createFetchGithubClient({ token: config.githubToken });
-  return lazyDefault;
-}
-
-export function setGithubClient(client: GithubClient | null): void {
-  injected = client;
-}
+// The process-global client, and the lazy default that built one from GITHUB_TOKEN,
+// used to live here. Both are gone: a client is built for a workspace, out of the
+// installation that workspace holds, so `githubClientFor()` in `github-app.ts` is the
+// only way to get one and the seam tests install is a factory rather than an instance.
+// A default client here would be exactly the confused deputy the App exists to remove.

@@ -11,7 +11,7 @@ import type { GithubOAuth } from "../src/overseer/github-oauth";
 
 function refuse(method: string): never {
   throw new Error(
-    `[tests] GitHub is offline in tests: ${method} was called with no fake installed. Install one with setGithubClient().`,
+    `[tests] GitHub is offline in tests: ${method} was called with no fake installed. Install one with setGithubClientFactory().`,
   );
 }
 

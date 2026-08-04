@@ -1,13 +1,13 @@
 import { test, expect, describe, afterEach } from "bun:test";
+import { createFetchGithubClient, nextLink, GithubError } from "../../src/overseer/github";
 import {
-  createFetchGithubClient,
-  githubClient,
-  setGithubClient,
-  nextLink,
-  GithubError,
-} from "../../src/overseer/github";
+  githubClientFor,
+  setGithubClientFactory,
+  setWorkspaceHoldings,
+} from "../../src/overseer/github-app";
+import { dbWorkspaceHoldings } from "../../src/overseer/installations";
 import { fakeGithubClient, loadPull, loadFiles, loadCommits, loadComments } from "./github-fixtures";
-import { offlineGithubClient } from "../offline-github";
+import { offlineGithubClientFactory } from "../offline-github";
 
 // Every request in this file goes through a stub fetch. No socket is opened, and the
 // grep the acceptance criteria asks for finds api.github.com only in the assertions
@@ -28,7 +28,7 @@ const ok = (body: unknown, headers: Record<string, string> = {}) =>
 
 // Back to the suite-wide offline default, not to the fetch-backed one: this file
 // shares a process with every other test file.
-afterEach(() => setGithubClient(offlineGithubClient()));
+afterEach(() => setGithubClientFactory(offlineGithubClientFactory()));
 
 describe("the fetch client", () => {
   test("a request that stalls is abandoned rather than waited on forever", async () => {
@@ -217,18 +217,29 @@ describe("Link parsing", () => {
 });
 
 describe("the injection seam", () => {
-  test("an injected client is what the rest of Overseer gets", async () => {
+  test("an injected factory is what the rest of Overseer gets, per workspace", async () => {
     const fake = fakeGithubClient({ pull: loadPull(3) });
-    setGithubClient(fake);
-    expect(githubClient()).toBe(fake);
-    expect((await githubClient().getPull("a/b", 3)).number).toBe(3);
+    setGithubClientFactory((ws) => {
+      expect(ws).toBe("ws_seam");
+      return fake;
+    });
+    expect(githubClientFor("ws_seam")).toBe(fake);
+    expect((await githubClientFor("ws_seam").getPull("a/b", 3)).number).toBe(3);
   });
 
-  test("clearing the seam restores the default without a network call", () => {
-    setGithubClient(fakeGithubClient());
-    setGithubClient(null);
-    const client = githubClient();
-    expect(typeof client.getPull).toBe("function");
+  // What used to be here: clearing the seam fell back to a client built from
+  // GITHUB_TOKEN. There is no such default any more — with nothing injected, a client
+  // can only be built out of what a workspace holds, so clearing both seams is a
+  // refusal rather than a quietly network-capable client.
+  test("clearing the seam leaves no default client behind", () => {
+    setGithubClientFactory(null);
+    setWorkspaceHoldings(null);
+    try {
+      expect(() => githubClientFor("ws_seam")).toThrow(/holdings source/);
+    } finally {
+      setGithubClientFactory(offlineGithubClientFactory());
+      setWorkspaceHoldings(dbWorkspaceHoldings());
+    }
   });
 
   test("the fake refuses to invent what it was not given", async () => {

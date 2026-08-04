@@ -12,12 +12,12 @@ import { getAttachment, getReviewVersion, listAttachments } from "../../src/over
 import { attachmentPath } from "../../src/store";
 import {
   GithubError,
-  setGithubClient,
   type GithubClient,
   type GithubFile,
   type GithubPull,
 } from "../../src/overseer/github";
-import { offlineGithubClient } from "../offline-github";
+import { GithubRoutingError, setGithubClientFactory } from "../../src/overseer/github-app";
+import { offlineGithubClient, offlineGithubClientFactory } from "../offline-github";
 import { REINDEX_EPSILON, validatePublish, type PublishPayload } from "../../src/overseer/validate";
 import { maxStatements } from "../../src/overseer/types";
 import { ATT_ID_RE } from "../../src/ids";
@@ -29,6 +29,7 @@ import {
   GOLDEN_HEAD_SHA_12,
   GOLDEN_HEAD_SHA_13,
   GOLDEN_HUNKS,
+  GOLDEN_REPO,
   goldenDerived,
   goldenPayload,
 } from "./fixtures/golden-review";
@@ -175,7 +176,40 @@ let keyA = "";
 let keyB = "";
 let wsA = "";
 let wsB = "";
-let priorToken: string | undefined;
+let keyNone = "";
+let wsNone = "";
+
+/** A client for a workspace that holds no installation covering the golden repository.
+ *  It refuses the way the real per-workspace client refuses — at the transport, before
+ *  anything is fetched — so the route sees exactly what production would hand it. */
+/** The same client with only its file reads refused: a workspace can derive a pull
+ *  request it holds while a ref names a repository it does not. */
+function refRefusing(base: GithubClient): GithubClient {
+  return {
+    ...base,
+    getFileAtSha: (repo) => {
+      throw new GithubRoutingError(
+        `This workspace does not hold the GitHub App installation that covers ${repo}. Connect that account in workspace settings.`,
+      );
+    },
+  };
+}
+
+function unheldClient(): GithubClient {
+  const refuse = (): never => {
+    throw new GithubRoutingError(
+      `This workspace does not hold the GitHub App installation that covers ${GOLDEN_REPO}. Connect that account in workspace settings.`,
+    );
+  };
+  return {
+    getPull: refuse,
+    listCommits: refuse,
+    listFiles: refuse,
+    listReviewComments: refuse,
+    getFileAtSha: refuse,
+    getPullDiff: refuse,
+  };
+}
 
 /** The golden payload as a publish body: the document plus the slug it lands on. */
 function body(slug: string, payload: PublishPayload = goldenPayload()): string {
@@ -213,17 +247,19 @@ function counts(): { versions: number; reviews: number; attachments: number } {
 beforeAll(async () => {
   server = await startServer();
   base = `http://localhost:${server.port}`;
-  setGithubClient(fake);
-  // The route refuses to publish without a token, and tests/setup.ts deletes it so
-  // nothing can reach the real API by accident. The fake client is what answers.
-  priorToken = config.githubToken;
-  config.githubToken = "fake-token";
+  // Publishing builds a client for the publishing workspace, so the seam the suite
+  // installs is a factory. Every workspace here holds the golden repository's
+  // installation except wsNone, which holds nothing — the one asymmetry the refusal
+  // below turns on.
+  setGithubClientFactory((ws) => (ws === wsNone ? unheldClient() : fake));
 
   const owner = listMembers(legacyWorkspaceId()!)[0]!.id;
   wsA = createWorkspace("Workspace A", owner);
   wsB = createWorkspace("Workspace B", owner);
   keyA = mintApiKey(owner, wsA, "a").token;
   keyB = mintApiKey(owner, wsB, "b").token;
+  wsNone = createWorkspace("Workspace with no installation", owner);
+  keyNone = mintApiKey(owner, wsNone, "none").token;
   // The golden review cites a bundle twice, latest and pinned at 3, so the workspace
   // publishing it holds three versions of that bundle.
   for (let i = 0; i < GOLDEN_BUNDLE_VERSION; i++) createVersion(wsA, GOLDEN_BUNDLE_SLUG, 10, 1);
@@ -231,8 +267,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  setGithubClient(offlineGithubClient());
-  config.githubToken = priorToken;
+  setGithubClientFactory(offlineGithubClientFactory());
   server.stop(true);
 });
 
@@ -719,25 +754,61 @@ describe("attachments", () => {
 
 // ---- misconfiguration ----
 
-describe("without GITHUB_TOKEN", () => {
-  test("publishing -> 503 naming the variable, while bundles still upload", async () => {
-    const held = config.githubToken;
-    config.githubToken = undefined;
-    try {
-      const res = await publish("no-token", noAttachments());
-      expect(res.status).toBe(503);
-      expect((await readJson(res)).error).toContain("GITHUB_TOKEN");
+describe("a workspace that holds no installation", () => {
+  test("publishing -> 422 naming the repository, while bundles still upload", async () => {
+    // The refusal this replaces was "GITHUB_TOKEN is not set", answered 503. There is
+    // no server-wide token any more: what can fail now is a workspace naming a
+    // repository none of its installations covers, and that is the caller's to fix.
+    const res = await publish("no-installation", noAttachments(), keyNone);
+    expect(res.status).toBe(422);
+    const body = await readJson(res);
+    expect(body.error).toContain(GOLDEN_REPO);
+    expect(body.error).toContain("does not hold");
+    // Nothing was written for the refused publish.
+    expect(getReviewVersion(wsNone, "no-installation", 1)).toBeNull();
 
-      const zip = await fetch(`${base}/api/bundles/still-works`, {
-        method: "PUT",
-        headers: { authorization: `Bearer ${keyA}` },
-        body: zipSync({ "index.html": strToU8("<!doctype html>still here") }),
-      });
-      expect(zip.status).toBe(200);
-      expect((await readJson(zip)).version).toBe(1);
+    // Bundles never touched GitHub and still do not, which is why this refuses per
+    // publish rather than at boot.
+    const zip = await fetch(`${base}/api/bundles/still-works`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${keyNone}` },
+      body: zipSync({ "index.html": strToU8("<!doctype html>still here") }),
+    });
+    expect(zip.status).toBe(200);
+    expect((await readJson(zip)).version).toBe(1);
+  });
+
+  test("the same payload publishes from a workspace that does hold it", async () => {
+    // The success beside the refusal: same document, same repository, same fake
+    // GitHub — only the workspace's holdings differ.
+    const res = await publish("no-installation", noAttachments(), keyA);
+    expect(res.status).toBe(200);
+    expect((await readJson(res)).version).toBe(1);
+    expect(getReviewVersion(wsA, "no-installation", 1)).not.toBeNull();
+  });
+
+  test("a ref into a repository the workspace does not hold is refused, not resolved", async () => {
+    // The ref path routes separately from derivation, so it gets its own refusal: a
+    // publish whose pull requests derive fine but whose ref names an unheld repository
+    // must not be served snippet bytes.
+    const payload = noAttachments();
+    const detail = payload.prs[0]!.detailRef!;
+    let refused: Response;
+    setGithubClientFactory((ws) => (ws === wsA ? refRefusing(fake) : fake));
+    try {
+      refused = await publish("unheld-ref", payload, keyA);
     } finally {
-      config.githubToken = held;
+      setGithubClientFactory((ws) => (ws === wsNone ? unheldClient() : fake));
     }
+    expect(refused.status).toBe(422);
+    expect((await readJson(refused)).error).toContain("does not hold");
+    expect(getReviewVersion(wsA, "unheld-ref", 1)).toBeNull();
+
+    // And with the same workspace holding it, the same ref resolves and the review lands.
+    const ok = await publish("unheld-ref", payload, keyA);
+    expect(ok.status).toBe(200);
+    expect(detail.repo).toBe(GOLDEN_REPO);
+    expect(getReviewVersion(wsA, "unheld-ref", 1)).not.toBeNull();
   });
 });
 

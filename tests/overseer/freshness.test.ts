@@ -11,14 +11,15 @@ import { test, expect, beforeAll, beforeEach, afterAll, describe } from "bun:tes
 import { startServer } from "../../src/server";
 import { createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
 import { listFreshness } from "../../src/overseer/db";
-import { setGithubClient, type GithubClient, type GithubPull } from "../../src/overseer/github";
+import type { GithubClient, GithubPull } from "../../src/overseer/github";
+import { setGithubClientFactory } from "../../src/overseer/github-app";
 import {
   CHECK_INTERVAL_MS,
   claimCheck,
   resetChecks,
   setFreshnessPublisher,
 } from "../../src/overseer/freshness";
-import { offlineGithubClient } from "../offline-github";
+import { offlineGithubClientFactory } from "../offline-github";
 import { tinyId } from "../../src/ids";
 import { GOLDEN_HEAD_SHA_12, GOLDEN_HEAD_SHA_13, GOLDEN_REPO } from "./fixtures/golden-review";
 import { storeGoldenReview } from "./fixtures/stored-review";
@@ -90,7 +91,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  setGithubClient(offlineGithubClient());
+  setGithubClientFactory(offlineGithubClientFactory());
   // The publisher is a module-level singleton, and this server is about to stop.
   setFreshnessPublisher(null);
   server.stop(true);
@@ -114,7 +115,7 @@ describe("the rate limit", () => {
   test("two renders inside the window cost one check and a later one costs another", async () => {
     storeGoldenReview(wsA, "rate");
     const fake = countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : GOLDEN_HEAD_SHA_13));
-    setGithubClient(fake.client);
+    setGithubClientFactory(() => fake.client);
 
     expect((await fetch(`${base}/${wsA}/r/rate`)).status).toBe(200);
     expect((await fetch(`${base}/${wsA}/r/rate`)).status).toBe(200);
@@ -135,7 +136,7 @@ describe("a head that moved", () => {
     storeGoldenReview(wsA, "moved");
     const moved = "9".repeat(40);
     const fake = countingClient((_repo, n) => (n === 12 ? moved : GOLDEN_HEAD_SHA_13));
-    setGithubClient(fake.client);
+    setGithubClientFactory(() => fake.client);
 
     const first = await fetch(`${base}/${wsA}/r/moved`);
     expect(first.status).toBe(200);
@@ -160,9 +161,7 @@ describe("POST /api/reviews/:slug/refresh", () => {
   test("it answers per pull request", async () => {
     storeGoldenReview(wsA, "explicit");
     const moved = "8".repeat(40);
-    setGithubClient(
-      countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : moved)).client,
-    );
+    setGithubClientFactory(() => countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : moved)).client);
 
     const res = await fetch(`${base}/api/reviews/explicit/refresh`, {
       method: "POST",
@@ -190,7 +189,7 @@ describe("POST /api/reviews/:slug/refresh", () => {
     storeGoldenReview(wsA, "bounded");
     const moved = "9".repeat(40);
     const counter = countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : moved));
-    setGithubClient(counter.client);
+    setGithubClientFactory(() => counter.client);
 
     const refresh = () =>
       fetch(`${base}/api/reviews/bounded/refresh`, {
@@ -229,7 +228,7 @@ describe("POST /api/reviews/:slug/refresh", () => {
 
   test("a review the caller may not read is the answer a missing one gets", async () => {
     storeGoldenReview(wsB, "sealed");
-    setGithubClient(countingClient(() => GOLDEN_HEAD_SHA_12).client);
+    setGithubClientFactory(() => countingClient(() => GOLDEN_HEAD_SHA_12).client);
 
     const post = (slug: string, headers: Record<string, string> = {}) =>
       fetch(`${base}/api/reviews/${slug}/refresh`, { method: "POST", headers });
@@ -261,7 +260,7 @@ describe("the live channel", () => {
 
   test("a moved head reaches the page that is open on the review", async () => {
     storeGoldenReview(wsA, "pushed");
-    setGithubClient(countingClient((_repo, n) => (n === 12 ? "7".repeat(40) : GOLDEN_HEAD_SHA_13)).client);
+    setGithubClientFactory(() => countingClient((_repo, n) => (n === 12 ? "7".repeat(40) : GOLDEN_HEAD_SHA_13)).client);
 
     const url = `ws://localhost:${server.port}/ws/livereload?kind=review&ws=${wsA}&slug=pushed`;
     const socket = new WebSocket(url);
@@ -284,7 +283,7 @@ describe("the live channel", () => {
   test("a push says what changed, in either direction, and repeats nothing", async () => {
     storeGoldenReview(wsA, "swings");
     let head12 = "6".repeat(40);
-    setGithubClient(countingClient((_repo, n) => (n === 12 ? head12 : GOLDEN_HEAD_SHA_13)).client);
+    setGithubClientFactory(() => countingClient((_repo, n) => (n === 12 ? head12 : GOLDEN_HEAD_SHA_13)).client);
 
     const url = `ws://localhost:${server.port}/ws/livereload?kind=review&ws=${wsA}&slug=swings`;
     const socket = new WebSocket(url);
@@ -331,7 +330,7 @@ describe("the live channel", () => {
 describe("the render is never blocked", () => {
   test("a client that never answers costs the reader nothing", async () => {
     storeGoldenReview(wsA, "hangs");
-    setGithubClient(hangingClient());
+    setGithubClientFactory(() => hangingClient());
 
     const started = Date.now();
     const res = await fetch(`${base}/${wsA}/r/hangs`);

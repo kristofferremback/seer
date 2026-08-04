@@ -18,7 +18,8 @@ import {
   setFreshness,
   type ReviewDoc,
 } from "./db";
-import { githubClient, type GithubClient } from "./github";
+import type { GithubClient } from "./github";
+import { githubClientFor } from "./github-app";
 import { freshnessOf, readableWorkspaces } from "./read";
 import { prKey, type Freshness } from "./types";
 
@@ -112,7 +113,10 @@ export async function checkReview(
   wsId: string,
   slug: string,
   doc: ReviewDoc,
-  client: GithubClient = githubClient(),
+  // The observation is made as the workspace whose review it is, through an
+  // installation that workspace holds. A repository it no longer holds fails the same
+  // way an unreachable GitHub does: the last observation stands.
+  client: GithubClient = githubClientFor(wsId),
 ): Promise<CheckResult> {
   const observed = new Map(
     listFreshness(wsId, slug).map((f) => [prKey(f.repo, f.pr_number), f.observed_head_sha]),

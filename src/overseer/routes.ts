@@ -29,7 +29,8 @@ import {
   type DerivedReview,
   type PrPointer,
 } from "./derive";
-import { GithubError, githubClient } from "./github";
+import { GithubError, type GithubClient } from "./github";
+import { GithubRoutingError, githubClientFor } from "./github-app";
 import {
   publishUsage,
   validatePublish,
@@ -235,10 +236,11 @@ class UpstreamError extends Error {}
 /** Resolve every pointer once. Returns the resolved refs by pointer key, or the 422
  *  errors when one or more pointers do not resolve. */
 async function resolveRefs(
+  client: GithubClient,
   review: DerivedReview,
   payload: PublishPayload,
 ): Promise<{ refs: Map<string, Ref>; errors: ValidationError[] }> {
-  const resolver = refResolver(githubClient(), review);
+  const resolver = refResolver(client, review);
   const refs = new Map<string, Ref>();
   const errors: ValidationError[] = [];
   for (const site of pointerSites(payload)) {
@@ -255,6 +257,10 @@ async function resolveRefs(
       // transport failure (DNS, a reset connection, `fetch failed`) also arrives as a
       // plain Error carried as the cause. So the cause decides: a failure the client
       // threw that is not a GithubError never reached GitHub, and is upstream.
+      // A repository this workspace holds no installation for is neither the skill's
+      // ref to rewrite nor GitHub failing: it is a refusal by our own transport, and it
+      // travels as itself so the route can answer 422 naming the repository.
+      if (err.cause instanceof GithubRoutingError) throw err.cause;
       const upstreamCause = err.cause !== undefined && !(err.cause instanceof GithubError);
       if (upstreamCause || (err.status !== null && err.status !== 0 && err.status !== 404)) {
         throw new UpstreamError(err.message);
@@ -598,19 +604,10 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > config.maxUploadBytes) return tooBig();
 
-  // Every fact half of a review comes off the GitHub API, so publishing without a
-  // token is a misconfiguration and not a smaller review. Bundles and images are
-  // untouched by it, which is why this refuses here rather than at boot.
-  if (!config.githubToken) {
-    return json(
-      {
-        error:
-          "GITHUB_TOKEN is not set, and Overseer derives every review from the GitHub API. " +
-          "Set GITHUB_TOKEN and publish again.",
-      },
-      503,
-    );
-  }
+  // Every GitHub call this publish makes is made as the workspace, through an
+  // installation the workspace has connected. There is no server-wide token behind
+  // this: a repository no held installation covers is refused by the client itself.
+  const github = githubClientFor(ws);
 
   let body: PublishBody;
   try {
@@ -663,7 +660,7 @@ export async function handlePublishReview(req: Request): Promise<Response> {
 
   let review: DerivedReview;
   try {
-    review = await derivePrs(githubClient(), pointers);
+    review = await derivePrs(github, pointers);
   } catch (err) {
     // Only the pointers themselves are the skill's to fix. GitHub answering badly, or
     // not answering at all, is Overseer's: telling the skill its pull requests are
@@ -671,6 +668,10 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     if (err instanceof PrPointerError) {
       return unprocessable([{ field: "prs", rule: "pr_not_derivable", message: err.message }]);
     }
+    // Routing refused before any request went out: the workspace holds no installation
+    // covering this repository. Naming it is the actionable answer; a 502 would have
+    // the skill retry an access problem as though GitHub had faltered.
+    if (err instanceof GithubRoutingError) return json({ error: err.message }, 422);
     // The same status rule the ref path reads: a 404 is a pointer at a pull request
     // that is not there, and a 0 is a pointer the client refused before any request
     // went out, a malformed repo or a number that is not one. Both are the skill's to
@@ -736,8 +737,9 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   let refs: Map<string, Ref>;
   let refErrors: ValidationError[];
   try {
-    ({ refs, errors: refErrors } = await resolveRefs(review, payload));
+    ({ refs, errors: refErrors } = await resolveRefs(github, review, payload));
   } catch (err) {
+    if (err instanceof GithubRoutingError) return json({ error: err.message }, 422);
     if (!(err instanceof UpstreamError)) throw err;
     return json({ error: `Overseer could not read a ref from GitHub: ${err.message}` }, 502);
   }
