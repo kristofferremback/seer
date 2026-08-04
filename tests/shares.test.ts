@@ -399,8 +399,9 @@ describe("a shared bundle", () => {
     const pinned = await fetch(`${base}/s/${token}/v/1/`);
     expect(pinned.status).toBe(200);
     expect(await pinned.text()).toContain("one");
-    // Pinned content never changes, so it caches forever and opens no socket.
-    expect(pinned.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    // Pinned content never changes, so it opens no socket — but see the caching test
+    // below for why it is still not cached the way the workspace path caches it.
+    expect(pinned.headers.get("content-type")).toBe("text/html;charset=utf-8");
 
     const bare = await fetch(`${base}/s/${token}/v/1`, { redirect: "manual" });
     expect(bare.status).toBe(302);
@@ -483,6 +484,74 @@ describe("a shared bundle", () => {
         "no-referrer",
       );
     }
+  });
+
+  test("nothing a share serves may be cached by anything but the reader", async () => {
+    // What revocation withdraws here is authorization, not content — so the reasoning
+    // the workspace path uses (a pinned version's bytes never change, therefore cache
+    // them forever) does not carry across. A year-long `public` entry is a copy of the
+    // bytes in an intermediary that no revocation can reach.
+    const { token } = bundleShare();
+    for (const path of ["/", "/assets/app.css", "/v/1/", "/v/1/assets/app.css"]) {
+      const res = await fetch(`${base}/s/${token}${path}`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("cache-control")).toBe("private, no-cache");
+    }
+
+    // The control: on the workspace path a pinned version still caches forever, which
+    // is what makes the line above a decision rather than a blanket rule.
+    const own = await fetch(`${base}/${rootWs}/b/own-bundle/v/1/`);
+    expect(own.status).toBe(200);
+    expect(own.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  });
+
+  test("a shared page is not indexable and does not print its own token", async () => {
+    const { token } = bundleShare();
+
+    // The other way a URL escapes a page is a crawler that fetched it.
+    for (const path of ["/", "/assets/app.css", "/v/1/"]) {
+      expect((await fetch(`${base}/s/${token}${path}`)).headers.get("x-robots-tag")).toBe(
+        "noindex, nofollow",
+      );
+    }
+    // Including the refusal, or an unknown token would be the indexable one.
+    expect((await fetch(`${base}/s/${newShareToken()}`)).headers.get("x-robots-tag")).toBe(
+      "noindex, nofollow",
+    );
+
+    // og:url would put the token in a meta tag, which is the one part of the page an
+    // unfurler copies onward and a crawler reads as the address to index. The other
+    // social tags stay: a shared link should still unfurl as a Seer card.
+    const html = await (await fetch(`${base}/s/${token}/`)).text();
+    expect(html).toContain(`property="og:title"`);
+    expect(html).toContain(`property="og:image"`);
+    expect(html).not.toContain(`property="og:url"`);
+    for (const tag of html.match(/<meta[^>]*>/g) ?? []) expect(tag).not.toContain(token);
+
+    // The live page does carry the token once, in the reload socket's URL, and has to:
+    // that is how the socket authorises. It is not a leak of the same kind — a script
+    // in the bundle can read location.href regardless, and no unfurler copies a script
+    // tag onward. A pinned page opens no socket, so it holds the token nowhere at all.
+    const pinned = await (await fetch(`${base}/s/${token}/v/1/`)).text();
+    expect(pinned).not.toContain(token);
+
+    // The control: the workspace path does declare its canonical URL, because there the
+    // URL is not a secret.
+    const own = await (await fetch(`${base}/${rootWs}/b/own-bundle/`)).text();
+    expect(own).toContain(`property="og:url"`);
+  });
+
+  test("revoking a share shuts the socket it already had open", async () => {
+    const live = bundleShare();
+    const socket = new WebSocket(`ws://localhost:${server.port}/ws/livereload?share=${live.token}`);
+    const closed = new Promise<boolean>((resolve) => {
+      socket.onopen = () => revokeShare(live.id);
+      socket.onclose = () => resolve(true);
+      socket.onerror = () => resolve(false);
+    });
+    // A socket is authorised once, at upgrade. Without this a revoked holder keeps a
+    // live channel and goes on being told that new versions exist.
+    expect(await closed).toBe(true);
   });
 
   test("the share route has no verb but GET", async () => {

@@ -80,8 +80,20 @@ GET    /api/shares          the workspace's shares, without tokens
 DELETE /api/shares/:id      sets revoked_at
 ```
 
-Session-authenticated, member-only, and the response carries the full `/s/<token>` URL
-rather than the bare token, because the URL is the thing a person actually wants.
+The response carries the full `/s/<token>` URL rather than the bare token, because the
+URL is the thing a person actually wants.
+
+**Two credentials mint.** A session, which reaches several workspaces and so has to name
+one; and an API key, which belongs to exactly one workspace and therefore names it by
+existing. The key is the point: the agent that built and uploaded a bundle is the thing
+best placed to hand out the link to it, and asking it to stop and fetch a human breaks
+the one flow this is for — publish a preview, paste the link into the pull request.
+
+That is a real widening of what a leaked key can do. A key could already upload and list,
+but it could not read a private bundle's bytes; a share it mints can. The trade is taken
+deliberately: minting is visible in the workspace's own list, every link is revocable,
+and the alternative is a capability that only works when a human is watching. A share
+token remains not a credential — it authenticates nothing, including this route.
 
 The settings page grows a list: what is shared, why, when it was made, when it expires,
 and a way to revoke. A share nobody can see is a share nobody revokes.

@@ -1,4 +1,4 @@
-import type { Server, WebSocketHandler } from "bun";
+import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
 import { join, resolve } from "node:path";
 import { config } from "./config";
 import {
@@ -53,6 +53,7 @@ import {
   listShares,
   resolveShare,
   revokeShare,
+  setShareRevokedHook,
 } from "./shares";
 import { serveBundleFile } from "./serve-bundle";
 import { handlePublishReview } from "./overseer/routes";
@@ -100,8 +101,10 @@ const WS_ANNOTATIONS_RE = new RegExp(
 
 // A live socket is either a bundle's reload channel or a review's freshness channel.
 // The two are gated differently, so which one this is travels with the socket rather
-// than being re-derived at subscribe time.
-type WSData = { ws: string; slug: string; kind: "bundle" | "review" };
+// than being re-derived at subscribe time. `shareId` is set when the socket was
+// authorised by a share token rather than by membership: a socket is gated once, at
+// upgrade, so revocation has to be able to find this one again and shut it.
+type WSData = { ws: string; slug: string; kind: "bundle" | "review"; shareId?: string };
 
 function markdown(body: string): Response {
   return new Response(body, {
@@ -271,12 +274,10 @@ async function handleWorkspaceBundle(req: Request, wsId: string): Promise<Respon
     updatedAt: getVersion(wsId, slug!, version)?.created_at ?? bundle.created_at,
     url: `${config.baseUrl}${url.pathname}`,
   };
-  return serveBundleFile(
-    wsId,
-    meta,
-    rest.slice(1),
-    pinned ? null : { via: "workspace", wsId, slug: slug! },
-  );
+  return serveBundleFile(wsId, meta, rest.slice(1), {
+    live: pinned ? null : { via: "workspace", wsId, slug: slug! },
+    shared: false,
+  });
 }
 
 // ---- upload ----
@@ -454,6 +455,11 @@ export async function startServer() {
   // Runs before the server binds so requests never race a half-moved store.
   await migrateBlobsToS3();
 
+  // Only the sockets a share opened, so revocation can find them. Membership-gated
+  // sockets are not in here: nothing revokes a membership mid-connection today, and a
+  // registry of every open socket would be a leak waiting to happen.
+  const shareSockets = new Set<ServerWebSocket<WSData>>();
+
   const websocket: WebSocketHandler<WSData> = {
     open(ws) {
       ws.subscribe(
@@ -461,6 +467,10 @@ export async function startServer() {
           ? reviewTopic(ws.data.ws, ws.data.slug)
           : `bundle:${ws.data.ws}:${ws.data.slug}`,
       );
+      if (ws.data.shareId) shareSockets.add(ws);
+    },
+    close(ws) {
+      shareSockets.delete(ws);
     },
     message() {},
   };
@@ -818,8 +828,13 @@ export async function startServer() {
         if (shareToken !== null) {
           const share = resolveShare(shareToken);
           if (!share || share.kind !== "bundle") return new Response("Not found", { status: 404 });
-          if (srv.upgrade(req, { data: { ws: share.workspace_id, slug: share.target, kind: "bundle" } }))
-            return undefined as unknown as Response;
+          const data: WSData = {
+            ws: share.workspace_id,
+            slug: share.target,
+            kind: "bundle",
+            shareId: share.id,
+          };
+          if (srv.upgrade(req, { data })) return undefined as unknown as Response;
           return new Response("WebSocket upgrade failed", { status: 400 });
         }
 
@@ -895,6 +910,16 @@ export async function startServer() {
   // so the freshness module never has to know a server exists to be tested.
   setFreshnessPublisher((topic, message) => {
     server.publish(topic, message);
+  });
+
+  // A revoked share loses its live channel in the same breath as its link. Without this
+  // a holder whose page is already open keeps being told that new versions exist —
+  // the reload lands on the soft-404, but being told at all is more than a revoked
+  // token should be able to learn.
+  setShareRevokedHook((shareId) => {
+    for (const socket of shareSockets) {
+      if (socket.data.shareId === shareId) socket.close();
+    }
   });
 
   console.log(`Seer listening on ${config.baseUrl} (port ${server.port})`);

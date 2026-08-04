@@ -25,6 +25,21 @@ export type LiveChannel =
   | { via: "workspace"; wsId: string; slug: string }
   | { via: "share"; token: string };
 
+/** How this page was reached, which is the whole of what the two routes disagree about.
+ *
+ *  `shared` is not a synonym for "private": it says the reader holds a revocable token
+ *  rather than a membership, and that is what decides caching. A pinned version's bytes
+ *  never change, so on the workspace path they are immutable and cached forever — a
+ *  statement about the content. Through a share, what revocation withdraws is not the
+ *  content but the permission, and a year-long `public` cache entry is a copy of the
+ *  bytes in an intermediary that no revocation can reach. So a shared page is `private`
+ *  (no shared cache may keep it) and `no-cache` (the reader's own browser must ask
+ *  again), pinned or not. */
+export interface ServeContext {
+  live: LiveChannel | null;
+  shared: boolean;
+}
+
 function liveReloadQuery(live: LiveChannel): string {
   return live.via === "share"
     ? `share=${encodeURIComponent(live.token)}`
@@ -39,19 +54,20 @@ export function liveReloadScript(live: LiveChannel): string {
 /**
  * One file out of an extracted bundle, or a 404 when the remainder names nothing.
  *
- * `live` is the channel the page listens on, and null for a pinned version — which is
- * also what decides caching. Latest (unpinned) content changes underneath viewers on
- * every upload, and the live-reload push means a stale-asset window breaks reloads
- * (new HTML, old CSS/JS) — so everything is no-cache. Pinned /v/N/ content is
- * immutable by construction: the injected social tags derive only from that version's
- * own fixed data.
+ * `ctx.live` is the channel the page listens on, and null for a pinned version. Latest
+ * (unpinned) content changes underneath viewers on every upload, and the live-reload
+ * push means a stale-asset window breaks reloads (new HTML, old CSS/JS) — so it is
+ * never cached. Pinned /v/N/ content is immutable by construction: the injected social
+ * tags derive only from that version's own fixed data. `ctx.shared` overrules both;
+ * see ServeContext.
  */
 export async function serveBundleFile(
   wsId: string,
   meta: BundleMeta,
   filePath: string,
-  live: LiveChannel | null,
+  ctx: ServeContext,
 ): Promise<Response> {
+  const { live } = ctx;
   const dir = await ensureExtracted(wsId, meta.slug, meta.version);
   const clean = normalize(filePath || "index.html");
   if (clean.startsWith("..") || clean.startsWith("/")) {
@@ -65,7 +81,11 @@ export async function serveBundleFile(
     file = withIndex;
   }
 
-  const cacheControl = live ? "no-cache" : "public, max-age=31536000, immutable";
+  const cacheControl = ctx.shared
+    ? "private, no-cache"
+    : live
+      ? "no-cache"
+      : "public, max-age=31536000, immutable";
 
   if (file.type.startsWith("text/html")) {
     let html = injectBundleMeta(await file.text(), meta);

@@ -373,6 +373,105 @@ for (const [what, token] of [
   );
 }
 
+// ---- an agent mints its own share, so it can paste one into a pull request ----
+//
+// This is the credential question, and it can only be asked here: with AUTH_DISABLED
+// set, every request is a signed-in root user and the session branch shadows the key
+// branch entirely. An API key belongs to one workspace and one user, which is exactly
+// what a mint needs, and it is what the agent that uploaded the bundle is already
+// holding.
+{
+  const { mintApiKey } = await import("../src/db");
+  const key = mintApiKey(member, ws, "agent key").token;
+  const bearer = { authorization: `Bearer ${key}`, "content-type": "application/json" };
+
+  const minted = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: bearer,
+    // No `workspace` in the body: a key names one by existing.
+    body: JSON.stringify({ kind: "bundle", target: "preview", label: "for the PR" }),
+  });
+  assert(minted.status === 200, `a key should be able to mint, got ${minted.status}`);
+  const made = (await minted.json()) as { id: string; token: string; url: string };
+  assert(
+    made.url === `http://localhost:3000/s/${made.token}`,
+    `the mint should hand back the full URL, got ${made.url}`,
+  );
+
+  // And the link works for someone with no account, which is the whole point of an
+  // agent minting one.
+  const opened = await fetch(`${base}/s/${made.token}/`, { redirect: "manual" });
+  assert(opened.status === 200, `an agent-minted link should open signed out, got ${opened.status}`);
+  assert(
+    (await opened.text()).includes("the preview"),
+    "an agent-minted link should render the bundle",
+  );
+
+  // A key lists and revokes within its own workspace too.
+  const listed = await fetch(`${base}/api/shares`, { headers: bearer });
+  assert(listed.status === 200, `a key should be able to list, got ${listed.status}`);
+  const text = await listed.text();
+  assert(!text.includes(made.token), "a listing must never hand back a token");
+  assert(text.includes("for the PR"), "the listing should hold the share just minted");
+
+  const revoked = await fetch(`${base}/api/shares/${made.id}`, {
+    method: "DELETE",
+    headers: bearer,
+  });
+  assert(revoked.status === 200, `a key should be able to revoke, got ${revoked.status}`);
+  const dead = await fetch(`${base}/s/${made.token}/`, { redirect: "manual" });
+  assert((await shape(dead)) === missing, "a revoked agent-minted link should be the soft-404");
+
+  // A key reaches its own workspace and no other. The root workspace ALLOWED_EMAILS
+  // bootstrapped is a second one this key does not belong to.
+  const elsewhere = db
+    .query<{ id: string }, [string]>("SELECT id FROM workspaces WHERE id != ? LIMIT 1")
+    .get(ws)!.id;
+  const crossed = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: bearer,
+    body: JSON.stringify({ workspace: elsewhere, kind: "bundle", target: "preview" }),
+  });
+  assert(
+    crossed.status === 404,
+    `a key naming another workspace should 404, got ${crossed.status}`,
+  );
+
+  // A share token still is not a credential. It never was, and widening the mint to
+  // accept API keys is exactly the change that could have made it one by accident.
+  const withShareToken = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${live.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ kind: "bundle", target: "preview" }),
+  });
+  assert(
+    withShareToken.status === 401,
+    `a share token must not mint shares, got ${withShareToken.status}`,
+  );
+
+  // Nor is a revoked key.
+  const { revokeApiKey } = await import("../src/db");
+  const doomed = mintApiKey(member, ws, "revoked key");
+  revokeApiKey(doomed.id);
+  const withDeadKey = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${doomed.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ kind: "bundle", target: "preview" }),
+  });
+  assert(
+    withDeadKey.status === 401,
+    `a revoked key must not mint shares, got ${withDeadKey.status}`,
+  );
+
+  // And no credential at all is still asked to sign in rather than told anything.
+  const anonymous = await fetch(`${base}/api/shares`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workspace: ws, kind: "bundle", target: "preview" }),
+  });
+  assert(anonymous.status === 403, `an anonymous mint should 403, got ${anonymous.status}`);
+}
+
 console.log("all assertions passed");
 server.stop(true);
 process.exit(0);

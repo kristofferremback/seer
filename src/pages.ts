@@ -46,7 +46,13 @@ export interface BundleMeta {
   slug: string;
   version: number;
   updatedAt: number; // epoch ms of the served version's upload
-  url: string; // canonical absolute URL of the page being served
+  /** Canonical absolute URL of the page being served, or null when it must not be
+   *  published. A page reached through a share is served at `/s/<token>`, and that path
+   *  IS the secret: writing it into og:url would put the token in the page's own body,
+   *  where every unfurler copies it onward and every crawler treats it as the address to
+   *  index. The route already refuses to leak it through a Referer; this is the same
+   *  refusal on the other way out. */
+  url: string | null;
 }
 
 export function injectBundleMeta(html: string, meta: BundleMeta): string {
@@ -61,7 +67,7 @@ export function injectBundleMeta(html: string, meta: BundleMeta): string {
     `<meta property="og:title" content="${escapeHtml(title)}">`,
     `<meta property="og:description" content="${escapeHtml(description)}">`,
     `<meta property="og:type" content="website">`,
-    `<meta property="og:url" content="${escapeHtml(meta.url)}">`,
+    ...(meta.url === null ? [] : [`<meta property="og:url" content="${escapeHtml(meta.url)}">`]),
     `<meta property="og:site_name" content="Seer">`,
     `<meta property="og:image" content="${escapeHtml(`${config.baseUrl}/og.png`)}">`,
     `<meta property="og:image:width" content="1200">`,
@@ -1099,12 +1105,51 @@ workspace serves them only to signed-in members; everyone else gets a generic
 Seer 404 that reveals nothing, so a private bundle's title never leaks. The human
 sets visibility per workspace on its settings page.
 
-There is a third option, and it is the human's to reach for rather than yours: from
-the bundle's row on \`${base}/bundles\` they can mint a **share link** (\`/s/<token>/\`)
-that opens that one bundle for someone with no account, and revoke it later. It is how
-a bundle in a private workspace gets handed to an outsider. You cannot mint one — it
-takes a signed-in session, not an API key — so hand over the \`url\` above and say that
-a share link exists if the recipient turns out not to be a member.
+### Share links, which you can mint yourself
+
+There is a third option: a **share link**, one revocable URL that opens one bundle for
+someone with no account at all. It is how a bundle in a private workspace reaches an
+outsider — a reviewer on a pull request, a client, anyone you cannot add to the
+workspace. Your API key mints one, so you do not have to ask a human to do it:
+
+\`\`\`sh
+curl -X PUT --data-binary @bundle.zip \\
+  -H "Authorization: Bearer $API_TOKEN" \\
+  ${base}/api/bundles/<slug>
+
+curl -X POST ${base}/api/shares \\
+  -H "Authorization: Bearer $API_TOKEN" \\
+  -H "content-type: application/json" \\
+  -d '{"kind":"bundle","target":"<slug>","label":"why this link exists"}'
+\`\`\`
+
+\`\`\`json
+{ "id": "shr_…", "kind": "bundle", "target": "<slug>",
+  "token": "seer_sh_…", "url": "${base}/s/seer_sh_…", "expiresAt": null }
+\`\`\`
+
+- Give the human (or paste into the pull request) the **\`url\`**. That is the thing that
+  opens; the bare token is not a URL anyone can use.
+- You do not name a workspace — your key already belongs to one, and naming a different
+  one is refused.
+- \`label\` is free text saying why the link exists ("for the PR", "for Anna"). It is what
+  a member sees in the workspace's list of live links, and how they decide what to
+  revoke. Write a useful one.
+- \`expiresAt\` is optional (epoch ms or ISO 8601). Default is no expiry, because a
+  revocable link that surprises its holder by dying is worse than one somebody forgets.
+- **The \`url\` is shown exactly once.** Only its hash is stored, so it cannot be looked
+  up later. If you lose it, mint another.
+- \`GET ${base}/api/shares\` lists your workspace's live links (never their tokens);
+  \`DELETE ${base}/api/shares/<id>\` revokes one.
+
+Do not mint a share link when the plain \`url\` would do. A public workspace's bundle URL
+already opens for anyone, and a share is a second secret to keep track of. Mint one when
+the workspace is private, or when you want a link that can be taken back.
+
+Treat the \`url\` like a password you are allowed to hand over: it is the whole of the
+authorisation, so it belongs in the place the recipient will read it and nowhere public.
+Seer keeps it out of \`Referer\` headers and out of search engines, but it cannot help
+you if you paste it into a public issue.
 
 Hand the \`url\` to whoever should see it, or open it yourself. You can also fetch it
 back to verify the rendered page: a GET on the bundle URL returns the served
