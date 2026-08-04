@@ -44,7 +44,14 @@ import {
 } from "./delta";
 import { freshnessOf, readableWorkspaces } from "./read";
 import { refreshOnView } from "./freshness";
-import { KIND_LABEL, hunkAnchorId, kindMark, statHtml, stats, walkthroughSection } from "./render-diff";
+import {
+  KIND_LABEL,
+  hunkAnchorId,
+  kindMark,
+  statHtml,
+  stats,
+  walkthroughSection,
+} from "./render-diff";
 import {
   icon,
   refChip,
@@ -1157,6 +1164,10 @@ const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
   <symbol id="i-contrast" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="12" cy="12" r="10"/><path d="M12 18a6 6 0 0 0 0-12v12z"/>
   </symbol>
+  <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+  </symbol>
 </svg>`;
 
 /** The pieces of the page the prototype had tokens for but no markup: the link out of
@@ -1194,7 +1205,8 @@ const EVIDENCE_STYLE = `
 
 /** Resolved before first paint so the surface never flashes, and stored so an explicit
  *  choice survives a reload. Without it the CSS floor still lands on the right surface. */
-const THEME_SCRIPT = `(()=>{let t=null;try{t=localStorage.getItem("overseer:theme")}catch(e){}` +
+const THEME_SCRIPT =
+  `(()=>{let t=null;try{t=localStorage.getItem("overseer:theme")}catch(e){}` +
   `const d=t==="dark"||(t!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);` +
   `document.documentElement.dataset.theme=d?"dark":"light"})();`;
 
@@ -1325,6 +1337,177 @@ const QUESTION_STYLE = `
   }
 `;
 
+/* The share panel. It sits under the masthead rather than floating, because it is a
+   thing you do to the review rather than a menu over it, and because a phone has
+   nowhere to float it to. Drawn only for a member reading the review's own url: a
+   shared page carries none of this markup and none of its script. */
+const SHARE_STYLE = `
+  .sharebox {
+    margin: -6px 0 18px; padding: 12px 14px 14px;
+    border: 1px solid hsl(var(--line)); border-radius: 8px;
+    background: hsl(var(--paper-sunk));
+  }
+  .sharebox[hidden] { display: none; }
+  .sharebox .eyebrow {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em;
+    text-transform: uppercase; color: hsl(var(--muted)); margin: 0 0 8px;
+  }
+  .sharebox p { margin: 0; font-size: 13.5px; color: hsl(var(--muted)); }
+  .share-list { list-style: none; margin: 0 0 10px; padding: 0; }
+  .share-list li {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 6px 0; border-top: 1px solid hsl(var(--line));
+    font-size: 13.5px;
+  }
+  .share-list li:first-child { border-top: 0; }
+  .share-when { font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); }
+  .share-label { color: hsl(var(--ink)); }
+  .share-dead { color: hsl(var(--remove)); }
+  .share-list button { margin-left: auto; }
+  .sharebox button {
+    font: inherit; font-size: 13px;
+    background: none; border: 1px solid hsl(var(--line)); border-radius: 6px;
+    padding: 5px 10px; min-height: 32px;
+    color: hsl(var(--accent)); cursor: pointer;
+  }
+  .sharebox button:active { background: hsl(var(--ink) / 0.07); }
+  /* The minted link, shown once. The row is the token, so it gets the mono face and
+     room to be selected by hand when the copy button is not available. */
+  .share-fresh { margin-top: 10px; }
+  .share-fresh[hidden] { display: none; }
+  .share-url {
+    display: flex; gap: 8px; align-items: stretch;
+  }
+  .share-url input {
+    flex: 1 1 auto; min-width: 0;
+    font-family: var(--font-mono); font-size: 12px;
+    padding: 6px 8px; border: 1px solid hsl(var(--line)); border-radius: 6px;
+    background: hsl(var(--paper)); color: hsl(var(--ink));
+  }
+  .share-once { margin-top: 6px !important; font-size: 12.5px !important; }
+  .share-toggle {
+    background: none; border: 0; margin: 0; padding: 10px;
+    min-width: 44px; min-height: 44px;
+    color: hsl(var(--accent)); cursor: pointer; line-height: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 6px; flex: none;
+  }
+  .share-toggle .mark { display: block; width: 17px; height: 17px; stroke-width: 1.5; }
+  .share-toggle:active { background: hsl(var(--ink) / 0.07); }
+  @media (max-width: 479.98px) { .share-toggle { order: 2; } }
+`;
+
+/** The panel's behaviour. Minting is the only thing here that cannot be undone by
+ *  reloading, and it is the only thing that shows a token: the store keeps a hash, so
+ *  a link this panel does not show now can never be shown again. That is why the list
+ *  and the fresh link are separate rows and why the list never pretends to hold one. */
+function shareScript(wsId: string, slug: string): string {
+  const ws = JSON.stringify(wsId);
+  const target = JSON.stringify(slug);
+  return `
+(() => {
+  const box = document.querySelector('[data-sharebox]');
+  const open = document.querySelector('[data-share-open]');
+  if (!box || !open) return;
+  const list = box.querySelector('[data-share-list]');
+  const empty = box.querySelector('[data-share-empty]');
+  const fresh = box.querySelector('[data-share-fresh]');
+  const field = box.querySelector('[data-share-url]');
+  const ws = ${ws}, target = ${target};
+
+  const when = (iso) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+  async function load() {
+    list.textContent = '';
+    let shares = [];
+    try {
+      const res = await fetch('/api/shares?workspace=' + encodeURIComponent(ws), { headers: { accept: 'application/json' } });
+      if (res.ok) shares = (await res.json()).shares.filter((s) => s.kind === 'review' && s.target === target);
+    } catch (e) { /* an offline panel shows no links rather than a wrong count */ }
+    empty.hidden = shares.length > 0;
+    for (const s of shares) {
+      const li = document.createElement('li');
+      const label = document.createElement('span');
+      label.className = 'share-label';
+      label.textContent = s.label || 'unlabelled link';
+      const made = document.createElement('span');
+      made.className = 'share-when';
+      // An expired link is still listed, because it is still revocable and still a
+      // thing that was handed out; it is said to be dead rather than drawn as live.
+      const dead = s.expiresAt !== null && new Date(s.expiresAt).getTime() <= Date.now();
+      made.textContent = when(s.createdAt)
+        + (s.expiresAt ? (dead ? ' · expired ' : ' · until ') + when(s.expiresAt) : '');
+      if (dead) made.classList.add('share-dead');
+      const kill = document.createElement('button');
+      kill.type = 'button';
+      kill.textContent = 'revoke';
+      kill.addEventListener('click', async () => {
+        kill.disabled = true;
+        await fetch('/api/shares/' + encodeURIComponent(s.id), { method: 'DELETE' });
+        await load();
+      });
+      li.append(label, made, kill);
+      list.append(li);
+    }
+  }
+
+  open.addEventListener('click', () => {
+    const showing = !box.hidden;
+    box.hidden = showing;
+    open.setAttribute('aria-expanded', String(!showing));
+    if (!showing) load();
+  });
+
+  box.querySelector('[data-share-new]').addEventListener('click', async (ev) => {
+    const button = ev.currentTarget;
+    button.disabled = true;
+    try {
+      const res = await fetch('/api/shares', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ workspace: ws, kind: 'review', target: target }),
+      });
+      if (!res.ok) { field.value = 'Could not create a link (' + res.status + ')'; fresh.hidden = false; return; }
+      const made = await res.json();
+      field.value = made.url;
+      fresh.hidden = false;
+      field.focus();
+      field.select();
+      await load();
+    } finally { button.disabled = false; }
+  });
+
+  box.querySelector('[data-share-copy]').addEventListener('click', async (ev) => {
+    field.select();
+    try { await navigator.clipboard.writeText(field.value); ev.currentTarget.textContent = 'copied'; }
+    catch (e) { ev.currentTarget.textContent = 'press copy'; }
+    setTimeout(() => { ev.currentTarget.textContent = 'copy'; }, 1600);
+  });
+})();
+`;
+}
+
+/** The panel's markup. Empty string when the reader may not share, so the page a
+ *  stranger or a share holder gets has no share affordance to find. */
+function sharePanel(canShare: boolean): string {
+  if (!canShare) return "";
+  return (
+    `<div class="sharebox" data-sharebox hidden>` +
+    `<p class="eyebrow">Share this review</p>` +
+    `<ul class="share-list" data-share-list></ul>` +
+    `<p data-share-empty>No link opens this review yet.</p>` +
+    `<div class="share-fresh" data-share-fresh hidden>` +
+    `<div class="share-url">` +
+    `<input type="text" readonly data-share-url aria-label="The share link">` +
+    `<button type="button" data-share-copy>copy</button>` +
+    `</div>` +
+    `<p class="share-once">Copy it now. Links are stored hashed, so this one cannot be shown again.</p>` +
+    `</div>` +
+    `<p style="margin-top:10px"><button type="button" data-share-new>Create link</button></p>` +
+    `</div>`
+  );
+}
+
 const FAVICON =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' " +
   "stroke='%231f1614' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath " +
@@ -1370,14 +1553,21 @@ function refsById(doc: ReviewDoc): Map<string, Ref> {
  *  with no hunks (nothing but a merge, or a diff GitHub would not serve) shows no
  *  count instead of a confident zero. */
 function prStat(pr: Pr, hunks: Hunk[]): string {
-  const mine = hunks.filter((h) => h.prNumber === pr.number && h.repo === pr.repo);
+  const mine = hunks.filter(
+    (h) => h.prNumber === pr.number && h.repo === pr.repo,
+  );
   if (mine.length === 0) return "";
   const { added, removed } = stats(mine);
   // U+2212, the minus sign: the count is a quantity, not a diff glyph.
   return `<span class="c-stat">${statHtml(added, removed)}</span>`;
 }
 
-function card(pr: Pr, refs: Map<string, Ref>, hunks: Hunk[], ctx: RenderCtx): string {
+function card(
+  pr: Pr,
+  refs: Map<string, Ref>,
+  hunks: Hunk[],
+  ctx: RenderCtx,
+): string {
   const kinds = pr.kinds
     .map((k) => icon(k, `ic k-${k}`, KIND_LABEL[k] ?? k))
     .join("");
@@ -1385,7 +1575,8 @@ function card(pr: Pr, refs: Map<string, Ref>, hunks: Hunk[], ctx: RenderCtx): st
   const detailRef = refs.get(pr.detailRef);
   const detailFold = detailRef ? refFold(owner, detailRef) : "";
   const d = ctx.delta ? ctx.delta.get("pr", prKey(pr.repo, pr.number)) : null;
-  const hasMore = pr.detail.trim() !== "" || detailFold !== "" || pr.body.trim() !== "";
+  const hasMore =
+    pr.detail.trim() !== "" || detailFold !== "" || pr.body.trim() !== "";
   // Three readings, each earned by a tap. Closed is the title and what it cost,
   // which is what a stack is scanned for. Open adds the marks and the one-line
   // gist. The nested fold holds the author's own account, which is the longest
@@ -1468,7 +1659,9 @@ function chain(doc: ReviewDoc, ctx: RenderCtx): string {
       : "";
   const arrow = `${icon("arrow", "arw")}`;
   const refs = refsById(doc);
-  const cards = prs.map((pr) => card(pr, refs, doc.hunks, ctx)).join(stack ? arrow : "");
+  const cards = prs
+    .map((pr) => card(pr, refs, doc.hunks, ctx))
+    .join(stack ? arrow : "");
   // A pull request the base version carried and this one does not stays in the
   // chain as a stub. A link that quietly leaves the stack is the one change a
   // reader of a stack most needs to see.
@@ -1491,7 +1684,10 @@ function uniqueRefs(refs: Ref[]): Ref[] {
 
 /** How a row's delta reaches its evidence. Null when the page has no base, which
  *  is what leaves a first-ever open with no marks anywhere in it. */
-function evidenceMarks(d: EntityDelta | null, owner: string): EvidenceMarks | null {
+function evidenceMarks(
+  d: EntityDelta | null,
+  owner: string,
+): EvidenceMarks | null {
   if (!d) return null;
   return {
     // Evidence is drawn in a body rather than a summary, so a one-line field there
@@ -1521,7 +1717,13 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
     `<div class="row-body">${marked(safeBlock(s.body), d, "body", s.id)}${folds}` +
     questionsHere(ctx, "statement", s.id) +
     kindMark(d, s.id, s.kind) +
-    renderEvidence(s.evidence, s.id, ctx, evidenceMarks(d, s.id), evidenceFieldNames(s.evidence)) +
+    renderEvidence(
+      s.evidence,
+      s.id,
+      ctx,
+      evidenceMarks(d, s.id),
+      evidenceFieldNames(s.evidence),
+    ) +
     `</div></details>`
   );
 }
@@ -1534,11 +1736,14 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
 function removedStub(e: EntityDelta, cls: string, headCls: string): string {
   const former = e.former ?? { head: "", body: [] };
   const id = `dgone-${safeId(e.id)}`;
-  const body = former.body.map((h) => `<div class="dp dpb">${h}</div>`).join("");
+  const body = former.body
+    .map((h) => `<div class="dp dpb">${h}</div>`)
+    .join("");
   // A removed row keeps the kind it was removed with, in its class and in its icon:
   // a risk that left the review is not the same absence as a note that left it.
   const kind = e.formerKind;
-  const mark = kind === null ? "" : icon(kind, `ic k-${escapeHtml(kind)}`, kind);
+  const mark =
+    kind === null ? "" : icon(kind, `ic k-${escapeHtml(kind)}`, kind);
   return (
     `<details class="${cls} dgoneunit" id="${escapeHtml(id)}">` +
     `<summary>${icon("chev", "tick")}${mark}` +
@@ -1559,7 +1764,11 @@ function noteRow(n: Note, ctx: RenderCtx): string {
   // list, as an item holding only the prior words behind their disclosure. A list
   // that simply got shorter would be an absence a reader cannot see.
   const dropped = (d ? d.fields : [])
-    .filter((f) => f.field.startsWith("check-") && Number(f.field.slice(6)) >= n.checks.length)
+    .filter(
+      (f) =>
+        f.field.startsWith("check-") &&
+        Number(f.field.slice(6)) >= n.checks.length,
+    )
     .sort((a, b) => Number(a.field.slice(6)) - Number(b.field.slice(6)));
   const items = [
     ...n.checks.map((c, i) => marked(safeInline(c), d, `check-${i}`, n.id)),
@@ -1578,7 +1787,13 @@ function noteRow(n: Note, ctx: RenderCtx): string {
     `<div class="note-body">${marked(safeBlock(n.body), d, "body", n.id)}${checks}${chips === "" ? "" : `<p class="rrefs">${chips}</p>`}${folds}` +
     questionsHere(ctx, "note", n.id) +
     kindMark(d, n.id, n.kind) +
-    renderEvidence(n.evidence, n.id, ctx, evidenceMarks(d, n.id), evidenceFieldNames(n.evidence)) +
+    renderEvidence(
+      n.evidence,
+      n.id,
+      ctx,
+      evidenceMarks(d, n.id),
+      evidenceFieldNames(n.evidence),
+    ) +
     `</div></details>`
   );
 }
@@ -1619,7 +1834,10 @@ function questionMeta(a: Annotation, version: number, at: string): string {
   const filed = `filed against v${a.version}`;
   // A question asked about an older version is worth saying twice: the reader is
   // looking at different words than the asker was.
-  const stale = a.version === version ? "" : `<span>${escapeHtml(`reading v${version}`)}</span>`;
+  const stale =
+    a.version === version
+      ? ""
+      : `<span>${escapeHtml(`reading v${version}`)}</span>`;
   return `<p class="qmeta">${state}<span>${escapeHtml(filed)}</span>${stale}<span>on ${at}</span></p>`;
 }
 
@@ -1699,7 +1917,11 @@ function targetOptions(doc: ReviewDoc): string {
 
 /** The questions section. Nothing here needs scripting: the form is a plain POST to
  *  the annotations route, which answers a form with the page it came from. */
-function questionsSection(input: RenderInput, annotations: Annotation[], basePath: string): string {
+function questionsSection(
+  input: RenderInput,
+  annotations: Annotation[],
+  basePath: string,
+): string {
   if (!QUESTIONS_ON_PAGE) return "";
   const blocks =
     annotations.length === 0
@@ -1720,7 +1942,10 @@ function questionsSection(input: RenderInput, annotations: Annotation[], basePat
 /** Risks first, then notes, each keeping the order it was authored in. A risk is the
  *  thing a reader would miss, so it does not wait behind an observation. */
 function notesInOrder(notes: Note[]): Note[] {
-  return [...notes.filter((n) => n.kind === "risk"), ...notes.filter((n) => n.kind !== "risk")];
+  return [
+    ...notes.filter((n) => n.kind === "risk"),
+    ...notes.filter((n) => n.kind !== "risk"),
+  ];
 }
 
 /** A date the colophon can hold, or nothing. A stored timestamp out of the range Date
@@ -1786,6 +2011,10 @@ export interface RenderInput {
   /** Whether this reader may file one. False draws the questions that exist without
    *  the form: a page served to a key holder is not a page anyone can ask from. */
   canFile?: boolean;
+  /** Whether this reader may hand the review out. Minting is a member's act on the
+   *  review's own url, so a share holder and a stranger get a page with no share
+   *  control and no script that could reach the mint route. */
+  canShare?: boolean;
 }
 
 /** The revision menu: every published version, what moved in it, and the two
@@ -1800,14 +2029,21 @@ function revisionMenu(input: RenderInput, basePath: string): string {
       if (e.added > 0) moved.push(`${e.added} new`);
       if (e.revised > 0) moved.push(`${e.revised} revised`);
       if (e.removed > 0) moved.push(`${e.removed} removed`);
-      if (e.restated.length > 0) moved.push(`${e.restated.join(" and ")} restated`);
+      if (e.restated.length > 0)
+        moved.push(`${e.restated.join(" and ")} restated`);
       // A row may not deny movement it is marking in the same breath: when the
       // only thing that moved is a head SHA, the code-moved chip beside this is
       // the whole count.
       const counts =
-        moved.length === 0 ? (e.codeMoved ? "" : "nothing moved") : moved.join(" · ");
+        moved.length === 0
+          ? e.codeMoved
+            ? ""
+            : "nothing moved"
+          : moved.join(" · ");
       const at = new Date(e.createdAt);
-      const on = Number.isNaN(at.getTime()) ? "" : at.toISOString().slice(0, 10);
+      const on = Number.isNaN(at.getTime())
+        ? ""
+        : at.toISOString().slice(0, 10);
       const here = e.version === input.version;
       const isBase = e.version === (input.baseVersion ?? null);
       return (
@@ -1881,21 +2117,40 @@ export function renderReviewPage(input: RenderInput): string {
   const review = delta ? delta.get("review", "review") : null;
   const summaryDelta = delta ? delta.get("summary", "summary") : null;
 
-  const behind = doc.prs.filter((pr) => input.freshness[prKey(pr.repo, pr.number)] === "behind");
+  const behind = doc.prs.filter(
+    (pr) => input.freshness[prKey(pr.repo, pr.number)] === "behind",
+  );
   const heads = headsChip(behind.length, doc.prs.length);
-  const count = doc.prs.length === 1 ? "1 pull request" : `${doc.prs.length} pull requests`;
+  const count =
+    doc.prs.length === 1 ? "1 pull request" : `${doc.prs.length} pull requests`;
   const marking = input.pinned
     ? `version ${input.version} of ${input.latestVersion}`
     : `version ${input.version}`;
 
   const rows =
     doc.statements.map((s) => statementRow(s, ctx)).join("") +
-    (delta ? delta.removed("statement").map((e) => removedStub(e, "row", "rwhat")).join("") : "");
+    (delta
+      ? delta
+          .removed("statement")
+          .map((e) => removedStub(e, "row", "rwhat"))
+          .join("")
+      : "");
   const notes =
     notesInOrder(doc.notes)
       .map((n) => noteRow(n, ctx))
       .join("") +
-    (delta ? delta.removed("note").map((e) => removedStub(e, `note is-${escapeHtml(e.formerKind ?? "note")}`, "none")).join("") : "");
+    (delta
+      ? delta
+          .removed("note")
+          .map((e) =>
+            removedStub(
+              e,
+              `note is-${escapeHtml(e.formerKind ?? "note")}`,
+              "none",
+            ),
+          )
+          .join("")
+      : "");
   // The page says what it is measuring against, once, next to what it is.
   const baseMark =
     input.baseVersion == null
@@ -1912,7 +2167,8 @@ export function renderReviewPage(input: RenderInput): string {
     `<link rel="icon" type="image/svg+xml" href="${FAVICON}">\n` +
     `<link rel="preload" href="/fonts/switzer.woff2" as="font" type="font/woff2" crossorigin>\n` +
     `<link rel="preload" href="/fonts/commit-mono-400.woff2" as="font" type="font/woff2" crossorigin>\n` +
-    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${DELTA_STYLE}${QUESTION_STYLE}</style>\n` +
+    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${DELTA_STYLE}${QUESTION_STYLE}` +
+    `${input.canShare ? SHARE_STYLE : ""}</style>\n` +
     `</head>\n<body>\n` +
     SPRITE +
     `\n<main class="doc">\n` +
@@ -1920,6 +2176,10 @@ export function renderReviewPage(input: RenderInput): string {
     `<div class="head-row">` +
     `<span class="brand">${icon("eye", "eye", "Overseer")}<span class="wordmark">overseer</span></span>` +
     `<span class="head-tag">${escapeHtml(`${slug} · ${marking}`)}</span>` +
+    (input.canShare
+      ? `<button type="button" class="share-toggle" data-share-open aria-expanded="false" ` +
+        `aria-label="Share this review outside the workspace">${icon("link", "mark")}</button>`
+      : "") +
     `<button type="button" class="theme-toggle" data-theme-toggle hidden ` +
     `aria-label="Switch between the light and dark reading surface">` +
     `${icon("contrast", "mark")}</button>` +
@@ -1929,6 +2189,7 @@ export function renderReviewPage(input: RenderInput): string {
     `<span class="heads" id="heads">${escapeHtml(heads)}</span>${baseMark}</p>` +
     revisionMenu(input, ctx.basePath) +
     `</header>\n` +
+    sharePanel(input.canShare === true) +
     // The chain and the summary share one row on a wide screen: the stack is a
     // fixed, narrow column and the account takes the rest. In the markup the chain
     // still comes first, so a phone and a reader with no styles both meet the pull
@@ -1951,10 +2212,13 @@ export function renderReviewPage(input: RenderInput): string {
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
     )} · <a href="/overseer/agent.md">give your own agent this</a></p>\n` +
     `</main>\n<script>${PAGE_SCRIPT}</script>\n` +
+    (input.canShare ? `<script>${shareScript(wsId, slug)}</script>\n` : "") +
     // A pinned version is a record of what was published, so it gets no live channel:
     // only the page reading the current version can go behind while it is open. A page
     // whose reader could not subscribe to that channel gets none either.
-    (input.pinned || input.live === false ? "" : `<script>${freshnessScript(wsId, slug)}</script>\n`) +
+    (input.pinned || input.live === false
+      ? ""
+      : `<script>${freshnessScript(wsId, slug)}</script>\n`) +
     `</body>\n</html>\n`
   );
 }
@@ -1986,7 +2250,10 @@ export function softNotFound(): Response {
       `</main>\n</body>\n</html>\n`,
     {
       status: 404,
-      headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
+      headers: {
+        "content-type": "text/html;charset=utf-8",
+        "cache-control": "no-store",
+      },
     },
   );
 }
@@ -2028,7 +2295,8 @@ export function baseVersion(
     // A `from` that names this version or one that does not exist is not a base.
     // The page falls back rather than refusing: the reader asked for a page.
   }
-  const want = lastOpened === null ? asked - 1 : Math.min(lastOpened, asked - 1);
+  const want =
+    lastOpened === null ? asked - 1 : Math.min(lastOpened, asked - 1);
   return want >= 1 ? want : null;
 }
 
@@ -2062,7 +2330,10 @@ function timelineCounts(
   const counts =
     cur && before
       ? new DeltaIndex(
-          computeDelta({ doc: before, annotations: [] }, { doc: cur, annotations: [] }),
+          computeDelta(
+            { doc: before, annotations: [] },
+            { doc: cur, annotations: [] },
+          ),
         ).counts()
       : { revised: 0, added: 0, removed: 0, codeMoved: 0, restated: [] };
   // Oldest entry out, rather than the whole table: clearing it would make every
@@ -2136,7 +2407,14 @@ export function handleSharedReviewPage(
   if (!SLUG_RE.test(slug)) return softNotFound();
   const review = getReview(wsId, slug);
   if (!review) return softNotFound();
-  return reviewPage({ review, slug, version, from, reader: null, sharePath: basePath });
+  return reviewPage({
+    review,
+    slug,
+    version,
+    from,
+    reader: null,
+    sharePath: basePath,
+  });
 }
 
 /** The page itself, once the review has been resolved by whichever gate.
@@ -2158,19 +2436,24 @@ function reviewPage(args: {
   const shared = sharePath !== null;
   const ws = review.workspace_id;
 
-  const asked = version === null ? review.latest_version : versionNumber(version);
+  const asked =
+    version === null ? review.latest_version : versionNumber(version);
   if (asked === null || asked > review.latest_version) return softNotFound();
   const row = getReviewVersion(ws, slug, asked);
   // A head pointer with no row behind it is corruption, not a miss: the publish path
   // writes the row and the pointer in one transaction.
-  if (!row) throw new Error(`Review ${ws}/${slug} has no version row for version ${asked}`);
+  if (!row)
+    throw new Error(
+      `Review ${ws}/${slug} has no version row for version ${asked}`,
+    );
 
   const reader = args.reader;
   const read = reader ? getReviewRead(ws, slug, reader.id) : null;
   const base = baseVersion(args.from, asked, read ? read.version : null);
   // Read before render, written after the base is fixed: a reader who opens v3
   // sees it against what they last read, and the next open moves on.
-  if (reader && (!read || read.version < asked)) setReviewRead(ws, slug, reader.id, asked);
+  if (reader && (!read || read.version < asked))
+    setReviewRead(ws, slug, reader.id, asked);
 
   const docs = new Map<number, ReviewDoc>([[asked, row.doc]]);
   const docAt = (n: number): ReviewDoc | null => {
@@ -2195,7 +2478,10 @@ function reviewPage(args: {
           // changed between two versions. Marking answers in the delta needs an
           // answered-at column and both sides wired here; until it exists,
           // `DeltaIndex.answered` is empty in production by construction.
-          computeDelta({ doc: baseDoc, annotations: [] }, { doc: row.doc, annotations: [] }),
+          computeDelta(
+            { doc: baseDoc, annotations: [] },
+            { doc: row.doc, annotations: [] },
+          ),
         );
 
   const timeline: TimelineEntry[] = [];
@@ -2241,17 +2527,28 @@ function reviewPage(args: {
       asked === review.latest_version &&
       reader !== null &&
       listUserWorkspaces(reader.id).some((w) => w.id === ws),
+    // Handing the review out is a member's act, and the same gate the mint route
+    // applies. Unlike asking, it does not turn on which version is open: a share
+    // names the review, and the link it makes renders whatever is current.
+    canShare:
+      !shared &&
+      reader !== null &&
+      listUserWorkspaces(reader.id).some((w) => w.id === ws),
   });
   // Looking at a review is what checks it. This is fired after the page is built and
   // never awaited, so a slow GitHub cannot hold a render: the reader gets the stored
   // document now, and a head that moved arrives on the live channel or on the next load.
   // A share holder's look does not count: it is not a member's attention, and a link
   // that anyone can open must not be a way to spend the deployment's GitHub budget.
-  if (!shared && asked === review.latest_version) refreshOnView(ws, slug, row.doc);
+  if (!shared && asked === review.latest_version)
+    refreshOnView(ws, slug, row.doc);
 
   return new Response(html, {
     status: 200,
-    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
+    headers: {
+      "content-type": "text/html;charset=utf-8",
+      "cache-control": "no-store",
+    },
   });
 }
 
@@ -2286,7 +2583,11 @@ export async function handleSharedReviewAttachment(
   return attachmentBytes(wsId, slug, id);
 }
 
-async function attachmentBytes(ws: string, slug: string, id: string): Promise<Response> {
+async function attachmentBytes(
+  ws: string,
+  slug: string,
+  id: string,
+): Promise<Response> {
   const row = getAttachment(ws, slug, id);
   if (!row) return softNotFound();
   const bytes = await openAttachment(ws, id);
@@ -2311,7 +2612,8 @@ async function attachmentBytes(ws: string, slug: string, id: string): Promise<Re
       "x-content-type-options": "nosniff",
       "content-disposition": "inline",
       // Same shape as /i/: bytes served from this origin get no privileges of their own.
-      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
+      "content-security-policy":
+        "default-src 'none'; style-src 'unsafe-inline'",
     },
   });
 }

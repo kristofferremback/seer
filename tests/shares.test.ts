@@ -361,6 +361,22 @@ describe("a share is never a write", () => {
     expect(filed).toBe(0);
   });
 
+  test("a member's own page offers to share it; a shared page does not", async () => {
+    // rootWs is the workspace the root user is in, so this is the member's view.
+    const mine = await (await fetch(`${base}/${rootWs}/r/own-review`)).text();
+    expect(mine).toContain("data-share-open");
+    expect(mine).toContain("data-sharebox");
+    expect(mine).toContain("/api/shares");
+
+    // The same review through a token: no control, and no script that could reach
+    // the mint route even if one were forged by hand.
+    const { token } = mint();
+    const shared = await (await fetch(`${base}/s/${token}`)).text();
+    expect(shared).not.toContain("data-share-open");
+    expect(shared).not.toContain("data-sharebox");
+    expect(shared).not.toContain("/api/shares");
+  });
+
   test("a shared page carries no annotations and no ask form", async () => {
     const { token } = mint();
     const html = await (await fetch(`${base}/s/${token}`)).text();
