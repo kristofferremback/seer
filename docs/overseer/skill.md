@@ -88,6 +88,20 @@ six files came out well at roughly 2,700 characters of prose, all fields counted
 earlier pass over the same change spent 10,900 and said less, because the length went
 into framing and restatement rather than into reasons.
 
+**That anchor is per pull request, and it does not move with the size of the diff.** A
+2,000-line pull request that does one thing well deserves about what a 130-line one
+does; a 130-line one doing five unrelated things deserves more. Length lives in the
+number of things worth saying, not in the number of lines changed. It is the same
+rule as "breadth scales with decomposition" below, applied to prose. Reaching for
+length because the diff was large is the exact move that produced the 10,900 pass.
+
+The per-field caps are no help in judging this. They permit over 24,000 characters
+for a single pull request, an order of magnitude past the anchor, so clearing every
+one of them says nothing about whether the review is the right size.
+`usage.prose.perPr` in the publish response is the number to judge by. Past roughly
+double the anchor, test it: delete a paragraph and ask what the reader no longer
+knows. If the answer is "nothing", that was the length talking.
+
 ## Reading a stack
 
 A review names one or more pull requests. Work in this order:
@@ -146,6 +160,12 @@ path and the range, so the arithmetic is checked, not trusted.
   from. A group carries no `prs[]` of its own.
 - Mechanical churn does not get dropped. It gets a group named for the chore it is, and
   that group ranks last.
+- But a mechanical hunk caused by one specific change belongs **with that change**, not
+  in the chore group. Import rewiring that exists only because a function moved is part
+  of the move, and a reader asking what the extraction touched wants to see it. The test
+  is whether the hunk still makes sense once you take the change away: a formatter run or
+  a rename sweep does, and gets the chore group; the shadow of a single edit does not, and
+  goes with its edit.
 - `significance` is a float. Groups sort ascending and the lowest number is the most
   significant, so 1.0 leads the walkthrough. Ties break by id.
 - The convention: behavior outranks mechanism outranks tests outranks chore. Beyond
@@ -228,9 +248,15 @@ field and the overage.
 | notes | 0 | 6 | +0 | 6 |
 
 **Only the maximum scales. The minimum is flat and small.** Four pull requests raise the
-group ceiling to 16; they do not raise the floor above 2. If a coherent partition of the
-diff wants eleven groups, publish eleven. Splitting a group you did not want in order to
+group ceiling to 16; they do not raise the floor above 2. Where the budget allows it,
+publish what a coherent partition of the diff actually wants: if that is eleven groups
+and eleven are available, publish eleven. Splitting a group you did not want in order to
 reach a number is padding, it costs the reader a section, and nothing asked for it.
+
+Where the budget does not allow it, the cap wins and the partition coarsens. **One pull
+request gets 8 groups and 6 statements, and no honest partition changes that.** Merge the
+neighbours that share a subject rather than dropping anything: a partition at a coarser
+grain is still a partition, and a hunk left unclaimed is a 422.
 
 Character caps: title 80, summary 600 over at most 2 paragraphs, pr gist 100, pr detail
 400, statement
@@ -254,6 +280,13 @@ a review pinned at the ceiling the warning is guaranteed by arithmetic, so weigh
 accordingly: on a stack that is already well decomposed, the honest sentence in the
 summary is that the stack is bigger than one review comfortably holds, not that it
 should have been split further.
+
+**For a single pull request the cap and the warning threshold are the same number**, so
+an honest partition that needs all 8 groups, or all 6 statements, always warns. There is
+nothing there to correct. Read it as a remark about the pull request rather than about
+the review: it says the change was large enough to fill a whole budget on its own, which
+is worth a sentence in the summary and is not an instruction to cut. Republishing smaller
+to silence it makes the review worse, and the warning is not counted against you.
 
 ## Choosing evidence
 
@@ -354,9 +387,19 @@ usage: {
 
 `prose.total` is every authored character on the page and `prose.perPr` divides it by the
 number of pull requests, which is the figure to compare against the calibration above:
-roughly 2,700 characters for a pull request of about 130 changed lines. Well past that
-and the review is long, whatever the per-field caps say. You can republish: same slug,
-same ids for the claims that survive, and the reader sees what you cut.
+roughly 2,700 characters for a pull request of about 130 changed lines, whatever the size
+of its diff. Well past that and the review is long, whatever the per-field caps say.
+
+`prose.bodies` is the subset that is paragraphs: the summary, statement bodies, note
+bodies, and group paragraphs. `total` is those plus every line and label around them:
+the title, each pr gist and detail, statement and note lines, note checks, group titles,
+and file notes. Read the split when you are deciding what to cut. A large `bodies` is
+prose, and prose is where cutting works. A large `total - bodies` is structure, many
+short labelled things, and cutting there removes claims rather than words, so the answer
+is fewer statements or fewer groups, not shorter ones.
+
+You can republish: same slug, same ids for the claims that survive, and the reader sees
+what you cut.
 
 **The other responses.** 401 when the bearer token is missing or wrong; the token is
 the `seer_sk_` secret itself, not any id that names it, and a 401 means fix the
