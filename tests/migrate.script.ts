@@ -2,6 +2,7 @@
 // bind to one DATA_DIR per process, so each migration scenario needs a fresh process.
 // SCENARIO selects what to seed and assert. Exits 0 on success, 1 on the first
 // failed assertion (message on stderr).
+import "./app-env";
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

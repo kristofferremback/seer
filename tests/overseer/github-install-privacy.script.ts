@@ -18,6 +18,7 @@
 // Every refusal runs beside the success it withholds, or the refusal proves nothing.
 //
 // Exits 0 on success, 1 on the first failed assertion (message on stderr).
+import "../app-env";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";

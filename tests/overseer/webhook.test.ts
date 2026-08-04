@@ -546,6 +546,35 @@ describe("reconciliation", () => {
     setGithubClientFactory(offlineGithubClientFactory());
   });
 
+  test("a sweep attributes each row to the installation that covers the repository", async () => {
+    // A workspace holding two installations, which the design calls day-one supported.
+    // The sweep is triggered by the second one; the repository belongs to the first.
+    const INSTALL_OTHER = 9003;
+    attach(wsA, INSTALL_OTHER, "acme-two");
+    reviewNaming(wsA, "two-installs");
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
+    const fake = countingClient(
+      () => ({ head: { sha: "e".repeat(40), ref: "topic" }, updated_at: "2026-08-06T10:00:00Z" }),
+      INSTALL_A,
+    );
+    setGithubClientFactory(() => fake.client);
+
+    await deliver("installation", { action: "unsuspend", installation: { id: INSTALL_OTHER } });
+    for (let i = 0; i < 20 && statusA(12) === null; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(statusA(12)!.installation_id).toBe(INSTALL_A);
+
+    // The half that used to destroy data: stamping the triggering installation on
+    // another one's rows means its removal deletes observations a live installation
+    // still covers.
+    const res = await deliver("installation", {
+      action: "deleted",
+      installation: { id: INSTALL_OTHER },
+    });
+    expect(res.status).toBe(202);
+    expect(statusA(12)).not.toBeNull();
+    setGithubClientFactory(offlineGithubClientFactory());
+  });
+
   test("repositories added are swept, and repositories nobody added are not", async () => {
     reviewNaming(wsA, "added");
     db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);

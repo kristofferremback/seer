@@ -34,11 +34,11 @@ if (s3) {
   }
 }
 
-// The GitHub App. All six variables or none: a half-configured app is a boot that
-// succeeds and then fails at the first publish, which is exactly the silent
-// misconfiguration this repo refuses elsewhere. They are not `required()` yet —
-// the token still works, and the step that deletes it is the step that makes these
-// mandatory (docs/overseer/github-app.md, "Removing the token").
+// The GitHub App. All six are required: with GITHUB_TOKEN gone there is no other way to
+// reach GitHub, so an instance without them is one that boots happily and then fails at
+// the first publish and answers every delivery 503 — the silent misconfiguration this
+// repo refuses elsewhere. Requiring them makes registering an App part of running the
+// server at all (docs/overseer/github-app.md, "Removing the token").
 const APP_VARS = [
   "GITHUB_APP_ID",
   "GITHUB_APP_SLUG",
@@ -49,12 +49,10 @@ const APP_VARS = [
 ] as const;
 
 function githubAppConfig() {
-  const present = APP_VARS.filter((name) => Boolean(process.env[name]));
-  if (present.length === 0) return null;
-  if (present.length !== APP_VARS.length) {
-    const missing = APP_VARS.filter((name) => !process.env[name]);
+  const missing = APP_VARS.filter((name) => !process.env[name]);
+  if (missing.length > 0) {
     throw new Error(
-      `GitHub App is partially configured: missing ${missing.join(", ")}. Set all of ${APP_VARS.join(", ")} or none.`,
+      `GitHub App is not configured: missing ${missing.join(", ")}. All of ${APP_VARS.join(", ")} are required.`,
     );
   }
   // The PEM arrives base64-encoded because a raw PEM's newlines do not survive a

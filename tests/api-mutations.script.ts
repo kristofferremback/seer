@@ -4,6 +4,7 @@
 // non-member 404/403, key ownership, and the invite accept flow over HTTP.
 //
 // Exits 0 on success, 1 on the first failed assertion (message on stderr).
+import "./app-env";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

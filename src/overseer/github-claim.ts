@@ -57,9 +57,8 @@ const AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
  *  setup URL of the App, which is why one handler reads `setup_action` too. */
 export const CALLBACK_PATH = "/github/setup";
 
-export function installUrl(): string | null {
-  const app = config.githubApp;
-  return app ? `https://github.com/apps/${app.slug}/installations/new` : null;
+export function installUrl(): string {
+  return `https://github.com/apps/${config.githubApp.slug}/installations/new`;
 }
 
 function html(body: string, status = 200): Response {
@@ -78,15 +77,9 @@ function refusal(wsId: string | null, headline: string, note: string, status = 4
  * membership by the route table; this mints the nonce and hands the browser to GitHub.
  */
 export function handleConnectGithub(wsId: string, userId: string): Response {
+  // No "not configured" branch: config.ts requires the App variables at boot, so a
+  // running server always has one.
   const app = config.githubApp;
-  if (!app) {
-    return refusal(
-      wsId,
-      "GitHub App is not configured",
-      "This deployment has no GITHUB_APP_CLIENT_ID, so there is nothing to authorize against.",
-      503,
-    );
-  }
   const { nonce } = createClaim(wsId, userId);
   const url = new URL(AUTHORIZE_URL);
   url.searchParams.set("client_id", app.clientId);

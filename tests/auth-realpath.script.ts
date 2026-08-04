@@ -5,6 +5,7 @@
 // nothing here talks to Google.
 //
 // Exits 0 on success, 1 on the first failed assertion (message on stderr).
+import "./app-env";
 import { createHmac } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
