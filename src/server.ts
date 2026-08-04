@@ -64,6 +64,7 @@ import {
   handleGithubSetupCallback,
   installUrl,
 } from "./overseer/github-claim";
+import { handleGithubWebhook } from "./overseer/webhook";
 import { dbWorkspaceHoldings, listWorkspaceInstallations } from "./overseer/installations";
 import { setWorkspaceHoldings } from "./overseer/github-app";
 import { handleReadReview } from "./overseer/read";
@@ -809,6 +810,15 @@ export async function startServer() {
       // reason they are two routes: originOk() passes when Origin and Referer are both
       // absent, the normal case for a top-level navigation, so it is no guard at all on
       // the redirect GET GitHub sends.
+      // Deliberately NO originOk guard, and this comment is here so the next person
+      // reading the table does not add one and break it. Every other POST here is a
+      // browser form and Origin is what proves it came from Seer; GitHub is not a
+      // browser, sends no Origin, and cannot hold a Seer credential. The HMAC over the
+      // raw body is the whole of this route's authentication and is the right amount.
+      "/api/github/webhook": {
+        POST: (req) => handleGithubWebhook(req),
+      },
+
       "/github/setup": {
         GET: (req) => handleGithubSetupCallback(req),
       },

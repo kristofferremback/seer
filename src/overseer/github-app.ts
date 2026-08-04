@@ -362,6 +362,20 @@ export function githubClientFor(workspaceId: string): GithubClient {
   });
 }
 
+/**
+ * Drop what routing believes about a repository (or about everything).
+ *
+ * The routing TTL is long on purpose — `GET /repos/{o}/{r}/installation` authenticates
+ * as the App, and that rate limit is the one budget shared across every workspace — so
+ * the correctness of a long TTL rests entirely on the events that invalidate it:
+ * `installation_repositories`, `installation.created/deleted` and `setup_action=update`.
+ * A no-op when no default app has been built yet, which is every test with an injected
+ * factory: there is no cache to drop.
+ */
+export function invalidateAppRouting(repo?: string): void {
+  defaultApp?.invalidateRouting(repo);
+}
+
 export function setGithubClientFactory(factory: GithubClientFactory | null): void {
   injectedFactory = factory;
 }

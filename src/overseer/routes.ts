@@ -17,7 +17,7 @@ import { saveAttachment } from "../store";
 import { tinyId } from "../ids";
 import { requireApiKey } from "../auth";
 import { createAttachment, createReviewVersion, getReview, getReviewVersion, type ReviewDoc } from "./db";
-import { setReviewPrs, upsertPrStatus } from "./installations";
+import { setReviewPrs, sweepOrphanPrStatus, upsertPrStatus } from "./installations";
 import {
   derivePrs,
   PrPointerError,
@@ -781,6 +781,11 @@ export async function handlePublishReview(req: Request): Promise<Response> {
         repoId: repoIds.get(prKey(p.repo, p.number)) ?? null,
       })),
     );
+    // The counterpart to the delivery filter. A republish that drops a pull request has
+    // just deleted its review_prs row above; its status row is keyed per workspace and
+    // may still be named by a second review, so it goes only when nothing names it.
+    // Same transaction as the set that changed the answer.
+    sweepOrphanPrStatus(ws);
     // The seed, and it is load-bearing rather than an optimisation: with no polling
     // anywhere this is the only thing that gives a new review a glyph, and for a pull
     // request that is already merged or closed there may never be a webhook. It runs

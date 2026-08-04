@@ -1,12 +1,16 @@
 // Freshness: whether the branches a review is about still point where the review says.
 //
-// Looking at a review is what checks it. A render answers from the stored document
-// immediately and, at most once a minute per review, kicks a detached comparison of
-// the stored head SHAs against GitHub. Nothing on the read path waits for GitHub: a
-// slow or broken client costs the reader nothing, and a head that moved lands in
-// `github_pr_status` — the one row per pull request that publish seeds and webhooks
-// maintain — which the next render reads and, for a reader with a script, arrives over
-// the live channel as a push.
+// Nothing here runs by itself any more. Looking at a review used to check it; that
+// automatic check is deleted, and no timer replaced it. Publish seeds `github_pr_status`
+// from the `getPull` the derivation already makes, deliveries maintain it, and a human
+// pressing refresh repairs it — one automatic write path after creation rather than two
+// sources of one fact. A render reaches GitHub on no path at all, which is now a
+// property of the architecture rather than a rule each page has to remember.
+//
+// What that costs is a change nobody could tell us about: a delivery GitHub gave up on,
+// a rotated secret, the minutes of a redeploy. Those used to heal silently on the next
+// render and now persist until someone repairs them, which is why the repair is visible
+// (`observed_at` on every row, delivery health in settings) rather than automatic.
 //
 // `review_freshness` is no longer written by anything. It held a second recording of
 // one fact beside the status row, and two writers of one fact is the drift this design
@@ -22,7 +26,7 @@ import { parseUpdatedAt } from "./derive";
 import type { GithubClient } from "./github";
 import { githubClientFor } from "./github-app";
 import { findPrStatus, upsertPrStatus } from "./installations";
-import { freshnessOf, readableWorkspaces } from "./read";
+import { freshnessOf, readableWorkspaces, statusesOf } from "./read";
 import { prKey, type Freshness } from "./types";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -157,36 +161,56 @@ export async function checkReview(
   return { prs, changed };
 }
 
-/** What a page pushes when a head has moved under it. One shape, so the script on the
- *  page reads a message rather than guessing at one. */
-export function freshnessMessage(result: CheckResult): string {
-  const behind = result.prs.filter((p) => p.freshness === "behind").length;
-  const unknown = result.prs.filter((p) => p.freshness === "unknown").length;
-  // `unknown` rides along because the chip is one sentence over three counts: a push
-  // carrying only `behind` would rewrite "2 unchecked" to "heads current" on a page
-  // whose glyphs still show nothing.
-  return JSON.stringify({ type: "freshness", behind, unknown, total: result.prs.length });
+/**
+ * The whole observation, in one message.
+ *
+ * One message and not two. A `{"type":"pr"}` beside a `{"type":"freshness"}` would be
+ * two descriptions of one observation on the wire: they can arrive out of order and
+ * leave the chip disagreeing with the glyphs on the same screen, which is the failure
+ * the one-row design exists to prevent, reintroduced at the transport. It also could
+ * not have worked — given one pull request's head the script cannot recompute `behind`,
+ * because the page emits no per-pull-request head SHA and the script holds no state.
+ *
+ * So the counts and the per-pull-request readings are computed here, from the rows,
+ * and whatever caused the observation — a delivery or a human pressing refresh — the
+ * wire shape is identical.
+ */
+export function reviewMessage(wsId: string, slug: string, doc: ReviewDoc): string {
+  const fresh = freshnessOf(wsId, slug, doc);
+  const status = statusesOf(wsId, doc);
+  const prs = doc.prs.map((pr) => {
+    const key = prKey(pr.repo, pr.number);
+    return {
+      pr: key,
+      // Null rather than absent: a page that had a glyph and should not have one any
+      // more has to be told, and a missing field is indistinguishable from "unchanged".
+      status: status[key] ?? null,
+      freshness: fresh[key] ?? "unknown",
+    };
+  });
+  return JSON.stringify({
+    type: "review",
+    prs,
+    behind: prs.filter((p) => p.freshness === "behind").length,
+    unknown: prs.filter((p) => p.freshness === "unknown").length,
+    total: prs.length,
+  });
 }
 
 /**
- * The refresh a render triggers. Returns immediately, always.
+ * Push the current observation of a review to the pages open on it.
  *
- * The check runs detached: the caller has already answered, so there is nothing to
- * await it for and every failure inside it is logged rather than thrown. When a head
- * has moved, the pages open on this review hear about it on the live channel; the ones
- * without a script see it on their next load, out of the rows this wrote.
+ * Read from the rows rather than handed the result of whatever wrote them, so a
+ * delivery and a refresh cannot describe the same review two different ways. A review
+ * that no longer resolves is silence: the page will find out on its next load.
  */
-export function refreshOnView(wsId: string, slug: string, doc: ReviewDoc): void {
-  if (!claimCheck(wsId, slug)) return;
-  // Deliberately not awaited. The `void` is the point of this function.
-  void (async () => {
-    try {
-      const result = await checkReview(wsId, slug, doc);
-      if (result.changed) publisher?.(reviewTopic(wsId, slug), freshnessMessage(result));
-    } catch (err) {
-      console.error(`[seer] freshness refresh failed for ${wsId}/${slug}: ${String(err)}`);
-    }
-  })();
+export function publishReview(wsId: string, slug: string): void {
+  if (!publisher) return;
+  const review = resolveReview([wsId], slug);
+  if (!review) return;
+  const row = getReviewVersion(wsId, slug, review.latest_version);
+  if (!row) return;
+  publisher(reviewTopic(wsId, slug), reviewMessage(wsId, slug, row.doc));
 }
 
 // ---- the route ----
@@ -246,7 +270,7 @@ export async function handleRefreshReview(req: Request, slug: string): Promise<R
   }
 
   const result = await checkReview(ws, slug, row.doc);
-  if (result.changed) publisher?.(reviewTopic(ws, slug), freshnessMessage(result));
+  if (result.changed) publishReview(ws, slug);
   return answer(
     true,
     result.prs.map((p) => ({ pr: p.pr, freshness: p.freshness })),

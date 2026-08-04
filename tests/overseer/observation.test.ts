@@ -326,25 +326,26 @@ describe("an absent observation is absence, on all three surfaces", () => {
       [`${GOLDEN_REPO}#13`]: "unknown",
     });
 
-    // 3b. the refresh route inside its window, which answers from what is recorded.
-    // This is the third home of the old default, and the worst of them: this is the
-    // repair path, the one route a reader reaches for when they already suspect
-    // something is stale, so it is the last place that may say "current" about a pull
-    // request nothing has observed. The render above claimed the window.
+    // 3b. the checked branch of the refresh route: this workspace holds no
+    // installation, so the call cannot land and nothing is learnt. Still unknown,
+    // never current. (The render above claims nothing any more — it reaches GitHub on
+    // no path at all — so this refresh is the first thing to claim the window.)
     const unknownPrs = [
       { pr: `${GOLDEN_REPO}#12`, freshness: "unknown" },
       { pr: `${GOLDEN_REPO}#13`, freshness: "unknown" },
     ];
-    const inWindow = await readJson(await refresh("unseen", keyBlind));
-    expect(inWindow.checked).toBe(false);
-    expect(inWindow.prs).toEqual(unknownPrs);
-
-    // 3c. and the checked branch: this workspace holds no installation, so the call
-    // cannot land and nothing is learnt. Still unknown, never current.
-    resetChecks();
     const checked = await readJson(await refresh("unseen", keyBlind));
     expect(checked.checked).toBe(true);
     expect(checked.prs).toEqual(unknownPrs);
+
+    // 3c. and inside the window, where it answers from what is recorded. This is the
+    // third home of the old default and the worst of them: this is the repair path,
+    // the one route a reader reaches for when they already suspect something is
+    // stale, so it is the last place that may say "current" about a pull request
+    // nothing has observed.
+    const inWindow = await readJson(await refresh("unseen", keyBlind));
+    expect(inWindow.checked).toBe(false);
+    expect(inWindow.prs).toEqual(unknownPrs);
   });
 
   test("and with an observation the same three say current", async () => {

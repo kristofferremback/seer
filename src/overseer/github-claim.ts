@@ -46,6 +46,7 @@ import {
   getLiveInstallation,
   updateRepositorySelection,
 } from "./installations";
+import { reconcileInstallation } from "./webhook";
 
 /** GitHub's user-authorization endpoint. The nonce rides OAuth `state`, which is
  *  specified and reliable — unlike `state` through `/apps/<slug>/installations/new`,
@@ -347,6 +348,14 @@ export async function handleClaimInstallation(req: Request): Promise<Response> {
       409,
     );
   }
+
+  // A successful claim is one of the three events that mean observations were missed:
+  // everything GitHub delivered for this installation before it belonged to a workspace
+  // was acknowledged and dropped, because there were no rows to write. Detached — the
+  // person is being redirected to settings and has nothing to wait for.
+  void reconcileInstallation(chosen, null).catch((err) => {
+    console.error(`[seer] reconcile after claim of installation ${chosen} failed: ${String(err)}`);
+  });
 
   return new Response(null, { status: 303, headers: { location: `/settings/${claim.workspace_id}` } });
 }

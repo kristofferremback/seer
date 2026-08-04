@@ -44,7 +44,6 @@ import {
 } from "./delta";
 import type { PrStatusWord } from "./installations";
 import { freshnessOf, readableWorkspaces, statusesOf } from "./read";
-import { refreshOnView } from "./freshness";
 import {
   KIND_LABEL,
   hunkAnchorId,
@@ -1659,7 +1658,9 @@ function card(
     `<span class="c-title">${escapeHtml(pr.title)}</span>` +
     `${icon("chev", "tick")}` +
     `</span>` +
-    `<span class="c-id">` +
+    // Named with the same key the live message uses, so a push can find this card's
+    // glyph without the script holding any per-pull-request state of its own.
+    `<span class="c-id" data-pr="${escapeHtml(prKey(pr.repo, pr.number))}">` +
     statusGlyph(ctx.status[prKey(pr.repo, pr.number)]) +
     `<a class="c-ref" href="https://github.com/${escapeHtml(pr.repo)}/pull/${pr.number}">` +
     `${icon("pr")}<span class="c-reftext">${escapeHtml(prLabel(pr))}</span></a>` +
@@ -2167,7 +2168,22 @@ function freshnessScript(wsId: string, slug: string): string {
     `"/ws/livereload?kind=review&ws="+encodeURIComponent(${JSON.stringify(wsId)})+` +
     `"&slug="+encodeURIComponent(${JSON.stringify(slug)}));` +
     `w.onmessage=(e)=>{let m=null;try{m=JSON.parse(e.data)}catch(x){return}` +
-    `if(!m||m.type!=="freshness")return;` +
+    // One message, carrying the whole observation: the glyphs and the chip are two
+    // readings of one row, so they are rewritten from one message or they can disagree
+    // on screen — which is the failure the single row exists to prevent.
+    `if(!m||m.type!=="review")return;` +
+    `const N="http://www.w3.org/2000/svg";` +
+    `(m.prs||[]).forEach((p)=>{` +
+    `const el=document.querySelector('[data-pr="'+(window.CSS&&CSS.escape?CSS.escape(p.pr):p.pr)+'"]');` +
+    `if(!el)return;let g=el.querySelector(".c-status");` +
+    // No status is no glyph, not a fourth shape: an observation that went away has to
+    // be able to take its glyph with it.
+    `if(!p.status){if(g)g.remove();return}` +
+    `if(!g){g=document.createElementNS(N,"svg");g.appendChild(document.createElementNS(N,"use"));` +
+    `el.insertBefore(g,el.firstChild)}` +
+    `g.setAttribute("class","ic c-status s-"+p.status);g.setAttribute("role","img");` +
+    `g.setAttribute("aria-label",p.status);` +
+    `g.querySelector("use").setAttribute("href","#i-pr-"+p.status)});` +
     // The same three-count sentence headsChip draws, because the two must not drift
     // into two different readings of one message.
     `const u=m.unknown||0;` +
@@ -2624,13 +2640,10 @@ function reviewPage(args: {
       reader !== null &&
       listUserWorkspaces(reader.id).some((w) => w.id === ws),
   });
-  // Looking at a review is what checks it. This is fired after the page is built and
-  // never awaited, so a slow GitHub cannot hold a render: the reader gets the stored
-  // document now, and a head that moved arrives on the live channel or on the next load.
-  // A share holder's look does not count: it is not a member's attention, and a link
-  // that anyone can open must not be a way to spend the deployment's GitHub budget.
-  if (!shared && asked === review.latest_version)
-    refreshOnView(ws, slug, row.doc);
+  // Nothing here reaches GitHub. Looking at a review used to check it; that automatic
+  // check is deleted, not merely unused, so there is no path from a render to the
+  // network to forget about later. Publish seeded these rows, deliveries maintain them,
+  // and the refresh control repairs them when a delivery never came.
 
   return new Response(html, {
     status: 200,

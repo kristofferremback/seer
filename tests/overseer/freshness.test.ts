@@ -120,45 +120,63 @@ describe("the rate limit", () => {
     expect(claimCheck("ws_rate", "review", t0 + CHECK_INTERVAL_MS + 1)).toBe(false);
   });
 
-  test("two renders inside the window cost one check and a later one costs another", async () => {
+  test("a render costs no GitHub call at all", async () => {
     storeGoldenReview(wsA, "rate");
     const fake = countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : GOLDEN_HEAD_SHA_13));
     setGithubClientFactory(() => fake.client);
 
+    // The automatic on-view check is deleted rather than merely rate-limited, so this
+    // is not "one call per minute" — it is no calls, ever, however many renders and
+    // however long between them. A counting client is the only way to say that: a
+    // window that happened to be closed would look the same.
     expect((await fetch(`${base}/${wsA}/r/rate`)).status).toBe(200);
     expect((await fetch(`${base}/${wsA}/r/rate`)).status).toBe(200);
-    await settle();
-    // Two pull requests, checked once: the second render found the window closed.
-    expect(fake.calls()).toBe(2);
-
-    // The window elapses.
     resetChecks();
     expect((await fetch(`${base}/${wsA}/r/rate`)).status).toBe(200);
     await settle();
-    expect(fake.calls()).toBe(4);
+    expect(fake.calls()).toBe(0);
+
+    // And the refresh route, the one path that may reach GitHub, still does: the
+    // guarantee above is about renders, not about the client being inert.
+    const res = await fetch(`${base}/api/reviews/rate/refresh`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${keyA}` },
+    });
+    expect(res.status).toBe(200);
+    expect(fake.calls()).toBe(2);
   });
 });
 
 describe("a head that moved", () => {
-  test("the next render says behind with no refresh call of its own", async () => {
+  test("the next render says behind and reaches GitHub not once", async () => {
     storeGoldenReview(wsA, "moved");
     const moved = "9".repeat(40);
     const fake = countingClient((_repo, n) => (n === 12 ? moved : GOLDEN_HEAD_SHA_13));
     setGithubClientFactory(() => fake.client);
 
+    // Nothing has observed these pull requests and a render will not, so the page says
+    // unchecked rather than asserting current.
     const first = await fetch(`${base}/${wsA}/r/moved`);
     expect(first.status).toBe(200);
-    // The page that triggered the check was rendered before it landed, and nothing had
-    // observed these pull requests, so it says unchecked rather than asserting current.
     expect(await first.text()).toContain("heads unchecked");
     await settle();
+    expect(fake.calls()).toBe(0);
+
+    // The repair is human-triggered, and it is what records the moved head.
+    expect(
+      (
+        await fetch(`${base}/api/reviews/moved/refresh`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${keyA}` },
+        })
+      ).status,
+    ).toBe(200);
 
     const row = findPrStatus(wsA, GOLDEN_REPO, 12);
     expect(row?.head_sha).toBe(moved);
     expect(row?.installation_id).toBe(TEST_INSTALLATION);
 
-    // The next render reads the stored rows. Nothing is refreshed for it: the window
-    // is still closed, and the client would count the call if it were.
+    // The next render reads the stored rows and spends nothing doing it.
     const before = fake.calls();
     const second = await fetch(`${base}/${wsA}/r/moved`);
     expect(await second.text()).toContain("1 of 2 behind");
@@ -286,8 +304,15 @@ describe("the live channel", () => {
       headers: { authorization: `Bearer ${keyA}` },
     });
     expect(res.status).toBe(200);
+    // One message carrying the whole observation: the per-pull-request readings the
+    // glyphs are drawn from and the counts the chip is written from, so the two cannot
+    // arrive out of order and disagree on the same screen.
     expect(JSON.parse(await message)).toEqual({
-      type: "freshness",
+      type: "review",
+      prs: [
+        { pr: `${GOLDEN_REPO}#12`, status: "open", freshness: "behind" },
+        { pr: `${GOLDEN_REPO}#13`, status: "open", freshness: "current" },
+      ],
       behind: 1,
       unknown: 0,
       total: 2,
@@ -331,9 +356,11 @@ describe("the live channel", () => {
     await refresh();
     socket.close();
 
-    expect(heard.map((m) => JSON.parse(m))).toEqual([
-      { type: "freshness", behind: 1, unknown: 0, total: 2 },
-      { type: "freshness", behind: 0, unknown: 0, total: 2 },
+    expect(heard.map((m) => JSON.parse(m) as { type: string; behind: number; unknown: number; total: number }).map(
+      (m) => [m.type, m.behind, m.unknown, m.total],
+    )).toEqual([
+      ["review", 1, 0, 2],
+      ["review", 0, 0, 2],
     ]);
   });
 

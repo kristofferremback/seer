@@ -172,6 +172,55 @@ export function updateRepositorySelection(installationId: number, selection: str
   );
 }
 
+/**
+ * `suspended_at`, set by `installation.suspend` and cleared by anything that proves the
+ * installation is live again.
+ *
+ * The clear is not only `unsuspend`: a delivery arriving at all is proof, which is what
+ * repairs the case where the `unsuspend` delivery was itself the one that was lost.
+ * The column is a display hint and never the fact — a publish is refused because GitHub
+ * declined to mint a token, not because of what this column says.
+ */
+export function setInstallationSuspended(installationId: number, suspended: boolean): void {
+  db.run(
+    "UPDATE github_installations SET suspended_at = ? WHERE installation_id = ? AND removed_at IS NULL",
+    [suspended ? Date.now() : null, installationId],
+  );
+}
+
+/** `installation.deleted`: the claim ends, the audit row survives, and the id is
+ *  released — the partial unique index only covers live rows. */
+export function markInstallationRemoved(installationId: number): boolean {
+  return (
+    db.run(
+      "UPDATE github_installations SET removed_at = ? WHERE installation_id = ? AND removed_at IS NULL",
+      [Date.now(), installationId],
+    ).changes > 0
+  );
+}
+
+/** The rows an installation was the source of, found by `installation_id` — which is
+ *  the whole reason that column exists. By the time `installation.deleted` arrives the
+ *  installation is gone, so GitHub cannot be asked which repositories were its own, and
+ *  deleting by workspace would destroy the surviving installations' observations. */
+export function deletePrStatusForInstallation(installationId: number): number {
+  return db.run("DELETE FROM github_pr_status WHERE installation_id = ?", [installationId]).changes;
+}
+
+/** What `installation_repositories.removed` drops. The glyph disappears rather than
+ *  rendering indefinitely after access ended. */
+export function deletePrStatusForRepo(
+  installationId: number,
+  repoId: number | null,
+  repoFullName: string,
+): number {
+  return db.run(
+    "DELETE FROM github_pr_status WHERE installation_id = ? AND " +
+      "(repo_id = ? OR (repo_id IS NULL AND lower(repo) = ?))",
+    [installationId, repoId, repoFullName.toLowerCase()],
+  ).changes;
+}
+
 /** Disconnect: stamp the row rather than delete it, so what was connected stays
  *  auditable — and release the installation id, because the partial unique index only
  *  covers live rows and a stranded id is one nobody can ever reconnect. */
@@ -410,6 +459,18 @@ export function matchReviewPrs(
     .all(prNumber, repoId, repoFullName.toLowerCase());
 }
 
+/** Every pull request any review in this workspace names, optionally narrowed to a set
+ *  of repositories. What reconciliation walks: bounded by the reviews that exist, not
+ *  by a clock, and it stops when it has been round them once. */
+export function listWorkspacePrs(wsId: string, repos: string[] | null = null): ReviewPrRow[] {
+  const rows = db
+    .query<ReviewPrRow, [string]>("SELECT * FROM review_prs WHERE workspace_id = ?")
+    .all(wsId);
+  if (repos === null) return rows;
+  const wanted = new Set(repos.map((r) => r.toLowerCase()));
+  return rows.filter((r) => wanted.has(r.repo.toLowerCase()));
+}
+
 /** Heal a backfilled row the first time an observation names its numeric id. */
 export function healReviewPrRepoId(
   wsId: string,
@@ -547,6 +608,37 @@ export function observePullRequest(installationId: number, obs: PrObservation): 
     healReviewPrRepoId(row.workspace_id, row.slug, obs.repo, obs.prNumber, obs.repoId);
   }
   return upsertPrStatus(wsId, installationId, obs) ? named.length : 0;
+}
+
+/**
+ * Collect status rows no review in this workspace names any more.
+ *
+ * The counterpart to the filtered upsert: a republish that drops a pull request deletes
+ * its `review_prs` row, but the status row is keyed per workspace and may still be named
+ * by a *second* review, so it cannot be deleted with the one that dropped it. It goes
+ * when nothing names it, which is why this asks the question of the whole workspace and
+ * runs inside the publish transaction that changed the answer.
+ */
+export function sweepOrphanPrStatus(wsId: string): number {
+  return db.run(
+    "DELETE FROM github_pr_status WHERE workspace_id = ? AND NOT EXISTS (" +
+      "SELECT 1 FROM review_prs r WHERE r.workspace_id = github_pr_status.workspace_id " +
+      "AND r.pr_number = github_pr_status.pr_number " +
+      "AND (r.repo_id = github_pr_status.repo_id OR lower(r.repo) = lower(github_pr_status.repo)))",
+    [wsId],
+  ).changes;
+}
+
+/** Which reviews in a workspace name this pull request. The webhook pushes to the pages
+ *  open on each of them, and one pull request may be named by two reviews. */
+export function reviewsNaming(wsId: string, repoId: number, repo: string, prNumber: number): string[] {
+  return [
+    ...new Set(
+      matchReviewPrs(repoId, repo, prNumber)
+        .filter((r) => r.workspace_id === wsId)
+        .map((r) => r.slug),
+    ),
+  ];
 }
 
 // ---- the derived readings ----
