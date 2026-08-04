@@ -600,6 +600,218 @@ function styles(): string {
   /* the void — soft-404 */
   .void-mark { width: 74px; height: 90px; margin-bottom: 1.6rem; opacity: 0.85; }
   .void-mark .glint { animation-duration: 9s; }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  /* ---- ledger sections: when a thing landed, and how many landed with it ----
+     A ruled mono head over each run of rows, in the same register as .eyebrow, with
+     the tally as a small bordered bead of a number. Every section is a <details>, so
+     folding is the browser's job and works with no script at all; Older ships closed
+     because it is the one that grows without bound. */
+  .ledger-section { margin-top: 1.15rem; }
+  .ledger-section[hidden] { display: none; }
+  .ledger-section > summary {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    cursor: pointer;
+    padding: 0.3rem 0 0.55rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: hsl(var(--muted));
+    list-style: none;
+  }
+  .ledger-section > summary::-webkit-details-marker { display: none; }
+  .ledger-section > summary::marker { content: ""; }
+  .section-chevron {
+    flex: none; width: 9px; height: 9px;
+    transition: transform 140ms ease;
+    color: hsl(var(--muted) / 0.8);
+  }
+  .ledger-section[open] > summary .section-chevron { transform: rotate(90deg); }
+  .section-count {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: hsl(var(--muted));
+    background: hsl(var(--paper-sunk));
+    border: 1px solid hsl(var(--line));
+    border-radius: 999px;
+    padding: 1px 7px;
+  }
+  .section-rule { flex: 1; height: 1px; min-width: 1rem; background: hsl(var(--line)); }
+  @media (hover: hover) and (pointer: fine) {
+    .ledger-section > summary:hover { color: hsl(var(--accent)); }
+    .ledger-section > summary:hover .section-chevron { color: hsl(var(--accent)); }
+  }
+
+  /* ---- the row's own menu ----
+     One button per row; one popover for the page, moved to whichever row asked for it.
+     It is positioned fixed rather than absolutely, because .ledger clips its overflow
+     to keep its rounded corners and an absolute menu would be cut off by them. */
+  th.col-menu, td.row-actions { width: 1%; white-space: nowrap; text-align: right; padding-left: 0; }
+  .menu-btn {
+    background: none; border: 0; margin: -8px 0; padding: 8px;
+    color: hsl(var(--muted)); cursor: pointer; line-height: 0;
+    border-radius: 6px;
+  }
+  .menu-btn[aria-expanded="true"] { color: hsl(var(--accent)); background: hsl(var(--paper-sunk)); }
+  @media (hover: hover) and (pointer: fine) { .menu-btn:hover { color: hsl(var(--accent)); } }
+
+  .rowmenu {
+    position: fixed;
+    z-index: 50;
+    width: min(21rem, calc(100vw - 16px));
+    /* Never taller than the screen it opens on. The panel scrolls rather than running
+       off the bottom, which on a phone is the difference between "Create a share link"
+       being reachable and not existing. */
+    max-height: min(30rem, calc(100dvh - 24px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: hsl(var(--paper));
+    border: 1px solid hsl(var(--line));
+    border-radius: 12px;
+    padding: 0.5rem;
+    box-shadow: 0 14px 34px hsl(var(--night) / 0.16), 0 2px 6px hsl(var(--night) / 0.08);
+  }
+  .rowmenu[hidden] { display: none; }
+  .rowmenu-title {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: hsl(var(--ink));
+    margin: 0.15rem 0.45rem 0.4rem;
+    max-width: none;
+    overflow-wrap: anywhere;
+  }
+  .rowmenu-item {
+    display: block; width: 100%; text-align: left;
+    background: none; border: 0; border-radius: 7px;
+    padding: 0.45rem 0.45rem;
+    font-family: var(--font-mono); font-size: 0.78rem;
+    color: hsl(var(--ink-soft)); text-decoration: none; cursor: pointer;
+  }
+  .rowmenu-item.accent { color: hsl(var(--accent)); }
+  .rowmenu-item:hover, .rowmenu-item:focus-visible { background: hsl(var(--paper-sunk)); }
+  .rowmenu-sep { height: 1px; background: hsl(var(--line)); margin: 0.45rem 0.2rem; }
+  [data-versions-block][hidden] { display: none; }
+
+  /* the tail of the history, where the History column stops printing it */
+  .more-versions {
+    background: none; border: 0; padding: 0; margin: 0;
+    font: inherit; color: hsl(var(--muted)); cursor: pointer;
+  }
+  @media (hover: hover) and (pointer: fine) { .more-versions:hover { color: hsl(var(--accent)); } }
+
+  .rowmenu-versions {
+    display: flex; flex-wrap: wrap; gap: 0.3rem;
+    margin: 0 0.45rem 0.35rem;
+    max-height: 7.2rem;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--line)) transparent;
+  }
+  .rowmenu-versions::-webkit-scrollbar { width: 6px; }
+  .rowmenu-versions::-webkit-scrollbar-thumb { background: hsl(var(--line)); border-radius: 999px; }
+  .rowmenu-version {
+    font-family: var(--font-mono); font-size: 0.72rem;
+    color: hsl(var(--muted)); text-decoration: none;
+    border: 1px solid hsl(var(--line)); border-radius: 6px;
+    padding: 1px 6px;
+  }
+  .rowmenu-version.latest { color: hsl(var(--accent-soft)); border-color: hsl(var(--accent) / 0.35); }
+  @media (hover: hover) and (pointer: fine) {
+    .rowmenu-version:hover { color: hsl(var(--accent)); border-color: hsl(var(--accent) / 0.6); }
+  }
+  .rowmenu-eyebrow {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.13em;
+    text-transform: uppercase; color: hsl(var(--muted));
+    margin: 0.15rem 0.45rem 0.35rem; max-width: none;
+  }
+  .rowmenu-note {
+    font-size: 0.76rem; color: hsl(var(--muted));
+    margin: 0.15rem 0.45rem 0.4rem; max-width: none;
+  }
+  .rowmenu-shares { list-style: none; margin: 0 0 0.3rem; padding: 0; }
+  .rowmenu-shares li {
+    display: flex; align-items: baseline; gap: 0.5rem;
+    padding: 0.3rem 0.45rem;
+    font-size: 0.78rem;
+  }
+  .rowmenu-shares .share-label { flex: 1; min-width: 0; overflow-wrap: anywhere; color: hsl(var(--ink-soft)); }
+  .rowmenu-shares .share-when { font-family: var(--font-mono); font-size: 0.68rem; color: hsl(var(--muted)); white-space: nowrap; }
+  .rowmenu-shares .share-when.share-dead { color: hsl(var(--accent-soft)); }
+  .rowmenu-shares button {
+    background: none; border: 0; padding: 0; margin: 0;
+    font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.06em;
+    color: hsl(var(--muted)); cursor: pointer;
+  }
+  @media (hover: hover) and (pointer: fine) { .rowmenu-shares button:hover { color: hsl(var(--accent)); } }
+  .rowmenu .share-fresh { margin: 0.3rem 0.45rem 0.5rem; }
+  .rowmenu .share-fresh[hidden] { display: none; }
+  .rowmenu .share-url { display: flex; gap: 6px; align-items: stretch; }
+  .rowmenu .share-url input {
+    flex: 1 1 auto; min-width: 0;
+    font-family: var(--font-mono); font-size: 12px;
+    padding: 5px 7px; border: 1px solid hsl(var(--line)); border-radius: 6px;
+    background: hsl(var(--paper-sunk)); color: hsl(var(--ink));
+  }
+  .rowmenu .share-url button {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em;
+    background: none; border: 1px solid hsl(var(--line)); border-radius: 6px;
+    padding: 4px 9px; color: hsl(var(--accent)); cursor: pointer;
+  }
+
+  /* ---- the ledger on a phone ----
+     The row is five columns wide and the last of them holds the only way to share a
+     bundle, so on a narrow screen the table must fit rather than scroll sideways: an
+     action you have to swipe to reach is an action nobody finds. History is the column
+     that goes, because every version it lists is in the menu the ⋯ opens anyway, and
+     the slug is allowed to wrap instead of forcing the row wide. */
+  @media (max-width: 640px) {
+    th, td { padding: 0.6rem 0.5rem; }
+    th.col-history, td.history { display: none; }
+    .slug { overflow-wrap: anywhere; }
+    .ledger { border-radius: 12px; }
+
+    /* The popover becomes a sheet at the bottom of the screen — a thumb reaches it,
+       it needs no flipping, and it cannot be pinned into a corner by a row near the
+       edge. place() clears its inline left/top on this width so these rules own the
+       geometry; see bundlesScript(). */
+    .rowmenu {
+      left: 8px;
+      right: 8px;
+      bottom: max(8px, env(safe-area-inset-bottom));
+      top: auto;
+      width: auto;
+      max-height: 82dvh;
+      border-radius: 14px;
+      padding: 0.6rem 0.5rem;
+    }
+    /* One scroller, not two: the sheet scrolls, the version list rides along. */
+    .rowmenu-versions { max-height: none; overflow: visible; }
+  }
+
+  /* ---- what a finger can hit ----
+     Keyed on the pointer rather than the width, because a touch screen is a touch
+     screen at any size. Everything in the menu is a target here, and the share field
+     goes to 16px: below that, iOS zooms the whole page on focus and the reader is left
+     somewhere else entirely. */
+  @media (pointer: coarse) {
+    .menu-btn { padding: 14px 12px; margin: -14px -4px -14px 0; }
+    .more-versions { padding: 6px 4px; margin: -6px -2px; }
+    .rowmenu-item { padding: 0.7rem 0.55rem; }
+    .rowmenu-version { padding: 6px 10px; font-size: 0.78rem; }
+    .rowmenu-shares li { padding: 0.55rem 0.5rem; }
+    .rowmenu-shares button { padding: 6px 4px; margin: -6px -2px; }
+    .rowmenu .share-url input { font-size: 16px; }
+    .rowmenu .share-url button { font-size: 13px; padding: 8px 12px; }
+    .ledger-section > summary { padding: 0.55rem 0 0.7rem; }
+  }
 `;
 }
 
@@ -887,6 +1099,13 @@ workspace serves them only to signed-in members; everyone else gets a generic
 Seer 404 that reveals nothing, so a private bundle's title never leaks. The human
 sets visibility per workspace on its settings page.
 
+There is a third option, and it is the human's to reach for rather than yours: from
+the bundle's row on \`${base}/bundles\` they can mint a **share link** (\`/s/<token>/\`)
+that opens that one bundle for someone with no account, and revoke it later. It is how
+a bundle in a private workspace gets handed to an outsider. You cannot mint one — it
+takes a signed-in session, not an API key — so hand over the \`url\` above and say that
+a share link exists if the recipient turns out not to be a member.
+
 Hand the \`url\` to whoever should see it, or open it yourself. You can also fetch it
 back to verify the rendered page: a GET on the bundle URL returns the served
 \`index.html\` (the latest URL has the live-reload script injected before \`</body>\`).
@@ -1014,8 +1233,54 @@ ${themeToggleScript()}
 export interface LedgerBundle {
   slug: string;
   latestVersion: number;
-  updated: string; // preformatted timestamp
+  updatedAt: number; // epoch ms of the newest version's upload
   versions: number[];
+}
+
+// ---- when a thing landed ----
+//
+// The ledger is read by recency far more often than by name, so it is cut into runs of
+// recency with a count on each. Five buckets, in one order, always drawn in that order
+// whether or not they hold anything: the page is the same shape every time it loads,
+// and the browser has somewhere to put a row it re-dates.
+
+export type LedgerBucket = "today" | "yesterday" | "this-week" | "last-week" | "older";
+
+export const LEDGER_BUCKETS: readonly { key: LedgerBucket; label: string }[] = [
+  { key: "today", label: "Today" },
+  { key: "yesterday", label: "Yesterday" },
+  { key: "this-week", label: "This week" },
+  { key: "last-week", label: "Last week" },
+  { key: "older", label: "Older" },
+];
+
+const DAY_MS = 86_400_000;
+
+/** Whole days since the epoch, in UTC. */
+export function utcDay(ms: number): number {
+  return Math.floor(ms / DAY_MS);
+}
+
+/**
+ * The bucket a day falls in, relative to today — pure day arithmetic, so the caller
+ * decides which timezone the two day numbers were counted in.
+ *
+ * A day in the future (a clock askew, or a machine ahead of this one) reads as today
+ * rather than as its own category: it is a rounding error, not a fact about the bundle.
+ *
+ * KEEP IN STEP with the five lines of the same rule in `bundlesScript()`. The server
+ * sections the page in UTC so a scriptless reader still gets a sectioned ledger, and
+ * the browser re-sections it in the reader's own timezone on load. They must agree, or
+ * a row would visibly jump for a reader whose clock already agreed with the server's.
+ */
+export function bucketFor(day: number, today: number): LedgerBucket {
+  if (day >= today) return "today";
+  if (day === today - 1) return "yesterday";
+  // Weeks start Monday. Epoch day 0 was a Thursday, so (day + 3) % 7 is 0 on Mondays.
+  const weekStart = today - ((today + 3) % 7);
+  if (day >= weekStart) return "this-week";
+  if (day >= weekStart - 7) return "last-week";
+  return "older";
 }
 
 // The ledger is grouped by the session user's workspaces: one group head per
@@ -1028,10 +1293,74 @@ export interface LedgerGroup {
   bundles: LedgerBundle[];
 }
 
-export function bundlesPage(email: string, groups: LedgerGroup[]): string {
+/** How many versions the History column prints inline before the rest go behind the
+ *  row's menu. Five is about where the column stops being a glance and starts being a
+ *  paragraph. */
+export const HISTORY_SHOWN = 5;
+
+/** `YYYY-MM-DD HH:MM` in UTC — what a scriptless reader sees, and what the browser
+ *  rewrites into the reader's own timezone on load. */
+function fmtInstant(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+}
+
+/** `now` is a parameter rather than a call so the sectioning is testable and so every
+ *  group on one render is cut against the same instant. */
+export function bundlesPage(email: string, groups: LedgerGroup[], now = Date.now()): string {
   const og = { "og:title": "Bundles · Seer", "og:type": "website", robots: "noindex" };
 
+  const today = utcDay(now);
   const bundleUrl = (wsId: string, slug: string) => `/${wsId}/b/${encodeURIComponent(slug)}/`;
+
+  const chevron = `<svg class="section-chevron" viewBox="0 0 8 8" fill="none" aria-hidden="true"><path d="M2.5 1 L6 4 L2.5 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const dots = `<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="8" cy="3" r="1.35"/><circle cx="8" cy="8" r="1.35"/><circle cx="8" cy="13" r="1.35"/></svg>`;
+
+  const row = (g: LedgerGroup, b: LedgerBundle) => {
+    const url = bundleUrl(g.wsId, b.slug);
+    // The recent few inline, the rest behind the row's menu. A bundle pushed forty
+    // times used to print forty links and make its row the widest thing on the page;
+    // the tail is worth keeping, not worth reading at a glance. The overflow travels
+    // as a list of numbers rather than as more markup, which is smaller than the links
+    // it replaces even before the menu builds them back.
+    const shown = b.versions.slice(0, HISTORY_SHOWN);
+    const rest = b.versions.length - shown.length;
+    const history =
+      shown.map((v) => `<a href="${url}v/${v}/">v${v}</a>`).join("") +
+      (rest > 0
+        ? `<button type="button" class="more-versions" data-menu-more` +
+          ` aria-label="All ${b.versions.length} versions of ${escapeHtml(b.slug)}">+${rest}</button>`
+        : "");
+    return `<tr data-at="${b.updatedAt}">
+          <td class="slug"><a href="${url}">${escapeHtml(b.slug)}</a></td>
+          <td class="mono">v${b.latestVersion}</td>
+          <td class="mono"><time datetime="${new Date(b.updatedAt).toISOString()}">${fmtInstant(b.updatedAt)}</time></td>
+          <td class="history mono">${history}</td>
+          <td class="row-actions"><button type="button" class="menu-btn" data-menu-open
+            aria-haspopup="true" aria-expanded="false"
+            aria-label="Actions for ${escapeHtml(b.slug)}"
+            data-ws="${escapeHtml(g.wsId)}" data-slug="${escapeHtml(b.slug)}" data-url="${url}"
+            data-versions="${b.versions.join(",")}">${dots}</button></td>
+        </tr>`;
+  };
+
+  // Every bucket is drawn, empty ones hidden rather than omitted: the browser re-dates
+  // rows in local time on load and needs somewhere to move them to.
+  const section = (g: LedgerGroup, bucket: (typeof LEDGER_BUCKETS)[number]) => {
+    const held = g.bundles.filter((b) => bucketFor(utcDay(b.updatedAt), today) === bucket.key);
+    const open = bucket.key === "older" ? "" : " open";
+    const hidden = held.length === 0 ? " hidden" : "";
+    return `<details class="ledger-section" data-section="${bucket.key}"${open}${hidden}>
+      <summary>${chevron}<span>${bucket.label}</span><span class="section-count" data-section-count>${held.length}</span><span class="section-rule"></span></summary>
+      <div class="ledger scroll-x">
+        <table>
+          <thead><tr><th>Bundle</th><th>Latest</th><th>Updated</th><th class="col-history">History</th><th class="col-menu"><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody data-section-rows>
+          ${held.map((b) => row(g, b)).join("\n")}
+          </tbody>
+        </table>
+      </div>
+    </details>`;
+  };
 
   const groupBlock = (g: LedgerGroup) => {
     const pill = `<span class="pill${g.visibility === "public" ? " public" : ""}"><span class="bead"></span>${g.visibility}</span>`;
@@ -1048,26 +1377,9 @@ export function bundlesPage(email: string, groups: LedgerGroup[]): string {
       <p class="empty">No bundles here yet.</p>`;
     }
 
-    const rows = g.bundles
-      .map((b) => {
-        const history = b.versions
-          .map((v) => `<a href="${bundleUrl(g.wsId, b.slug)}v/${v}/">v${v}</a>`)
-          .join("");
-        return `<tr>
-          <td class="slug"><a href="${bundleUrl(g.wsId, b.slug)}">${escapeHtml(b.slug)}</a></td>
-          <td class="mono">v${b.latestVersion}</td>
-          <td class="mono">${escapeHtml(b.updated)}</td>
-          <td class="history mono">${history}</td>
-        </tr>`;
-      })
-      .join("\n");
-
     return `${head}
-    <div class="ledger scroll-x">
-      <table>
-        <tr><th>Bundle</th><th>Latest</th><th>Updated</th><th>History</th></tr>
-        ${rows}
-      </table>
+    <div data-ledger-group>
+      ${LEDGER_BUCKETS.map((bucket) => section(g, bucket)).join("\n")}
     </div>`;
   };
 
@@ -1082,6 +1394,31 @@ export function bundlesPage(email: string, groups: LedgerGroup[]): string {
       <input class="input" type="text" name="name" placeholder="new workspace name" maxlength="80" aria-label="New workspace name">
       <button class="btn primary" type="submit">New workspace</button>
     </form>`;
+
+  // One popover for the page rather than one per row: it is moved to whichever row
+  // asked for it, so a ledger of five hundred bundles carries one menu's worth of DOM.
+  const rowMenu = `<div class="rowmenu" data-rowmenu hidden role="menu" aria-label="Bundle actions">
+    <p class="rowmenu-title" data-menu-title></p>
+    <a class="rowmenu-item" role="menuitem" data-menu-open-link href="/">Open the latest</a>
+    <button class="rowmenu-item" type="button" role="menuitem" data-menu-copy>Copy its link</button>
+    <div data-versions-block>
+      <div class="rowmenu-sep"></div>
+      <p class="rowmenu-eyebrow">Every version <span class="section-count" data-versions-count></span></p>
+      <div class="rowmenu-versions" data-versions-list></div>
+    </div>
+    <div class="rowmenu-sep"></div>
+    <p class="rowmenu-eyebrow">Share links</p>
+    <ul class="rowmenu-shares" data-share-list></ul>
+    <p class="rowmenu-note" data-share-empty>No link opens this one yet.</p>
+    <div class="share-fresh" data-share-fresh hidden>
+      <div class="share-url">
+        <input type="text" readonly data-share-url aria-label="The new share link">
+        <button type="button" data-share-copy>copy</button>
+      </div>
+      <p class="rowmenu-note">Copy it now. Links are stored hashed, so this one cannot be shown again.</p>
+    </div>
+    <button class="rowmenu-item accent" type="button" role="menuitem" data-share-new>Create a share link</button>
+  </div>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -1100,7 +1437,8 @@ ${head("Bundles · Seer", og)}
     ${body}
     ${newWorkspace}
     <p class="aside stack-gap">You appear here for every workspace you're a member of. Each group is
-    its own little estate — its visibility rides on its sleeve, its settings one click away.</p>
+    its own little estate — its visibility rides on its sleeve, its settings one click away.
+    A share link opens one bundle for someone who is in none of them, and it can be taken back.</p>
   </div>
 </div>
 <div class="frame night">
@@ -1108,9 +1446,266 @@ ${head("Bundles · Seer", og)}
     ${footer([`<a href="/">back to the front</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
   </div>
 </div>
+${rowMenu}
 ${themeToggleScript()}
+<script>${bundlesScript()}</script>
 </body>
 </html>`;
+}
+
+/**
+ * The ledger's two pieces of behaviour, both of which the page reads correctly without.
+ *
+ * First: re-dating. The server sectioned the page in UTC, which is the same timezone it
+ * prints every other timestamp in, and is wrong about "today" for anyone who works past
+ * their own midnight. So on load the browser recounts the days in its own timezone,
+ * moves rows to the section they actually belong in, redraws the counts, and rewrites
+ * each stamp as local time. Rows are re-appended in one descending pass, so each body
+ * ends up ordered however many of them moved and whichever way the offset ran.
+ *
+ * Second: the row menu, which is where a bundle is shared. Minting is the only thing
+ * here that cannot be undone by reloading, and the only thing that ever shows a token:
+ * the store keeps a hash, so a link this menu does not show now can never be shown
+ * again. That is why the fresh link is its own row and why the list never pretends to
+ * hold one.
+ */
+function bundlesScript(): string {
+  return `
+(() => {
+  const DAY = 86400000;
+  // The same rule as bucketFor() in src/pages.ts — keep the two in step.
+  const bucket = (day, today) => {
+    if (day >= today) return 'today';
+    if (day === today - 1) return 'yesterday';
+    const week = today - ((today + 3) % 7);
+    if (day >= week) return 'this-week';
+    if (day >= week - 7) return 'last-week';
+    return 'older';
+  };
+  const localDay = (ms) => Math.floor((ms - new Date(ms).getTimezoneOffset() * 60000) / DAY);
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = (ms) => {
+    const d = new Date(ms);
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  };
+
+  const today = localDay(Date.now());
+  for (const group of document.querySelectorAll('[data-ledger-group]')) {
+    const rows = [...group.querySelectorAll('tr[data-at]')]
+      .sort((a, b) => Number(b.dataset.at) - Number(a.dataset.at));
+    for (const row of rows) {
+      const at = Number(row.dataset.at);
+      const time = row.querySelector('time');
+      if (time) time.textContent = stamp(at);
+      const body = group.querySelector('[data-section="' + bucket(localDay(at), today) + '"] [data-section-rows]');
+      // Always append, never skip: appending in one descending pass is what keeps every
+      // body sorted, whichever direction the timezone moved rows in.
+      if (body) body.append(row);
+    }
+    for (const section of group.querySelectorAll('[data-section]')) {
+      const held = section.querySelectorAll('tr[data-at]').length;
+      section.hidden = held === 0;
+      section.querySelector('[data-section-count]').textContent = String(held);
+    }
+  }
+})();
+
+(() => {
+  const menu = document.querySelector('[data-rowmenu]');
+  if (!menu) return;
+  const title = menu.querySelector('[data-menu-title]');
+  const openLink = menu.querySelector('[data-menu-open-link]');
+  const list = menu.querySelector('[data-share-list]');
+  const empty = menu.querySelector('[data-share-empty]');
+  const fresh = menu.querySelector('[data-share-fresh]');
+  const field = menu.querySelector('[data-share-url]');
+  const versionsBlock = menu.querySelector('[data-versions-block]');
+  const versionsList = menu.querySelector('[data-versions-list]');
+  const versionsCount = menu.querySelector('[data-versions-count]');
+  // anchor is the row's own button, which is what the menu is filled from and
+  // positioned against; opener is whatever was actually clicked, which is where focus
+  // goes back to on Escape. They differ when the menu was opened from a "+N".
+  let anchor = null;
+  let opener = null;
+
+  const when = (iso) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+  // On a narrow screen the menu is a sheet pinned to the bottom by CSS, so the only
+  // thing to do is get out of the way: inline left/top would outrank the media query.
+  const asSheet = () => window.matchMedia('(max-width: 640px)').matches;
+
+  function place() {
+    if (!anchor) return;
+    if (asSheet()) {
+      menu.style.left = '';
+      menu.style.top = '';
+      return;
+    }
+    const at = anchor.getBoundingClientRect();
+    const box = menu.getBoundingClientRect();
+    const left = Math.max(8, Math.min(at.right - box.width, window.innerWidth - box.width - 8));
+    const below = at.bottom + 6;
+    const top = below + box.height > window.innerHeight - 8
+      ? Math.max(8, at.top - box.height - 6)
+      : below;
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+  }
+
+  function close(refocus) {
+    if (!anchor) return;
+    const was = anchor, from = opener || anchor;
+    anchor = null;
+    opener = null;
+    menu.hidden = true;
+    was.setAttribute('aria-expanded', 'false');
+    if (refocus) from.focus();
+  }
+
+  // The whole history, which the row prints only the head of. Built here rather than
+  // shipped as markup on every row: the numbers are what travel, and one bundle's worth
+  // of links exists at a time.
+  function fillVersions() {
+    const held = (anchor.dataset.versions || '').split(',').filter(Boolean);
+    versionsBlock.hidden = held.length === 0;
+    versionsCount.textContent = String(held.length);
+    versionsList.textContent = '';
+    for (const v of held) {
+      const link = document.createElement('a');
+      link.className = 'rowmenu-version';
+      link.href = anchor.dataset.url + 'v/' + v + '/';
+      link.textContent = 'v' + v;
+      if (v === held[0]) {
+        link.classList.add('latest');
+        link.title = 'the newest version';
+      }
+      versionsList.append(link);
+    }
+  }
+
+  async function load() {
+    if (!anchor) return;
+    const ws = anchor.dataset.ws, slug = anchor.dataset.slug;
+    let shares = [];
+    try {
+      const res = await fetch('/api/shares?workspace=' + encodeURIComponent(ws), { headers: { accept: 'application/json' } });
+      if (res.ok) shares = (await res.json()).shares.filter((s) => s.kind === 'bundle' && s.target === slug);
+    } catch (e) { /* an offline menu shows no links rather than a wrong count */ }
+    // The menu may have moved on while that was in flight.
+    if (!anchor || anchor.dataset.ws !== ws || anchor.dataset.slug !== slug) return;
+    list.textContent = '';
+    empty.hidden = shares.length > 0;
+    for (const s of shares) {
+      const li = document.createElement('li');
+      const label = document.createElement('span');
+      label.className = 'share-label';
+      label.textContent = s.label || 'unlabelled link';
+      const made = document.createElement('span');
+      made.className = 'share-when';
+      // An expired link is still listed, because it is still revocable and still a thing
+      // that was handed out; it is said to be dead rather than drawn as live.
+      const dead = s.expiresAt !== null && new Date(s.expiresAt).getTime() <= Date.now();
+      made.textContent = when(s.createdAt) + (s.expiresAt ? (dead ? ' · expired ' : ' · until ') + when(s.expiresAt) : '');
+      if (dead) made.classList.add('share-dead');
+      const kill = document.createElement('button');
+      kill.type = 'button';
+      kill.textContent = 'revoke';
+      kill.addEventListener('click', async () => {
+        kill.disabled = true;
+        await fetch('/api/shares/' + encodeURIComponent(s.id), { method: 'DELETE' });
+        await load();
+      });
+      li.append(label, made, kill);
+      list.append(li);
+    }
+    place();
+  }
+
+  async function copyInto(button, text, done) {
+    try { await navigator.clipboard.writeText(text); button.textContent = done; }
+    catch (e) { button.textContent = 'press ⌘C'; }
+    setTimeout(() => { button.textContent = button.dataset.label; }, 1600);
+  }
+  for (const b of menu.querySelectorAll('[data-menu-copy],[data-share-copy]')) b.dataset.label = b.textContent;
+
+  // Two ways into the same menu: the row's own button, and the "+N" standing in for the
+  // versions the History column did not print. The second opens the first's menu, so
+  // there is one panel and one place that knows how to fill it.
+  function triggerFor(target) {
+    const own = target.closest('[data-menu-open]');
+    if (own) return own;
+    const more = target.closest('[data-menu-more]');
+    return more ? more.closest('tr').querySelector('[data-menu-open]') : null;
+  }
+
+  document.addEventListener('click', (ev) => {
+    const button = triggerFor(ev.target);
+    if (button) {
+      const again = anchor === button;
+      close(false);
+      if (again) return;
+      anchor = button;
+      opener = ev.target.closest('[data-menu-open],[data-menu-more]');
+      button.setAttribute('aria-expanded', 'true');
+      title.textContent = button.dataset.slug;
+      openLink.href = button.dataset.url;
+      fresh.hidden = true;
+      field.value = '';
+      list.textContent = '';
+      empty.hidden = false;
+      fillVersions();
+      menu.hidden = false;
+      place();
+      load();
+      return;
+    }
+    if (!menu.hidden && !ev.target.closest('[data-rowmenu]')) close(false);
+  });
+
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(true); });
+  // Rather than chase the anchor: a menu positioned against a row that has scrolled
+  // away is worse than no menu. Scrolling INSIDE the menu is the exception and has to
+  // be one — this listener captures, so without it the first swipe down a long version
+  // list would close the thing being read.
+  window.addEventListener('scroll', (ev) => {
+    const within = ev.target instanceof Element && ev.target.closest('[data-rowmenu]');
+    if (!within) close(false);
+  }, true);
+  window.addEventListener('resize', () => close(false));
+
+  menu.querySelector('[data-menu-copy]').addEventListener('click', (ev) => {
+    if (!anchor) return;
+    copyInto(ev.currentTarget, location.origin + anchor.dataset.url, 'Copied');
+  });
+
+  menu.querySelector('[data-share-copy]').addEventListener('click', (ev) => {
+    field.select();
+    copyInto(ev.currentTarget, field.value, 'copied');
+  });
+
+  menu.querySelector('[data-share-new]').addEventListener('click', async (ev) => {
+    if (!anchor) return;
+    const button = ev.currentTarget;
+    const ws = anchor.dataset.ws, slug = anchor.dataset.slug;
+    button.disabled = true;
+    try {
+      const res = await fetch('/api/shares', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ workspace: ws, kind: 'bundle', target: slug, label: slug }),
+      });
+      if (!res.ok) { field.value = 'Could not create a link (' + res.status + ')'; fresh.hidden = false; place(); return; }
+      field.value = (await res.json()).url;
+      fresh.hidden = false;
+      place();
+      field.focus();
+      field.select();
+      await load();
+    } finally { button.disabled = false; }
+  });
+})();
+`;
 }
 
 // ---- workspace settings ----

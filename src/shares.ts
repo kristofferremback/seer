@@ -18,8 +18,9 @@
 
 import { config } from "./config";
 import { sessionUser } from "./auth";
-import { db, getBundle, isMember } from "./db";
+import { db, getBundle, getVersion, isMember } from "./db";
 import { hashKey, newShareToken, tinyId, SHARE_TOKEN_RE, SHR_ID_RE, WS_ID_RE } from "./ids";
+import { serveBundleFile, type BundleMeta } from "./serve-bundle";
 import { getReview } from "./overseer/db";
 import {
   handleSharedReviewAttachment,
@@ -36,17 +37,12 @@ export type ShareKind = "review" | "bundle";
  *  open. */
 export const SHARE_KINDS: readonly ShareKind[] = ["review", "bundle"];
 
-/** The kinds the read route actually serves today.
- *
- *  THE BUNDLE GAP. Reviews are here; bundles are not, and minting one is refused rather
- *  than half-built. A bundle is a tree of files served under a path whose every relative
- *  URL resolves against it, so serving one through `/s/<token>` means the trailing-slash
- *  redirect, the asset remainder, the version pin and the live-reload channel all
- *  rewritten onto the token path. That is a route, not a resolver call, and it buys
- *  nothing yet: a bundle is public by link today, so no bundle needs a share to be
- *  sendable. When private bundles exist, this is the line that changes and
- *  handleShare() below is where the second branch goes. */
-export const SERVED_SHARE_KINDS: readonly ShareKind[] = ["review"];
+/** The kinds the read route actually serves. A kind in SHARE_KINDS but not here is one
+ *  the resolver understands and no route opens, so minting it is refused rather than
+ *  handing over a link that dead-ends: see handleCreateShare(). Both kinds are served
+ *  today, so the guard is a standing check on the next kind rather than a live refusal,
+ *  and it is deliberately kept — the mint and the read route must not drift. */
+export const SERVED_SHARE_KINDS: readonly ShareKind[] = ["review", "bundle"];
 
 export interface ShareRow {
   id: string;
@@ -149,27 +145,66 @@ function withShareHeaders(res: Response): Response {
   return res;
 }
 
+/** A review's remainder: nothing, a version pin, or one attachment. Trailing slash
+ *  optional; anything else under the token is not part of the review. */
+const REVIEW_TAIL_RE = /^(?:(v|a)\/([^/]+))?\/?$/;
+
+/** A bundle's remainder, when it opens with a version pin: `v/<n>` and then whatever
+ *  the tree is asked for. `undefined` for the third group means the pin arrived without
+ *  the trailing slash its relative URLs need. */
+const BUNDLE_PIN_RE = /^v\/(\d+)(?:\/(.*))?$/;
+
 /**
- * GET /s/:token, GET /s/:token/v/:n and GET /s/:token/a/:id.
+ * GET anything under `/s/`.
  *
- * The asset renders exactly as its private route renders it, with three differences the
- * renderer is told about rather than asked to infer: the page hangs off `/s/<token>` so
- * every link on it is one the holder can follow, it carries no annotations, and it
- * offers no write.
+ * The whole path is parsed here rather than by the router, because what the remainder
+ * after the token means is not knowable until the token is resolved: `v/2/app.css` is a
+ * pinned asset inside a bundle and a nonsense URL on a review. Resolve first, then read
+ * the rest of the path as the kind it turned out to be.
+ *
+ * Either way the asset renders exactly as its private route renders it, with three
+ * differences the renderer is told about rather than asked to infer: the page hangs off
+ * `/s/<token>` so every link on it is one the holder can follow, it carries none of the
+ * workspace's own conversation, and it offers no write.
  */
-export async function handleShare(
-  req: Request,
-  token: string,
-  version: string | null,
-  attachment: string | null,
-): Promise<Response> {
+export async function handleShareRequest(req: Request): Promise<Response> {
+  // Reading is the whole of what a share grants, so this route has no other verb. The
+  // refusal is a plain 405 rather than the soft-404: it says nothing about the token,
+  // which is not even looked at.
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return withShareHeaders(new Response("Method not allowed", { status: 405 }));
+  }
+
+  const url = new URL(req.url);
+  const tail = url.pathname.slice("/s/".length);
+  const cut = tail.indexOf("/");
+  // `rest` is null when the URL ended at the token and "" when it ended at the token's
+  // trailing slash. A bundle needs to tell those apart; a review does not care.
+  const token = cut === -1 ? tail : tail.slice(0, cut);
+  const rest = cut === -1 ? null : tail.slice(cut + 1);
+
   const share = resolveShare(token);
   if (!share) return deadShare(req, token);
-  if (!SERVED_SHARE_KINDS.includes(share.kind)) return softNotFound();
+  if (share.kind === "review") return sharedReview(req, share, token, rest);
+  if (share.kind === "bundle") return sharedBundle(url, share, token, rest);
+  // A kind the resolver knows and no branch here serves. Unreachable while
+  // SERVED_SHARE_KINDS and this switch agree, which is what the mint guard enforces.
+  return softNotFound();
+}
 
-  if (attachment !== null) {
+async function sharedReview(
+  req: Request,
+  share: ShareRow,
+  token: string,
+  rest: string | null,
+): Promise<Response> {
+  const parts = (rest ?? "").match(REVIEW_TAIL_RE);
+  if (!parts) return softNotFound();
+  const [, part, value] = parts;
+
+  if (part === "a") {
     return withShareHeaders(
-      await handleSharedReviewAttachment(share.workspace_id, share.target, attachment),
+      await handleSharedReviewAttachment(share.workspace_id, share.target, value!),
     );
   }
   // `?from=` is the only thing this route reads off the request, and it moves the
@@ -177,8 +212,77 @@ export async function handleShare(
   // revision menu on a shared page would draw controls that do nothing.
   const from = new URL(req.url).searchParams.get("from");
   return withShareHeaders(
-    handleSharedReviewPage(share.workspace_id, share.target, version, `/s/${token}`, from),
+    handleSharedReviewPage(
+      share.workspace_id,
+      share.target,
+      part === "v" ? value! : null,
+      `/s/${token}`,
+      from,
+    ),
   );
+}
+
+/**
+ * A shared bundle: the same tree the workspace path serves, rooted at the token.
+ *
+ * Everything the workspace route does with the path, this does with the token in front
+ * of it — the trailing slash a bundle's relative URLs resolve against, the asset
+ * remainder, the `/v/<n>` pin. The one thing it does differently is the live-reload
+ * channel: the injected socket carries the token instead of the workspace, because the
+ * holder is not a member and the membership gate would refuse them.
+ */
+async function sharedBundle(
+  url: URL,
+  share: ShareRow,
+  token: string,
+  rest: string | null,
+): Promise<Response> {
+  const bundle = getBundle(share.workspace_id, share.target);
+  // A share outliving the bundle it names is the soft-404, same as a dead token: what
+  // the workspace no longer holds is not this route's to describe.
+  if (!bundle) return softNotFound();
+
+  // Require the trailing slash on the bundle root, exactly as /<ws>/b/<slug> does, or
+  // every relative URL in the page resolves one level too high.
+  if (rest === null) {
+    return withShareHeaders(
+      new Response(null, { status: 302, headers: { location: `${url.pathname}/${url.search}` } }),
+    );
+  }
+
+  const pin = rest.match(BUNDLE_PIN_RE);
+  const pinned = pin !== null;
+  const version = pinned ? Number(pin[1]) : bundle.latest_version;
+  if (pinned && (version < 1 || version > bundle.latest_version)) return softNotFound();
+  if (pinned && pin[2] === undefined) {
+    return withShareHeaders(
+      new Response(null, { status: 302, headers: { location: `${url.pathname}/${url.search}` } }),
+    );
+  }
+  const file = pinned ? pin[2]! : rest;
+
+  const meta: BundleMeta = {
+    slug: share.target,
+    version,
+    updatedAt: getVersion(share.workspace_id, share.target, version)?.created_at ?? bundle.created_at,
+    url: `${config.baseUrl}${url.pathname}`,
+  };
+  return withShareHeaders(
+    await serveBundleFile(
+      share.workspace_id,
+      meta,
+      file,
+      pinned ? null : { via: "share", token },
+    ),
+  );
+}
+
+/** Where a member landing on a dead link is sent instead of the refusal: the asset's
+ *  own URL, per kind. */
+function assetPath(row: ShareRow): string | null {
+  if (row.kind === "review") return `/${row.workspace_id}/r/${row.target}`;
+  if (row.kind === "bundle") return `/${row.workspace_id}/b/${row.target}/`;
+  return null;
 }
 
 /** A token that is unknown, revoked or expired. The one exception in the design: a
@@ -188,15 +292,11 @@ export async function handleShare(
  *  one refusal. */
 function deadShare(req: Request, token: string): Response {
   const row = lookupShare(token);
-  if (row && row.kind === "review") {
+  const path = row ? assetPath(row) : null;
+  if (row && path) {
     const user = sessionUser(req);
     if (user && isMember(row.workspace_id, user.id)) {
-      return withShareHeaders(
-        new Response(null, {
-          status: 302,
-          headers: { location: `/${row.workspace_id}/r/${row.target}` },
-        }),
-      );
+      return withShareHeaders(new Response(null, { status: 302, headers: { location: path } }));
     }
   }
   return softNotFound();
@@ -294,12 +394,12 @@ export async function handleCreateShare(req: Request): Promise<Response> {
       message: `kind must be one of ${SHARE_KINDS.join(", ")}`,
     });
   } else if (!(SERVED_SHARE_KINDS as readonly string[]).includes(kind as string)) {
-    // See SERVED_SHARE_KINDS: a bundle share would mint a link no route opens, and a
-    // link that cannot be followed is worse than a refusal that says why.
+    // See SERVED_SHARE_KINDS: a kind no route opens would mint a link that dead-ends,
+    // and that is worse than a refusal which says why.
     errors.push({
       field: "kind",
       rule: "kind_not_served",
-      message: `kind ${kind} cannot be shared yet; a bundle is public by link, so it needs no share`,
+      message: `kind ${kind} cannot be shared yet; no read route serves it`,
     });
   }
 
