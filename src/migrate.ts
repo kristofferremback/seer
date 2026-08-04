@@ -31,10 +31,17 @@ import { hashKey, tinyId } from "./ids";
 //
 // v6 drops the freshness table — and it does NOT run in this release. This is the
 // release where v5 lands and the write stops; the drop is the release after. Splitting
-// them is what makes a rollback to the previous image survivable (it refuses to start on
-// a user_version it does not know) and what keeps the graceful-shutdown redeploy overlap
-// from serving `no such table: review_freshness` out of the old container, which calls
+// them is what keeps the graceful-shutdown redeploy overlap from serving
+// `no such table: review_freshness` out of the old container, which calls
 // listFreshness() on every review render.
+//
+// READ THIS BEFORE DEPLOYING: the split does NOT make this release rollback-safe, and an
+// earlier version of this comment claimed it did. The previous image's migrate() throws on
+// any user_version above 4, so once a database has been walked to 5 the old image refuses
+// to start on it. Going back means restoring the database, not redeploying the image.
+// Splitting v6 out fixes the overlap window and buys nothing for rollback; saying
+// otherwise in the one file you open when a release has gone wrong is the worst possible
+// place to be wrong.
 //
 // SEER_DROP_FRESHNESS=1 opts a database in early, so the drop can be exercised and so the
 // next release is a one-line change (delete the gate) rather than a new migration. A

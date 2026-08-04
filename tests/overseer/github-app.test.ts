@@ -126,9 +126,11 @@ function clientFor(t: Transport, workspaceId: string, held: Record<string, numbe
   };
 }
 
-beforeEach(() => {
-  setGithubClientFactory(offlineGithubClientFactory());
-});
+// No beforeEach installing the offline factory here, deliberately. There used to be one,
+// and it made the "cannot reach the network through either seam" test below verify the
+// factory it had just installed itself rather than the one tests/setup.ts installs — so
+// neutering the preload left the whole suite green. The seam is the preload's to close,
+// and this file's job is to notice when it stops.
 
 // ---- the JWT ----
 
