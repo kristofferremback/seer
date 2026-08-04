@@ -3,8 +3,13 @@
 Overseer reaches GitHub through one personal access token held in `GITHUB_TOKEN`, read
 once at boot, used by every workspace. This document replaces it with a GitHub App whose
 installations are owned by workspaces, and then spends the capability that buys: a pull
-request on a review page says whether it is open, merged, closed or draft, and says it
-within a second of it changing.
+request on a review page says whether it is open, merged, closed or draft, and updates
+when GitHub tells us it changed.
+
+(An earlier draft promised "within a second of it changing". Withdrawn: GitHub offers no
+webhook delivery-latency guarantee, and after the polling decision below there is no
+second mechanism to bound it either. The honest claim is that the page updates when a
+delivery arrives, and says how stale it is when one has not.)
 
 > **Line citations in this document are relative to `origin/main` at the commit that
 > merged bundle shares (#8) and the skill-doc pass (#9), plus PR #7. They were verified
