@@ -32,6 +32,7 @@ import { sessionUser } from "../auth";
 import { isMember } from "../db";
 import { githubClaimPage, type GithubClaimChoice } from "../pages";
 import { GithubError } from "./github";
+import { invalidateAppRouting } from "./github-app";
 import { githubOAuth, type UserInstallation } from "./github-oauth";
 import {
   attachInstallation,
@@ -200,6 +201,13 @@ export async function handleGithubSetupCallback(req: Request): Promise<Response>
       updateRepositorySelection(installation.id, installation.repository_selection ?? "selected");
       refreshed++;
     }
+    // The whole point of recognising this action: the person just changed which
+    // repositories the installation covers, and this request is the only moment
+    // synchronous with that click. What routing believes about the repositories it has
+    // been asked about is now, by assumption, wrong — including the negatives for the
+    // repositories they have just added, which is the case they will retry within
+    // seconds. Which names changed is not in this payload, so the drop is total.
+    if (refreshed > 0) invalidateAppRouting();
     return refusal(
       claim.workspace_id,
       refreshed > 0 ? "Repository access updated" : "Nothing to update here",
@@ -341,6 +349,13 @@ export async function handleClaimInstallation(req: Request): Promise<Response> {
       409,
     );
   }
+
+  // The refusal that sent them here was very likely a cached negative — "no GitHub App
+  // installation covers X" is what a publish answers before the App is installed, and
+  // the user's response to it ends exactly here. Dropping it before reconcile matters
+  // twice over: reconcile routes through the same cache, so without this it would ask
+  // the question, get the stale null back, and give up.
+  invalidateAppRouting();
 
   // A successful claim is one of the three events that mean observations were missed:
   // everything GitHub delivered for this installation before it belonged to a workspace

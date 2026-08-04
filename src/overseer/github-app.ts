@@ -78,6 +78,28 @@ export const TOKEN_REMINT_EARLY_MS = 5 * 60 * 1000;
  */
 export const ROUTING_TTL_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * How long a *negative* answer is trusted — "no installation covers this repository".
+ *
+ * Deliberately not ROUTING_TTL_MS. The long TTL above is an argument about a positive
+ * answer, which only stops being true when GitHub tells us so, and which is the hot
+ * path. A negative is the opposite on both counts: the ordinary first run *is* a
+ * negative (publish, be told to install the App, install it, connect it, publish again),
+ * and the event that makes it false — somebody installing the App on an account Seer has
+ * never seen — is not an event any invalidation here can be sure of seeing first. A
+ * negative that outlives the user's next attempt turns the failure table's one
+ * actionable message into a lie, so it lives about as long as it takes to read that
+ * message, and no longer.
+ *
+ * With more than one process alive — which the design guarantees, since containers
+ * overlap on deploy — invalidation reaches only the process that handled the request.
+ * The TTL is therefore what the *other* processes get: an upper bound on how long a
+ * container that missed the event keeps answering the stale thing. That is why the
+ * bound that matters is this one. A stale positive costs a 404 from a mint the caller
+ * already handles; a stale negative costs a refusal the user cannot clear.
+ */
+export const NEGATIVE_ROUTING_TTL_MS = 60 * 1000;
+
 interface CachedToken {
   token: string;
   /** Milliseconds, already pulled forward by TOKEN_REMINT_EARLY_MS. */
@@ -167,7 +189,14 @@ export function createAppApi(options: AppApiOptions): AppApi {
       const path = `/repos/${repo}/installation`;
       const res = await appRequest(path);
       if (res.status === 404) {
-        routing.set(key, { installationId: null, until: now() + ROUTING_TTL_MS });
+        // Cached, but only for NEGATIVE_ROUTING_TTL_MS. This write happens before any
+        // caller has asked whose installation it is — it has to, because this layer does
+        // not know about workspaces — so whoever names a repository first decides what
+        // every workspace on this process is told about it. Keeping the entry is still
+        // right (a repository nobody has installed is the thing a retry loop asks about
+        // hardest), but at a minute it cannot outlive the asker's own next attempt, so
+        // naming somebody else's repository buys nothing worth having.
+        routing.set(key, { installationId: null, until: now() + NEGATIVE_ROUTING_TTL_MS });
         return null;
       }
       if (!res.ok) await failed(res, `${base}${path}`);
@@ -374,6 +403,15 @@ export function githubClientFor(workspaceId: string): GithubClient {
  */
 export function invalidateAppRouting(repo?: string): void {
   defaultApp?.invalidateRouting(repo);
+}
+
+/**
+ * Install the AppApi that `githubClientFor` routes through and `invalidateAppRouting`
+ * drops from. The only seam through which a test can watch an invalidation happen:
+ * the client factory tests inject is a *client* factory, and it has no cache in it.
+ */
+export function setAppApi(app: AppApi | null): void {
+  defaultApp = app;
 }
 
 export function setGithubClientFactory(factory: GithubClientFactory | null): void {
