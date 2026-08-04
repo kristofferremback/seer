@@ -12,10 +12,10 @@
 // render and now persist until someone repairs them, which is why the repair is visible
 // (`observed_at` on every row, delivery health in settings) rather than automatic.
 //
-// `review_freshness` is no longer written by anything. It held a second recording of
-// one fact beside the status row, and two writers of one fact is the drift this design
-// exists to remove; the table itself is dropped a release later, so an old container
-// still reading it during a redeploy finds it there.
+// The freshness table this module used to write is gone (schema v6). It held a second
+// recording of one fact beside the status row, and two writers of one fact is the drift
+// this design exists to remove; the drop waited a release after the write stopped, so an
+// old container still reading it during a redeploy found it there.
 //
 // The rate limit is process-local on purpose. It is a courtesy to the GitHub API, not
 // a correctness rule: two processes checking the same review a second apart write the

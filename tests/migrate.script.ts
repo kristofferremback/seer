@@ -28,7 +28,6 @@ const V3_TABLES = [
   "review_attachments",
   "review_annotations",
   "review_reads",
-  "review_freshness",
   "ref_snippets",
 ];
 
@@ -84,7 +83,7 @@ if (SCENARIO === "v0") {
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 5, `user_version should be 5, got ${uv}`);
+  assert(uv === 6, `user_version should be 6, got ${uv}`);
 
   const user = db.query("SELECT * FROM users").get() as { id: string; email: string } | null;
   assert(!!user, "root user exists");
@@ -147,7 +146,7 @@ if (SCENARIO === "fresh") {
   const wsId = getMeta("legacy_workspace_id")!;
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 5, `user_version should be 5, got ${uv}`);
+  assert(uv === 6, `user_version should be 6, got ${uv}`);
   const iCount = (db.query("SELECT COUNT(*) c FROM images").get() as { c: number }).c;
   assert(iCount === 0, `fresh db has an empty images table, got ${iCount}`);
   const user = db.query("SELECT * FROM users").get() as { email: string } | null;
@@ -241,7 +240,7 @@ if (SCENARIO === "v2") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 5, `user_version should be 5, got ${uv}`);
+  assert(uv === 6, `user_version should be 6, got ${uv}`);
 
   for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
@@ -257,23 +256,23 @@ if (SCENARIO === "v2") {
   // A second run is a no-op: still v4, no duplicate rows, no throw.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 5, `user_version stays 5 after re-run, got ${uv2}`);
+  assert(uv2 === 6, `user_version stays 6 after re-run, got ${uv2}`);
   const bCount2 = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount2 === 1, `no duplicate bundles after re-run, got ${bCount2}`);
   const rCount = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount === 0, `reviews table starts empty, got ${rCount}`);
 
   // A database from a newer binary is refused rather than half-read.
-  db.run("PRAGMA user_version = 6");
+  db.run("PRAGMA user_version = 7");
   let threw = false;
   try {
     migrate();
   } catch (err) {
     threw = true;
-    assert(/user_version 6/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
+    assert(/user_version 7/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
   }
   assert(threw, "migrate must throw on a user_version newer than it knows");
-  db.run("PRAGMA user_version = 5");
+  db.run("PRAGMA user_version = 6");
 
   console.log("migrate v2: all assertions passed");
   process.exit(0);
@@ -321,7 +320,7 @@ if (SCENARIO === "v3") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 5, `user_version should be 5, got ${uv}`);
+  assert(uv === 6, `user_version should be 6, got ${uv}`);
   for (const table of [...V4_TABLES, ...V5_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} created by v4`);
@@ -365,7 +364,7 @@ if (SCENARIO === "v3") {
   // A second run is a no-op.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 5, `user_version stays 5 after re-run, got ${uv2}`);
+  assert(uv2 === 6, `user_version stays 6 after re-run, got ${uv2}`);
   const rCount2 = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount2 === 1, `no duplicate reviews after re-run, got ${rCount2}`);
   const sCount = (db.query("SELECT COUNT(*) c FROM shares").get() as { c: number }).c;
@@ -524,6 +523,140 @@ if (SCENARIO === "v4malformed") {
   assert(!table, "the transaction rolled back, so review_prs does not exist");
 
   console.log("migrate v4malformed: all assertions passed");
+  process.exit(0);
+}
+
+// ---- a v5 database, freshness table and all: the drop is v6 ----
+//
+// v5 stopped writing `review_freshness` but left it standing, so a rollback to a v4
+// image still found the table it reads. This is the release after: the table goes, and
+// a database sitting at 5 has to walk up without losing anything else. The seed writes
+// freshness rows precisely so the drop has something to drop — a scenario that seeds an
+// absent table would pass against a migration that does nothing.
+function seedV5() {
+  seedV4([
+    { ws: "ws_seed", slug: "stack", version: 1, doc: { prs: [{ repo: "threahq/threa", number: 9 }] } },
+  ]);
+  const seed = new Database(join(dataDir, "seer.db"), { create: true });
+  // The v3 shape of the freshness table, verbatim, because that is what is on disk in
+  // production. github_installations is seeded WITHOUT last_delivery_at: that column
+  // arrives outside the version ladder, and a v5 database written before it exists is
+  // the case ensureAdditiveColumns is for.
+  seed.exec(`
+    CREATE TABLE review_freshness (workspace_id TEXT NOT NULL, slug TEXT NOT NULL,
+      repo TEXT NOT NULL, pr_number INTEGER NOT NULL, observed_head_sha TEXT NOT NULL,
+      checked_at INTEGER NOT NULL, PRIMARY KEY (workspace_id, slug, repo, pr_number));
+    CREATE TABLE github_installations (id TEXT PRIMARY KEY, workspace_id TEXT,
+      installation_id INTEGER NOT NULL, account_login TEXT NOT NULL, account_id INTEGER NOT NULL,
+      account_type TEXT NOT NULL, repository_selection TEXT NOT NULL, connected_by TEXT,
+      connected_at INTEGER, created_at INTEGER NOT NULL, suspended_at INTEGER, removed_at INTEGER);
+    CREATE TABLE github_pr_status (workspace_id TEXT NOT NULL, repo_id INTEGER,
+      pr_number INTEGER NOT NULL, installation_id INTEGER NOT NULL, repo TEXT NOT NULL,
+      state TEXT NOT NULL, merged INTEGER NOT NULL DEFAULT 0, draft INTEGER NOT NULL DEFAULT 0,
+      head_sha TEXT NOT NULL, updated_at INTEGER NOT NULL, observed_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace_id, repo_id, pr_number));
+    CREATE TABLE review_prs (workspace_id TEXT NOT NULL, slug TEXT NOT NULL, repo_id INTEGER,
+      pr_number INTEGER NOT NULL, repo TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, slug, repo_id, pr_number));
+    CREATE TABLE github_deliveries (delivery_id TEXT PRIMARY KEY, received_at INTEGER NOT NULL);
+    CREATE TABLE github_app_claims (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+      user_id TEXT NOT NULL, nonce_hash TEXT NOT NULL UNIQUE, attach_hash TEXT UNIQUE,
+      proven_ids TEXT, github_login TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+      consumed_at INTEGER, attached_at INTEGER);
+    PRAGMA user_version = 5;
+  `);
+  seed.run(
+    "INSERT INTO review_freshness (workspace_id, slug, repo, pr_number, observed_head_sha, checked_at) " +
+      "VALUES ('ws_seed', 'stack', 'threahq/threa', 9, ?, 1000)",
+    ["c".repeat(40)],
+  );
+  seed.run(
+    "INSERT INTO review_prs (workspace_id, slug, repo_id, pr_number, repo) " +
+      "VALUES ('ws_seed', 'stack', NULL, 9, 'threahq/threa')",
+  );
+  seed.run(
+    "INSERT INTO github_installations (id, workspace_id, installation_id, account_login, account_id, " +
+      "account_type, repository_selection, connected_by, connected_at, created_at) " +
+      "VALUES ('ghi_seed0000', 'ws_seed', 77, 'threahq', 7, 'Organization', 'all', 'usr_seed', 1000, 1000)",
+  );
+  seed.close();
+}
+
+if (SCENARIO === "v5drop") {
+  process.env.AUTH_DISABLED = "true";
+  delete process.env.ALLOWED_EMAILS;
+  seedV5();
+
+  const { migrate } = await import("../src/migrate");
+  const { db } = await import("../src/db");
+
+  const before = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(before === 5, `seeded db starts at 5, got ${before}`);
+  const seeded = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
+    .get();
+  assert(!!seeded, "the seeded v5 database really does carry the table v6 has to drop");
+
+  migrate();
+
+  const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(uv === 6, `user_version should be 6, got ${uv}`);
+  const dropped = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
+    .get();
+  assert(!dropped, "v6 dropped review_freshness");
+  let queryFailed = false;
+  try {
+    db.query("SELECT * FROM review_freshness").all();
+  } catch {
+    queryFailed = true;
+  }
+  assert(queryFailed, "and nothing can read it any more");
+
+  // The drop takes the freshness table and nothing else. The surviving recording of the
+  // same fact is `review_prs` joined to `github_pr_status`, so the assertions that the
+  // walk was clean are assertions that the survivor still answers.
+  // Only the tables this seed actually wrote: v6 creates nothing, so a table the v5
+  // seed never made would be missing for a reason that has nothing to do with the drop.
+  for (const table of ["reviews", "review_versions", ...V4_TABLES, ...V5_TABLES]) {
+    const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    assert(!!row, `table ${table} survives the v6 drop`);
+  }
+  const prCount = (db.query("SELECT COUNT(*) c FROM review_prs").get() as { c: number }).c;
+  assert(prCount === 1, `the seeded review_prs row survives, got ${prCount}`);
+  // Two: the golden review seedV3 writes, and the stack this scenario adds.
+  const rCount = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
+  assert(rCount === 2, `the seeded reviews survive, got ${rCount}`);
+  const uCount = (db.query("SELECT COUNT(*) c FROM users").get() as { c: number }).c;
+  assert(uCount === 1, `the seeded user survives, got ${uCount}`);
+  const cols = (db.query("PRAGMA table_info(github_installations)").all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  assert(cols.includes("last_delivery_at"), "the additive column still lands on a v5 database");
+
+  // What the dropped table used to answer, answered by the pair that replaced it: an
+  // observation lands on the review and the head sha is readable again.
+  const { observePullRequest, getPrStatus } = await import("../src/overseer/installations");
+  const applied = observePullRequest(77, {
+    repoId: 55501,
+    repo: "threahq/threa",
+    prNumber: 9,
+    state: "open",
+    merged: false,
+    draft: false,
+    headSha: "d".repeat(40),
+    updatedAt: 2000,
+  });
+  assert(applied === 1, `an observation still lands after the drop, got ${applied}`);
+  const status = getPrStatus("ws_seed", 55501, 9);
+  assert(!!status && status.head_sha === "d".repeat(40), "and the head sha is readable without the dropped table");
+
+  // A second run is a no-op: still 6, nothing to re-drop.
+  migrate();
+  const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(uv2 === 6, `user_version stays 6 after re-run, got ${uv2}`);
+
+  console.log("migrate v5drop: all assertions passed");
   process.exit(0);
 }
 

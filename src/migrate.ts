@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 4.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 6.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -19,7 +19,7 @@ import { hashKey, tinyId } from "./ids";
 // v2 adds the images table (single-file image uploads). Purely additive.
 //
 // v3 adds the Overseer review tables (reviews, versions, attachments, annotations,
-// read state, freshness, and the ref snippet cache). Purely additive: no existing
+// read state, and the ref snippet cache). Purely additive: no existing
 // table is touched, so a v1 or v2 database walks straight up to it.
 //
 // v4 adds the shares table: one revocable read-only link to one asset. Purely
@@ -28,8 +28,10 @@ import { hashKey, tinyId } from "./ids";
 // v5 adds the GitHub App tables and backfills `review_prs` from every review's
 // latest version. Purely additive as DDL, and the one migration in this repo that
 // reads an application-level document rather than doing pure DDL — see backfillReviewPrs.
-// The drop of `review_freshness` is deliberately NOT here: it is v6, a release later,
-// so a rollback to a v4 image still finds the table it reads on every render.
+//
+// v6 drops the freshness table, a release after v5 stopped writing it. Splitting the
+// drop off its own release is what makes a v5 rollback survivable and what keeps a
+// redeploy overlap from serving `no such table` out of the old container.
 
 const V1_SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
@@ -158,10 +160,9 @@ const V2_IMAGES = `
 // Annotations belong to the review rather than to a version and record the version
 // they were filed against, so a question asked on pass one is still open on pass
 // three. `ref_snippets` is a pure cache keyed by (repo, sha, path): SHA-pinned, so
-// an entry is never stale and never needs invalidating. `review_freshness` keys on
-// (repo, pr_number) rather than the number alone: today's write path allows one repo
-// per review, but two pull requests numbered alike in different repos must never
-// collide if that constraint is ever lifted.
+// an entry is never stale and never needs invalidating. The freshness table v3
+// originally created is not here: v6 drops it, and a fresh database has no reason to
+// create a table the same migrate() run would immediately drop.
 const V3_REVIEWS = `
   CREATE TABLE IF NOT EXISTS reviews (
     workspace_id TEXT NOT NULL,
@@ -209,15 +210,6 @@ const V3_REVIEWS = `
     version INTEGER NOT NULL,
     opened_at INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, slug, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS review_freshness (
-    workspace_id TEXT NOT NULL,
-    slug TEXT NOT NULL,
-    repo TEXT NOT NULL,
-    pr_number INTEGER NOT NULL,
-    observed_head_sha TEXT NOT NULL,
-    checked_at INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, slug, repo, pr_number)
   );
   -- Process-global cache of SHA-pinned source files. The key is deliberately
   -- (repo, sha, path) with no workspace column: the same key always names the same
@@ -466,14 +458,15 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 5) {
-    throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, 2, 3, 4, or 5`);
+  if (uv > 6) {
+    throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, 2, 3, 4, 5, or 6`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
   if (userVersion() < 3) migrateToV3();
   if (userVersion() < 4) migrateToV4();
   if (userVersion() < 5) migrateToV5();
+  if (userVersion() < 6) migrateToV6();
   ensureAdditiveColumns();
 }
 
@@ -485,8 +478,7 @@ export function migrate(): void {
  * cannot report it from `github_deliveries` — that table is a replay guard swept on a
  * week's retention, so a fortnight of silence would read there as no silence at all.
  *
- * It does not get a version bump. v6 is spoken for (dropping `review_freshness`), and
- * this column earns no bump on its own terms either: it is nullable, nothing reads it
+ * It does not get a version bump: the column earns none on its own terms. it is nullable, nothing reads it
  * that is not new, and an old container writing rows during a redeploy overlap simply
  * leaves it null — which reads as "no delivery recorded yet", which is true.
  */
@@ -494,6 +486,18 @@ function ensureAdditiveColumns(): void {
   if (tableExists("github_installations") && !hasColumn("github_installations", "last_delivery_at")) {
     db.run("ALTER TABLE github_installations ADD COLUMN last_delivery_at INTEGER");
   }
+}
+
+// The one destructive migration in the repo, and it only removes a second recording of
+// a fact `review_prs` already holds. Nothing has read or written the table since v5, so
+// there is nothing to carry forward; IF EXISTS because a database created after v5
+// stopped creating it never had one.
+function migrateToV6(): void {
+  db.transaction(() => {
+    db.run("DROP TABLE IF EXISTS review_freshness");
+    db.run("PRAGMA user_version = 6");
+  })();
+  console.log("[seer] migrated to schema v6 (dropped the freshness table).");
 }
 
 function migrateToV5(): void {

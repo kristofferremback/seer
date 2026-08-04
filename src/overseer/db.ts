@@ -373,57 +373,6 @@ export function setReviewRead(
   );
 }
 
-// ---- freshness ----
-
-export interface FreshnessRow {
-  workspace_id: string;
-  slug: string;
-  repo: string;
-  pr_number: number;
-  observed_head_sha: string;
-  checked_at: number;
-}
-
-/** The head SHA last seen on GitHub for one pull request in this review. Keyed by
- *  repo as well as number: pull request 12 exists in every repository. */
-export function getFreshness(
-  wsId: string,
-  slug: string,
-  repo: string,
-  prNumber: number,
-): FreshnessRow | null {
-  return db
-    .query<FreshnessRow, [string, string, string, number]>(
-      "SELECT * FROM review_freshness " +
-        "WHERE workspace_id = ? AND slug = ? AND repo = ? AND pr_number = ?",
-    )
-    .get(wsId, slug, repo, prNumber);
-}
-
-export function listFreshness(wsId: string, slug: string): FreshnessRow[] {
-  return db
-    .query<FreshnessRow, [string, string]>(
-      "SELECT * FROM review_freshness WHERE workspace_id = ? AND slug = ? " +
-        "ORDER BY repo ASC, pr_number ASC",
-    )
-    .all(wsId, slug);
-}
-
-export function setFreshness(
-  wsId: string,
-  slug: string,
-  repo: string,
-  prNumber: number,
-  observedHeadSha: string,
-): void {
-  db.run(
-    "INSERT OR REPLACE INTO review_freshness " +
-      "(workspace_id, slug, repo, pr_number, observed_head_sha, checked_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?)",
-    [wsId, slug, repo, prNumber, observedHeadSha, Date.now()],
-  );
-}
-
 // ---- ref snippet cache ----
 
 // Refs are SHA-pinned, so a cached file at (repo, sha, path) can never go stale:

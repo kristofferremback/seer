@@ -67,6 +67,12 @@ test("a malformed stored document aborts the v5 backfill, naming the row", async
   expect(out).toContain("all assertions passed");
 });
 
+test("a v5 db drops review_freshness and keeps everything else", async () => {
+  const { code, out } = await runScenario("v5drop");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("no resolvable root email with auth enabled fails loudly", async () => {
   const { code, out } = await runScenario("noemail");
   expect(code).toBe(0);
