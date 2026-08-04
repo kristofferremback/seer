@@ -19,7 +19,7 @@ import {
   type ReviewDoc,
 } from "./db";
 import { githubClient, type GithubClient } from "./github";
-import { readableWorkspaces } from "./read";
+import { freshnessOf, readableWorkspaces } from "./read";
 import { prKey, type Freshness } from "./types";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -184,8 +184,16 @@ function softNotFound(): Response {
  *
  * The explicit version of what viewing does, and the only one that waits: a caller
  * asking for a refresh wants the answer, so this checks synchronously and returns the
- * per-pull-request result. It claims the window too, so a refresh and a render a
- * second apart are one call to GitHub rather than two.
+ * per-pull-request result.
+ *
+ * It honours the window rather than merely claiming it. This used to call claimCheck
+ * and throw the answer away, which made the one-check-per-minute bound a property of
+ * rendering and of nothing else: a caller posting this route in a loop spent one call
+ * to GitHub per pull request per request, without limit, and the rate limit the whole
+ * module is built around was a comment. A refused claim is not an error, because the
+ * caller wants an answer and there is one — the last observation, which is what a
+ * render inside the same window would have shown them too. `checked` says which they
+ * got, so a caller that really needs a fetch can tell it did not happen.
  */
 export async function handleRefreshReview(req: Request, slug: string): Promise<Response> {
   if (!SLUG_RE.test(slug)) return softNotFound();
@@ -195,21 +203,28 @@ export async function handleRefreshReview(req: Request, slug: string): Promise<R
   const row = getReviewVersion(ws, slug, review.latest_version);
   if (!row) throw new Error(`Review ${ws}/${slug} has no version row for version ${review.latest_version}`);
 
-  claimCheck(ws, slug);
+  const answer = (checked: boolean, prs: { pr: string; freshness: Freshness }[]) =>
+    new Response(
+      JSON.stringify({ slug, workspace: ws, version: review.latest_version, checked, prs }, null, 2),
+      { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } },
+    );
+
+  if (!claimCheck(ws, slug)) {
+    // Inside the window. Answer from what is already recorded, touching nothing.
+    const known = freshnessOf(ws, slug, row.doc);
+    return answer(
+      false,
+      row.doc.prs.map((pr) => {
+        const key = prKey(pr.repo, pr.number);
+        return { pr: key, freshness: known[key] ?? "current" };
+      }),
+    );
+  }
+
   const result = await checkReview(ws, slug, row.doc);
   if (result.changed) publisher?.(reviewTopic(ws, slug), freshnessMessage(result));
-
-  return new Response(
-    JSON.stringify(
-      {
-        slug,
-        workspace: ws,
-        version: review.latest_version,
-        prs: result.prs.map((p) => ({ pr: p.pr, freshness: p.freshness })),
-      },
-      null,
-      2,
-    ),
-    { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } },
+  return answer(
+    true,
+    result.prs.map((p) => ({ pr: p.pr, freshness: p.freshness })),
   );
 }
