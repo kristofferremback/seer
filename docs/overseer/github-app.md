@@ -177,7 +177,66 @@ GITHUB_WEBHOOK_SECRET     the HMAC key for inbound deliveries
 the reader on GitHub". That was the critical error.** It has to, exactly once, at claim
 time, and nothing else can do that job. Details below.
 
-Two credentials are derived at runtime and **neither is persisted**:
+### Secrets, and what is stored
+
+Asked directly: **where is the credential GitHub gives us encrypted at rest?** It is not,
+because it is never at rest. That is not this plan having quietly covered the question —
+it is a consequence of a choice made for a different reason, and the choice deserves to be
+argued against its alternative rather than assumed.
+
+The rule for the whole system, written down so the next secret is not invented ad hoc:
+
+| kind | example | how it is stored |
+|---|---|---|
+| **Verify-only** — Seer only ever needs to check a presented value | API keys, share tokens, the claim nonce | **hashed.** Not reversible, not readable back |
+| **Use-later** — Seer needs the plaintext again to act with it | *nothing, today* | would need **envelope encryption** |
+| **Ambient** — the process needs it from boot | app private key, webhook secret | environment variable |
+
+Everything Seer stores today is in row one. `hashKey` is the only treatment of a secret in
+the codebase and there is no `createCipheriv` anywhere in `src/`.
+
+**Why nothing in this feature lands in row two.** The app JWT lives ten minutes and is
+derived from the private key on demand. The installation token lives an hour and is minted
+on demand. The user access token from the claim flow is used once, inside one request, and
+dropped. A webhook needs no token at all — the payload carries the whole observation. Even
+the deferred work does not create one: re-deriving a review when a head moves mints a token
+from the private key with no user present.
+
+So the plan is not "we store the token, encrypted". It is "we do not store the token",
+which is the stronger of the two. A database copy is not a set of live GitHub credentials
+either way, and the version with no ciphertext also has no key to rotate, no decrypt path
+to get wrong, and no key-loss failure mode.
+
+**Where the question does land, and where this plan was thin.** The claim nonce is a
+short-lived bearer secret that *is* written to the database, and the first draft said
+nothing about how. It is row one: hashed at rest, looked up by hash, exactly as
+`shares.ts` and `api_keys` do. That is the real gap the question surfaces, and it is now
+specified rather than left to whoever writes the migration.
+
+**What would move something into row two**, so this is a decision with a trigger rather
+than a permanent no:
+
+- Persisting installation tokens so they survive a restart or are shared between
+  instances. Today the cost of not doing this is one re-mint per process per installation
+  per hour, which is negligible at this scale and spends the one shared budget only
+  trivially.
+- Storing a GitHub user **refresh** token, which would be needed only if Seer ever acted
+  as a person on GitHub outside a request they are present for. Nothing here does.
+- Any third-party credential a workspace hands Seer to use on its behalf.
+
+**Recommendation, and it is a recommendation rather than a decision.** Build the envelope
+primitive when the first row-two secret appears, not before. Unused crypto is worse than
+absent crypto: the key rotation is never exercised, the decrypt path is never run, and its
+first real use is by someone who reasonably assumes both work. If any of the three
+triggers above is coming sooner than it looks — say the intent is for tokens to survive
+across instances from the start — then it is row two now, and the shape is the one from
+Threa: a data key per secret, sealed by a KEK from an env var, ciphertext and wrapped key
+stored together with an explicit version byte so the KEK can be rotated without a
+migration. Say the word and it goes in step 1 rather than in a later step.
+
+### The runtime credentials
+
+Two are derived at runtime and **neither is persisted**:
 
 **The app JWT.** RS256 over `{iat, exp, iss}`, signed with `node:crypto`. **`iat` is
 backdated 60 seconds** — GitHub rejects a JWT whose `iat` is in the future, and a second
@@ -422,56 +481,90 @@ because `config` is imported by nearly every module and therefore nearly every t
 
 ## Pull request status
 
-### Polling happens only while someone is looking
+### There is no polling
 
-**There is no background poller.** No timer, no cron, no sweep. The only thing that causes
-Overseer to ask GitHub about a pull request is a person opening a page that shows it, plus
-the explicit `POST /api/reviews/:slug/refresh`, which is a person asking on purpose. A
-workspace with two hundred reviews nobody is reading costs nothing.
+The first two drafts kept an automatic check on the read path — `refreshOnView`, once a
+minute per review, triggered by a render. **It goes.** Not "goes eventually": it is
+deleted in the step that adds webhooks, and nothing replaces it.
 
-**The bound was not real, and is now.** The first draft said "the existing bound stays
-exactly as it is: at most one check per review per minute". It did not hold for explicit
-refresh: `handleRefreshReview` called `claimCheck` and **threw the return value away**,
-then checked anyway, so a member or an API key could POST in a loop and spend one GitHub
-call per pull request per request without limit. **Fixed ahead of this plan** — a refused
-claim answers from the observation already recorded, with `checked: false` so a caller
-that really needs a fetch can tell it did not happen.
+The argument for keeping it was that webhooks make status *instant* rather than
+*possible*, so polling was the floor and webhooks the accelerant. That argument does not
+survive contact with the fact that **publish already observes every pull request**.
+`derivePrs` calls `getPull` per pull request while building the document, so the moment a
+review exists its status rows exist. There is no window in which a review has no
+observation and a poll is what fills it.
 
-**And the claim key moves.** The best argument for dropping `review_freshness` is that the
-head SHA is a property of the pull request, not of the review looking at it. The same is
-true of the check. `claimCheck(wsId, slug)` keys on the review, so a workspace with three
-reviews of one stack pays three calls a minute for the same pull requests and writes the
-same row three times. The claim moves to `(wsId, repo_id, prNumber)` in the same step —
-otherwise the row has moved and the thing guarding it has not, which is where the next
-disagreement starts.
+So the two write paths become:
 
-### One observation, not two checks
+```
+publish   seeds     one getPull per pull request, already happening
+webhook   maintains every subsequent change, pushed
+```
 
-There is one call, one row, one moment of observation, and both readings come out of it.
-`checkReview` already calls `getPull` and reads exactly one field. The change is that it
-stops throwing away three-quarters of what it fetched. `freshness.ts` becomes the module
-that **observes a pull request**, and webhooks write the same row through the same upsert
-— a second way for the row to become true, not a second source of truth.
+That is one automatic write path after creation, not two. Every argument this document
+makes about drift applies with more force to two *sources* than to two *readings*, and
+polling was the second source.
 
-**Publish observes too.** `derivePrs` already calls `getPull` per pull request at publish
-and drops `state`, `merged` and `draft` (`derive.ts:255-267`). Left as the first draft had
-it, a freshly published review renders with no glyph despite Seer having held the answer
-seconds earlier. The status fields ride through `DerivedPr` and are upserted in the
-publish transaction.
+**What is lost, precisely.** A change that happens while the app cannot tell Seer about
+it: a suspended installation, a rotated webhook secret, a delivery GitHub gave up
+retrying, the minutes of a redeploy. Under polling, those healed silently on the next
+render. Without it they persist until something repairs them.
+
+**So the repair has to become visible instead of automatic**, and that is the real cost of
+this simplification:
+
+- **`POST /api/reviews/:slug/refresh` survives** as the repair, now the only thing that
+  reaches GitHub on the read path, and it is human-triggered. The review page grows a
+  control for it beside the heads chip. (Its rate-limit bug is already fixed; the window
+  now guards this route alone.)
+- **Every observation carries `observed_at`,** and a row older than a threshold renders as
+  *as of \<time\>* rather than as bare truth. A status nobody has confirmed for a week
+  should look like one.
+- **Delivery health is surfaced in settings.** If the safety net is removed, you have to
+  be able to see that the net is gone: last delivery received per installation, and its
+  suspended state. A webhook integration that silently stopped a fortnight ago is the
+  failure mode this design is choosing, so it is the one thing the UI must make loud.
+
+Without those three, dropping polling trades a small recurring cost for a silent failure,
+which is the wrong trade. With them it trades it for a visible one, which is the right
+one.
+
+**The consequences that ripple out.** `claimCheck`'s window, the `LAST_CHECK` map and its
+eviction bound exist to protect the read path from a render storm. With no automatic
+check, they guard exactly one human-triggered route. They stay — a loop on that route is
+still a loop — but they stop being load-bearing, and the question of re-keying the claim
+from the review to the pull request becomes moot rather than urgent.
+
+`unknown` **is still needed**, and is now needed for a narrower and clearer reason: not
+"nobody has looked yet" but "this review predates the App", which is exactly the reviews
+the migration backfills and cannot observe.
+
+### One observation
+
+There is one row per pull request and both readings are derived from it. Publish writes it
+from the `getPull` it already makes; webhooks write the same row through the same upsert.
+A second way for the row to become true, not a second source of truth.
+
+**Publish is the seed, and this is now load-bearing rather than an optimisation.**
+`derivePrs` already calls `getPull` per pull request and drops `state`, `merged` and
+`draft` (`derive.ts:255-267`). Those fields ride through `DerivedPr` and are upserted in
+the publish transaction. With polling gone, this is the *only* thing that gives a new
+review its first status — get it wrong and every review renders glyph-less until its first
+webhook, which for a merged or abandoned pull request may be never.
 
 ### Ordering: the upsert needs a precondition
 
-Deduplication does not order anything, and polling races webhooks:
+Removing polling removes one race and leaves two, so the precondition is still required:
 
-1. A poll starts before a merge and receives `open`.
-2. The merge webhook arrives and writes `merged`.
-3. The slow poll completes and writes `open` over it.
+1. **Publish races a webhook.** A publish that started before a merge writes `open` from
+   its `getPull` after the merge webhook has already written `merged`.
+2. **Webhooks race each other.** GitHub does not guarantee delivery order, and a retried
+   delivery can land after a newer one succeeded.
 
-A delayed delivery does the same in reverse. The first draft stored `updated_at` and never
-used it. **The upsert is conditional on `updated_at` being newer than the stored row**,
-with an explicit tie policy: equal timestamps let the write through, because GitHub's
-`updated_at` has one-second resolution and a genuine later state is likelier than a
-duplicate. Without this the single row is just one place where the fact oscillates.
+**The upsert is conditional on `updated_at` being newer than the stored row**, with an
+explicit tie policy: equal timestamps let the write through, because GitHub's `updated_at`
+has one-second resolution and a genuine later state is likelier than a duplicate. Without
+this the single row is just one place where the fact oscillates.
 
 ### The reviews index, which does not exist yet
 
@@ -479,17 +572,15 @@ duplicate. Without this the single row is just one place where the fact oscillat
 `/bundles` renders bundles only, so a published review is reachable today only by its URL.
 So this is not a column added to a page; it is the page.
 
-**And it ships after webhooks, not before.** The first draft had it as step 5 and webhooks
-as 6, which is backwards: with no background poller, `github_pr_status` has rows only for
-reviews someone recently opened. The index's whole pitch — see a stack land without
-opening it — is exactly what the polling rule guarantees you do not have until you open
-it. Before webhooks it would show tallies only for the reviews you did not need it for.
-Webhooks first; and the index renders "not checked yet" rather than a tally that silently
-reads as zero merged.
+**It ships after webhooks.** With publish seeding and webhooks maintaining, the index is
+correct the moment both exist; before webhooks it would show each review's status frozen
+at publication, which reads as truth and is not.
 
-The tally is derived at render from rows already written and **does not trigger an
-observation**. Listing twenty reviews must not become twenty calls to GitHub — the polling
-rule at the one place it would be easiest to break.
+The tally is derived at render from rows already written and **reaches GitHub never**.
+Listing twenty reviews must not become twenty calls — and with the automatic check gone
+this is no longer a rule the index has to remember, because there is no code path left
+that could observe from a render at all. The rule became a property of the architecture,
+which is the better version of it.
 
 ### Where the glyph goes
 
@@ -592,7 +683,7 @@ So one message carries the whole observation:
 ```
 
 The script swaps glyphs and rewrites the chip from the same message. Whatever caused the
-observation — a reader's poll or a webhook — the wire shape is identical.
+observation — a webhook, or a human pressing refresh — the wire shape is identical.
 
 ## Migration
 
@@ -646,6 +737,8 @@ importing `ReviewDoc` and rotting the day someone edits it.
 | Webhook for an unknown installation | 202, nothing written |
 | No observation for a pull request yet | no glyph, chip says unchecked — never "current" |
 | GitHub unreachable during an observation | last observation stands |
+| Webhook deliveries stop arriving | status freezes at its last observation and **says so**: `as of <time>` on the page, last-delivery age in settings. Repaired by the refresh control. This is the failure mode dropping the poll chooses, which is why step 6 is not optional |
+| An installation is suspended | deliveries stop; settings says suspended rather than merely quiet |
 | App-JWT rate limit exhausted | routing fails; publish 422s naming the limit rather than the repository |
 
 ## Testing
@@ -692,28 +785,63 @@ and not closed — the ordering constraint, tested.
 
 ## The steps
 
-1. **App identity.** Config, the JWT (backdated `iat`), the installation-token cache with
-   narrow minting, repository routing inside a per-workspace client factory, the test seam
-   successor. No schema, no UI.
-2. **Schema v5 and the claim.** Tables, partial unique index, `review_prs` backfill from
-   latest versions, the OAuth claim flow end to end, the settings panel. The token still
-   works.
-3. **Derivation through installations, and the token deleted.** All four call sites
-   threaded; `GITHUB_TOKEN`, `config.githubToken` and the lazy default removed together.
-4. **One observation.** Status written from the call `checkReview` already makes and from
-   the publish transaction; `unknown` added to `Freshness`; the claim key moved from the
-   review to the pull request; the conditional upsert; the glyph and the colour rule.
-   `review_freshness` stops being written.
-5. **Webhooks.** Endpoint, signature, one-transaction dedupe, the event table, the single
-   live message, the script that swaps glyphs and chip together.
-6. **The reviews index.** The page that does not exist, with tallies that are now
-   populated because step 5 shipped first, and "not checked yet" where they are not.
-7. **v6: drop `review_freshness`.** One release after step 4 stopped writing it.
+These are sized for a build-then-verify pass per step, where the implementer and the
+verifier are different runs that do not share a context. That imposes two rules on how a
+step is written: **it must be checkable from the tree alone**, without knowing what the
+previous step was thinking, and **it must leave `bun test` and `tsc` green**, because a
+verifier's first question is whether the tree is sound and a red suite makes every later
+answer ambiguous.
 
-Steps 1–4 are the spine: at the end of step 4 the App owns every credential, the token is
-gone, the confused deputy is gone, and status is on the page as of whenever someone last
-looked. Step 5 is what makes it true while nobody is looking, which is why the index waits
-for it.
+Each step therefore names its own done-condition, which is the thing the verifier checks
+rather than a summary of the work.
+
+**1. App identity.** Config, the JWT with backdated `iat`, the installation-token cache
+with narrow minting, repository routing, the per-workspace client factory, the test seam
+successor. No schema, no UI, no route.
+*Done when:* a generated keypair signs a JWT whose claims and lifetime are asserted; a
+fake transport shows the `Authorization` header carried the minted token; the factory
+refuses a repository the workspace does not hold; the suite still cannot reach the network.
+
+**2. Schema v5 and the claim.** Tables, the partial unique index, the hashed claim nonce,
+`review_prs` backfill from latest versions, the OAuth claim flow end to end, the settings
+panel. The old token still works throughout.
+*Done when:* `github-install-privacy.script.ts` passes in its own process — including the
+unheld-installation case — and each refusal has its success beside it.
+
+**3. Derivation through installations, and the token deleted.** All four call sites
+threaded; `GITHUB_TOKEN`, `config.githubToken` and the lazy default removed in one commit.
+*Done when:* no `githubToken` remains in `src/`, and publish, ref resolution and annotation
+answers all derive through a workspace client.
+
+**4. One observation.** Status upserted in the publish transaction; `unknown` added to
+`Freshness`; the conditional `updated_at` precondition; the glyph and the colour rule.
+`review_freshness` stops being written.
+*Done when:* a published review renders its glyphs immediately with no webhook and no
+poll; an absent row renders as unchecked on both glyph and chip; a merged pull request
+renders merged rather than closed.
+
+**5. Webhooks, and polling deleted.** Endpoint, signature, one-transaction dedupe, the
+event table, the single live message. `refreshOnView` and its call site go in the same
+commit; `handleRefreshReview` stays as the human repair.
+*Done when:* an out-of-order delivery cannot roll a newer status back; a failed apply
+followed by a retry applies; nothing in `src/` reaches GitHub from a render.
+
+**6. Seeing that the net is there.** `observed_at` surfaced as *as of \<time\>* past a
+threshold, the refresh control on the review page, delivery health per installation in
+settings.
+*Done when:* an installation whose last delivery is old says so in settings without being
+asked.
+
+**7. The reviews index.** The page that does not exist, with tallies from rows already
+written.
+*Done when:* rendering the index makes zero GitHub calls, asserted by a counting client.
+
+**8. v6: drop `review_freshness`.** One release after step 4 stopped writing it.
+
+Steps 1–4 are the spine: at the end of 4 the App owns every credential, the token is gone,
+the confused deputy is gone, and a published review shows its status. Step 5 makes it stay
+true. **Step 6 is not polish** — it is the price of deleting the poll, and shipping 5
+without 6 leaves a silent failure where there used to be a self-healing one.
 
 ## Settled
 
@@ -729,6 +857,16 @@ to be sayable or the chip lies where the glyph is honest.
 
 **Status on the reviews index,** which is its own step, and now after webhooks rather than
 before.
+
+**No polling at all.** Publish seeds, webhooks maintain, a human repairs. The automatic
+on-view check is deleted rather than kept as a floor, because publish already observes
+every pull request and so there is no window for a poll to fill. Reversed only by
+discovering that webhook delivery is unreliable enough to need a safety net — which step 6
+exists to make observable rather than assumed.
+
+**Nothing GitHub gives Seer is stored.** Not stored encrypted: not stored. Envelope
+encryption waits for the first secret that needs reading back, and the triggers that would
+create one are written down.
 
 ## What the review changed
 
