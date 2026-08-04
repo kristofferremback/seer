@@ -16,6 +16,7 @@
 // review that does not exist all answer with the same bytes.
 
 import { escapeHtml } from "../escape";
+import { agoWords } from "../relative-time";
 import { getWorkspace, listUserWorkspaces } from "../db";
 import { sessionUser, type SessionUser } from "../auth";
 import { openAttachment, attachmentLocation } from "../store";
@@ -43,7 +44,7 @@ import {
   type EntityDelta,
 } from "./delta";
 import type { PrStatusWord } from "./installations";
-import { freshnessOf, readableWorkspaces, statusesOf } from "./read";
+import { freshnessOf, observedAtOf, readableWorkspaces, statusesOf } from "./read";
 import {
   KIND_LABEL,
   hunkAnchorId,
@@ -64,6 +65,7 @@ import {
   type EvidenceMarks,
 } from "./render-evidence";
 import {
+  OBSERVATION_STALE_MS,
   prKey,
   type Annotation,
   type Evidence,
@@ -480,6 +482,26 @@ const STYLE = `  @font-face {
     .meta { font-size: 11.5px; column-gap: 8px; }
     .meta > span { gap: 8px; }
   }
+  /* "as of <time>" only appears when the observation behind the chip is old, so it is
+     not decoration to be quieted: it is the page admitting the chip beside it is a
+     memory. It sits at the weight of the row rather than below it. */
+  .meta .asof { color: hsl(var(--muted)); font-variant-numeric: tabular-nums; }
+  /* the repair, beside the thing it repairs. With the automatic check deleted this is
+     the only control on the page that reaches GitHub, and it does so because a human
+     asked it to. */
+  .refresh {
+    font: inherit;
+    color: hsl(var(--muted));
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: hsl(var(--muted) / 0.4);
+  }
+  .refresh:hover { color: hsl(var(--ink)); }
+  .refresh[disabled] { cursor: default; opacity: 0.55; text-decoration: none; }
 
   /* ---- sections ---- */
   section { margin-top: 30px; scroll-margin-top: 20px; }
@@ -2070,6 +2092,18 @@ export interface RenderInput {
   /** What GitHub last said each pull request was, keyed by `${repo}#${number}`. A key
    *  with no entry has no observation, and its card draws no glyph. */
   status?: Record<string, PrStatusWord>;
+  /** When the oldest observation behind those readings was made, or null when nothing
+   *  has been observed. Past `OBSERVATION_STALE_MS` the page says so; below it the
+   *  readings stand on their own, because a status confirmed minutes ago does not need
+   *  a disclaimer. */
+  observedAt?: number | null;
+  /** Whether to draw the refresh control. The route it posts to answers only a reader
+   *  who may read the review, so a page with no such reader gets no button rather than
+   *  one that could only 404. */
+  canRefresh?: boolean;
+  /** Now, for the staleness comparison. A parameter so a test can age an observation
+   *  without sleeping through the threshold. */
+  now?: number;
   /** The version the marks are measured against, or null for a page with none. */
   baseVersion?: number | null;
   /** The delta from that base. Null and baseVersion null move together. */
@@ -2156,6 +2190,44 @@ function headsChip(behind: number, unknown: number, total: number): string {
   return "heads current";
 }
 
+/**
+ * "as of <time>", or nothing at all.
+ *
+ * Exported for the test that pins the threshold: an observation a minute old renders
+ * bare and one three hours old renders dated, and both halves matter — a page that
+ * always says "as of" is a page whose reader learns nothing from it saying so.
+ */
+export function asOfMark(observedAt: number | null, now: number): string {
+  if (observedAt === null) return "";
+  const age = now - observedAt;
+  if (age < OBSERVATION_STALE_MS) return "";
+  return `<span class="asof" id="asof">${escapeHtml(`as of ${agoWords(age)}`)}</span>`;
+}
+
+/**
+ * The refresh control: the only thing left on this page that reaches GitHub, and it
+ * does so because a human pressed it.
+ *
+ * It reloads on success rather than waiting for the live channel. The channel carries
+ * an observation and publishes only when a reading *changed*, so a refresh that
+ * confirms everything would leave the page silent — and silent is exactly wrong here,
+ * because the thing the reader asked for was a newer `observed_at`, which no message
+ * carries. A reload renders the answer they actually wanted: the same readings, newly
+ * dated, with the "as of" gone.
+ */
+function refreshScript(slug: string): string {
+  return (
+    `(()=>{const b=document.getElementById("refresh");if(!b)return;` +
+    `b.addEventListener("click",()=>{b.disabled=true;b.textContent="checking\\u2026";` +
+    `fetch("/api/reviews/"+encodeURIComponent(${JSON.stringify(slug)})+"/refresh",` +
+    `{method:"POST",headers:{"accept":"application/json"}})` +
+    `.then((r)=>{if(!r.ok)throw new Error(String(r.status));location.reload()})` +
+    // A failed repair says so and stays pressable. Swallowing it would leave a page
+    // that looks refreshed and is not, which is the failure this control exists for.
+    `.catch(()=>{b.disabled=false;b.textContent="refresh failed \\u2014 try again"})})})();`
+  );
+}
+
 /** The freshness enhancement: it subscribes to the review's channel and rewrites the
  *  heads chip when a push says a head moved. Nothing depends on it. Without a script
  *  the chip is as fresh as the render, which is what the stored rows say. */
@@ -2223,6 +2295,11 @@ export function renderReviewPage(input: RenderInput): string {
     (pr) => (input.freshness[prKey(pr.repo, pr.number)] ?? "unknown") === "unknown",
   );
   const heads = headsChip(behind.length, unchecked.length, doc.prs.length);
+  // The chip states what was observed; this states when, and only once "when" is old
+  // enough to change how the chip should be read. Below the threshold the reading
+  // stands bare, which is the whole distinction: a disclaimer on every page would be
+  // read by nobody and would say nothing about the page that has actually gone quiet.
+  const asOf = asOfMark(input.observedAt ?? null, input.now ?? Date.now());
   const count =
     doc.prs.length === 1 ? "1 pull request" : `${doc.prs.length} pull requests`;
   const marking = input.pinned
@@ -2288,7 +2365,15 @@ export function renderReviewPage(input: RenderInput): string {
     `</div>` +
     `<h1 class="title">${marked(safeInline(doc.title), review, "title", "review", true)}</h1>` +
     `<p class="meta"><span>${escapeHtml(doc.kind)}</span><span>${escapeHtml(count)}</span>` +
-    `<span class="heads" id="heads">${escapeHtml(heads)}</span>${baseMark}</p>` +
+    `<span class="heads" id="heads">${escapeHtml(heads)}</span>${asOf}` +
+    // Beside the chip, because the chip is the thing it repairs.
+    (input.canRefresh
+      ? // Wrapped in a span so the row's separator rule treats it like every other
+        // fact in the line: the "·" between items comes from `.meta > span`.
+        `<span><button type="button" class="refresh" id="refresh" ` +
+        `aria-label="Ask GitHub for the current state of these pull requests">refresh</button></span>`
+      : "") +
+    `${baseMark}</p>` +
     revisionMenu(input, ctx.basePath) +
     `</header>\n` +
     sharePanel(input.canShare === true) +
@@ -2321,6 +2406,7 @@ export function renderReviewPage(input: RenderInput): string {
     (input.pinned || input.live === false
       ? ""
       : `<script>${freshnessScript(wsId, slug)}</script>\n`) +
+    (input.canRefresh ? `<script>${refreshScript(slug)}</script>\n` : "") +
     `</body>\n</html>\n`
   );
 }
@@ -2613,6 +2699,20 @@ function reviewPage(args: {
     // Both readings come off the same rows, so the chip and the glyphs cannot disagree
     // about a pull request nothing has observed.
     status: statusesOf(ws, row.doc),
+    // Off the same rows again: the age the page reports is the age of the readings it
+    // is showing, not of some other query.
+    observedAt: observedAtOf(ws, row.doc),
+    // The refresh route answers a reader who may read the review, and it refreshes the
+    // review's *current* version — so the button is drawn for a member on the page that
+    // asked for the current version, and for nobody else. A share holder pressing it
+    // would get a 404; a pinned page is a record of what was published, and repairing
+    // it would mean repairing something other than what it shows, even when the pinned
+    // number happens to be the latest one.
+    canRefresh:
+      !shared &&
+      version === null &&
+      reader !== null &&
+      listUserWorkspaces(reader.id).some((w) => w.id === ws),
     baseVersion: delta ? base : null,
     delta,
     timeline,

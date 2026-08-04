@@ -65,7 +65,12 @@ import {
   installUrl,
 } from "./overseer/github-claim";
 import { handleGithubWebhook } from "./overseer/webhook";
-import { dbWorkspaceHoldings, listWorkspaceInstallations } from "./overseer/installations";
+import {
+  dbWorkspaceHoldings,
+  deliveryIsQuiet,
+  listWorkspaceInstallations,
+} from "./overseer/installations";
+import { agoWords } from "./relative-time";
 import { setWorkspaceHoldings } from "./overseer/github-app";
 import { handleReadReview } from "./overseer/read";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
@@ -219,6 +224,10 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
         repositorySelection: g.repository_selection,
         connected: g.connected_at ? fmtDate(g.connected_at) : "—",
         isSuspended: g.suspended_at !== null,
+        // Said in ages rather than dates, because the question a reader has here is
+        // "has this stopped?" and a date makes them do the subtraction themselves.
+        lastDelivery: g.last_delivery_at ? agoWords(Date.now() - g.last_delivery_at) : "never",
+        isQuiet: deliveryIsQuiet(g.last_delivery_at),
       })),
       githubAppConfigured: !!config.githubApp,
       githubInstallUrl: installUrl(),

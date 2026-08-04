@@ -1800,6 +1800,13 @@ export interface SettingsInstallation {
   repositorySelection: string;
   connected: string;
   isSuspended: boolean;
+  /** When a delivery from this installation last arrived, in words — "never" when none
+   *  ever has. Delivery health is the whole reason this panel is worth reading: with
+   *  polling deleted, an installation that stopped talking is a page frozen at its last
+   *  observation, and nothing else anywhere would say so. */
+  lastDelivery: string;
+  /** True when that is long enough ago to be worth a word rather than a date. */
+  isQuiet: boolean;
 }
 
 export interface SettingsData {
@@ -1871,7 +1878,7 @@ export function settingsPage(d: SettingsData): string {
 
   const installRows =
     d.installations.length === 0
-      ? `<tr><td colspan="5" class="empty">No GitHub account connected yet.</td></tr>`
+      ? `<tr><td colspan="6" class="empty">No GitHub account connected yet.</td></tr>`
       : d.installations
           .map(
             (g) => `<tr>
@@ -1879,6 +1886,9 @@ export function settingsPage(d: SettingsData): string {
         <td class="mono">${escapeHtml(g.accountType)}</td>
         <td class="mono">${escapeHtml(g.repositorySelection)}</td>
         <td class="mono">${escapeHtml(g.connected)}</td>
+        <td class="mono">${escapeHtml(g.lastDelivery)}${
+          g.isQuiet ? ` <span class="pill">no recent deliveries</span>` : ""
+        }</td>
         <td class="act">
           <form method="post" action="${s(`/github/${g.id}/disconnect`)}"><button type="submit">disconnect</button></form>
         </td>
@@ -1981,7 +1991,7 @@ ${head(`Settings · ${d.name} · Seer`, og)}
       <p class="eyebrow">GitHub</p>
       <div class="ledger scroll-x">
         <table>
-          <tr><th>Account</th><th>Kind</th><th>Repositories</th><th>Connected</th><th></th></tr>
+          <tr><th>Account</th><th>Kind</th><th>Repositories</th><th>Connected</th><th>Last delivery</th><th></th></tr>
           ${installRows}
         </table>
       </div>
@@ -1996,6 +2006,10 @@ ${head(`Settings · ${d.name} · Seer`, og)}
       ${d.githubInstallUrl ? `<p class="panel-note dim">Not installed on that account yet? <a href="${escapeHtml(d.githubInstallUrl)}" rel="noreferrer">Install the app first</a>, then come back and connect it.</p>` : ""}`
           : `<p class="panel-note">This deployment has no GitHub App configured, so there is nothing to connect yet.</p>`
       }
+      <p class="panel-note dim">Nothing polls GitHub any more: a review's status is as true as
+      the last delivery that touched it. <em>Last delivery</em> is how you can see the net is
+      still there — an installation that has been quiet for a week, or is suspended, is one whose
+      reviews have quietly stopped moving.</p>
       <p class="panel-note dim">Disconnecting keeps the record and releases the installation,
       so the same account can be connected again later — here or anywhere.</p>
     </div>

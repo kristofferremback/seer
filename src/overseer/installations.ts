@@ -29,7 +29,26 @@ export interface InstallationRow {
   connected_at: number | null;
   created_at: number;
   suspended_at: number | null;
+  last_delivery_at: number | null;
   removed_at: number | null;
+}
+
+/**
+ * How long an installation may go without a delivery before settings calls it quiet.
+ *
+ * Deliberately much longer than the review page's one hour, because the two are
+ * different questions. A pull request nobody touched for an afternoon is normal and its
+ * *observation* still ages; an installation is the transport, and a transport that has
+ * said nothing for a week is either a repository nobody works in or a webhook that
+ * silently stopped — and the second is precisely the failure deleting the poll chose to
+ * accept, so it is the one the panel has to make loud.
+ */
+export const DELIVERY_QUIET_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Whether an installation has gone quiet: never heard from, or not lately. */
+export function deliveryIsQuiet(lastDeliveryAt: number | null, now: number = Date.now()): boolean {
+  if (lastDeliveryAt === null) return true;
+  return now - lastDeliveryAt > DELIVERY_QUIET_MS;
 }
 
 /** The live row for an installation id, claimed or not. `removed_at IS NULL` is what
@@ -186,6 +205,25 @@ export function setInstallationSuspended(installationId: number, suspended: bool
     "UPDATE github_installations SET suspended_at = ? WHERE installation_id = ? AND removed_at IS NULL",
     [suspended ? Date.now() : null, installationId],
   );
+}
+
+/**
+ * Stamp an installation with the moment a delivery from it arrived.
+ *
+ * Written from inside the delivery transaction, so a delivery whose effects rolled back
+ * does not leave settings claiming the net was there. It records arrival and nothing
+ * about content: a `pull_request` event for a repository no review names writes no
+ * status row and still proves the transport is alive, which is exactly what this
+ * column is asked about.
+ *
+ * Unclaimed and removed rows are stamped too. `removed_at IS NULL` is not in the
+ * predicate because this is a fact about an installation rather than about a claim.
+ */
+export function recordInstallationDelivery(installationId: number, at: number = Date.now()): void {
+  db.run("UPDATE github_installations SET last_delivery_at = ? WHERE installation_id = ?", [
+    at,
+    installationId,
+  ]);
 }
 
 /** `installation.deleted`: the claim ends, the audit row survives, and the id is

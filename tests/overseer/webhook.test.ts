@@ -15,6 +15,7 @@ import { startServer } from "../../src/server";
 import { createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
 import { tinyId } from "../../src/ids";
 import {
+  deliveryIsQuiet,
   getLiveInstallation,
   getPrStatus,
   listReviewPrs,
@@ -290,6 +291,63 @@ describe("what one delivery does", () => {
     const row = statusA(12)!;
     expect(row.merged).toBe(1);
     expect(row.state).toBe("closed");
+  });
+});
+
+// The net is only visible if the deliveries that prove it is there leave a trace.
+// Without this, settings can report health for an integration that stopped a fortnight
+// ago, which is the exact failure deleting the poll chose to accept and therefore the
+// one thing the UI has to make loud.
+describe("delivery health", () => {
+  test("an installation nothing has delivered for has no stamp and is quiet", () => {
+    attach(wsA, INSTALL_A, "acme");
+    expect(getLiveInstallation(INSTALL_A)!.last_delivery_at).toBeNull();
+    expect(deliveryIsQuiet(null)).toBe(true);
+  });
+
+  test("a delivery stamps the installation it came from", async () => {
+    attach(wsA, INSTALL_A, "acme");
+    reviewNaming(wsA, "health");
+    const before = Date.now();
+    expect((await deliver("pull_request", prEvent({ number: 12, head: "f".repeat(40), updatedAt: "2026-09-01T10:00:00Z" }))).status).toBe(200);
+
+    const stamp = getLiveInstallation(INSTALL_A)!.last_delivery_at;
+    expect(stamp).not.toBeNull();
+    expect(stamp!).toBeGreaterThanOrEqual(before);
+    expect(deliveryIsQuiet(stamp)).toBe(false);
+  });
+
+  test("an event that writes nothing still proves the transport is alive", async () => {
+    attach(wsA, INSTALL_A, "acme");
+    reviewNaming(wsA, "health-dropped");
+    // #99 is named by no review, so the upsert drops it. The delivery still arrived,
+    // and delivery health is a question about the wire rather than about the rows.
+    const before = Date.now();
+    expect((await deliver("pull_request", prEvent({ number: 99 }))).status).toBe(202);
+    expect(getLiveInstallation(INSTALL_A)!.last_delivery_at!).toBeGreaterThanOrEqual(before);
+  });
+
+  test("a forged delivery stamps nothing", async () => {
+    attach(wsA, INSTALL_A, "acme");
+    db.run("UPDATE github_installations SET last_delivery_at = NULL WHERE installation_id = ?", [
+      INSTALL_A,
+    ]);
+    const res = await deliver("pull_request", prEvent({ number: 12 }), {
+      signature: `sha256=${"0".repeat(64)}`,
+    });
+    expect(res.status).toBe(401);
+    // A page that would say "heard from a moment ago" because someone unauthenticated
+    // knocked would be worse than one that says nothing.
+    expect(getLiveInstallation(INSTALL_A)!.last_delivery_at).toBeNull();
+  });
+
+  test("one installation's delivery does not vouch for another's", async () => {
+    attach(wsA, INSTALL_A, "acme");
+    attach(wsB, INSTALL_B, "other");
+    reviewNaming(wsA, "health-attribution");
+    expect((await deliver("pull_request", prEvent({ number: 12, head: "1".repeat(40), updatedAt: "2026-09-02T10:00:00Z" }))).status).toBe(200);
+    expect(getLiveInstallation(INSTALL_A)!.last_delivery_at).not.toBeNull();
+    expect(getLiveInstallation(INSTALL_B)!.last_delivery_at).toBeNull();
   });
 });
 

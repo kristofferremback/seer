@@ -168,6 +168,31 @@ if (SCENARIO === "fresh") {
   const shCount = (db.query("SELECT COUNT(*) c FROM shares").get() as { c: number }).c;
   assert(shCount === 0, `fresh db has an empty shares table, got ${shCount}`);
 
+  // Delivery health needs somewhere to remember the last delivery per installation.
+  // `github_deliveries` cannot answer it — that table is a replay guard swept on a
+  // week's retention, so a fortnight of silence would read there as no silence at all.
+  const cols = () =>
+    (db.query("PRAGMA table_info(github_installations)").all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+  assert(cols().includes("last_delivery_at"), "github_installations has last_delivery_at");
+
+  // Additive columns are applied outside the version ladder, so migrating an already
+  // migrated database must be a no-op rather than a duplicate-column error.
+  migrate();
+  assert(
+    cols().filter((c) => c === "last_delivery_at").length === 1,
+    "re-migrating adds the column once, not twice",
+  );
+
+  // The path a database migrated before this column existed actually takes: the column
+  // is missing and the next boot adds it, without a version bump and without touching
+  // the rows already there.
+  db.run("ALTER TABLE github_installations DROP COLUMN last_delivery_at");
+  assert(!cols().includes("last_delivery_at"), "column removed for the upgrade test");
+  migrate();
+  assert(cols().includes("last_delivery_at"), "an older schema gains last_delivery_at on boot");
+
   console.log("migrate fresh: all assertions passed");
   process.exit(0);
 }

@@ -21,6 +21,18 @@ export type ReviewKind = "single" | "stack" | "set";
  *  observation exists to prevent. */
 export type Freshness = "current" | "behind" | "unknown";
 
+/**
+ * How old an observation may be before the page stops stating it as bare truth.
+ *
+ * One hour, named once. With no polling left, a status is only as true as the last
+ * delivery that touched it, and a row nobody has confirmed since breakfast should not
+ * read like a row confirmed a second ago — so past this age the page says *as of
+ * \<time\>* beside the reading instead of the reading alone. This is the visible half
+ * of the trade that deleting the automatic check made: the repair became human, so the
+ * need for it has to be legible without being asked for.
+ */
+export const OBSERVATION_STALE_MS = 60 * 60 * 1000;
+
 /** Derived: whether the ref's path at its sha is touched by a pr in the review. */
 export type RefOrigin = "in_stack" | "outside";
 

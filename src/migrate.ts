@@ -324,6 +324,7 @@ const V5_GITHUB_APP = `
     connected_at INTEGER,
     created_at INTEGER NOT NULL,
     suspended_at INTEGER,
+    last_delivery_at INTEGER,
     removed_at INTEGER
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_github_installations_live
@@ -473,6 +474,26 @@ export function migrate(): void {
   if (userVersion() < 3) migrateToV3();
   if (userVersion() < 4) migrateToV4();
   if (userVersion() < 5) migrateToV5();
+  ensureAdditiveColumns();
+}
+
+/**
+ * Columns added to an existing schema version, applied idempotently.
+ *
+ * `last_delivery_at` is the delivery-health column: with polling deleted, an
+ * installation that has gone quiet is the failure mode this design chose, and settings
+ * cannot report it from `github_deliveries` — that table is a replay guard swept on a
+ * week's retention, so a fortnight of silence would read there as no silence at all.
+ *
+ * It does not get a version bump. v6 is spoken for (dropping `review_freshness`), and
+ * this column earns no bump on its own terms either: it is nullable, nothing reads it
+ * that is not new, and an old container writing rows during a redeploy overlap simply
+ * leaves it null — which reads as "no delivery recorded yet", which is true.
+ */
+function ensureAdditiveColumns(): void {
+  if (tableExists("github_installations") && !hasColumn("github_installations", "last_delivery_at")) {
+    db.run("ALTER TABLE github_installations ADD COLUMN last_delivery_at INTEGER");
+  }
 }
 
 function migrateToV5(): void {

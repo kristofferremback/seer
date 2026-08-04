@@ -33,6 +33,7 @@ import {
   listWorkspacePrs,
   markInstallationRemoved,
   observePullRequest,
+  recordInstallationDelivery,
   recordUnclaimedInstallation,
   reviewsNaming,
   setInstallationSuspended,
@@ -234,6 +235,11 @@ function applyEvent(event: string, payload: WebhookPayload): Effects {
   // case even when the `unsuspend` delivery was itself the one that was lost. Cleared
   // before the event is applied, so `suspend` still sets it in the same breath.
   setInstallationSuspended(installationId, false);
+  // The same proof, kept rather than merely acted on: settings reports the age of this
+  // stamp, and with no polling left that report is the only way anyone finds out the
+  // net stopped catching things. Recorded for every event, including the ones dropped
+  // below — an acknowledged event nobody stored still travelled the wire.
+  recordInstallationDelivery(installationId);
 
   switch (event) {
     case "pull_request":

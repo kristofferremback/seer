@@ -101,6 +101,24 @@ export function statusesOf(wsId: string, doc: ReviewDoc): Record<string, PrStatu
   return out;
 }
 
+/**
+ * When the readings on this page were last confirmed, or null when nothing has been.
+ *
+ * The *oldest* observation, not the newest: a page is only as fresh as its stalest row,
+ * and taking the newest would let one busy pull request vouch for four nobody has heard
+ * about since last week. Pull requests with no row at all contribute nothing here —
+ * they are already saying `unknown`, and an absence has no age.
+ */
+export function observedAtOf(wsId: string, doc: ReviewDoc): number | null {
+  let oldest: number | null = null;
+  for (const pr of doc.prs) {
+    const row = findPrStatus(wsId, pr.repo, pr.number);
+    if (!row) continue;
+    if (oldest === null || row.observed_at < oldest) oldest = row.observed_at;
+  }
+  return oldest;
+}
+
 /** A version number as it may appear in a URL. Anything else is out of range, and out
  *  of range is a soft-404 like every other miss. */
 function versionNumber(raw: string): number | null {

@@ -64,6 +64,8 @@ describe("settings github panel", () => {
     repositorySelection: "all",
     connected: "2026-08-01",
     isSuspended: false,
+    lastDelivery: "3 minutes ago",
+    isQuiet: false,
   };
 
   test("a connected installation is listed with a way to disconnect it", () => {
@@ -82,6 +84,30 @@ describe("settings github panel", () => {
   test("a suspended installation says so rather than looking healthy", () => {
     const html = settingsPage(settings({ installations: [{ ...held, isSuspended: true }] }));
     expect(html).toContain("suspended");
+  });
+
+  // Delivery health is the point of the panel now that nothing polls: an installation
+  // that stopped talking has to say so here, because nowhere else would.
+  test("a healthy installation states when it was last heard from, and is not called quiet", () => {
+    const html = settingsPage(settings({ installations: [held] }));
+    expect(html).toContain("3 minutes ago");
+    expect(html).not.toContain("no recent deliveries");
+  });
+
+  test("an installation that has gone quiet says so without being asked", () => {
+    const html = settingsPage(
+      settings({ installations: [{ ...held, lastDelivery: "14 days ago", isQuiet: true }] }),
+    );
+    expect(html).toContain("14 days ago");
+    expect(html).toContain("no recent deliveries");
+  });
+
+  test("an installation that has never delivered says never", () => {
+    const html = settingsPage(
+      settings({ installations: [{ ...held, lastDelivery: "never", isQuiet: true }] }),
+    );
+    expect(html).toContain("never");
+    expect(html).toContain("no recent deliveries");
   });
 
   test("with no app configured there is no button that could only fail", () => {
