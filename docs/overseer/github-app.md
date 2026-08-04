@@ -76,7 +76,8 @@ later** — see "Why the drop is its own release".
 ```
 github_installations
   id                    "ghi_" + tinyId
-  workspace_id          the owning workspace. Many rows may share one
+  workspace_id          the owning workspace, NULL while unclaimed. Many rows may
+                        share one. See "Unclaimed installations" below
   installation_id       GitHub's numeric id
   account_login         "kristofferremback" | "threahq"
   account_id            numeric; a login can be renamed, this cannot
@@ -91,6 +92,8 @@ github_installations
 
 github_pr_status
   workspace_id, repo_id, pr_number      PRIMARY KEY
+  repo_id           GitHub's numeric id; NULL only on backfilled rows, healed
+                    on first observation
   installation_id   which installation this observation came through
   repo              "owner/name" as last seen, for display only
   state             "open" | "closed"
@@ -122,10 +125,55 @@ its own rows — and by the time the event arrives the installation is gone, so
 destroy the surviving installations' observations, which is exactly the case this design
 leads with as day-one supported.
 
-**The join key is GitHub's numeric repository id, not `owner/name`.** GitHub treats
-those names case-insensitively and renames change them outright, so a review published as
+**The join key is GitHub's numeric repository id, not `owner/name`.** GitHub treats those
+names case-insensitively and renames change them outright, so a review published as
 `ThreaHQ/Threa` would never join a webhook carrying `threahq/threa`, and a renamed repo
 would silently stop matching everything. The name is kept alongside for display.
+
+**But `repo_id` is nullable, because the migration cannot invent one.** This is the
+correction that nearly shipped a silently broken backfill. `review_prs` backfills from
+stored v4 documents, and **the v4 document has no numeric repository id anywhere**: `Pr`
+carries `repo: string`, and `GithubPull` captures `head` and `base` with no repository
+object at all. So a migration could produce `repo_id` only by calling GitHub — a migration
+that reaches the network, unprecedented in this repo and impossible for a repository no
+installation covers any more — or by writing a sentinel, in which case **webhooks join on
+`repo_id` and never match a backfilled row**, every pre-App review renders unchecked
+forever, and settings reports healthy deliveries throughout. Step 2's done-condition would
+have passed.
+
+So the join is explicit about its transitional state:
+
+```
+match on repo_id                     when both sides have one
+fall back to lower(repo)             only when the stored repo_id is null
+heal null -> id                      on the first observation of that row
+```
+
+The fallback exists solely for rows the migration wrote and retires itself as they are
+observed. It is a stated, ending transitional path rather than a permanent second join.
+
+**Two fields have to be captured that are not captured today.** `GithubPull` grows the
+repository id (`base.repo.id` at minimum) and `updated_at` — the first so new documents
+never need the fallback, the second because the conditional upsert's whole precondition is
+a timestamp the client does not currently read. Neither exists in `github.ts` now, and
+both are step 1 work rather than something a later step discovers.
+
+**Unclaimed installations.** The webhook table records `installation.created` as an
+*unclaimed* installation, which the schema as first written could not represent:
+`workspace_id` was non-null and the claim flow "attaches", implying an UPDATE of a row
+that had to exist first with no workspace. An implementer building the schema from the
+schema block and the handler from the event table would have produced two incompatible
+things. So `workspace_id` is nullable, and three consequences are stated rather than left
+to be discovered:
+
+- The partial unique index still keys on `installation_id WHERE removed_at IS NULL`, so an
+  unclaimed row reserves the id exactly as a claimed one does — which is what stops a claim
+  race from producing two rows for one installation.
+- Every workspace-keyed query filters `workspace_id IS NOT NULL`. An unclaimed row belongs
+  to nobody and must never be walked as if it belonged to somebody.
+- **Routing refuses an unclaimed installation.** Resolving a repository to a row with no
+  workspace is not a match; it is a 422 telling the caller the installation exists but is
+  not connected to any workspace, which is both true and actionable.
 
 ### The derived readings
 
@@ -202,7 +250,10 @@ the codebase and there is no `createCipheriv` anywhere in `src/`.
 
 **Why nothing in this feature lands in row two.** The app JWT lives ten minutes and is
 derived from the private key on demand. The installation token lives an hour and is minted
-on demand. The user access token from the claim flow is used once, inside one request, and
+on demand. The user access token from the claim flow is used to list what the person can
+reach and then dropped — **not** carried to the attach request, which reads a proof
+recorded server-side instead; see "The proof has to cross a request", which is the one
+place this question genuinely bit, and
 dropped. A webhook needs no token at all — the payload carries the whole observation. Even
 the deferred work does not create one: re-deriving a review when a head moves mints a token
 from the private key with no user present.
@@ -320,12 +371,45 @@ user and a GitHub identity**. The claim flow has to establish one, transiently.
 4. **Ask what they actually have:** `GET /user/installations` with that token. This is
    the only step that proves anything about the relationship between the person and the
    installation.
-5. **Present the intersection** — the installations they can reach that are not already
-   claimed — and let them pick. This is the picker, now built from proof instead of from
-   a query parameter.
+5. **Record the proof and present the intersection** — the installations they can reach
+   that are not already claimed. This is the picker, built from proof rather than from a
+   query parameter.
 6. **Attach** on an Origin-checked POST, re-checking membership and re-checking that the
-   chosen id is in the list step 4 returned.
+   chosen id is one the recorded proof names.
 7. **Discard the user token.** It is never stored.
+
+### The proof has to cross a request, and that is where the secret question actually lands
+
+Steps 4 and 6 are **different requests**. The list of installations the person proved they
+can reach is produced in the callback and consumed by the attach POST, so something has to
+carry it between them. There are only three ways, and an earlier draft of this section
+specified none of them while separately claiming that no GitHub credential outlives a
+request — which the most natural reading of "re-checking that the chosen id is in the list
+step 4 returned" quietly contradicts.
+
+| how | verdict |
+|---|---|
+| Keep the user token and re-ask GitHub at attach time | **No.** That is a GitHub credential surviving a request boundary — a use-later secret, and the secrets table says there are none |
+| Record the proven installation ids server-side, bound to the claim row | **Yes.** Not a credential: a list of integers the person demonstrated access to |
+| Sign the list into the browser and verify at attach | Workable, and no worse; rejected only because it puts a second signing scheme beside the session HMAC for no gain |
+
+**So the claim row carries the proof.** The row already exists — it is the nonce row —
+and it gains the proven ids, the GitHub login they were proved for, and its own short
+expiry. Three properties are not optional:
+
+- **It lives in SQLite, not process memory.** This document establishes that old and new
+  containers overlap by design during a Railway redeploy (`cc41e33`), so the callback and
+  the attach can land on different processes. A memory-held proof is a claim flow that
+  fails intermittently, during deploys, in a way no test will show.
+- **The nonce is consumed at the callback, and the attach is gated by the claim row's own
+  single-use flag.** Two stages, two burns; otherwise "must exist, be unused" at step 2
+  leaves step 6 ungated.
+- **The row is hashed like every other bearer secret here** if the browser holds a handle
+  to it, and expires in minutes rather than hours.
+
+The user access token is used to produce that list and is then gone. It never reaches the
+database in any form, encrypted or otherwise — which is the claim the secrets section
+makes, now with the mechanism that makes it true rather than an assertion that it is.
 
 Two further corrections fall out:
 
@@ -480,6 +564,8 @@ had you deploy first and connect second, which is an outage for the whole window
 3. Connect both installations through settings. Verify a publish derives through one.
 4. Deploy **step 3**, which removes the token.
 
+**Local dev now requires App credentials.** Today `githubToken` is optional and public repositories resolve anonymously. Once the App variables are `required()`, nobody runs the server without registering a GitHub App. That is consistent with failing loudly and is the right trade, but it is a real change to the dev loop and is chosen here rather than discovered.
+
 **`config.ts` will break the suite** if the App variables are `required()` at import time,
 because `config` is imported by nearly every module and therefore nearly every test.
 `tests/setup.ts` seeds a generated keypair — which step 1 needs anyway for the JWT tests.
@@ -534,11 +620,75 @@ Without those three, dropping polling trades a small recurring cost for a silent
 which is the wrong trade. With them it trades it for a visible one, which is the right
 one.
 
+### Terminal transitions, and why visibility alone is not enough
+
+The three mechanisms above make a stale status *visible*. They do not make it *correct*,
+and there is one class of loss where visibility arrives too late to matter.
+
+**A lost `synchronize` heals itself; a lost `closed` never does.** Push again and another
+`synchronize` arrives carrying the new head. But merging or closing a pull request is the
+**last event that pull request will ever emit**. Lose that one delivery — a ten-second
+timeout, a redeploy window, a suspended installation, a rotated secret — and the row says
+`open` for the rest of time, on a page with no reason to doubt itself. The single most
+important status transition is precisely the one webhooks cannot self-heal.
+
+Two more with no repair path at all under the design as first revised:
+
+- **`installation.unsuspend`.** Miss it and `suspended_at` stays set forever. The failure
+  table promises a 422 "naming the account and saying it is suspended" — which would then
+  be asserting something false, permanently, with nothing anywhere to clear it.
+- **`installation_repositories.added`.** The `removed` action drops that repository's
+  status rows; `added` writes nothing back. Every review naming that repository renders
+  unchecked indefinitely **while delivery health in settings looks perfectly fine**,
+  because deliveries are flowing. The one mechanism meant to make the failure visible
+  reports health.
+
+**The answer is reconciliation, and it is not polling returning by the back door.** The
+distinction is the trigger: a poll fires on a timer or a render, endlessly, whether or not
+anything happened. Reconciliation fires on a **discrete event that means observations may
+have been missed**, and then stops:
+
+```
+installation.unsuspend            \
+installation_repositories.added    >  sweep review_prs for the affected repositories,
+a successful claim                /   re-observe each pull request once, then stop
+```
+
+Bounded by the number of pull requests in affected reviews, triggered by an event rather
+than a clock, and it writes through the same conditional upsert as everything else. It
+also clears `suspended_at` on any delivery received from that installation, because a
+delivery arriving *is* proof the installation is live — which repairs the unsuspend case
+even when the unsuspend event itself was the one that was lost.
+
+What reconciliation still cannot repair is the lost merge on an otherwise healthy
+installation, because nothing announces that it happened. That is what the human refresh
+control is for, and it is the residual risk this design accepts knowingly rather than by
+omission.
+
+**A GitHub behaviour to verify before building step 5, flagged as uncertain rather than
+asserted:** whether GitHub automatically retries failed webhook deliveries at all. The
+belief is that it does not — one attempt, a ten-second timeout, and redelivery is manual
+via the UI or `POST /app/hook/deliveries/{id}/attempts`. If that is right, every delivery
+is one-shot and the losses above are permanent by default rather than unlucky, which
+raises reconciliation from prudent to required, and makes `GET /app/hook/deliveries` worth
+reading in the settings panel rather than merely recording what arrived. Confirm against
+the current documentation; do not build the retry assumption into a test that then models a
+mechanism production does not have.
+
 **The consequences that ripple out.** `claimCheck`'s window, the `LAST_CHECK` map and its
 eviction bound exist to protect the read path from a render storm. With no automatic
 check, they guard exactly one human-triggered route. They stay — a loop on that route is
 still a loop — but they stop being load-bearing, and the question of re-keying the claim
 from the review to the pull request becomes moot rather than urgent.
+
+**And it has two homes, not one.** `read.ts:72` is the one the first draft named. The
+second is `freshness.ts:219` — `known[key] ?? "current"` — written into the refresh route
+by the very fix that closed its rate-limit bug, which means the pattern this document
+spends two pages condemning was planted, by this author, on what is now the *only repair
+path*. `headsChip` in `render.ts` is a third: it collapses to "heads current" whenever
+`behind === 0`, so it needs the unknown count rather than a zero check. All three change
+together in step 4, or the chip lies where the glyph is honest on the one route a human
+reaches for when they already suspect something is stale.
 
 `unknown` **is still needed**, and is now needed for a narrower and clearer reason: not
 "nobody has looked yet" but "this review predates the App", which is exactly the reviews
@@ -645,7 +795,7 @@ has deliveries in flight.
 
 | event | actions | effect |
 |---|---|---|
-| `pull_request` | opened, closed, reopened, edited, synchronize, converted_to_draft, ready_for_review | conditional upsert into `github_pr_status` |
+| `pull_request` | opened, closed, reopened, edited, synchronize, converted_to_draft, ready_for_review | conditional upsert **only for pull requests some review names** — see below |
 | `installation` | created | record as an **unclaimed** installation, with its `repositories[]` |
 | `installation` | deleted | mark removed; drop that installation's status rows |
 | `installation` | suspend, unsuspend | set / clear `suspended_at` |
@@ -653,6 +803,17 @@ has deliveries in flight.
 | `installation_repositories` | added, removed | invalidate routing cache; drop status rows for removed repos |
 | `ping` | — | 204 |
 | anything else | — | 202, ignored |
+
+**The upsert is filtered, and the filter is not an optimisation.** An installation
+covering "all repositories" on a busy org delivers a `pull_request` event for every pull
+request anyone opens anywhere in that org. Writing a row for each would grow
+`github_pr_status` without bound, forever, for pull requests no review mentions and no
+page renders. So the upsert applies only where `(workspace_id, repo_id, pr_number)` appears
+in `review_prs`; everything else is acknowledged and dropped. The counterpart is a sweep
+nobody had specified: when a republish removes a pull request from a review, its
+`review_prs` row goes, but its status row is keyed per workspace and may still be named by
+another review — so status rows are collected when **no** `review_prs` row in that
+workspace names them, in the same publish transaction.
 
 `installation.created` was missing from the first draft and is the most useful of them: it
 is the earliest trustworthy moment Seer learns an installation exists, it carries
@@ -735,7 +896,7 @@ importing `ReviewDoc` and rotting the day someone edits it.
 |---|---|
 | App private key or webhook secret missing/unparseable | fails at boot, naming the variable |
 | Repository outside every installation the workspace holds | 422 on publish, naming the repository and the account |
-| Installation suspended | 422 naming the account and saying suspended |
+| Installation suspended | 422 naming the account and saying suspended — sourced from GitHub refusing the mint, not from a `suspended_at` that a lost `unsuspend` could leave stale forever. The column is a display hint; the refusal is the fact |
 | Installation already claimed | refused without naming the holding workspace |
 | Token mint fails | the publish fails with GitHub's status and call site, as `GithubError` already does |
 | Webhook signature wrong, missing, or truncated | 401, nothing written |
@@ -802,10 +963,15 @@ rather than a summary of the work.
 
 **1. App identity.** Config, the JWT with backdated `iat`, the installation-token cache
 with narrow minting, repository routing, the per-workspace client factory, the test seam
-successor. No schema, no UI, no route.
-*Done when:* a generated keypair signs a JWT whose claims and lifetime are asserted; a
-fake transport shows the `Authorization` header carried the minted token; the factory
-refuses a repository the workspace does not hold; the suite still cannot reach the network.
+successor. `GithubPull` grows `updated_at` and the repository id. A second injection seam
+for the OAuth transport, which is not a `GithubClient` and does not fit the first one.
+No schema, no UI, no route.
+*Done when:* a generated keypair signs a JWT whose claims and lifetime are asserted, and
+`iat < now`; a fake transport shows the `Authorization` header carried the minted token,
+and that the token appears in no SQLite row afterwards; **the factory refuses a repository
+the workspace does not hold, against an injected holdings interface** — the DB-backed
+implementation does not exist yet and is step 2's to verify; the suite still cannot reach
+the network **through either seam**.
 
 **2. Schema v5 and the claim.** Tables, the partial unique index, the hashed claim nonce,
 `review_prs` backfill from latest versions, the OAuth claim flow end to end, the settings
@@ -815,15 +981,22 @@ unheld-installation case — and each refusal has its success beside it.
 
 **3. Derivation through installations, and the token deleted.** All four call sites
 threaded; `GITHUB_TOKEN`, `config.githubToken` and the lazy default removed in one commit.
-*Done when:* no `githubToken` remains in `src/`, and publish, ref resolution and annotation
-answers all derive through a workspace client.
+Four existing tests set `config.githubToken` and assert the 503 it produces
+(`routes.test.ts`, `annotations.test.ts`); the behaviour they cover is being deleted, so
+they are **rewritten to assert the 422-no-installation refusal that replaces it**, not
+deleted to make the suite green.
+*Done when:* no `githubToken` remains in `src/`; publish, ref resolution and annotation
+answers all derive through a workspace client; and those four tests still assert a refusal
+rather than having been removed.
 
 **4. One observation.** Status upserted in the publish transaction; `unknown` added to
 `Freshness`; the conditional `updated_at` precondition; the glyph and the colour rule.
 `review_freshness` stops being written.
 *Done when:* a published review renders its glyphs immediately with no webhook and no
-poll; an absent row renders as unchecked on both glyph and chip; a merged pull request
-renders merged rather than closed.
+poll; an absent row renders as unchecked on **all three** of glyph, chip and the refresh
+route's JSON; a merged pull request renders merged rather than closed; **an older
+observation applied after a newer one does not overwrite it** — the precondition is built
+here, so it is verified here rather than waiting for step 5 to exercise it.
 
 **5. Webhooks, and polling deleted.** Endpoint, signature, one-transaction dedupe, the
 event table, the single live message. `refreshOnView` and its call site go in the same
@@ -835,11 +1008,16 @@ followed by a retry applies; nothing in `src/` reaches GitHub from a render.
 threshold, the refresh control on the review page, delivery health per installation in
 settings.
 *Done when:* an installation whose last delivery is old says so in settings without being
-asked.
+asked, **and** a review whose observation is older than the threshold renders "as of
+&lt;time&gt;" rather than bare status. The threshold is one hour, named here so it is not
+invented three times.
 
 **7. The reviews index.** The page that does not exist, with tallies from rows already
 written.
-*Done when:* rendering the index makes zero GitHub calls, asserted by a counting client.
+*Done when:* the index renders tallies that match seeded rows, **and** makes zero GitHub
+calls doing it, asserted by a counting client. The zero-call assertion alone passes against
+a page that renders nothing, which is the vacuity this document names elsewhere and would
+otherwise have written into its own plan.
 
 **8. v6: drop `review_freshness`.** One release after step 4 stopped writing it.
 
