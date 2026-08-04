@@ -651,6 +651,21 @@ function styles(): string {
     padding: 1px 7px;
   }
   .section-rule { flex: 1; height: 1px; min-width: 1rem; background: hsl(var(--line)); }
+
+  /* ---- the reviews index's tally ----
+     Counts in the site's own register. The GitHub palette is admitted on the review
+     page for the status glyph alone, and the bound on that exception is that it does
+     not spread — so here the count is a mono numeral and the plain word. */
+  .row-sub { display: block; font-size: 11px; color: hsl(var(--muted)); }
+  td.status-cell { white-space: nowrap; }
+  .tally { display: inline-flex; flex-wrap: wrap; gap: 0.55rem; align-items: baseline; }
+  .tally-part { display: inline-flex; gap: 0.3rem; align-items: baseline; }
+  .tally-n { font-family: var(--font-mono); font-size: 12px; }
+  .tally-w {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: hsl(var(--muted));
+  }
+  .tally-none { color: hsl(var(--muted)); font-size: 12px; }
   @media (hover: hover) and (pointer: fine) {
     .ledger-section > summary:hover { color: hsl(var(--accent)); }
     .ledger-section > summary:hover .section-chevron { color: hsl(var(--accent)); }
@@ -1471,7 +1486,7 @@ ${head("Bundles · Seer", og)}
 <body>
 <div class="frame warm">
   <div class="shell spine">
-    ${navRow(null)}
+    ${navRow({ href: "/reviews", label: "reviews" })}
     <p class="eyebrow"><span class="email-tag">${escapeHtml(email)}</span></p>
     <h1 class="h-section">Bundles</h1>
     <p class="subtitle">Everything Seer is holding, workspace by workspace.</p>
@@ -1494,6 +1509,132 @@ ${head("Bundles · Seer", og)}
 ${rowMenu}
 ${themeToggleScript()}
 <script>${bundlesScript()}</script>
+</body>
+</html>`;
+}
+
+// ---- the reviews index ----
+//
+// The ledger beside the bundles ledger, in the same visual language: one group per
+// workspace, one table of rows, the same mono stamps. It is the only way a published
+// review is reachable without already holding its URL.
+
+/** One review as the index lists it. Counts, not words: the page decides how a tally
+ *  reads, and the caller has already asked the database what the rows say. */
+export interface LedgerReview {
+  slug: string;
+  title: string;
+  latestVersion: number;
+  publishedAt: number;
+  tally: { merged: number; closed: number; draft: number; open: number; unknown: number; total: number };
+}
+
+export interface ReviewLedgerGroup {
+  wsId: string;
+  name: string;
+  visibility: "public" | "private";
+  reviews: LedgerReview[];
+}
+
+/**
+ * The tally, in words rather than in GitHub's colours.
+ *
+ * The status glyph's palette is admitted on the review page on one ground — that those
+ * colours are quoted from GitHub rather than authored by Seer — and the bound on that
+ * exception is that it appears only in the glyph. So the index counts in the site's own
+ * register: mono numerals and the plain word.
+ *
+ * A review with pull requests but no observation of any of them says "not checked yet"
+ * rather than counting five unknowns, because that is the sentence a reader wants, and
+ * a review naming no pull requests at all says nothing.
+ */
+function tallyCell(t: LedgerReview["tally"]): string {
+  if (t.total === 0) return `<span class="tally-none">&mdash;</span>`;
+  if (t.unknown === t.total) return `<span class="tally-none">not checked yet</span>`;
+  const parts: string[] = [];
+  for (const word of ["merged", "open", "draft", "closed", "unknown"] as const) {
+    const n = t[word];
+    if (n === 0) continue;
+    parts.push(
+      `<span class="tally-part"><span class="tally-n">${n}</span>` +
+        `<span class="tally-w">${word === "unknown" ? "unchecked" : word}</span></span>`,
+    );
+  }
+  return `<span class="tally">${parts.join("")}</span>`;
+}
+
+export function reviewsPage(email: string, groups: ReviewLedgerGroup[]): string {
+  const og = { "og:title": "Reviews · Seer", "og:type": "website", robots: "noindex" };
+
+  const row = (g: ReviewLedgerGroup, r: LedgerReview) => {
+    const url = `/${g.wsId}/r/${encodeURIComponent(r.slug)}/`;
+    return `<tr>
+          <td class="slug"><a href="${url}">${escapeHtml(r.title)}</a>
+            <span class="row-sub mono">${escapeHtml(r.slug)}</span></td>
+          <td class="mono">v${r.latestVersion}</td>
+          <td class="mono"><time datetime="${new Date(r.publishedAt).toISOString()}">${fmtInstant(r.publishedAt)}</time></td>
+          <td class="status-cell">${tallyCell(r.tally)}</td>
+        </tr>`;
+  };
+
+  const groupBlock = (g: ReviewLedgerGroup) => {
+    const pill = `<span class="pill${g.visibility === "public" ? " public" : ""}"><span class="bead"></span>${g.visibility}</span>`;
+    const head = `<div class="ws-head">
+      <h2>${escapeHtml(g.name)}</h2>
+      <span class="mono-id">${escapeHtml(g.wsId)}</span>
+      ${pill}
+      <span class="spacer"></span>
+      <a class="nav-action" href="/settings/${g.wsId}">settings</a>
+    </div>`;
+
+    if (g.reviews.length === 0) {
+      return `${head}
+      <p class="empty">No reviews here yet.</p>`;
+    }
+
+    return `${head}
+    <div class="ledger scroll-x">
+      <table>
+        <thead><tr><th>Review</th><th>Latest</th><th>Published</th><th>Pull requests</th></tr></thead>
+        <tbody>
+        ${g.reviews.map((r) => row(g, r)).join("\n")}
+        </tbody>
+      </table>
+    </div>`;
+  };
+
+  const body =
+    groups.length === 0
+      ? `<p class="empty">No workspaces yet.</p>`
+      : groups.map(groupBlock).join("\n");
+
+  return `<!doctype html>
+<html lang="en">
+${head("Reviews · Seer", og)}
+<body>
+<div class="frame warm">
+  <div class="shell spine">
+    ${navRow({ href: "/bundles", label: "bundles" })}
+    <p class="eyebrow"><span class="email-tag">${escapeHtml(email)}</span></p>
+    <h1 class="h-section">Reviews</h1>
+    <p class="subtitle">Every review published here, newest first, workspace by workspace.</p>
+  </div>
+</div>
+<div class="frame grow">
+  <div class="shell spine">
+    ${body}
+    <p class="aside stack-gap">The pull request counts are what Seer was last told, by the
+    publish that seeded them and the webhooks that have arrived since. Nothing on this page
+    asks GitHub anything — a review whose count reads <em>not checked yet</em> is one no
+    observation has landed for, which is a different thing from one with nothing to say.</p>
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/bundles">bundles</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
 </body>
 </html>`;
 }

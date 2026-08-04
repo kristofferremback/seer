@@ -65,10 +65,12 @@ import {
   installUrl,
 } from "./overseer/github-claim";
 import { handleGithubWebhook } from "./overseer/webhook";
+import { getReviewVersion, listReviewVersions, listReviews } from "./overseer/db";
 import {
   dbWorkspaceHoldings,
   deliveryIsQuiet,
   listWorkspaceInstallations,
+  reviewStatusTally,
 } from "./overseer/installations";
 import { agoWords } from "./relative-time";
 import { setWorkspaceHoldings } from "./overseer/github-app";
@@ -84,6 +86,7 @@ import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
 import {
   landingPage,
   bundlesPage,
+  reviewsPage,
   invitePage,
   settingsPage,
   skillDoc,
@@ -91,6 +94,7 @@ import {
   softNotFoundPage,
   type BundleMeta,
   type LedgerGroup,
+  type ReviewLedgerGroup,
   type SettingsReveal,
 } from "./pages";
 
@@ -478,6 +482,34 @@ function ledgerGroups(userId: string): LedgerGroup[] {
   }));
 }
 
+// The reviews index, grouped the same way. Every field comes out of SQLite: the title
+// off the latest stored version, the tally off `review_prs` joined to the observations
+// already written. Nothing here can reach GitHub, because after the on-view check was
+// deleted no code path from a render to an observation exists at all.
+function reviewLedgerGroups(userId: string): ReviewLedgerGroup[] {
+  return listUserWorkspaces(userId).map((ws) => ({
+    wsId: ws.id,
+    name: ws.name,
+    visibility: ws.visibility,
+    reviews: listReviews(ws.id)
+      .map((r) => {
+        const versions = listReviewVersions(ws.id, r.slug);
+        const latest = getReviewVersion(ws.id, r.slug, r.latest_version);
+        return {
+          slug: r.slug,
+          // A review with no version row behind its head pointer cannot happen —
+          // createReviewVersion moves both in one transaction — but the index is not
+          // the place to throw over it, so the slug stands in for the title.
+          title: latest?.doc.title ?? r.slug,
+          latestVersion: r.latest_version,
+          publishedAt: versions[0]?.created_at ?? r.created_at,
+          tally: reviewStatusTally(ws.id, r.slug),
+        };
+      })
+      .sort((a, b) => b.publishedAt - a.publishedAt),
+  }));
+}
+
 // ---- server ----
 
 export async function startServer() {
@@ -547,6 +579,15 @@ export async function startServer() {
         const user = sessionUser(req);
         if (!user) return requireSession(req)!;
         return new Response(bundlesPage(user.email, ledgerGroups(user.id)), {
+          headers: { "content-type": "text/html;charset=utf-8" },
+        });
+      },
+
+      // The signed-in index of published reviews, beside the bundle ledger.
+      "/reviews": (req) => {
+        const user = sessionUser(req);
+        if (!user) return requireSession(req)!;
+        return new Response(reviewsPage(user.email, reviewLedgerGroups(user.id)), {
           headers: { "content-type": "text/html;charset=utf-8" },
         });
       },

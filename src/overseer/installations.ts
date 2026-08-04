@@ -692,3 +692,30 @@ export function statusOf(row: Pick<PrStatusRow, "state" | "merged" | "draft">): 
   if (row.draft) return "draft";
   return "open";
 }
+
+/** What a review's pull requests are, counted. `unknown` is one of the counts rather
+ *  than a missing one: a pull request nobody has observed has to be sayable, or the
+ *  index reads as though every pull request it cannot see is open. */
+export type StatusTally = Record<PrStatusWord | "unknown", number> & { total: number };
+
+/**
+ * The tally the reviews index renders, derived from rows already written.
+ *
+ * It reaches GitHub never — not as a rule the page has to remember, but because both
+ * tables it reads are written by publish and by webhooks and there is no code path
+ * from a render to an observation at all. Twenty reviews are twenty pairs of indexed
+ * queries, not twenty calls.
+ *
+ * `review_prs` names the pull requests, which is why it is the side iterated: a status
+ * row the workspace holds for a pull request no version of this review names is not
+ * this review's business.
+ */
+export function reviewStatusTally(wsId: string, slug: string): StatusTally {
+  const tally: StatusTally = { merged: 0, closed: 0, draft: 0, open: 0, unknown: 0, total: 0 };
+  for (const pr of listReviewPrs(wsId, slug)) {
+    const row = findPrStatus(wsId, pr.repo, pr.pr_number);
+    tally[row ? statusOf(row) : "unknown"] += 1;
+    tally.total += 1;
+  }
+  return tally;
+}
