@@ -10,7 +10,7 @@ import { test, expect, beforeAll, beforeEach, afterAll, describe } from "bun:tes
 
 import { startServer } from "../../src/server";
 import { createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
-import { listFreshness } from "../../src/overseer/db";
+import { findPrStatus } from "../../src/overseer/installations";
 import type { GithubClient, GithubPull } from "../../src/overseer/github";
 import { setGithubClientFactory } from "../../src/overseer/github-app";
 import {
@@ -30,6 +30,9 @@ let wsA = "";
 let wsB = "";
 let keyA = "";
 
+/** The installation every fake client here says it routed through. */
+const TEST_INSTALLATION = 5150;
+
 /** A client that answers `getPull` with whatever head this test wants, and counts. */
 function countingClient(head: (repo: string, number: number) => string): {
   client: GithubClient;
@@ -37,6 +40,11 @@ function countingClient(head: (repo: string, number: number) => string): {
 } {
   let calls = 0;
   const client = {
+    // The observation has to be attributable or it is not written: the status row's
+    // installation_id is how `installation.deleted` finds its own rows.
+    async installationFor(): Promise<number> {
+      return TEST_INSTALLATION;
+    },
     async getPull(repo: string, number: number): Promise<GithubPull> {
       calls++;
       return {
@@ -140,12 +148,14 @@ describe("a head that moved", () => {
 
     const first = await fetch(`${base}/${wsA}/r/moved`);
     expect(first.status).toBe(200);
-    // The page that triggered the check was rendered before it landed.
-    expect(await first.text()).toContain("heads current");
+    // The page that triggered the check was rendered before it landed, and nothing had
+    // observed these pull requests, so it says unchecked rather than asserting current.
+    expect(await first.text()).toContain("heads unchecked");
     await settle();
 
-    const rows = listFreshness(wsA, "moved");
-    expect(rows.map((r) => r.observed_head_sha).includes(moved)).toBe(true);
+    const row = findPrStatus(wsA, GOLDEN_REPO, 12);
+    expect(row?.head_sha).toBe(moved);
+    expect(row?.installation_id).toBe(TEST_INSTALLATION);
 
     // The next render reads the stored rows. Nothing is refreshed for it: the window
     // is still closed, and the client would count the call if it were.
@@ -276,12 +286,22 @@ describe("the live channel", () => {
       headers: { authorization: `Bearer ${keyA}` },
     });
     expect(res.status).toBe(200);
-    expect(JSON.parse(await message)).toEqual({ type: "freshness", behind: 1, total: 2 });
+    expect(JSON.parse(await message)).toEqual({
+      type: "freshness",
+      behind: 1,
+      unknown: 0,
+      total: 2,
+    });
     socket.close();
   });
 
   test("a push says what changed, in either direction, and repeats nothing", async () => {
     storeGoldenReview(wsA, "swings");
+    // An observation is of a pull request, not of a review: every review in this file
+    // names the same two pull requests, so this one inherits whatever the last test
+    // observed about them and would start already behind. Cleared so the swing below
+    // is this test's own.
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
     let head12 = "6".repeat(40);
     setGithubClientFactory(() => countingClient((_repo, n) => (n === 12 ? head12 : GOLDEN_HEAD_SHA_13)).client);
 
@@ -312,8 +332,8 @@ describe("the live channel", () => {
     socket.close();
 
     expect(heard.map((m) => JSON.parse(m))).toEqual([
-      { type: "freshness", behind: 1, total: 2 },
-      { type: "freshness", behind: 0, total: 2 },
+      { type: "freshness", behind: 1, unknown: 0, total: 2 },
+      { type: "freshness", behind: 0, unknown: 0, total: 2 },
     ]);
   });
 
@@ -335,7 +355,9 @@ describe("the render is never blocked", () => {
     const started = Date.now();
     const res = await fetch(`${base}/${wsA}/r/hangs`);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("heads current");
+    // Nothing has observed this review and nothing ever will through this client, so
+    // the chip says so rather than claiming the heads are current.
+    expect(await res.text()).toContain("heads unchecked");
     expect(Date.now() - started).toBeLessThan(2000);
   });
 });

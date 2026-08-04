@@ -17,7 +17,7 @@ import { saveAttachment } from "../store";
 import { tinyId } from "../ids";
 import { requireApiKey } from "../auth";
 import { createAttachment, createReviewVersion, getReview, getReviewVersion, type ReviewDoc } from "./db";
-import { setReviewPrs } from "./installations";
+import { setReviewPrs, upsertPrStatus } from "./installations";
 import {
   derivePrs,
   PrPointerError,
@@ -767,9 +767,38 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     // The pull request set this review names, replaced wholesale in the same
     // transaction: a republish that drops #4 and adds #9 must delete #4's row, or an
     // observation keeps landing on a review that no longer mentions it. The numeric
-    // repository id is left null here for the same reason the backfill leaves it null —
-    // the document has none — and heals on the first observation.
-    setReviewPrs(ws, slug, doc.prs.map((p) => ({ repo: p.repo, number: p.number })));
+    // repository id comes off the same `getPull` the derivation made, so a document
+    // published through the App never needs the backfill's name fallback.
+    const repoIds = new Map(
+      review.observations.map((o) => [prKey(o.repo, o.number), o.repoId] as const),
+    );
+    setReviewPrs(
+      ws,
+      slug,
+      doc.prs.map((p) => ({
+        repo: p.repo,
+        number: p.number,
+        repoId: repoIds.get(prKey(p.repo, p.number)) ?? null,
+      })),
+    );
+    // The seed, and it is load-bearing rather than an optimisation: with no polling
+    // anywhere this is the only thing that gives a new review a glyph, and for a pull
+    // request that is already merged or closed there may never be a webhook. It runs
+    // through the same conditional upsert as every other writer, so a publish that
+    // started before a merge cannot roll the merge back.
+    for (const o of review.observations) {
+      if (o.installationId === null || o.repoId === null) continue;
+      upsertPrStatus(ws, o.installationId, {
+        repoId: o.repoId,
+        repo: o.repo,
+        prNumber: o.number,
+        state: o.state,
+        merged: o.merged,
+        draft: o.draft,
+        headSha: o.headSha,
+        updatedAt: o.updatedAt,
+      });
+    }
     for (const a of resolved.attachments) {
       createAttachment(ws, slug, v, a.mediaType, a.bytes.length, a.alt, a.caption, a.id);
     }

@@ -282,6 +282,16 @@ export function createWorkspaceGithubClient(options: WorkspaceClientOptions): Gi
   }
 
   return {
+    async installationFor(repo) {
+      // The routing question without the mint, and without the refusal: a caller
+      // asking whose installation this would be is asking so it can attribute an
+      // observation, and "nobody's" is an answer rather than an error.
+      assertRepo(repo);
+      const installationId = await app.installationForRepo(repo);
+      if (installationId === null) return null;
+      const held = await holdings.installationIds(workspaceId);
+      return held.includes(installationId) ? installationId : null;
+    },
     async getPull(repo, number) {
       const pull: GithubPull = await (await authorize(repo)).getPull(repo, number);
       // The one payload that carries the repository's numeric id, which is what lets

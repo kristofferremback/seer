@@ -14,8 +14,12 @@ export type NoteKind = (typeof NOTE_KINDS)[number];
 /** Derived: one pr is `single`, a chain of bases is `stack`, anything else is `set`. */
 export type ReviewKind = "single" | "stack" | "set";
 
-/** Derived per pr by comparing the stored head sha against GitHub. */
-export type Freshness = "current" | "behind";
+/** Derived per pr from the one observation in `github_pr_status`: the stored head sha
+ *  against the observed one. `unknown` is absence and has to be sayable — an
+ *  unobserved pull request read as `current` makes the chip assert a freshness the
+ *  glyph beside it cannot show, which is the two-readings-disagree failure the one
+ *  observation exists to prevent. */
+export type Freshness = "current" | "behind" | "unknown";
 
 /** Derived: whether the ref's path at its sha is touched by a pr in the review. */
 export type RefOrigin = "in_stack" | "outside";

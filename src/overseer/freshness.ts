@@ -4,22 +4,24 @@
 // immediately and, at most once a minute per review, kicks a detached comparison of
 // the stored head SHAs against GitHub. Nothing on the read path waits for GitHub: a
 // slow or broken client costs the reader nothing, and a head that moved lands in
-// `review_freshness`, which the next render reads and, for a reader with a script,
-// arrives over the live channel as a push.
+// `github_pr_status` — the one row per pull request that publish seeds and webhooks
+// maintain — which the next render reads and, for a reader with a script, arrives over
+// the live channel as a push.
+//
+// `review_freshness` is no longer written by anything. It held a second recording of
+// one fact beside the status row, and two writers of one fact is the drift this design
+// exists to remove; the table itself is dropped a release later, so an old container
+// still reading it during a redeploy finds it there.
 //
 // The rate limit is process-local on purpose. It is a courtesy to the GitHub API, not
 // a correctness rule: two processes checking the same review a second apart write the
 // same rows and reach the same answer.
 
-import {
-  getReviewVersion,
-  listFreshness,
-  resolveReview,
-  setFreshness,
-  type ReviewDoc,
-} from "./db";
+import { getReviewVersion, resolveReview, type ReviewDoc } from "./db";
+import { parseUpdatedAt } from "./derive";
 import type { GithubClient } from "./github";
 import { githubClientFor } from "./github-app";
+import { findPrStatus, upsertPrStatus } from "./installations";
 import { freshnessOf, readableWorkspaces } from "./read";
 import { prKey, type Freshness } from "./types";
 
@@ -118,26 +120,37 @@ export async function checkReview(
   // way an unreachable GitHub does: the last observation stands.
   client: GithubClient = githubClientFor(wsId),
 ): Promise<CheckResult> {
-  const observed = new Map(
-    listFreshness(wsId, slug).map((f) => [prKey(f.repo, f.pr_number), f.observed_head_sha]),
-  );
   const prs: PrFreshness[] = [];
   let changed = false;
   for (const pr of doc.prs) {
     const key = prKey(pr.repo, pr.number);
-    const before = observed.get(key) ?? pr.headSha;
-    let head = before;
+    const known = findPrStatus(wsId, pr.repo, pr.number);
+    const was: Freshness = known ? (known.head_sha === pr.headSha ? "current" : "behind") : "unknown";
+    let freshness = was;
     try {
       const pull = await client.getPull(pr.repo, pr.number);
-      head = pull.head.sha;
-      setFreshness(wsId, slug, pr.repo, pr.number, head);
+      const installationId = (await client.installationFor?.(pr.repo)) ?? null;
+      const repoId = pull.base?.repo?.id ?? known?.repo_id ?? null;
+      // One row, one writer, one precondition: a refresh goes through the same upsert a
+      // publish and a delivery do, so a slow refresh cannot roll back a newer fact.
+      if (installationId !== null && repoId !== null) {
+        upsertPrStatus(wsId, installationId, {
+          repoId,
+          repo: pr.repo,
+          prNumber: pr.number,
+          state: pull.state,
+          merged: pull.merged === true,
+          draft: pull.draft === true,
+          headSha: pull.head.sha,
+          updatedAt: parseUpdatedAt(pull.updated_at),
+        });
+      }
+      freshness = pull.head.sha === pr.headSha ? "current" : "behind";
     } catch (err) {
       // A review is not wrong because GitHub was unreachable. The last observation
       // stands, and the failure is said out loud rather than swallowed.
       console.error(`[seer] freshness check failed for ${key} in ${wsId}/${slug}: ${String(err)}`);
     }
-    const freshness: Freshness = head !== pr.headSha ? "behind" : "current";
-    const was: Freshness = before !== pr.headSha ? "behind" : "current";
     if (freshness !== was) changed = true;
     prs.push({ pr: key, repo: pr.repo, number: pr.number, freshness });
   }
@@ -148,7 +161,11 @@ export async function checkReview(
  *  page reads a message rather than guessing at one. */
 export function freshnessMessage(result: CheckResult): string {
   const behind = result.prs.filter((p) => p.freshness === "behind").length;
-  return JSON.stringify({ type: "freshness", behind, total: result.prs.length });
+  const unknown = result.prs.filter((p) => p.freshness === "unknown").length;
+  // `unknown` rides along because the chip is one sentence over three counts: a push
+  // carrying only `behind` would rewrite "2 unchecked" to "heads current" on a page
+  // whose glyphs still show nothing.
+  return JSON.stringify({ type: "freshness", behind, unknown, total: result.prs.length });
 }
 
 /**
@@ -220,7 +237,10 @@ export async function handleRefreshReview(req: Request, slug: string): Promise<R
       false,
       row.doc.prs.map((pr) => {
         const key = prKey(pr.repo, pr.number);
-        return { pr: key, freshness: known[key] ?? "current" };
+        // No default. This route is the repair path — the one thing a reader reaches
+        // for when they already suspect something is stale — so it is the last place
+        // that may answer "current" about a pull request nothing has observed.
+        return { pr: key, freshness: known[key] ?? "unknown" };
       }),
     );
   }

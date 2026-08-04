@@ -77,6 +77,17 @@ export interface GithubClient {
   getFileAtSha(repo: string, path: string, sha: string): Promise<string>;
   /** The whole pull request as one unified diff. The fallback when `files[].patch` is absent. */
   getPullDiff(repo: string, number: number): Promise<string>;
+  /**
+   * Which installation this client would route `repo` through, or null when none does
+   * and the call would be refused.
+   *
+   * Optional because a client built from a bare token has no installation to name. It
+   * exists because an observation of a pull request has to be attributed to the
+   * installation it came through — `installation.deleted` finds its rows by that column
+   * and by nothing else — and the routing answer lives inside the client, which is the
+   * only place that knows it.
+   */
+  installationFor?(repo: string): Promise<number | null>;
 }
 
 /** Every failure out of this module is one of these, with the call site in the message. */

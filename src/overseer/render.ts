@@ -42,7 +42,8 @@ import {
   touched,
   type EntityDelta,
 } from "./delta";
-import { freshnessOf, readableWorkspaces } from "./read";
+import type { PrStatusWord } from "./installations";
+import { freshnessOf, readableWorkspaces, statusesOf } from "./read";
 import { refreshOnView } from "./freshness";
 import {
   KIND_LABEL,
@@ -864,6 +865,33 @@ const STYLE = `  @font-face {
   @media (hover: hover) and (pointer: fine) {
     .c-ref:hover .c-reftext { text-decoration-thickness: 2px; }
   }
+  /* ---- the one place GitHub's palette is allowed on this page ----
+     Green, purple and red are none of Seer's mark families, and they are admitted on
+     one ground: these colours are quoted, not authored. They express GitHub's encoding
+     rather than Seer's judgment, and a reader who has seen ten thousand of them reads
+     the card without being taught anything.
+
+     The exception is bounded and the bound is the rule: this glyph only. Never a wash,
+     a border, text or a chip; one glyph per card, at the size of the marks beside it;
+     colour is never the only channel (four shapes, and the word in the accessible
+     name); and dark theme uses GitHub's own dark variants rather than lightened light
+     ones. If it spreads past the glyph the rule has been broken, and the exception
+     does not widen. */
+  .c-status { flex: none; align-self: center; }
+  .c-status.s-open { color: #1a7f37; }
+  .c-status.s-merged { color: #8250df; }
+  .c-status.s-closed { color: #cf222e; }
+  .c-status.s-draft { color: #6e7781; }
+  :root[data-theme="dark"] .c-status.s-open { color: #3fb950; }
+  :root[data-theme="dark"] .c-status.s-merged { color: #a371f7; }
+  :root[data-theme="dark"] .c-status.s-closed { color: #f85149; }
+  :root[data-theme="dark"] .c-status.s-draft { color: #8b949e; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .c-status.s-open { color: #3fb950; }
+    :root:not([data-theme="light"]) .c-status.s-merged { color: #a371f7; }
+    :root:not([data-theme="light"]) .c-status.s-closed { color: #f85149; }
+    :root:not([data-theme="light"]) .c-status.s-draft { color: #8b949e; }
+  }
   .c-stat { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
   .stat { white-space: nowrap; }
   .stat .s-add { color: hsl(var(--add)); }
@@ -1153,6 +1181,25 @@ const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
   <symbol id="i-pr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
     <path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>
+  </symbol>
+  <!-- the four status glyphs, from GitHub's own vocabulary. Four distinct shapes, so
+       the reading survives colour being removed: an open pull request, a merge, a
+       cross, and the open shape drawn broken for a draft. -->
+  <symbol id="i-pr-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
+    <path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>
+  </symbol>
+  <symbol id="i-pr-merged" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
+    <path d="M6 21V9a9 9 0 0 0 9 9"/>
+  </symbol>
+  <symbol id="i-pr-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="6" cy="6" r="3"/><line x1="6" x2="6" y1="9" y2="21"/>
+    <path d="m21 3-6 6"/><path d="m15 3 6 6"/>
+  </symbol>
+  <symbol id="i-pr-draft" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
+    <path d="M18 6v1"/><path d="M18 11v1"/><line x1="6" x2="6" y1="9" y2="21"/>
   </symbol>
   <symbol id="i-branch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
@@ -1562,6 +1609,21 @@ function prStat(pr: Pr, hunks: Hunk[]): string {
   return `<span class="c-stat">${statHtml(added, removed)}</span>`;
 }
 
+/**
+ * What GitHub says this pull request is, in GitHub's own vocabulary.
+ *
+ * No observation draws nothing. A fourth glyph meaning "we have not looked" would be
+ * Seer inventing a state GitHub does not have; the chip above the chain is where
+ * absence is said, once, rather than on every card.
+ *
+ * Colour is never the only channel: four distinct shapes, and the word itself in the
+ * accessible name, so the four are told apart with colour removed.
+ */
+function statusGlyph(status: PrStatusWord | undefined): string {
+  if (status === undefined) return "";
+  return icon(`pr-${status}`, `ic c-status s-${status}`, status);
+}
+
 function card(
   pr: Pr,
   refs: Map<string, Ref>,
@@ -1598,6 +1660,7 @@ function card(
     `${icon("chev", "tick")}` +
     `</span>` +
     `<span class="c-id">` +
+    statusGlyph(ctx.status[prKey(pr.repo, pr.number)]) +
     `<a class="c-ref" href="https://github.com/${escapeHtml(pr.repo)}/pull/${pr.number}">` +
     `${icon("pr")}<span class="c-reftext">${escapeHtml(prLabel(pr))}</span></a>` +
     prStat(pr, hunks) +
@@ -1966,6 +2029,9 @@ interface RenderCtx {
    *  belong to the review rather than to a version, so this is the same map whichever
    *  version is being read. */
   annotations: Map<string, Annotation[]>;
+  /** The status word per pull request, for the glyph on its card. Empty for a review
+   *  nothing has observed. */
+  status: Record<string, PrStatusWord>;
 }
 
 /** One row of the revision menu. Counts are derived from the delta between a
@@ -2000,6 +2066,9 @@ export interface RenderInput {
   /** True when the URL pinned a version rather than asking for the current one. */
   pinned: boolean;
   freshness: Record<string, Freshness>;
+  /** What GitHub last said each pull request was, keyed by `${repo}#${number}`. A key
+   *  with no entry has no observation, and its card draws no glyph. */
+  status?: Record<string, PrStatusWord>;
   /** The version the marks are measured against, or null for a page with none. */
   baseVersion?: number | null;
   /** The delta from that base. Null and baseVersion null move together. */
@@ -2076,15 +2145,22 @@ function revisionMenu(input: RenderInput, basePath: string): string {
 
 /** The heads chip, as the page draws it and as the live push rewrites it. One
  *  function so the two cannot drift into two different sentences. */
-function headsChip(behind: number, total: number): string {
-  return behind === 0 ? "heads current" : `${behind} of ${total} behind`;
+function headsChip(behind: number, unknown: number, total: number): string {
+  // Three counts, not one. A `behind === 0` test collapsed every unobserved review to
+  // "heads current", which is the chip asserting a freshness the glyphs beside it
+  // cannot show: absence has to be sayable here or the chip lies where the glyph is
+  // honest. A pull request that moved is the more urgent of the two, so it wins.
+  if (behind > 0) return `${behind} of ${total} behind`;
+  if (unknown > 0) return unknown === total ? "heads unchecked" : `${unknown} of ${total} unchecked`;
+  return "heads current";
 }
 
 /** The freshness enhancement: it subscribes to the review's channel and rewrites the
  *  heads chip when a push says a head moved. Nothing depends on it. Without a script
  *  the chip is as fresh as the render, which is what the stored rows say. */
 function freshnessScript(wsId: string, slug: string): string {
-  const current = JSON.stringify(headsChip(0, 0));
+  const current = JSON.stringify(headsChip(0, 0, 0));
+  const allUnchecked = JSON.stringify(headsChip(0, 1, 1));
   return (
     `(()=>{const h=document.getElementById("heads");if(!h)return;` +
     `const c=()=>{const w=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+` +
@@ -2092,7 +2168,11 @@ function freshnessScript(wsId: string, slug: string): string {
     `"&slug="+encodeURIComponent(${JSON.stringify(slug)}));` +
     `w.onmessage=(e)=>{let m=null;try{m=JSON.parse(e.data)}catch(x){return}` +
     `if(!m||m.type!=="freshness")return;` +
-    `h.textContent=m.behind===0?${current}:m.behind+" of "+m.total+" behind"};` +
+    // The same three-count sentence headsChip draws, because the two must not drift
+    // into two different readings of one message.
+    `const u=m.unknown||0;` +
+    `h.textContent=m.behind>0?m.behind+" of "+m.total+" behind":` +
+    `u>0?(u===m.total?${allUnchecked}:u+" of "+m.total+" unchecked"):${current}};` +
     `w.onclose=()=>setTimeout(c,2000)};c()})();`
   );
 }
@@ -2113,6 +2193,7 @@ export function renderReviewPage(input: RenderInput): string {
     basePath: input.basePath ?? `/${wsId}/r/${slug}`,
     delta,
     annotations: byTarget,
+    status: input.status ?? {},
   };
   const review = delta ? delta.get("review", "review") : null;
   const summaryDelta = delta ? delta.get("summary", "summary") : null;
@@ -2120,7 +2201,12 @@ export function renderReviewPage(input: RenderInput): string {
   const behind = doc.prs.filter(
     (pr) => input.freshness[prKey(pr.repo, pr.number)] === "behind",
   );
-  const heads = headsChip(behind.length, doc.prs.length);
+  // Absent counts as unchecked, not as checked: a document read with no freshness map
+  // at all knows nothing about its heads and says so.
+  const unchecked = doc.prs.filter(
+    (pr) => (input.freshness[prKey(pr.repo, pr.number)] ?? "unknown") === "unknown",
+  );
+  const heads = headsChip(behind.length, unchecked.length, doc.prs.length);
   const count =
     doc.prs.length === 1 ? "1 pull request" : `${doc.prs.length} pull requests`;
   const marking = input.pinned
@@ -2508,6 +2594,9 @@ function reviewPage(args: {
     latestVersion: review.latest_version,
     pinned: version !== null,
     freshness: freshnessOf(ws, slug, row.doc),
+    // Both readings come off the same rows, so the chip and the glyphs cannot disagree
+    // about a pull request nothing has observed.
+    status: statusesOf(ws, row.doc),
     baseVersion: delta ? base : null,
     delta,
     timeline,

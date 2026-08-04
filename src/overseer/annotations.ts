@@ -257,7 +257,10 @@ export function derivedFromDoc(doc: ReviewDoc): DerivedReview {
       files: [...byPath.values()],
     };
   });
-  return { kind: doc.kind, prs, skillContext: [] };
+  // No observations: a stored document is not an observation of anything. Reading one
+  // back is a round trip through facts already recorded, and inventing a status from it
+  // would write publication time into a row that means "as of now".
+  return { kind: doc.kind, prs, observations: [], skillContext: [] };
 }
 
 /** A ref that Overseer could not resolve because GitHub would not answer, rather than

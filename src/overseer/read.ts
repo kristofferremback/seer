@@ -17,10 +17,10 @@ import { requireApiKey, sessionUser } from "../auth";
 import {
   getReviewVersion,
   listAnnotations,
-  listFreshness,
   resolveReview,
   type ReviewDoc,
 } from "./db";
+import { findPrStatus, statusOf, type PrStatusWord } from "./installations";
 import { prKey, type Freshness, type Review } from "./types";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -58,18 +58,45 @@ export function readableWorkspaces(req: Request): string[] {
   return ids;
 }
 
-/** Freshness as of the last check, per pull request of the version being read. A
- *  head that has moved since publication is `behind`; a head nobody has checked
- *  since is `current`, because the stored document is the last thing known true. */
-export function freshnessOf(wsId: string, slug: string, doc: ReviewDoc): Record<string, Freshness> {
-  const observed = new Map(
-    listFreshness(wsId, slug).map((f) => [prKey(f.repo, f.pr_number), f.observed_head_sha]),
-  );
+/**
+ * Freshness per pull request of the version being read, from the one observation.
+ *
+ * Absence is `unknown`, not `current`. Reading it as `current` was the old default and
+ * it lies in exactly the case that matters: a review published before the App, or one
+ * whose installation went away and took its rows with it, would assert "heads current"
+ * on the chip while the glyph beside it — reading the same missing row — showed
+ * nothing. The stored document is the last thing known true about the *code*; it is no
+ * evidence at all about where the branch points now.
+ */
+export function freshnessOf(
+  wsId: string,
+  // The slug is no longer part of the key: an observation is of a pull request, not of
+  // a review, and one pull request may be named by two reviews in the same workspace.
+  // It stays in the signature because every caller has it and the day a review-scoped
+  // reading returns it will want it back.
+  _slug: string,
+  doc: ReviewDoc,
+): Record<string, Freshness> {
   const out: Record<string, Freshness> = {};
   for (const pr of doc.prs) {
-    const key = prKey(pr.repo, pr.number);
-    const seen = observed.get(key);
-    out[key] = seen && seen !== pr.headSha ? "behind" : "current";
+    const row = findPrStatus(wsId, pr.repo, pr.number);
+    out[prKey(pr.repo, pr.number)] = row
+      ? row.head_sha === pr.headSha
+        ? "current"
+        : "behind"
+      : "unknown";
+  }
+  return out;
+}
+
+/** The other reading of the same row: the word a card's glyph draws. A pull request
+ *  with no observation has no entry, and the card draws no glyph rather than a fourth
+ *  state that would be Seer's own invention. */
+export function statusesOf(wsId: string, doc: ReviewDoc): Record<string, PrStatusWord> {
+  const out: Record<string, PrStatusWord> = {};
+  for (const pr of doc.prs) {
+    const row = findPrStatus(wsId, pr.repo, pr.number);
+    if (row) out[prKey(pr.repo, pr.number)] = statusOf(row);
   }
   return out;
 }

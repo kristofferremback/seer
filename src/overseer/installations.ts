@@ -462,6 +462,22 @@ export function getPrStatus(wsId: string, repoId: number, prNumber: number): PrS
 }
 
 /**
+ * The observation for one pull request as a page names it: "owner/name" and a number.
+ *
+ * The read path has no numeric repository id — a stored document carries none — so it
+ * asks by the display name, which every observation keeps current. Absence is null and
+ * the caller says `unknown` rather than guessing `current`.
+ */
+export function findPrStatus(wsId: string, repo: string, prNumber: number): PrStatusRow | null {
+  return db
+    .query<PrStatusRow, [string, string, number]>(
+      "SELECT * FROM github_pr_status WHERE workspace_id = ? AND lower(repo) = ? AND pr_number = ? " +
+        "ORDER BY updated_at DESC LIMIT 1",
+    )
+    .get(wsId, repo.toLowerCase(), prNumber);
+}
+
+/**
  * The conditional upsert. Newer wins; equal timestamps let the write through, because
  * GitHub's `updated_at` has one-second resolution and a genuine later state is likelier
  * than a duplicate.
