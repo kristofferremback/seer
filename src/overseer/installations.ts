@@ -592,7 +592,11 @@ export function repoIdForNamedPr(wsId: string, repo: string, prNumber: number): 
     db
       .query<{ repo_id: number }, [string, string, number]>(
         "SELECT repo_id FROM review_prs WHERE workspace_id = ? AND lower(repo) = ? AND pr_number = ? " +
-          "AND repo_id IS NOT NULL LIMIT 1",
+          // A name freed by a rename can later be taken by a different repository, so
+          // one workspace can hold two rows under the same name and number carrying
+          // different ids. Order by rowid so the answer is deterministic — the most
+          // recently published row wins — rather than whichever SQLite reaches first.
+          "AND repo_id IS NOT NULL ORDER BY rowid DESC LIMIT 1",
       )
       .get(wsId, repo.toLowerCase(), prNumber)?.repo_id ?? null
   );

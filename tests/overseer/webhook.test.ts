@@ -548,7 +548,7 @@ describe("attribution", () => {
     expect(page.status).toBe(200);
     const html = await page.text();
     expect(html).toContain("c-status s-merged");
-    expect(html).toContain("heads current");
+    expect(html).toContain(">heads current<");
 
     // The reviews index reads the same rows through its own query.
     expect(reviewStatusTally(wsA, "renamed-read")).toEqual({
@@ -568,7 +568,9 @@ describe("attribution", () => {
       state: "closed",
       merged: true,
       head: { sha: number === 12 ? GOLDEN_HEAD_SHA_12 : GOLDEN_HEAD_SHA_13, ref: "topic" },
-      base: { sha: "1".repeat(40), ref: "main", repo: { id: REPO_ID, full_name: repo } },
+      // GitHub answers under the name the repository has now, whatever name it was
+      // asked with.
+      base: { sha: "1".repeat(40), ref: "main", repo: { id: REPO_ID, full_name: renamed } },
       updated_at: "2026-08-04T16:00:00Z",
     }));
     setGithubClientFactory(() => fake.client);
@@ -580,12 +582,15 @@ describe("attribution", () => {
     setGithubClientFactory(offlineGithubClientFactory());
 
     expect(statusA(12)!.merged).toBe(1);
+    // GitHub's answer names the repository as it is called now, and the row keeps that
+    // name rather than rolling back to the one the document froze at publication.
+    expect(statusA(12)!.repo).toBe(renamed);
     const after = await fetch(`${base}/r/renamed-read`, {
       headers: { authorization: `Bearer ${keyA}` },
     });
     const afterHtml = await after.text();
     expect(afterHtml).toContain("c-status s-merged");
-    expect(afterHtml).toContain("heads current");
+    expect(afterHtml).toContain(">heads current<");
   });
 });
 
