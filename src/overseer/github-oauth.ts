@@ -108,12 +108,9 @@ let lazyDefault: GithubOAuth | null = null;
 
 export function githubOAuth(): GithubOAuth {
   if (injected) return injected;
+  // config.ts requires the App variables at boot (see appCredentials): there is no
+  // unconfigured server to guard against here.
   const app = config.githubApp;
-  if (!app) {
-    throw new Error(
-      "GitHub App is not configured: set GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET to run the claim flow.",
-    );
-  }
   lazyDefault ??= createFetchGithubOAuth({
     clientId: app.clientId,
     clientSecret: app.clientSecret,

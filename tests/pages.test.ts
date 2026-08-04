@@ -36,7 +36,6 @@ function settings(over: Partial<SettingsData> = {}): SettingsData {
       { id: "key_bbbbbbbbbb", name: "imported from env", hint: "(pre-workspace key)", created: "2026-06-02", lastUsed: "2 days ago", isLegacy: true },
     ],
     installations: [],
-    githubAppConfigured: true,
     githubInstallUrl: "https://github.com/apps/seer-overseer-test/installations/new",
     shares: [
       {
@@ -110,12 +109,14 @@ describe("settings github panel", () => {
     expect(html).toContain("no recent deliveries");
   });
 
-  test("with no app configured there is no button that could only fail", () => {
-    const html = settingsPage(
-      settings({ githubAppConfigured: false, githubInstallUrl: null, installations: [] }),
-    );
-    expect(html).not.toContain("/github/connect");
-    expect(html).toContain("no GitHub App configured");
+  // There is no "not configured" state to render: config.ts requires all six App
+  // variables at boot. The panel therefore always offers both doors, and the one that
+  // used to be conditional — install first, then connect — is the one a fresh account
+  // needs, so its absence would be the failure.
+  test("the panel offers connecting and, for a fresh account, installing first", () => {
+    const html = settingsPage(settings({ installations: [] }));
+    expect(html).toContain("/github/connect");
+    expect(html).toContain("https://github.com/apps/seer-overseer-test/installations/new");
   });
 });
 

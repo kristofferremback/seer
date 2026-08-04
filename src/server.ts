@@ -233,7 +233,6 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
         lastDelivery: g.last_delivery_at ? agoWords(Date.now() - g.last_delivery_at) : "never",
         isQuiet: deliveryIsQuiet(g.last_delivery_at),
       })),
-      githubAppConfigured: !!config.githubApp,
       githubInstallUrl: installUrl(),
       shares: listShares(wsId).map((sh) => ({
         id: sh.id,

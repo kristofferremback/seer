@@ -1959,11 +1959,9 @@ export interface SettingsData {
   keys: SettingsKey[];
   shares: SettingsShare[];
   installations: SettingsInstallation[];
-  /** False when the deployment has no App credentials: the panel then explains itself
-   *  rather than offering a button that could only fail. */
-  githubAppConfigured: boolean;
-  /** Where to install the app on a fresh account, when there is an app to install. */
-  githubInstallUrl: string | null;
+  /** Where to install the app on a fresh account. Never absent: config.ts requires the
+   *  App variables at boot, so there is no deployment without an app to install. */
+  githubInstallUrl: string;
   reveal?: SettingsReveal;
 }
 
@@ -2136,17 +2134,13 @@ ${head(`Settings · ${d.name} · Seer`, og)}
           ${installRows}
         </table>
       </div>
-      ${
-        d.githubAppConfigured
-          ? `<form class="panel-row stack-gap" method="post" action="${s("/github/connect")}">
+      <form class="panel-row stack-gap" method="post" action="${s("/github/connect")}">
         <button class="btn primary" type="submit">Connect a GitHub account</button>
       </form>
       <p class="panel-note">Connecting sends you to GitHub and back. Seer asks GitHub which
       installations <em>you</em> can reach, and only those can be connected here — naming an
       installation id is not enough, and never was.</p>
-      ${d.githubInstallUrl ? `<p class="panel-note dim">Not installed on that account yet? <a href="${escapeHtml(d.githubInstallUrl)}" rel="noreferrer">Install the app first</a>, then come back and connect it.</p>` : ""}`
-          : `<p class="panel-note">This deployment has no GitHub App configured, so there is nothing to connect yet.</p>`
-      }
+      <p class="panel-note dim">Not installed on that account yet? <a href="${escapeHtml(d.githubInstallUrl)}" rel="noreferrer">Install the app first</a>, then come back and connect it.</p>
       <p class="panel-note dim">Nothing polls GitHub any more: a review's status is as true as
       the last delivery that touched it. <em>Last delivery</em> is how you can see the net is
       still there — an installation that has been quiet for a week, or is suspended, is one whose

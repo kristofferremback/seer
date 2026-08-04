@@ -63,7 +63,13 @@ export function installUrl(): string {
 }
 
 function html(body: string, status = 200): Response {
-  return new Response(body, { status, headers: { "content-type": "text/html;charset=utf-8" } });
+  // Every page this handler renders can carry the one-time attach handle, and a
+  // secret-bearing response is no-store everywhere else in this codebase: a shared
+  // proxy or a back-button restore must not re-serve a handle that has since burned.
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
+  });
 }
 
 function refusal(wsId: string | null, headline: string, note: string, status = 400): Response {

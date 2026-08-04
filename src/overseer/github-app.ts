@@ -456,12 +456,10 @@ export function setWorkspaceHoldings(holdings: WorkspaceHoldings | null): void {
 }
 
 export function appCredentials(): AppCredentials {
+  // No "not configured" branch: config.ts requires all six App variables at boot and
+  // names the missing ones there, so a running server always has credentials. A guard
+  // here could only ever be dead code pretending the failure is handled later.
   const app = config.githubApp;
-  if (!app) {
-    throw new Error(
-      "GitHub App is not configured: set GITHUB_APP_ID, GITHUB_APP_SLUG, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET and GITHUB_WEBHOOK_SECRET.",
-    );
-  }
   return { appId: app.appId, privateKeyPem: app.privateKeyPem };
 }
 

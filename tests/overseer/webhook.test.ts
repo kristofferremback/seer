@@ -300,10 +300,52 @@ describe("what one delivery does", () => {
 // ago, which is the exact failure deleting the poll chose to accept and therefore the
 // one thing the UI has to make loud.
 describe("delivery health", () => {
-  test("an installation nothing has delivered for has no stamp and is quiet", () => {
+  // The stamp has to be written by the delivery that CREATES the row too, or the one
+  // installation whose whole existence Seer learned from a delivery is the one that
+  // reports "never" — settings then says the net is missing for the account whose
+  // webhook just arrived.
+  test("the delivery that first tells Seer an installation exists stamps it too", async () => {
+    const fresh = 9101;
+    db.run("DELETE FROM github_installations WHERE installation_id = ?", [fresh]);
+    const before = Date.now();
+    expect(
+      (
+        await deliver("installation", {
+          action: "created",
+          installation: {
+            id: fresh,
+            account: { id: 4242, login: "newcomer", type: "Organization" },
+            repository_selection: "all",
+          },
+        })
+      ).status,
+    ).toBe(202); // accepted; it touches no review, so nothing is republished
+
+    const row = getLiveInstallation(fresh)!;
+    expect(row.account_login).toBe("newcomer");
+    expect(row.last_delivery_at).not.toBeNull();
+    expect(row.last_delivery_at!).toBeGreaterThanOrEqual(before);
+    expect(deliveryIsQuiet(row.last_delivery_at)).toBe(false);
+  });
+
+  // The other half: quiet is about age, not about the column merely being set, so a
+  // stamp older than the window still reads as quiet.
+  test("an installation nothing has delivered for is quiet, and so is one that went silent", () => {
     attach(wsA, INSTALL_A, "acme");
     expect(getLiveInstallation(INSTALL_A)!.last_delivery_at).toBeNull();
     expect(deliveryIsQuiet(null)).toBe(true);
+
+    const now = Date.now();
+    db.run("UPDATE github_installations SET last_delivery_at = ? WHERE installation_id = ?", [
+      now - 14 * 24 * 60 * 60 * 1000,
+      INSTALL_A,
+    ]);
+    expect(deliveryIsQuiet(getLiveInstallation(INSTALL_A)!.last_delivery_at, now)).toBe(true);
+    db.run("UPDATE github_installations SET last_delivery_at = ? WHERE installation_id = ?", [
+      now - 60 * 1000,
+      INSTALL_A,
+    ]);
+    expect(deliveryIsQuiet(getLiveInstallation(INSTALL_A)!.last_delivery_at, now)).toBe(false);
   });
 
   test("a delivery stamps the installation it came from", async () => {
@@ -879,15 +921,30 @@ describe("the single live message", () => {
 });
 
 describe("nothing reaches GitHub from a render", () => {
-  test("the automatic on-view check is gone from the source, not merely unused", async () => {
-    const freshness = await Bun.file("src/overseer/freshness.ts").text();
-    const render = await Bun.file("src/overseer/render.ts").text();
-    // `refreshOnView` was the one path from a render to the network. It is deleted
-    // rather than left in place uncalled, because an uncalled path is one somebody
-    // calls again.
-    expect(freshness).not.toContain("refreshOnView");
-    expect(render).not.toContain("refreshOnView");
-    expect(render).not.toContain("checkReview");
+  // The source-text version of this claim (`expect(freshness).not.toContain(
+  // "refreshOnView")`) only ever caught a regression that reused that exact identifier.
+  // The behavioural version is the case the old on-view check existed FOR: a review
+  // with no observation at all, which is the state that used to trigger it. If any
+  // render-time check comes back under any name, this counts its calls.
+  test("a review with nothing observed still makes no call from a render", async () => {
+    resetChecks();
+    reviewNaming(wsA, "unobserved");
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
+    const fake = countingClient(() => ({}));
+    setGithubClientFactory(() => fake.client);
+    for (let i = 0; i < 3; i++) {
+      const html = await (await fetch(`${base}/${wsA}/r/unobserved`)).text();
+      // The page really is the one whose glyphs are missing — otherwise this counts
+      // the calls of a 404.
+      expect(html).toContain(`data-pr="${GOLDEN_REPO}#12"`);
+      expect(
+        (await fetch(`${base}/api/reviews/unobserved`, { headers: { authorization: `Bearer ${keyA}` } })).status,
+      ).toBe(200);
+    }
+    await new Promise((r) => setTimeout(r, 60));
+    expect(fake.calls()).toBe(0);
+    expect(getPrStatus(wsA, REPO_ID, 12)).toBeNull();
+    setGithubClientFactory(offlineGithubClientFactory());
   });
 
   test("rendering a review with observations makes no call", async () => {

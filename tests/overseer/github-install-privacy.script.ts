@@ -64,6 +64,9 @@ const { startServer } = await import("../../src/server");
 const { createWorkspaceGithubClient, GithubRoutingError } = await import(
   "../../src/overseer/github-app"
 );
+const { refResolver, RefResolveError } = await import("../../src/overseer/derive");
+type DerivedReview = import("../../src/overseer/derive").DerivedReview;
+const { putSnippet } = await import("../../src/overseer/db");
 const { dbWorkspaceHoldings, getLiveInstallation, listWorkspaceInstallations } = await import(
   "../../src/overseer/installations"
 );
@@ -199,6 +202,12 @@ let attachTokenA: string;
   const res = await callback(`code=code-a&state=${state}&setup_action=install`, cookieA);
   const body = await res.text();
   assert(res.status === 200, `A's callback renders the picker, got ${res.status}`);
+  // The page carries a one-time attach handle, which makes it a secret-bearing
+  // response like every other one in this codebase, and they are all no-store.
+  assert(
+    (res.headers.get("cache-control") ?? "").includes("no-store"),
+    `the page carrying the attach handle is no-store, got ${res.headers.get("cache-control")}`,
+  );
   assert(body.includes(String(A_INSTALLATION)), "the picker offers the installation A can reach");
   assert(
     installationRow(A_INSTALLATION) === null,
@@ -261,6 +270,16 @@ let attachTokenA: string;
   assert(settingsA.status === 200 && bodyA.includes("acme"), "A's own settings names A's account");
   const settingsAasB = await fetch(`${base}/settings/${wsA}`, { headers: cookieB });
   assert(settingsAasB.status === 404, `B asking for A's settings gets a 404, got ${settingsAasB.status}`);
+  // The panel has no "no app configured" state to fall into — config.ts requires the
+  // App variables at boot — so both doors are always there. Asserted end to end, on the
+  // real server, because the render-level version of this claim could pass with the
+  // feature deleted from the route.
+  assert(bodyA.includes(`/settings/${wsA}/github/connect`), "A's settings offers the connect form");
+  assert(
+    bodyA.includes("/installations/new"),
+    "and the install-first link a fresh account needs",
+  );
+
   const settingsB = await fetch(`${base}/settings/${wsB}`, { headers: cookieB });
   const bodyB = await settingsB.text();
   assert(settingsB.status === 200, "B's own settings renders");
@@ -462,6 +481,82 @@ let attachTokenA: string;
   });
   assert(again.status === 303, `a disconnected installation can be connected again, got ${again.status}`);
   assert(installationRow(B_INSTALLATION)!.workspace_id === wsB, "and it is B's again");
+}
+
+// ========== 8. the snippet gate holds with the validator's single_repo rule off =====
+//
+// `validate.ts` enforces `single_repo`, so today a published ref can only name the
+// review's own repository. The design's claim is that the ref_snippets gate does NOT
+// depend on that: it is per-workspace by construction, at the transport. So this runs
+// the resolver the publish path builds with no validator anywhere in front of it — the
+// rule is not merely disabled, it is absent — and points a ref at a repository the
+// workspace holds no installation for.
+{
+  const HELD = "acme/seer"; // routed through A_INSTALLATION, which wsA holds
+  const FOREIGN = "acme-labs/private"; // routed through A_SECOND, which nobody holds
+  const SHA = "c".repeat(40);
+  const SECRET_BYTES = "the private source nobody outside acme-labs may read\n";
+
+  // Somebody else's resolution already put the foreign file in the shared table: this
+  // is the cache that has no workspace column, and the thing the gate withholds.
+  putSnippet(FOREIGN, SHA, "src/keys.ts", SECRET_BYTES);
+  putSnippet(HELD, SHA, "src/held.ts", "a held line\n");
+
+  const app: AppApi = {
+    async installationForRepo(repo: string) {
+      if (repo === HELD) return A_INSTALLATION;
+      if (repo === FOREIGN) return A_SECOND;
+      return null;
+    },
+    async installationToken() {
+      return "ghs_minted";
+    },
+    noteRepositoryId() {},
+    repositoryId() {
+      return undefined;
+    },
+    invalidateRouting() {},
+  };
+  let fetched = 0;
+  const fetchImpl = (async (url: string) => {
+    fetched++;
+    return new Response(url.includes("acme-labs") ? SECRET_BYTES : "a held line\n", {
+      headers: { "content-type": "application/vnd.github.raw" },
+    });
+  }) as unknown as typeof fetch;
+  const clientFor = (wsId: string) =>
+    createWorkspaceGithubClient({ workspaceId: wsId, holdings: dbWorkspaceHoldings(), app, fetchImpl });
+  // prs: [] is the honest shape here — the resolver uses them only to label an origin,
+  // and a review whose refs leave its own repositories is precisely the case.
+  const emptyReview = { kind: "stack", prs: [], observations: [], skillContext: [] } as unknown as DerivedReview;
+
+  const foreignPointer = { repo: FOREIGN, sha: SHA, path: "src/keys.ts", startLine: 1, endLine: 1 };
+  const err = await refResolver(clientFor(wsA), emptyReview)
+    .resolve(foreignPointer)
+    .catch((e: unknown) => e);
+  assert(err instanceof RefResolveError, `a ref into an unheld repository is refused, got ${err}`);
+  const cause = (err as InstanceType<typeof RefResolveError>).cause;
+  assert(
+    cause instanceof GithubRoutingError,
+    `refused at the transport by routing, not by anything upstream: ${cause}`,
+  );
+  assert(fetched === 0, `and no request was made for it at all, got ${fetched}`);
+  assert(
+    !String((err as Error).message).includes("private source"),
+    "the refusal does not carry the cached bytes",
+  );
+
+  // The success beside it, or the refusal above proves only that the resolver is
+  // broken: the same resolver, the same shape of pointer, a repository wsA holds.
+  const ok = await refResolver(clientFor(wsA), emptyReview).resolve({
+    repo: HELD,
+    sha: SHA,
+    path: "src/held.ts",
+    startLine: 1,
+    endLine: 1,
+  });
+  assert(ok.snippet.includes("a held line"), "a ref into a held repository resolves");
+  assert(fetched === 1, `and it paid a real fetch rather than reading the cache, got ${fetched}`);
 }
 
 console.log("github install privacy: all assertions passed");
