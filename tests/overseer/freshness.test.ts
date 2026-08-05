@@ -9,6 +9,7 @@
 import { test, expect, beforeAll, beforeEach, afterAll, describe } from "bun:test";
 
 import { startServer } from "../../src/server";
+import { config } from "../../src/config";
 import { createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
 import { findPrStatus } from "../../src/overseer/installations";
 import type { GithubClient, GithubPull } from "../../src/overseer/github";
@@ -186,6 +187,40 @@ describe("a head that moved", () => {
 });
 
 describe("POST /api/reviews/:slug/refresh", () => {
+  // This route had no origin guard while every other browser-reachable POST in the table
+  // had one, and then a refresh button was put on the review page pointing at it — so any
+  // page a signed-in member visited could spend their GitHub calls for them. The
+  // once-a-minute window bounds the damage rather than making it harmless.
+  test("a cross-site post is refused, and the two legitimate callers are not", async () => {
+    storeGoldenReview(wsA, "origin-guard");
+    const counter = countingClient(() => GOLDEN_HEAD_SHA_12);
+    setGithubClientFactory(() => counter.client);
+
+    const post = (headers: Record<string, string>) =>
+      fetch(`${base}/api/reviews/origin-guard/refresh`, { method: "POST", headers });
+
+    // A browser on somebody else's page sends its own Origin.
+    const cross = await post({ origin: "https://evil.example", authorization: `Bearer ${keyA}` });
+    expect(cross.status).toBe(403);
+    expect(counter.calls()).toBe(0);
+
+    // The page's own button sends the configured origin. Not `base` — under tests the
+    // server binds port 0 while config.baseUrl keeps its fixed string, and originOk
+    // compares against the configured host, which is the one a real browser would send.
+    resetChecks();
+    expect((await post({ origin: config.baseUrl, authorization: `Bearer ${keyA}` })).status).toBe(
+      200,
+    );
+    const afterSameOrigin = counter.calls();
+    expect(afterSameOrigin).toBeGreaterThan(0);
+
+    // ...and an API key posts with no Origin at all, which must keep working, because
+    // originOk passing on absent headers is what lets a non-browser caller through.
+    resetChecks();
+    expect((await post({ authorization: `Bearer ${keyA}` })).status).toBe(200);
+    expect(counter.calls()).toBeGreaterThan(afterSameOrigin);
+  });
+
   test("it answers per pull request", async () => {
     storeGoldenReview(wsA, "explicit");
     const moved = "8".repeat(40);

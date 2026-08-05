@@ -314,7 +314,27 @@ export async function handleGithubWebhook(req: Request): Promise<Response> {
   }
 
   const event = req.headers.get("x-github-event") ?? "";
-  if (event === "ping") return new Response(null, { status: 204 });
+  if (event === "ping") {
+    // A ping is the delivery that proves the endpoint works, and it is usually the first
+    // one an installation ever sends — which is exactly when a person is looking at the
+    // settings panel to see whether connecting worked. Returning 204 without stamping
+    // meant that panel said "no deliveries yet" immediately after a delivery had in fact
+    // arrived and verified: the health signal reading unhealthy at the one moment it is
+    // being read on purpose.
+    //
+    // Parsed defensively rather than through applyDelivery: an app-level ping carries a
+    // `hook` and a `zen` and need not name an installation at all, so this stamps only
+    // when there is one to stamp and stays a 204 either way.
+    try {
+      const ping = JSON.parse(new TextDecoder().decode(raw)) as WebhookPayload;
+      const id = ping.installation?.id;
+      if (typeof id === "number") recordInstallationDelivery(id);
+    } catch {
+      // A ping whose body will not parse still verified its signature, so it is still
+      // evidence the endpoint is reachable. Nothing to stamp, nothing to report.
+    }
+    return new Response(null, { status: 204 });
+  }
 
   const deliveryId = req.headers.get("x-github-delivery") ?? "";
   if (!deliveryId) return json({ error: "Missing X-GitHub-Delivery" }, 400);

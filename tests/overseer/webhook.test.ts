@@ -249,6 +249,37 @@ describe("what one delivery does", () => {
     expect((await deliver("star", { action: "created", installation: { id: INSTALL_A } })).status).toBe(202);
   });
 
+  // A ping is usually the first delivery an installation ever sends, and it arrives at
+  // the moment a person is watching the settings panel to see whether connecting worked.
+  // Answering 204 without stamping made that panel report "no deliveries yet" just after
+  // a delivery had arrived and verified — the health signal reading unhealthy at the one
+  // moment it is deliberately being read.
+  test("a ping that names an installation stamps its delivery health", async () => {
+    db.run("UPDATE github_installations SET last_delivery_at = NULL WHERE installation_id = ?", [
+      INSTALL_A,
+    ]);
+    expect(getLiveInstallation(INSTALL_A)!.last_delivery_at).toBe(null);
+
+    expect((await deliver("ping", { zen: "hello", installation: { id: INSTALL_A } })).status).toBe(
+      204,
+    );
+
+    const stamped = getLiveInstallation(INSTALL_A)!.last_delivery_at;
+    expect(stamped).not.toBe(null);
+    expect(deliveryIsQuiet(stamped)).toBe(false);
+  });
+
+  test("an app-level ping that names no installation is still 204 and stamps nothing", async () => {
+    // The success beside the refusal: an App's own hook ping carries a `hook` and a `zen`
+    // and need not name an installation at all. It must not 500 on the way to 204, and it
+    // must not invent a row to stamp.
+    db.run("UPDATE github_installations SET last_delivery_at = NULL WHERE installation_id = ?", [
+      INSTALL_A,
+    ]);
+    expect((await deliver("ping", { zen: "hello", hook_id: 42 })).status).toBe(204);
+    expect(getLiveInstallation(INSTALL_A)!.last_delivery_at).toBe(null);
+  });
+
   test("an unknown installation is 202 and writes nothing", async () => {
     reviewNaming(wsA, "unknown-install");
     const before = statusA(12)?.head_sha ?? null;

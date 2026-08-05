@@ -681,8 +681,17 @@ export async function startServer() {
           return handleAnnotation(req, req.params.slug);
         },
       },
+      // Origin-checked like every other browser-reachable POST. It was not, and step 6
+      // then put a button on the review page pointing at it — so any page a signed-in
+      // member visited could spend their GitHub calls for them. The window bounds the
+      // damage to one check a minute per review rather than making it harmless, and
+      // originOk passes when Origin and Referer are both absent, so an API key posting
+      // this route with a bearer token is unaffected.
       "/api/reviews/:slug/refresh": {
-        POST: (req) => handleRefreshReview(req, req.params.slug),
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleRefreshReview(req, req.params.slug);
+        },
       },
       "/api/reviews/:slug/v/:n": {
         GET: (req) => handleReadReview(req, req.params.slug, req.params.n),
