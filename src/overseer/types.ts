@@ -14,8 +14,24 @@ export type NoteKind = (typeof NOTE_KINDS)[number];
 /** Derived: one pr is `single`, a chain of bases is `stack`, anything else is `set`. */
 export type ReviewKind = "single" | "stack" | "set";
 
-/** Derived per pr by comparing the stored head sha against GitHub. */
-export type Freshness = "current" | "behind";
+/** Derived per pr from the one observation in `github_pr_status`: the stored head sha
+ *  against the observed one. `unknown` is absence and has to be sayable — an
+ *  unobserved pull request read as `current` makes the chip assert a freshness the
+ *  glyph beside it cannot show, which is the two-readings-disagree failure the one
+ *  observation exists to prevent. */
+export type Freshness = "current" | "behind" | "unknown";
+
+/**
+ * How old an observation may be before the page stops stating it as bare truth.
+ *
+ * One hour, named once. With no polling left, a status is only as true as the last
+ * delivery that touched it, and a row nobody has confirmed since breakfast should not
+ * read like a row confirmed a second ago — so past this age the page says *as of
+ * \<time\>* beside the reading instead of the reading alone. This is the visible half
+ * of the trade that deleting the automatic check made: the repair became human, so the
+ * need for it has to be legible without being asked for.
+ */
+export const OBSERVATION_STALE_MS = 60 * 60 * 1000;
 
 /** Derived: whether the ref's path at its sha is touched by a pr in the review. */
 export type RefOrigin = "in_stack" | "outside";

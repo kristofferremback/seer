@@ -55,6 +55,33 @@ test("a v3 db gains the shares table and re-running is a no-op", async () => {
   expect(out).toContain("all assertions passed");
 });
 
+test("v5 backfills review_prs from each review's latest version only", async () => {
+  const { code, out } = await runScenario("v4backfill");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
+test("a malformed stored document aborts the v5 backfill, naming the row", async () => {
+  const { code, out } = await runScenario("v4malformed");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
+// The drop is its own release: an ordinary boot of this image must stop at v5 with the
+// table standing, so the previous image can keep serving through the overlap and a
+// rollback still recognises the database.
+test("an ordinary boot stops at v5 and leaves review_freshness standing", async () => {
+  const { code, out } = await runScenario("v5stops");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
+test("a v5 db drops review_freshness and keeps everything else, when asked", async () => {
+  const { code, out } = await runScenario("v5drop");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("no resolvable root email with auth enabled fails loudly", async () => {
   const { code, out } = await runScenario("noemail");
   expect(code).toBe(0);

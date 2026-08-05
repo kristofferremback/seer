@@ -8,6 +8,7 @@ import {
   utcDay,
   landingPage,
   settingsPage,
+  githubClaimPage,
   invitePage,
   noSeatPage,
   type LedgerBundle,
@@ -34,6 +35,8 @@ function settings(over: Partial<SettingsData> = {}): SettingsData {
       { id: "key_aaaaaaaaaa", name: "macbook agent", hint: "seer_sk_9f3K····sD2e", created: "2026-07-18", lastUsed: "3 min ago", isLegacy: false },
       { id: "key_bbbbbbbbbb", name: "imported from env", hint: "(pre-workspace key)", created: "2026-06-02", lastUsed: "2 days ago", isLegacy: true },
     ],
+    installations: [],
+    githubInstallUrl: "https://github.com/apps/seer-overseer-test/installations/new",
     shares: [
       {
         id: "shr_2n7kq4xbvm",
@@ -48,6 +51,113 @@ function settings(over: Partial<SettingsData> = {}): SettingsData {
     ...over,
   };
 }
+
+// ---- settings: the GitHub panel ----
+
+describe("settings github panel", () => {
+  const held = {
+    id: "ghi_2n7kq4xbvm",
+    installationId: 111,
+    account: "threahq",
+    accountType: "Organization",
+    repositorySelection: "all",
+    connected: "2026-08-01",
+    isSuspended: false,
+    lastDelivery: "3 minutes ago",
+    isQuiet: false,
+  };
+
+  test("a connected installation is listed with a way to disconnect it", () => {
+    const html = settingsPage(settings({ installations: [held] }));
+    expect(html).toContain("threahq");
+    expect(html).toContain("/settings/ws_7g2kq4xbvm/github/ghi_2n7kq4xbvm/disconnect");
+    expect(html).toContain("/settings/ws_7g2kq4xbvm/github/connect");
+  });
+
+  test("with nothing connected the panel says so and still offers the connect", () => {
+    const html = settingsPage(settings({ installations: [] }));
+    expect(html).toContain("No GitHub account connected yet.");
+    expect(html).toContain("/settings/ws_7g2kq4xbvm/github/connect");
+  });
+
+  test("a suspended installation says so rather than looking healthy", () => {
+    const html = settingsPage(settings({ installations: [{ ...held, isSuspended: true }] }));
+    expect(html).toContain("suspended");
+  });
+
+  // Delivery health is the point of the panel now that nothing polls: an installation
+  // that stopped talking has to say so here, because nowhere else would.
+  test("a healthy installation states when it was last heard from, and is not called quiet", () => {
+    const html = settingsPage(settings({ installations: [held] }));
+    expect(html).toContain("3 minutes ago");
+    expect(html).not.toContain("no recent deliveries");
+  });
+
+  test("an installation that has gone quiet says so without being asked", () => {
+    const html = settingsPage(
+      settings({ installations: [{ ...held, lastDelivery: "14 days ago", isQuiet: true }] }),
+    );
+    expect(html).toContain("14 days ago");
+    expect(html).toContain("no recent deliveries");
+  });
+
+  test("an installation that has never delivered says never", () => {
+    const html = settingsPage(
+      settings({ installations: [{ ...held, lastDelivery: "never", isQuiet: true }] }),
+    );
+    expect(html).toContain("never");
+    expect(html).toContain("no recent deliveries");
+  });
+
+  // There is no "not configured" state to render: config.ts requires all six App
+  // variables at boot. The panel therefore always offers both doors, and the one that
+  // used to be conditional — install first, then connect — is the one a fresh account
+  // needs, so its absence would be the failure.
+  test("the panel offers connecting and, for a fresh account, installing first", () => {
+    const html = settingsPage(settings({ installations: [] }));
+    expect(html).toContain("/github/connect");
+    expect(html).toContain("https://github.com/apps/seer-overseer-test/installations/new");
+  });
+});
+
+// ---- the claim page ----
+
+describe("github claim page", () => {
+  const choice = {
+    installationId: 111,
+    account: "threahq",
+    accountType: "Organization",
+    repositorySelection: "all",
+    held: false,
+  };
+
+  test("the picker carries the one-time handle and the ids it may attach", () => {
+    const html = githubClaimPage({
+      wsId: "ws_7g2kq4xbvm",
+      headline: "Choose what to connect",
+      note: "n",
+      login: "kristofferremback",
+      claimToken: "seer_gha_abc",
+      choices: [choice],
+    });
+    expect(html).toContain('name="claim" value="seer_gha_abc"');
+    expect(html).toContain('value="111"');
+    expect(html).toContain('action="/github/claim"');
+  });
+
+  test("a refusal carries no form at all, so it cannot write", () => {
+    const html = githubClaimPage({
+      wsId: "ws_7g2kq4xbvm",
+      headline: "That installation is not yours to connect",
+      note: "n",
+      login: null,
+      claimToken: null,
+      choices: [],
+    });
+    expect(html).not.toContain('action="/github/claim"');
+    expect(html).not.toContain('name="claim"');
+  });
+});
 
 // ---- settings: one-time reveal presence rules ----
 

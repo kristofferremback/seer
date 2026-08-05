@@ -9,16 +9,18 @@
 import { test, expect, beforeAll, beforeEach, afterAll, describe } from "bun:test";
 
 import { startServer } from "../../src/server";
+import { config } from "../../src/config";
 import { createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
-import { listFreshness } from "../../src/overseer/db";
-import { setGithubClient, type GithubClient, type GithubPull } from "../../src/overseer/github";
+import { findPrStatus } from "../../src/overseer/installations";
+import type { GithubClient, GithubPull } from "../../src/overseer/github";
+import { setGithubClientFactory } from "../../src/overseer/github-app";
 import {
   CHECK_INTERVAL_MS,
   claimCheck,
   resetChecks,
   setFreshnessPublisher,
 } from "../../src/overseer/freshness";
-import { offlineGithubClient } from "../offline-github";
+import { offlineGithubClientFactory } from "../offline-github";
 import { tinyId } from "../../src/ids";
 import { GOLDEN_HEAD_SHA_12, GOLDEN_HEAD_SHA_13, GOLDEN_REPO } from "./fixtures/golden-review";
 import { storeGoldenReview } from "./fixtures/stored-review";
@@ -29,6 +31,9 @@ let wsA = "";
 let wsB = "";
 let keyA = "";
 
+/** The installation every fake client here says it routed through. */
+const TEST_INSTALLATION = 5150;
+
 /** A client that answers `getPull` with whatever head this test wants, and counts. */
 function countingClient(head: (repo: string, number: number) => string): {
   client: GithubClient;
@@ -36,6 +41,11 @@ function countingClient(head: (repo: string, number: number) => string): {
 } {
   let calls = 0;
   const client = {
+    // The observation has to be attributable or it is not written: the status row's
+    // installation_id is how `installation.deleted` finds its own rows.
+    async installationFor(): Promise<number> {
+      return TEST_INSTALLATION;
+    },
     async getPull(repo: string, number: number): Promise<GithubPull> {
       calls++;
       return {
@@ -45,7 +55,8 @@ function countingClient(head: (repo: string, number: number) => string): {
         state: "open",
         user: { login: "someone" },
         head: { sha: head(repo, number), ref: "topic" },
-        base: { sha: "1".repeat(40), ref: "main" },
+        base: { sha: "1".repeat(40), ref: "main", repo: { id: 1301620029, full_name: repo } },
+        updated_at: "2026-07-19T06:27:55Z",
       };
     },
   } as unknown as GithubClient;
@@ -89,7 +100,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  setGithubClient(offlineGithubClient());
+  setGithubClientFactory(offlineGithubClientFactory());
   // The publisher is a module-level singleton, and this server is about to stop.
   setFreshnessPublisher(null);
   server.stop(true);
@@ -110,43 +121,63 @@ describe("the rate limit", () => {
     expect(claimCheck("ws_rate", "review", t0 + CHECK_INTERVAL_MS + 1)).toBe(false);
   });
 
-  test("two renders inside the window cost one check and a later one costs another", async () => {
+  test("a render costs no GitHub call at all", async () => {
     storeGoldenReview(wsA, "rate");
     const fake = countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : GOLDEN_HEAD_SHA_13));
-    setGithubClient(fake.client);
+    setGithubClientFactory(() => fake.client);
 
+    // The automatic on-view check is deleted rather than merely rate-limited, so this
+    // is not "one call per minute" — it is no calls, ever, however many renders and
+    // however long between them. A counting client is the only way to say that: a
+    // window that happened to be closed would look the same.
     expect((await fetch(`${base}/${wsA}/r/rate`)).status).toBe(200);
     expect((await fetch(`${base}/${wsA}/r/rate`)).status).toBe(200);
-    await settle();
-    // Two pull requests, checked once: the second render found the window closed.
-    expect(fake.calls()).toBe(2);
-
-    // The window elapses.
     resetChecks();
     expect((await fetch(`${base}/${wsA}/r/rate`)).status).toBe(200);
     await settle();
-    expect(fake.calls()).toBe(4);
+    expect(fake.calls()).toBe(0);
+
+    // And the refresh route, the one path that may reach GitHub, still does: the
+    // guarantee above is about renders, not about the client being inert.
+    const res = await fetch(`${base}/api/reviews/rate/refresh`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${keyA}` },
+    });
+    expect(res.status).toBe(200);
+    expect(fake.calls()).toBe(2);
   });
 });
 
 describe("a head that moved", () => {
-  test("the next render says behind with no refresh call of its own", async () => {
+  test("the next render says behind and reaches GitHub not once", async () => {
     storeGoldenReview(wsA, "moved");
     const moved = "9".repeat(40);
     const fake = countingClient((_repo, n) => (n === 12 ? moved : GOLDEN_HEAD_SHA_13));
-    setGithubClient(fake.client);
+    setGithubClientFactory(() => fake.client);
 
+    // Nothing has observed these pull requests and a render will not, so the page says
+    // unchecked rather than asserting current.
     const first = await fetch(`${base}/${wsA}/r/moved`);
     expect(first.status).toBe(200);
-    // The page that triggered the check was rendered before it landed.
-    expect(await first.text()).toContain("heads current");
+    expect(await first.text()).toContain("heads unchecked");
     await settle();
+    expect(fake.calls()).toBe(0);
 
-    const rows = listFreshness(wsA, "moved");
-    expect(rows.map((r) => r.observed_head_sha).includes(moved)).toBe(true);
+    // The repair is human-triggered, and it is what records the moved head.
+    expect(
+      (
+        await fetch(`${base}/api/reviews/moved/refresh`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${keyA}` },
+        })
+      ).status,
+    ).toBe(200);
 
-    // The next render reads the stored rows. Nothing is refreshed for it: the window
-    // is still closed, and the client would count the call if it were.
+    const row = findPrStatus(wsA, GOLDEN_REPO, 12);
+    expect(row?.head_sha).toBe(moved);
+    expect(row?.installation_id).toBe(TEST_INSTALLATION);
+
+    // The next render reads the stored rows and spends nothing doing it.
     const before = fake.calls();
     const second = await fetch(`${base}/${wsA}/r/moved`);
     expect(await second.text()).toContain("1 of 2 behind");
@@ -156,12 +187,44 @@ describe("a head that moved", () => {
 });
 
 describe("POST /api/reviews/:slug/refresh", () => {
+  // This route had no origin guard while every other browser-reachable POST in the table
+  // had one, and then a refresh button was put on the review page pointing at it — so any
+  // page a signed-in member visited could spend their GitHub calls for them. The
+  // once-a-minute window bounds the damage rather than making it harmless.
+  test("a cross-site post is refused, and the two legitimate callers are not", async () => {
+    storeGoldenReview(wsA, "origin-guard");
+    const counter = countingClient(() => GOLDEN_HEAD_SHA_12);
+    setGithubClientFactory(() => counter.client);
+
+    const post = (headers: Record<string, string>) =>
+      fetch(`${base}/api/reviews/origin-guard/refresh`, { method: "POST", headers });
+
+    // A browser on somebody else's page sends its own Origin.
+    const cross = await post({ origin: "https://evil.example", authorization: `Bearer ${keyA}` });
+    expect(cross.status).toBe(403);
+    expect(counter.calls()).toBe(0);
+
+    // The page's own button sends the configured origin. Not `base` — under tests the
+    // server binds port 0 while config.baseUrl keeps its fixed string, and originOk
+    // compares against the configured host, which is the one a real browser would send.
+    resetChecks();
+    expect((await post({ origin: config.baseUrl, authorization: `Bearer ${keyA}` })).status).toBe(
+      200,
+    );
+    const afterSameOrigin = counter.calls();
+    expect(afterSameOrigin).toBeGreaterThan(0);
+
+    // ...and an API key posts with no Origin at all, which must keep working, because
+    // originOk passing on absent headers is what lets a non-browser caller through.
+    resetChecks();
+    expect((await post({ authorization: `Bearer ${keyA}` })).status).toBe(200);
+    expect(counter.calls()).toBeGreaterThan(afterSameOrigin);
+  });
+
   test("it answers per pull request", async () => {
     storeGoldenReview(wsA, "explicit");
     const moved = "8".repeat(40);
-    setGithubClient(
-      countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : moved)).client,
-    );
+    setGithubClientFactory(() => countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : moved)).client);
 
     const res = await fetch(`${base}/api/reviews/explicit/refresh`, {
       method: "POST",
@@ -189,7 +252,7 @@ describe("POST /api/reviews/:slug/refresh", () => {
     storeGoldenReview(wsA, "bounded");
     const moved = "9".repeat(40);
     const counter = countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : moved));
-    setGithubClient(counter.client);
+    setGithubClientFactory(() => counter.client);
 
     const refresh = () =>
       fetch(`${base}/api/reviews/bounded/refresh`, {
@@ -228,7 +291,7 @@ describe("POST /api/reviews/:slug/refresh", () => {
 
   test("a review the caller may not read is the answer a missing one gets", async () => {
     storeGoldenReview(wsB, "sealed");
-    setGithubClient(countingClient(() => GOLDEN_HEAD_SHA_12).client);
+    setGithubClientFactory(() => countingClient(() => GOLDEN_HEAD_SHA_12).client);
 
     const post = (slug: string, headers: Record<string, string> = {}) =>
       fetch(`${base}/api/reviews/${slug}/refresh`, { method: "POST", headers });
@@ -260,7 +323,7 @@ describe("the live channel", () => {
 
   test("a moved head reaches the page that is open on the review", async () => {
     storeGoldenReview(wsA, "pushed");
-    setGithubClient(countingClient((_repo, n) => (n === 12 ? "7".repeat(40) : GOLDEN_HEAD_SHA_13)).client);
+    setGithubClientFactory(() => countingClient((_repo, n) => (n === 12 ? "7".repeat(40) : GOLDEN_HEAD_SHA_13)).client);
 
     const url = `ws://localhost:${server.port}/ws/livereload?kind=review&ws=${wsA}&slug=pushed`;
     const socket = new WebSocket(url);
@@ -276,14 +339,31 @@ describe("the live channel", () => {
       headers: { authorization: `Bearer ${keyA}` },
     });
     expect(res.status).toBe(200);
-    expect(JSON.parse(await message)).toEqual({ type: "freshness", behind: 1, total: 2 });
+    // One message carrying the whole observation: the per-pull-request readings the
+    // glyphs are drawn from and the counts the chip is written from, so the two cannot
+    // arrive out of order and disagree on the same screen.
+    expect(JSON.parse(await message)).toEqual({
+      type: "review",
+      prs: [
+        { pr: `${GOLDEN_REPO}#12`, status: "open", freshness: "behind" },
+        { pr: `${GOLDEN_REPO}#13`, status: "open", freshness: "current" },
+      ],
+      behind: 1,
+      unknown: 0,
+      total: 2,
+    });
     socket.close();
   });
 
   test("a push says what changed, in either direction, and repeats nothing", async () => {
     storeGoldenReview(wsA, "swings");
+    // An observation is of a pull request, not of a review: every review in this file
+    // names the same two pull requests, so this one inherits whatever the last test
+    // observed about them and would start already behind. Cleared so the swing below
+    // is this test's own.
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
     let head12 = "6".repeat(40);
-    setGithubClient(countingClient((_repo, n) => (n === 12 ? head12 : GOLDEN_HEAD_SHA_13)).client);
+    setGithubClientFactory(() => countingClient((_repo, n) => (n === 12 ? head12 : GOLDEN_HEAD_SHA_13)).client);
 
     const url = `ws://localhost:${server.port}/ws/livereload?kind=review&ws=${wsA}&slug=swings`;
     const socket = new WebSocket(url);
@@ -311,9 +391,11 @@ describe("the live channel", () => {
     await refresh();
     socket.close();
 
-    expect(heard.map((m) => JSON.parse(m))).toEqual([
-      { type: "freshness", behind: 1, total: 2 },
-      { type: "freshness", behind: 0, total: 2 },
+    expect(heard.map((m) => JSON.parse(m) as { type: string; behind: number; unknown: number; total: number }).map(
+      (m) => [m.type, m.behind, m.unknown, m.total],
+    )).toEqual([
+      ["review", 1, 0, 2],
+      ["review", 0, 0, 2],
     ]);
   });
 
@@ -330,12 +412,14 @@ describe("the live channel", () => {
 describe("the render is never blocked", () => {
   test("a client that never answers costs the reader nothing", async () => {
     storeGoldenReview(wsA, "hangs");
-    setGithubClient(hangingClient());
+    setGithubClientFactory(() => hangingClient());
 
     const started = Date.now();
     const res = await fetch(`${base}/${wsA}/r/hangs`);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("heads current");
+    // Nothing has observed this review and nothing ever will through this client, so
+    // the chip says so rather than claiming the heads are current.
+    expect(await res.text()).toContain("heads unchecked");
     expect(Date.now() - started).toBeLessThan(2000);
   });
 });

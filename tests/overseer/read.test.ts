@@ -11,7 +11,8 @@ import { join } from "node:path";
 import { startServer } from "../../src/server";
 import { config } from "../../src/config";
 import { createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
-import { createAnnotation, setFreshness } from "../../src/overseer/db";
+import { createAnnotation } from "../../src/overseer/db";
+import { upsertPrStatus } from "../../src/overseer/installations";
 import { tinyId } from "../../src/ids";
 import { GOLDEN_REPO, GOLDEN_HEAD_SHA_12, goldenPayload } from "./fixtures/golden-review";
 import { storeGoldenReview } from "./fixtures/stored-review";
@@ -95,27 +96,45 @@ describe("GET /api/reviews/:slug", () => {
     expect(doc.groups[0]!.hunks.length).toBe(doc.hunks.length);
   });
 
+  /** One observation of a golden pull request, through the same upsert publish and the
+   *  webhook use. `updatedAt` climbs so a later call is a later fact. */
+  let observedAt = Date.parse("2026-07-19T06:27:55Z");
+  const observe = (number: number, headSha: string) => {
+    observedAt += 1000;
+    upsertPrStatus(wsA, 5150, {
+      repoId: 1301620029,
+      repo: GOLDEN_REPO,
+      prNumber: number,
+      state: "open",
+      merged: false,
+      draft: false,
+      headSha,
+      updatedAt: observedAt,
+    });
+  };
+
   test("the document carries its annotations and its freshness", async () => {
     const before = await readJson(await get("/api/reviews/golden"));
-    // Nothing has been checked against GitHub, so the stored document is the last
-    // thing known true and every pull request reads current.
+    // Nothing has observed these pull requests, and absence is absence: the stored
+    // document is the last thing known true about the code and no evidence at all
+    // about where the branches point now.
     expect(before.document.freshness).toEqual({
-      [`${GOLDEN_REPO}#12`]: "current",
-      [`${GOLDEN_REPO}#13`]: "current",
+      [`${GOLDEN_REPO}#12`]: "unknown",
+      [`${GOLDEN_REPO}#13`]: "unknown",
     });
     expect(before.document.annotations).toEqual([]);
 
     createAnnotation(wsA, "golden", { type: "statement", id: "st_gate" }, "Why here?", 1);
     // A head that has moved since publication, and one that has not.
-    setFreshness(wsA, "golden", GOLDEN_REPO, 12, "9".repeat(40));
-    setFreshness(wsA, "golden", GOLDEN_REPO, 13, GOLDEN_HEAD_SHA_12);
+    observe(12, "9".repeat(40));
+    observe(13, GOLDEN_HEAD_SHA_12);
 
     const after = await readJson(await get("/api/reviews/golden"));
     expect(after.document.freshness[`${GOLDEN_REPO}#12`]).toBe("behind");
     // 13's stored head is a different sha, so an observation equal to 12's head is
     // still a move: freshness compares against the pull request's own head.
     expect(after.document.freshness[`${GOLDEN_REPO}#13`]).toBe("behind");
-    setFreshness(wsA, "golden", GOLDEN_REPO, 13, after.document.prs[1]!.headSha);
+    observe(13, after.document.prs[1]!.headSha);
     const settled = await readJson(await get("/api/reviews/golden"));
     expect(settled.document.freshness[`${GOLDEN_REPO}#13`]).toBe("current");
 

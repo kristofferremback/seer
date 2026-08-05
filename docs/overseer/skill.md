@@ -405,10 +405,11 @@ what you cut.
 the `seer_sk_` secret itself, not any id that names it, and a 401 means fix the
 credential, never the document. 400 for a body that is not a usable document or that
 carries no valid `slug`. 413 when the upload is over the server's size limit. 502 when
-GitHub fails to serve a pull request or a ref cannot be read upstream. 503 when
-Overseer cannot reach GitHub because `GITHUB_TOKEN` is unset. None of these is about
-your content: do not re-author for them, and do not retry a 502 or a 503 as if the
-document were wrong.
+GitHub fails to serve a pull request or a ref cannot be read upstream. And a 422 with
+a bare `error` rather than an `errors[]` list when the workspace holds no GitHub App
+installation covering a repository the review names, which is fixed by connecting that
+account in Seer rather than by re-authoring. None of these is about your content: do not
+re-author for them, and do not retry a 502 as if the document were wrong.
 
 **Reading a 422.** The body is `{ error, errors[], warnings[] }`. Each error carries
 `field` (a JSON path into your payload, such as `statements[2].text`), `rule`, and

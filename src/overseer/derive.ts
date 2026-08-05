@@ -69,9 +69,41 @@ export function hunksOf(pr: { files: FileDiff[] }): Hunk[] {
   return pr.files.flatMap((f) => f.hunks);
 }
 
+/**
+ * What the `getPull` behind a derivation saw of the pull request itself, as opposed to
+ * of its code. These fields were read and dropped until now; publish writes them as the
+ * review's first status observation, which — with no polling anywhere — is the only
+ * thing that gives a new review a glyph before its first webhook, and for a pull
+ * request that is already merged or closed there may never be one.
+ *
+ * `installationId` and `repoId` are null when the client could not name them: a client
+ * built from something other than an installation, or a pull request whose base
+ * repository is gone. An observation that cannot be attributed is not written, because
+ * `installation.deleted` finds its rows by that column and by nothing else.
+ */
+export interface DerivedObservation {
+  repo: string;
+  number: number;
+  repoId: number | null;
+  installationId: number | null;
+  state: string;
+  merged: boolean;
+  draft: boolean;
+  headSha: string;
+  /** GitHub's `updated_at`, in milliseconds. The upsert's whole precondition. */
+  updatedAt: number;
+}
+
+export function parseUpdatedAt(raw: string | null | undefined): number {
+  const at = raw == null ? NaN : Date.parse(raw);
+  return Number.isFinite(at) ? at : 0;
+}
+
 export interface DerivedReview {
   kind: ReviewKind;
   prs: DerivedPr[];
+  /** One per pull request, in pointer order. The publish transaction's seed. */
+  observations: DerivedObservation[];
   /** Review comments across every pull request, in pointer order. Never rendered.
    *  Destination: `Review.skillContext` on the stored document, so it travels inside
    *  `review_versions.doc` and no column is added for it. The skill reads it back on
@@ -224,9 +256,24 @@ export async function derivePrs(
   }
   const partial: (Omit<DerivedPr, "parent"> & { authored: number | null })[] = [];
   const skillContext: SkillContextComment[] = [];
+  const observations: DerivedObservation[] = [];
 
   for (const pointer of pointers) {
     const pull = await client.getPull(pointer.repo, pointer.number);
+    observations.push({
+      repo: pointer.repo,
+      number: pointer.number,
+      repoId: pull.base?.repo?.id ?? null,
+      installationId: (await client.installationFor?.(pointer.repo)) ?? null,
+      state: pull.state,
+      merged: pull.merged === true,
+      draft: pull.draft === true,
+      headSha: pull.head.sha,
+      // A timestamp GitHub did not give us, or gave us unparseably, sorts oldest: any
+      // observation with a real one then wins the precondition, which is the safe way
+      // round for a value the whole ordering rests on.
+      updatedAt: parseUpdatedAt(pull.updated_at),
+    });
     const commits = await client.listCommits(pointer.repo, pointer.number);
     const diff = await collectPullDiff(
       client,
@@ -272,7 +319,7 @@ export async function derivePrs(
     ...pr,
     parent: parents[i]!,
   }));
-  return { kind: deriveReviewKind(prs), prs, skillContext };
+  return { kind: deriveReviewKind(prs), prs, observations, skillContext };
 }
 
 // ---- refs ----
@@ -385,12 +432,14 @@ export function refResolver(client: GithubClient, review: DerivedReview): RefRes
 
   // ref_snippets has no workspace column: the same (repo, sha, path) is the same bytes
   // for everyone, which makes it a shared cache of private source. The gate below is
-  // per-derivation, against the server's single GitHub token: the cache opens for a
-  // repository only once this derivation has actually fetched from it, so a publish
-  // body naming an unrelated (repo, sha, path) pays a real fetch rather than being
-  // served cached bytes with no GitHub call at all. It is not a per-caller check and
-  // proves nothing about who is publishing; there is one process-global token today,
-  // and if per-workspace tokens ever arrive this gate has to be rebuilt around them.
+  // per-derivation: the cache opens for a repository only once this derivation has
+  // actually fetched from it, so a publish body naming an unrelated (repo, sha, path)
+  // pays a real fetch rather than being served cached bytes with no GitHub call at all.
+  // What that fetch now costs is the point. The client handed in is built for one
+  // workspace and refuses a repository that workspace holds no installation for, so
+  // the only way into this set is a fetch that workspace was entitled to make — which
+  // is what makes the shared snippet cache per-workspace by construction rather than
+  // by the validator's single-repo rule happening to hold.
   //
   // The set starts EMPTY, and the only thing that puts a repository in it is a
   // successful fetch below. It used to be seeded from `review.prs`, which made the

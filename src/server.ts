@@ -57,6 +57,23 @@ import {
 } from "./shares";
 import { serveBundleFile } from "./serve-bundle";
 import { handlePublishReview } from "./overseer/routes";
+import {
+  handleClaimInstallation,
+  handleConnectGithub,
+  handleDisconnectGithub,
+  handleGithubSetupCallback,
+  installUrl,
+} from "./overseer/github-claim";
+import { handleGithubWebhook } from "./overseer/webhook";
+import { getReviewVersion, listReviewVersions, listReviews } from "./overseer/db";
+import {
+  dbWorkspaceHoldings,
+  deliveryIsQuiet,
+  listWorkspaceInstallations,
+  reviewStatusTally,
+} from "./overseer/installations";
+import { agoWords } from "./relative-time";
+import { setWorkspaceHoldings } from "./overseer/github-app";
 import { handleReadReview } from "./overseer/read";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
 import { handleAnnotation } from "./overseer/annotations";
@@ -69,6 +86,7 @@ import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
 import {
   landingPage,
   bundlesPage,
+  reviewsPage,
   invitePage,
   settingsPage,
   skillDoc,
@@ -76,6 +94,7 @@ import {
   softNotFoundPage,
   type BundleMeta,
   type LedgerGroup,
+  type ReviewLedgerGroup,
   type SettingsReveal,
 } from "./pages";
 
@@ -198,6 +217,23 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
       // The workspace's shares, not the viewer's: a share is the workspace's to see and
       // to revoke, or a link nobody can see is a link nobody takes back. No token is in
       // this list, because none survived the mint.
+      // What this workspace may derive through. Unclaimed and disconnected installations
+      // are not in here: listWorkspaceInstallations answers the same question routing
+      // asks, so the panel cannot claim a reach the client would refuse.
+      installations: listWorkspaceInstallations(wsId).map((g) => ({
+        id: g.id,
+        installationId: g.installation_id,
+        account: g.account_login,
+        accountType: g.account_type,
+        repositorySelection: g.repository_selection,
+        connected: g.connected_at ? fmtDate(g.connected_at) : "—",
+        isSuspended: g.suspended_at !== null,
+        // Said in ages rather than dates, because the question a reader has here is
+        // "has this stopped?" and a date makes them do the subtraction themselves.
+        lastDelivery: g.last_delivery_at ? agoWords(Date.now() - g.last_delivery_at) : "never",
+        isQuiet: deliveryIsQuiet(g.last_delivery_at),
+      })),
+      githubInstallUrl: installUrl(),
       shares: listShares(wsId).map((sh) => ({
         id: sh.id,
         label: sh.label,
@@ -445,6 +481,34 @@ function ledgerGroups(userId: string): LedgerGroup[] {
   }));
 }
 
+// The reviews index, grouped the same way. Every field comes out of SQLite: the title
+// off the latest stored version, the tally off `review_prs` joined to the observations
+// already written. Nothing here can reach GitHub, because after the on-view check was
+// deleted no code path from a render to an observation exists at all.
+function reviewLedgerGroups(userId: string): ReviewLedgerGroup[] {
+  return listUserWorkspaces(userId).map((ws) => ({
+    wsId: ws.id,
+    name: ws.name,
+    visibility: ws.visibility,
+    reviews: listReviews(ws.id)
+      .map((r) => {
+        const versions = listReviewVersions(ws.id, r.slug);
+        const latest = getReviewVersion(ws.id, r.slug, r.latest_version);
+        return {
+          slug: r.slug,
+          // A review with no version row behind its head pointer cannot happen —
+          // createReviewVersion moves both in one transaction — but the index is not
+          // the place to throw over it, so the slug stands in for the title.
+          title: latest?.doc.title ?? r.slug,
+          latestVersion: r.latest_version,
+          publishedAt: versions[0]?.created_at ?? r.created_at,
+          tally: reviewStatusTally(ws.id, r.slug),
+        };
+      })
+      .sort((a, b) => b.publishedAt - a.publishedAt),
+  }));
+}
+
 // ---- server ----
 
 export async function startServer() {
@@ -454,6 +518,12 @@ export async function startServer() {
   // Then move any local blobs into S3 (no-op when already done or disk-only).
   // Runs before the server binds so requests never race a half-moved store.
   await migrateBlobsToS3();
+
+  // The database-backed answer to "which installations may this workspace act through",
+  // installed once the schema is known to be current. Without it githubClientFor() has
+  // no holdings source and refuses to build a client at all, which is the loud failure
+  // the alternative — a client that routes against nothing — would not be.
+  setWorkspaceHoldings(dbWorkspaceHoldings());
 
   // Only the sockets a share opened, so revocation can find them. Membership-gated
   // sockets are not in here: nothing revokes a membership mid-connection today, and a
@@ -508,6 +578,15 @@ export async function startServer() {
         const user = sessionUser(req);
         if (!user) return requireSession(req)!;
         return new Response(bundlesPage(user.email, ledgerGroups(user.id)), {
+          headers: { "content-type": "text/html;charset=utf-8" },
+        });
+      },
+
+      // The signed-in index of published reviews, beside the bundle ledger.
+      "/reviews": (req) => {
+        const user = sessionUser(req);
+        if (!user) return requireSession(req)!;
+        return new Response(reviewsPage(user.email, reviewLedgerGroups(user.id)), {
           headers: { "content-type": "text/html;charset=utf-8" },
         });
       },
@@ -602,8 +681,17 @@ export async function startServer() {
           return handleAnnotation(req, req.params.slug);
         },
       },
+      // Origin-checked like every other browser-reachable POST. It was not, and step 6
+      // then put a button on the review page pointing at it — so any page a signed-in
+      // member visited could spend their GitHub calls for them. The window bounds the
+      // damage to one check a minute per review rather than making it harmless, and
+      // originOk passes when Origin and Referer are both absent, so an API key posting
+      // this route with a bearer token is unaffected.
       "/api/reviews/:slug/refresh": {
-        POST: (req) => handleRefreshReview(req, req.params.slug),
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleRefreshReview(req, req.params.slug);
+        },
       },
       "/api/reviews/:slug/v/:n": {
         GET: (req) => handleReadReview(req, req.params.slug, req.params.n),
@@ -773,6 +861,47 @@ export async function startServer() {
           }
           revokeShare(share.id);
           return redirect(`/settings/${req.params.ws}`);
+        },
+      },
+
+      // The claim flow. The callback RENDERS and this POST WRITES, which is the whole
+      // reason they are two routes: originOk() passes when Origin and Referer are both
+      // absent, the normal case for a top-level navigation, so it is no guard at all on
+      // the redirect GET GitHub sends.
+      // Deliberately NO originOk guard, and this comment is here so the next person
+      // reading the table does not add one and break it. Every other POST here is a
+      // browser form and Origin is what proves it came from Seer; GitHub is not a
+      // browser, sends no Origin, and cannot hold a Seer credential. The HMAC over the
+      // raw body is the whole of this route's authentication and is the right amount.
+      "/api/github/webhook": {
+        POST: (req) => handleGithubWebhook(req),
+      },
+
+      "/github/setup": {
+        GET: (req) => handleGithubSetupCallback(req),
+      },
+      "/github/claim": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          return handleClaimInstallation(req);
+        },
+      },
+
+      "/settings/:ws/github/connect": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          return handleConnectGithub(req.params.ws, gate.id);
+        },
+      },
+
+      "/settings/:ws/github/:id/disconnect": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          return handleDisconnectGithub(req.params.ws, req.params.id);
         },
       },
 

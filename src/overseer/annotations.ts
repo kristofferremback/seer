@@ -28,7 +28,8 @@ import {
   type ReviewDoc,
 } from "./db";
 import { refResolver, RefResolveError, type DerivedPr, type DerivedReview } from "./derive";
-import { GithubError, githubClient } from "./github";
+import { GithubError, type GithubClient } from "./github";
+import { GithubAppRefusal, githubClientFor } from "./github-app";
 import { readableWorkspaces } from "./read";
 import { checkRef, type RefPointerInput, type ValidationError } from "./validate";
 import { BUDGETS, type Annotation, type AnnotationTargetType, type Ref } from "./types";
@@ -256,7 +257,10 @@ export function derivedFromDoc(doc: ReviewDoc): DerivedReview {
       files: [...byPath.values()],
     };
   });
-  return { kind: doc.kind, prs, skillContext: [] };
+  // No observations: a stored document is not an observation of anything. Reading one
+  // back is a round trip through facts already recorded, and inventing a status from it
+  // would write publication time into a row that means "as of now".
+  return { kind: doc.kind, prs, observations: [], skillContext: [] };
 }
 
 /** A ref that Overseer could not resolve because GitHub would not answer, rather than
@@ -264,10 +268,11 @@ export function derivedFromDoc(doc: ReviewDoc): DerivedReview {
 class UpstreamError extends Error {}
 
 async function resolveAnswerRefs(
+  client: GithubClient,
   doc: ReviewDoc,
   pointers: RefPointerInput[],
 ): Promise<{ refs: Ref[]; errors: ValidationError[] }> {
-  const resolver = refResolver(githubClient(), derivedFromDoc(doc));
+  const resolver = refResolver(client, derivedFromDoc(doc));
   const refs: Ref[] = [];
   const errors: ValidationError[] = [];
   for (const [i, pointer] of pointers.entries()) {
@@ -277,6 +282,9 @@ async function resolveAnswerRefs(
       if (!(err instanceof RefResolveError)) throw err;
       // The publish route's rule, unchanged: a 404 and a client-side refusal are the
       // author's to fix, and anything else GitHub said, or failed to say, is ours.
+      // The publish route's other rule, unchanged too: a repository this workspace
+      // holds no installation for is our own transport refusing, and travels as itself.
+      if (err.cause instanceof GithubAppRefusal) throw err.cause;
       const upstreamCause = err.cause !== undefined && !(err.cause instanceof GithubError);
       if (upstreamCause || (err.status !== null && err.status !== 0 && err.status !== 404)) {
         throw new UpstreamError(err.message);
@@ -451,23 +459,15 @@ async function answerHere(
   if (errors.length > 0) return unprocessable(errors);
 
   // Only now does anything reach GitHub, and only when there is something to fetch: an
-  // answer citing nothing needs no token at all.
+  // answer citing nothing asks the workspace's installations for nothing at all. That
+  // is why the client is built here rather than at the top of the route.
   let refs: Ref[] = [];
   if (pointers.length > 0) {
-    if (!config.githubToken) {
-      return json(
-        {
-          error:
-            "GITHUB_TOKEN is not set, and Overseer resolves every ref through the GitHub API. " +
-            "Set GITHUB_TOKEN and answer again.",
-        },
-        503,
-      );
-    }
     let refErrors: ValidationError[];
     try {
-      ({ refs, errors: refErrors } = await resolveAnswerRefs(doc, pointers));
+      ({ refs, errors: refErrors } = await resolveAnswerRefs(githubClientFor(ws), doc, pointers));
     } catch (err) {
+      if (err instanceof GithubAppRefusal) return json({ error: err.message }, 422);
       if (!(err instanceof UpstreamError)) throw err;
       return json({ error: `Overseer could not read a ref from GitHub: ${err.message}` }, 502);
     }
