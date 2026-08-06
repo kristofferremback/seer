@@ -500,13 +500,53 @@ describe("refs", () => {
     expect(client.calls.getFileAtSha).toBe(1);
     expect(again.snippet).toBe("delta\necho");
 
-    // The cache is the shared (repo, sha, path) table, so a fresh resolver over a
-    // fresh client pays nothing either.
-    const fresh = countingClient(chain(), {});
+    // The cache is the shared (repo, sha, path) table, so a fresh resolver reaches the
+    // same row — but only after it has proved the repository by fetching from it once.
+    // Its first ref pays, whatever is already cached; its second is free.
+    const fresh = countingClient(chain(), { [`${sha("sha101")}:src/cached.ts`]: FILE });
     const review = await derivePrs(fresh, POINTERS);
-    const cold = await refResolver(fresh, review).resolve(pointer);
-    expect(cold.snippet).toBe("alpha\nbravo");
-    expect(fresh.calls.getFileAtSha).toBe(0);
+    const resolver2 = refResolver(fresh, review);
+    expect((await resolver2.resolve(pointer)).snippet).toBe("alpha\nbravo");
+    expect(fresh.calls.getFileAtSha).toBe(1);
+    expect((await resolver2.resolve({ ...pointer, startLine: 4, endLine: 5 })).snippet).toBe(
+      "delta\necho",
+    );
+    expect(fresh.calls.getFileAtSha).toBe(1);
+  });
+
+  // The regression this file used to encode as correct behaviour: the resolver seeded
+  // `proven` from the review's own pull request repositories, so a repository the
+  // caller had never fetched from opened the shared cache. Deriving a pull request
+  // reads pulls, files and commits and never reads file contents, so the seed asserted
+  // a fetch that had not happened on any path. It mattered most for a resolver built
+  // from a STORED document — the annotation answer path — where the repositories come
+  // from what the document claims rather than from anything this caller proved.
+  test("a review's own repository does not open the cache until something fetches it", async () => {
+    // Somebody else's resolution already put this file in the shared table.
+    putSnippet(REPO, sha("sha404"), "src/leaky.ts", FILE);
+    const pointer = {
+      repo: REPO,
+      sha: sha("sha404"),
+      path: "src/leaky.ts",
+      startLine: 1,
+      endLine: 1,
+    };
+
+    // A client holding no blobs: any real fetch fails. The repository is the review's
+    // own, which is exactly the case the old seed waved through.
+    const empty = countingClient(chain(), {});
+    const review = await derivePrs(empty, POINTERS);
+    const err = await refResolver(empty, review)
+      .resolve(pointer)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RefResolveError);
+    expect(empty.calls.getFileAtSha).toBe(1);
+
+    // And the guarantee is only worth stating because the success is there to withhold:
+    // the same pointer, under a client that can actually serve the file, resolves.
+    const allowed = countingClient(chain(), { [`${sha("sha404")}:src/leaky.ts`]: FILE });
+    const ok = await refResolver(allowed, await derivePrs(allowed, POINTERS)).resolve(pointer);
+    expect(ok.snippet).toBe("alpha");
   });
 
   test("the cache is not read for a repository this review has not fetched", async () => {
