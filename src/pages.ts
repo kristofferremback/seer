@@ -907,7 +907,7 @@ export function skillRouter(): string {
   const base = config.baseUrl;
   return `---
 name: seer
-description: Publish to Seer: HTML bundles a human can open in a browser, and Overseer reviews of GitHub pull requests. Takes one argument naming what you want to do. Use when asked to publish a page, share a built artifact, or review a pull request.
+description: "Publish to Seer: HTML bundles a human can open in a browser, and Overseer reviews of GitHub pull requests. Takes one argument naming what you want to do. Use when asked to publish a page, share a built artifact, or review a pull request."
 ---
 
 # Seer

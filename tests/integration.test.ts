@@ -129,8 +129,16 @@ describe("agent skill doc", () => {
     // this deployment's own base URL, so an agent never has to guess a second URL.
     expect(md).toContain(`${config.baseUrl}/bundles/skill.md`);
     expect(md).toContain(`${config.baseUrl}/overseer/agent.md`);
-    // It is installable as a skill itself, so it carries frontmatter.
+    // It is installable as a skill itself, so it carries valid YAML frontmatter. The
+    // description contains a colon followed by a space, which must be quoted or YAML
+    // parsers reject the hosted document when an agent installs it as SKILL.md.
     expect(md.startsWith("---\nname: seer\n")).toBe(true);
+    const yaml = md.match(/^---\n([\s\S]*?)\n---\n/)?.[1];
+    expect(yaml).toBeDefined();
+    expect(Bun.YAML.parse(yaml!)).toMatchObject({
+      name: "seer",
+      description: expect.stringContaining("Publish to Seer: HTML bundles"),
+    });
     // It routes rather than teaching: the calls belong to the documents it points at.
     expect(md).not.toContain("--data-binary @bundle.zip");
   });
