@@ -423,10 +423,12 @@ curl -X POST "$SEER_URL/api/reviews" \
 ```
 
 The document is `{ slug, title, authorIntent, summary, prs[], statements[], notes[],
-codeDesign, groups[], attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries an
-`id` you author, unique within the document and stable across versions:
+codeDesign, groups[], attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`.
+Statements, notes, design modules, coverage paths, groups and attachments carry an `id`
+you author, unique within the document and stable across versions. A pull request is
+identified by its `repo` and `number` instead:
 
-- **pr**: `{ id, repo, number, gist, detail, detailRef, parent }`. `gist` is one line,
+- **pr**: `{ repo, number, gist, detail, detailRef, parent }`. `gist` is one line,
   `detail` is at most 2 sentences and at most 400 characters, `detailRef` is a full
   ref object
   (`{ repo, sha, path, startLine, endLine }`) pinned at that pull request's own head

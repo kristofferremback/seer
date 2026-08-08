@@ -41,7 +41,7 @@ describe("overseer skill doc", () => {
   });
 
   test("states the authored fields the write path requires", () => {
-    expect(doc).toContain("{ id, repo, number, gist, detail, detailRef, parent }");
+    expect(doc).toContain("{ repo, number, gist, detail, detailRef, parent }");
     expect(doc).toContain("{ id, kind, text, prs[], refs[], body, evidence[] }");
     expect(doc).toContain("{ id, kind, text, body, checks[], refs[], evidence[] }");
     expect(doc).toContain("{ placement, modules[], coverage[] }");
@@ -103,6 +103,8 @@ describe("overseer skill doc", () => {
 
   test("covers the publish contract", () => {
     expect(doc).toContain("{ slug, title, authorIntent, summary");
+    expect(doc).toContain("{ repo, number, gist, detail, detailRef, parent }");
+    expect(doc).not.toContain("{ id, repo, number");
     expect(doc).toContain("POST /api/reviews");
     expect(doc).toContain("multipart/form-data");
     expect(doc).toContain("document");
