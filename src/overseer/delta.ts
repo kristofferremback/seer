@@ -42,11 +42,9 @@
 //
 // A field is diffed as the HTML the page will actually show, scanned into tags,
 // whitespace runs and words, with only words compared, so a tag boundary never
-// shifts an alignment. Changed density is (words inserted + words deleted) /
-// max(base words, current words). Past 0.40, or when an inserted run straddles a
-// tag it cannot wrap, the field is republished whole behind one disclosure
-// rather than carrying a dozen little ones: at that density the prior sentence
-// is what a reader wants, not the prior clause.
+// shifts an alignment. Changed density is retained as a measurement for tests and
+// diagnostics, but it never changes the visual grammar: prose always gets one labelled
+// Previous disclosure, with only its changed prior words marked.
 //
 // Only words are compared, which is also the limit of what this can see: an edit
 // that moves markup without moving a word, a phrase that became code or emphasis,
@@ -62,9 +60,6 @@ import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
 import { exampleBodyHtml, safeBlock, safeInline } from "./render-evidence";
 import { prKey, type Annotation, type Evidence } from "./types";
-
-/** Past this share of moved words a field is shown whole rather than in place. */
-export const DENSE = 0.4;
 
 /** Past this many words on either side a field is not aligned at all. The
  *  alignment is quadratic in both time and memory, and the one field with no
@@ -95,9 +90,9 @@ export interface Region {
   c1: number;
 }
 
-/** One authored field that moved. `mode` is how the renderer should show it:
- *  `words` marks each region in place, `whole` marks the insertions and hangs the
- *  entire base text behind one disclosure. */
+/** One authored field that moved. `words` is a one-line field inside an existing
+ *  disclosure. `whole` is prose with one field-level Previous disclosure. Both modes
+ *  mark the same word regions; the distinction is control placement, not diff semantics. */
 export interface FieldDelta {
   /** Field name, unique within its entity. */
   field: string;
@@ -106,7 +101,9 @@ export interface FieldDelta {
   inline: boolean;
   mode: "words" | "whole";
   regions: Region[];
-  /** The base side's words, in order. */
+  /** The base side as rendered and as words. The markup lets the Previous view keep
+   *  its paragraphs and mark only the words that actually left. */
+  priorHtml: string;
   priorWords: string[];
   /** Share of words moved, 0..1. */
   density: number;
@@ -292,6 +289,7 @@ export function diffField(
       inline,
       mode: "whole",
       regions: [{ d0: 0, d1: pw.length, c0: 0, c1: cw.length }],
+      priorHtml,
       priorWords: pw,
       density: 1,
     };
@@ -300,12 +298,11 @@ export function diffField(
   const regs = regions(lcsOps(pw, cw));
   const moved = regs.reduce((a, r) => a + (r.d1 - r.d0) + (r.c1 - r.c0), 0);
   const density = moved / Math.max(1, Math.max(pw.length, cw.length));
-  // An inserted run that straddles a tag cannot be wrapped where it stands. A
-  // one-line field is drawn inside a summary and has nowhere else to go, so it
-  // wraps what it can; a block hands the whole paragraph over instead.
-  const splits = regs.some((r) => r.c1 > r.c0 && !contiguous(ix, r.c0, r.c1));
-  const mode: FieldDelta["mode"] = !inline && (density > DENSE || splits) ? "whole" : "words";
-  return { field, inline, mode, regions: regs, priorWords: pw, density };
+  // Prose gets one labelled field-level disclosure whether one word or the whole
+  // paragraph moved. One-line fields already sit in a disclosure row and keep their
+  // old words beside the exact replacement when that row opens.
+  const mode: FieldDelta["mode"] = inline ? "words" : "whole";
+  return { field, inline, mode, regions: regs, priorHtml, priorWords: pw, density };
 }
 
 // ---- entities ----
@@ -392,7 +389,6 @@ export function designPathsHtml(paths: string[]): string {
 function moduleFields(m: NonNullable<ReviewDoc["codeDesign"]>["modules"][number]): FieldSpec[] {
   return [
     spec("title", true, safeInline(m.title)),
-    spec("role", true, safeInline(m.role)),
     spec("body", false, safeBlock(m.body)),
     spec("paths", false, designPathsHtml(m.paths)),
   ];
@@ -492,6 +488,7 @@ function compare(
       inline: false,
       mode: "whole",
       regions: [{ d0: 0, d1: words.length, c0: 0, c1: 0 }],
+      priorHtml: spec.html,
       priorWords: words,
       density: 1,
     });
@@ -769,12 +766,40 @@ function boxId(owner: string, field: string, k: number): string {
 
 type Edit = { at: number; del: number; ins: string };
 
+/** The prior field in its original structure, with only words absent from the current
+ *  version marked. Unchanged prior prose stays neutral, so opening Previous shows a
+ *  redline rather than painting a mostly identical paragraph as removed. */
+function markedPrior(d: FieldDelta): string {
+  const html = d.priorHtml;
+  const ix = wordIndex(html);
+  const edits: Edit[] = [];
+  for (const r of d.regions) {
+    if (r.d1 <= r.d0) continue;
+    let a = r.d0;
+    while (a < r.d1) {
+      let b = a + 1;
+      while (b < r.d1 && contiguous(ix, a, b + 1)) b++;
+      const first = ix.words[a]!;
+      const last = ix.words[b - 1]!;
+      edits.push({
+        at: first.s,
+        del: last.e - first.s,
+        ins: `<del class="dold">${html.slice(first.s, last.e)}</del>`,
+      });
+      a = b;
+    }
+  }
+  edits.sort((a, b) => b.at - a.at || b.del - a.del);
+  let out = html;
+  for (const e of edits) out = out.slice(0, e.at) + e.ins + out.slice(e.at + e.del);
+  return out;
+}
+
 /**
- * The field's markup with the delta marked in it. Every prior-text reveal is a
- * checkbox and a label: the mark itself is the label, plus the chevron the rest
- * of the page opens things with. Inside a summary there is no control at all,
- * because one would fight the row's own; the prior words sit in place and the
- * row's chevron is the one tap. Nothing here needs JavaScript.
+ * The field's markup with the delta marked in it. Prose has one labelled Previous
+ * control after the current account. One-line fields inside an existing disclosure
+ * borrow that row's chevron and reveal only the old words beside their replacements.
+ * Nothing here needs JavaScript.
  */
 export function markField(
   html: string,
@@ -835,21 +860,31 @@ export function markField(
     );
   };
 
-  if (d.mode === "whole") {
+  if (d.mode === "whole" || control) {
     for (const r of d.regions) {
-      if (r.c1 <= r.c0) continue;
-      insRuns(r.c0, r.c1);
+      if (r.c1 > r.c0) {
+        insRuns(r.c0, r.c1);
+        continue;
+      }
+      // A deletion has no current word to tint. Leave a quiet cut exactly where the
+      // words left, and show the deleted words in the Previous view below.
+      if (r.d1 > r.d0) {
+        const at =
+          r.c0 < w.length ? w[r.c0]!.s : w.length > 0 ? w[w.length - 1]!.e : 0;
+        cut(at, 0, `<span class="dw dcut" aria-hidden="true"></span>`);
+      }
     }
     // A field with no base text is new rather than rewritten, and there is no
-    // prior paragraph to open.
+    // prior account to open.
     if (prior.length > 0) {
       const id = box();
+      const priorTag = d.inline ? "span" : "div";
       cut(
         html.length,
         0,
-        `<input type="checkbox" class="dtog" id="${id}" aria-label="prior text">` +
-          `<label class="dw dall" for="${id}">${CHEV}</label>` +
-          `<span class="dp dpb">${prior.join(" ")}</span>`,
+        `<input type="checkbox" class="dtog" id="${id}" aria-label="previous text">` +
+          `<label class="dprevious" for="${id}">${CHEV}<span>Previous</span></label>` +
+          `<${priorTag} class="dprior${d.inline ? " dprior-inline" : ""}">${markedPrior(d)}</${priorTag}>`,
       );
     }
   } else {

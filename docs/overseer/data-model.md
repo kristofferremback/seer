@@ -132,7 +132,6 @@ code_design
   modules[]       0..6 responsibility areas
     id
     title         <= 60 chars
-    role          <= 40 chars
     paths[]       concrete paths, each <= 180 chars
     body          <= 800 chars
     refs[]        at least one
@@ -338,7 +337,7 @@ The renderer gives every review a revision menu: the versions as a timeline, eac
 
 The same machinery covers derived text. A pull request description that changed between passes is word-diffed like any authored body, which is how "the agent improved the description" stops meaning "read all 600 words again."
 
-How the delta renders is part of the design, not a renderer whim. Changed text is highlighted in place at word level, the way a diff colors a line, and the prior text is one tap away, anchored to the span it replaced: opened in place on a phone, on hover or click at a desk. A revised section announces itself where it changed, never in a legend somewhere else. Removed rows render as collapsed stubs in the delta view, openable to their full former content. Author intent, the witness summary and code design are not exempt: authored text diffs wherever it appears. The page states which base version its marks are measured against, and row-level marks exist only as the sum of their spans, so a mark can never claim a change the text does not show.
+How the delta renders is part of the design, not a renderer whim. Current words are highlighted in place. Prose carries one labelled `Previous` disclosure; opening it keeps unchanged prior words neutral and marks only words that left. A one-line field inside an existing row borrows that row's disclosure, but uses the same current and prior word marks. Density never switches the page to a second diff grammar. Removed rows render as collapsed stubs in the delta view, openable to their full former content. Author intent, the witness summary and code design are not exempt: authored text diffs wherever it appears. The page states which base version its marks are measured against, and row-level marks exist only as the sum of their spans, so a mark can never claim a change the text does not show.
 
 Viewing is the refresh trigger. Opening `/r/:slug` compares the stored head SHAs against GitHub, rate limited to once a minute per review, and kicks an asynchronous re-derivation when a head has moved. The page renders the stored document immediately and updates its freshness marks when the refresh lands, over the same live channel Seer already uses for bundles. `POST /api/reviews/:slug/refresh` stays for explicit calls, but nothing depends on remembering to make one: a review someone is looking at cannot silently claim `current` while the branch moves underneath it, because looking at it is what checks.
 

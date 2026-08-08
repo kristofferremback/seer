@@ -171,8 +171,6 @@ export interface DesignModule {
   id: string;
   /** Plain responsibility name, e.g. "The trust boundary". */
   title: string;
-  /** Plain short role, e.g. "core policy" or "presentation". */
-  role: string;
   /** Paths that make up this responsibility area. */
   paths: string[];
   /** How the modules divide responsibility and interact. */
@@ -397,7 +395,6 @@ export const BUDGETS = {
     check: 120, // each note.checks[] entry
     designPlacement: 800, // codeDesign.placement
     designModuleTitle: 60,
-    designModuleRole: 40,
     designModuleBody: 800,
     designCoverageTitle: 80,
     designCoverageBody: 600,

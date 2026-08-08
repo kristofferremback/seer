@@ -45,7 +45,7 @@ describe("overseer skill doc", () => {
     expect(doc).toContain("{ id, kind, text, prs[], refs[], body, evidence[] }");
     expect(doc).toContain("{ id, kind, text, body, checks[], refs[], evidence[] }");
     expect(doc).toContain("{ placement, modules[], coverage[] }");
-    expect(doc).toContain("{ id, title, role, paths[], body, refs[] }");
+    expect(doc).toContain("{ id, title, paths[], body, refs[] }");
     expect(doc).toContain("{ id, title, significance, paragraph, hunks[], fileNotes[] }");
     // Every list is required, sent as [] when unused: the doc must not call one optional.
     expect(doc).toContain("Every list field in the");

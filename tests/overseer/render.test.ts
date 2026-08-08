@@ -135,8 +135,14 @@ describe("the page itself", () => {
     const html = page(doc());
     expect(html).toContain('class="dmodule" id="mod_gate"');
     expect(html).toContain("The workspace session boundary");
-    expect(html).toContain("core policy");
     expect(html).toContain('<span class="dpath">src/auth.ts</span>');
+    const moduleSummary = html.slice(
+      html.indexOf('<details class="dmodule" id="mod_gate"'),
+      html.indexOf("</summary>", html.indexOf('<details class="dmodule" id="mod_gate"')),
+    );
+    expect(moduleSummary).not.toContain("src/auth.ts");
+    expect(moduleSummary).not.toContain('class="ref"');
+    expect(html).toContain('class="design-refs"');
     expect(html).toContain('class="coverage-row" id="cov_review_routes"');
     expect(html).toContain('<h3 class="design-heading">');
     expect(html).toContain("<span>Coverage</span>");

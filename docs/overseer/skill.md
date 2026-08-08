@@ -330,7 +330,7 @@ at most 2 paragraphs, pr gist 100, pr detail
 400, statement
 text 120, statement body 1200, note text 140, note body 1600, each check 120, group
 title 60, group paragraph 600, file note 120, code-design placement 800, module title
-60, module role 40, module body 800, design path 180, coverage title 80, coverage body
+60, module body 800, design path 180, coverage title 80, coverage body
 600, payload side 800, example text 800, caption 120, attachment alt 140, figure node
 label 40, figure edge label 24.
 
@@ -405,8 +405,9 @@ when the diff cannot show the thing.
 
 ## Publishing
 
-One shot. You read, you form your view, you publish the whole document with its
-attachments. `POST /api/reviews` with your API key as a bearer token.
+Each publish is one whole document, never a sequence of partial writes. Read, form your
+view, then send the document and its attachments with `POST /api/reviews`. A 422 retry
+or deliberate refinement sends the whole document again and may create a later version.
 
 Bare JSON when there are no attachments. Otherwise `multipart/form-data`:
 
@@ -437,7 +438,7 @@ codeDesign, groups[], attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`
 - **note**: `{ id, kind, text, body, checks[], refs[], evidence[] }`. `kind` is
   `decision`, `risk` or `note`.
 - **codeDesign**: `{ placement, modules[], coverage[] }`. A module is
-  `{ id, title, role, paths[], body, refs[] }`; a coverage item is
+  `{ id, title, paths[], body, refs[] }`; a coverage item is
   `{ id, title, body, refs[] }`. Every module and coverage item has at least one ref.
   The lists are capped at 6 modules and 8 coverage paths. Send empty strings and lists
   when the change has no useful design account.

@@ -535,7 +535,6 @@ function buildDocument(args: {
   const designModules: DesignModule[] = payload.codeDesign.modules.map((m) => ({
     id: m.id,
     title: m.title,
-    role: m.role,
     paths: m.paths,
     body: m.body,
     refs: m.refs.map((r) => refs.get(pointerKey(r))!),

@@ -25,7 +25,7 @@ import {
   textOf,
 } from "../../src/overseer/delta";
 import { baseVersion, renderReviewPage } from "../../src/overseer/render";
-import { safeInline } from "../../src/overseer/render-evidence";
+import { safeBlock, safeInline } from "../../src/overseer/render-evidence";
 import { prKey, type Annotation } from "../../src/overseer/types";
 import { GOLDEN_REPO } from "./fixtures/golden-review";
 import { goldenStoredDoc } from "./fixtures/stored-review";
@@ -173,7 +173,7 @@ describe("the delta itself", () => {
     expect(e.fields.length).toBe(1);
   });
 
-  test("a body rewritten past the density threshold is shown whole", () => {
+  test("a body gets one field-level Previous disclosure regardless of density", () => {
     const before = doc((d) => {
       d.statements[0]!.body = "one two three four five six seven eight nine ten";
     });
@@ -187,9 +187,9 @@ describe("the delta itself", () => {
     expect(field.priorWords.join(" ")).toContain("six seven eight");
   });
 
-  // The threshold itself, bracketed either side of 0.4 so the constant is what
-  // decides rather than some far-away score.
-  test("a body edited at the threshold stays in place, and one word more goes whole", () => {
+  // Density remains useful as a measurement, but cannot switch the page to a
+  // different visual grammar.
+  test("density does not change how prose diffs are disclosed", () => {
     const before = doc((d) => {
       d.statements[0]!.body = "one two three four five six seven eight nine ten";
     });
@@ -203,7 +203,7 @@ describe("the delta itself", () => {
       }),
     );
     expect(at.density).toBeCloseTo(0.4, 5);
-    expect(at.mode).toBe("words");
+    expect(at.mode).toBe("whole");
     // Three of ten, which is 0.6.
     const over = bodyField(
       doc((d) => {
@@ -214,7 +214,7 @@ describe("the delta itself", () => {
     expect(over.mode).toBe("whole");
   });
 
-  test("a light edit to the same body stays in place", () => {
+  test("a light prose edit uses the same field-level disclosure", () => {
     const before = doc((d) => {
       d.statements[0]!.body = "one two three four five six seven eight nine ten";
     });
@@ -224,7 +224,7 @@ describe("the delta itself", () => {
     const field = computeDelta(side(before), side(after)).entities[0]!.fields.find(
       (f) => f.field === "body",
     )!;
-    expect(field.mode).toBe("words");
+    expect(field.mode).toBe("whole");
     expect(field.density).toBeLessThan(0.4);
   });
 
@@ -310,11 +310,24 @@ describe("the delta itself", () => {
     expect(d.mode).toBe("whole");
     const out = markField(html, d, "st_x");
     expect(/class="dw/.test(out)).toBe(true);
-    // The insert lands in two pieces around the code span, so the prior words cannot
-    // ride along inside one mark: they come out on their own, and the whole prior
-    // line is readable from what the field drew.
-    expect(out).toContain(`<span class="dp dpb">${textOf(prior)}</span>`);
-    expect(out).toMatch(/<input type="checkbox" class="dtog"[^>]*aria-label="prior text"/);
+    // The insert lands in two pieces around the code span. The current words are
+    // marked in place and one labelled control opens the structured prior field.
+    expect(out).toContain('class="dprevious"');
+    expect(out).toContain("<span>Previous</span>");
+    expect(out).toContain(`class="dprior">${prior}</div>`);
+    expect(out).toMatch(/<input type="checkbox" class="dtog"[^>]*aria-label="previous text"/);
+  });
+
+  test("a prose diff labels its one control and marks only changed prior words", () => {
+    const prior = safeBlock("one two three four five six seven eight nine ten");
+    const html = safeBlock("one two three four five alpha beta gamma delta epsilon");
+    const d = diffField("body", false, prior, html)!;
+    const out = markField(html, d, "summary");
+    expect([...out.matchAll(/class="dprevious"/g)]).toHaveLength(1);
+    expect(out).toContain("<span>Previous</span>");
+    expect(out).toContain("<p>one two three four five ");
+    expect(out).toContain('<del class="dold">six seven eight nine ten</del>');
+    expect(out).not.toContain('<del class="dold">one two three four five');
   });
 
   test("a field past the word ceiling is republished whole rather than aligned", () => {
@@ -384,7 +397,7 @@ describe("the marks on the page", () => {
     expect(chips.length).toBeGreaterThan(3);
     for (const m of chips) {
       const unit = unitAround(html, m.index!);
-      const marked = /class="(dw|dp|dw dnew|dw dall|dw dxo|dp dpb|dp dpstub)/.test(unit);
+      const marked = /class="(dw|dp|dprevious|dprior|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit);
       expect(marked).toBe(true);
     }
     // The page says what it is measuring against.
@@ -413,7 +426,6 @@ describe("the marks on the page", () => {
     ["note check", (d) => { d.notes[0]!.checks = ["a check worded differently"]; }],
     ["note kind", (d) => { d.notes[0]!.kind = "note"; }],
     ["module title", (d) => { d.codeDesign!.modules[0]!.title = "The shared session boundary"; }],
-    ["module role", (d) => { d.codeDesign!.modules[0]!.role = "policy owner"; }],
     ["module body", (d) => { d.codeDesign!.modules[0]!.body = "The policy now has a revised responsibility split."; }],
     ["module paths", (d) => { d.codeDesign!.modules[0]!.paths.push("src/read.ts"); }],
     ["coverage title", (d) => { d.codeDesign!.coverage[0]!.title = "Every review read surface"; }],
@@ -435,7 +447,7 @@ describe("the marks on the page", () => {
       expect(chips.length).toBeGreaterThan(0);
       for (const m of chips) {
         const unit = unitAround(html, m.index!);
-        expect(/class="(dw|dp|dw dnew|dw dall|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
+        expect(/class="(dw|dp|dprevious|dprior|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
       }
     });
   }
@@ -487,7 +499,7 @@ describe("the marks on the page", () => {
     expect(chips.length).toBe(1);
     for (const m of chips) {
       const unit = unitAround(html, m.index!);
-      expect(/class="(dw|dp|dw dnew|dw dall|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
+      expect(/class="(dw|dp|dprevious|dprior|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
       // The prior description is in the page, behind its own disclosure.
       expect(unit).toContain(textOf(prBodyHtml(before.prs[0]!.body)).split(" ")[0]!);
     }
@@ -516,7 +528,7 @@ describe("the marks on the page", () => {
     const unit = unitAround(html, at + 20);
     expect(unit).toContain("beta check");
     expect(unit).toContain("gamma check");
-    expect(unit).toContain('class="dp dpb"');
+    expect(unit).toContain('class="dprior"');
     expect(unit).toContain('<span class="rev">revised</span>');
   });
 
@@ -604,10 +616,13 @@ describe("the marks on the page", () => {
     // The title stands on its own, so its prior words grow a control of their own.
     const head = html.slice(html.indexOf('<h1 class="title">'), html.indexOf("</h1>"));
     expect(head).toContain('class="dtog"');
-    expect(head).toContain('class="dp"');
-    // A whole prior block is hidden until its own checkbox is checked.
-    expect(html).toContain(".dp.dpb { margin-top");
-    expect(html).toContain(".dtog:checked + .dw + .dp.dpb { display: block; }");
+    expect(head).toContain('class="dprior dprior-inline"');
+    expect(head).toContain("<span>Previous</span>");
+    // A prior block is hidden until its labelled checkbox is checked.
+    expect(html).toContain(".dprior {");
+    expect(html).toContain(".dtog:checked + .dprevious + .dprior { display: block; }");
+    // Standalone and row-contained deletions share one redline treatment.
+    expect(html).toContain(".dold, .dp {");
     // The row reveal is scoped to the summary, so an open row does not print its
     // whole prior body.
     expect(html).toContain("details.row[open] > summary .dp");
@@ -625,7 +640,7 @@ describe("the marks on the page", () => {
     const html = page(after, before);
     const boxes = [...html.matchAll(/<input type="checkbox" class="dtog"[^>]*>/g)];
     expect(boxes.length).toBeGreaterThan(0);
-    for (const b of boxes) expect(b[0]).toContain('aria-label="prior text"');
+    for (const b of boxes) expect(b[0]).toContain('aria-label="previous text"');
   });
 
   test("a head that moved marks the card without claiming a word changed", () => {

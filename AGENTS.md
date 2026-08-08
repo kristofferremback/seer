@@ -18,5 +18,9 @@
   never use super-bold type merely to make a heading feel important.
 - Name only information the reader needs. Do not add labels such as "verified against
   the code" when that is already guaranteed by the product.
+- Give one concept one visual grammar. The same state or interaction must not use
+  different diff marks, controls, labels, or disclosure behavior elsewhere on the page.
+- Protect the primary label on mobile. Move citations, paths, metadata, and secondary
+  actions into the expanded body before allowing them to squeeze or wrap the title.
 - Read the rendered page once for meaning and once only for removable words. If deleting
   text preserves the meaning, delete it.

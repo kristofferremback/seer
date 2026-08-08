@@ -771,17 +771,19 @@ const STYLE = `  @font-face {
   .dmodule, .coverage-row { border: 1px solid hsl(var(--line)); background: hsl(var(--paper)); }
   .dmodule > summary, .coverage-row > summary {
     list-style: none; cursor: pointer; display: grid; align-items: start;
-    grid-template-columns: 14px minmax(0, 1fr) auto; column-gap: 9px; padding: 13px 14px;
+    grid-template-columns: 14px minmax(0, 1fr); column-gap: 9px; padding: 13px 14px;
   }
   .dmodule > summary::-webkit-details-marker, .coverage-row > summary::-webkit-details-marker { display: none; }
   .dmodule > summary .tick, .coverage-row > summary .tick { margin-top: 3px; }
   .dmodule-head { min-width: 0; }
   .dmodule-title, .coverage-title { display: block; font-size: 14px; font-weight: 500; color: hsl(var(--ink)); }
-  .dmodule-role { display: block; margin-top: 3px; font: 400 12px/1.3 var(--font-body); color: hsl(var(--muted)); }
+  .dmodule > summary .rrefs, .coverage-row > summary .rrefs { grid-column: 2; margin-top: 6px; }
   .dmodule-body, .coverage-body { padding: 0 14px 15px 37px; color: hsl(var(--ink-soft)); }
   .dmodule-body > p:first-child, .coverage-body > p:first-child { margin-top: 0; }
-  .dpaths { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0; }
-  .dpath { display: inline-block; padding: 4px 6px; border-radius: 3px; background: hsl(var(--paper-sunk)); font: 10.5px/1.2 var(--font-mono); color: hsl(var(--muted)); }
+  .dpaths { display: flex; flex-wrap: wrap; gap: 3px 8px; margin: 10px 0; }
+  .dpath { display: inline-block; font: 400 10.5px/1.35 var(--font-mono); color: hsl(var(--muted)); overflow-wrap: anywhere; }
+  .dpath + .dpath::before { content: "·"; margin-right: 8px; color: hsl(var(--line)); }
+  .design-refs { display: flex; flex-wrap: wrap; gap: 7px; margin: 10px 0; }
   .coverage-list { border-top: 1px solid hsl(var(--line)); }
   .coverage-row { border-width: 0 0 1px; }
   .design-heading {
@@ -1340,20 +1342,35 @@ const PAGE_SCRIPT = `
 })();
 `;
 
-/** The delta's own ink. Every prior-text reveal is a checkbox and a label, so the
- *  marks open with no script at all; the checkbox itself is never seen. */
+/** The delta's own ink. Current insertions stay in place; prose has one labelled
+ *  Previous disclosure whose unchanged words are neutral and whose deletions carry
+ *  the same redline everywhere on the page. The checkbox keeps it script-free. */
 const DELTA_STYLE = `
   .dtog { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
   .dw { border-radius: 3px; background: var(--word-add); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
   label.dw { cursor: pointer; padding: 0 2px; }
   .dw ins, ins.dw { text-decoration: none; }
   .dtick { width: 10px; height: 10px; margin-left: 3px; vertical-align: baseline; color: hsl(var(--muted)); fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; transition: transform 120ms ease; }
-  .dtog:checked + .dw .dtick, .dtog:checked + .dw.dxo .dtick, .dtog:checked + .dw.dall .dtick { transform: rotate(90deg); }
-  .dw.dxo, .dw.dall { background: none; color: hsl(var(--muted)); }
-  .dp { display: none; color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
+  .dtog:checked + .dw .dtick, .dtog:checked + .dw.dxo .dtick { transform: rotate(90deg); }
+  .dw.dxo { background: none; color: hsl(var(--muted)); }
+  .dprevious {
+    display: flex; align-items: center; gap: 6px; width: max-content; min-height: 40px;
+    margin: 1px 0 0; color: hsl(var(--muted)); cursor: pointer;
+    font: 400 12.5px/1.35 var(--font-body);
+  }
+  .dprevious .dtick { margin-left: 0; }
+  .dtog:checked + .dprevious .dtick { transform: rotate(90deg); }
+  .dprior {
+    display: none; margin: 0 0 10px; padding: 7px 0 7px 12px;
+    border-left: 1px solid hsl(var(--line)); color: hsl(var(--muted));
+  }
+  .dtog:checked + .dprevious + .dprior { display: block; }
+  .dprior.dprior-inline { margin-left: 8px; padding: 0 0 0 8px; }
+  .dtog:checked + .dprevious + .dprior-inline { display: inline; }
+  .dold, .dp { color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
+  .dp { display: none; }
   .dtog:checked + .dw + .dp { display: inline; }
   .dp.dpb { margin-top: 6px; padding: 6px 8px; text-decoration: none; }
-  .dtog:checked + .dw + .dp.dpb { display: block; }
   details.row[open] > summary .dp, details.note[open] > summary .dp, details.card[open] > summary .dp, details.grp[open] > summary .dp { display: inline; }
   .dgoneunit { opacity: 0.85; }
   .dgoneunit .dgone-body, .dgoneunit .grp-body, .dgoneunit .card-body { padding: 4px 0 8px; }
@@ -1817,10 +1834,10 @@ function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
     `<details class="dmodule" id="${escapeHtml(m.id)}">` +
     `<summary>${icon("chev", "tick")}<span class="dmodule-head">` +
     `<span class="dmodule-title">${marked(safeInline(m.title), d, "title", m.id)}</span>` +
-    `<span class="dmodule-role">${marked(safeInline(m.role), d, "role", m.id)}</span>` +
-    `</span><span class="rrefs">${chip(d)}${chips}</span></summary>` +
+    `</span><span class="rrefs">${chip(d)}</span></summary>` +
     `<div class="dmodule-body">${marked(safeBlock(m.body), d, "body", m.id)}` +
     `<div class="dpaths">${marked(designPathsHtml(m.paths), d, "paths", m.id)}</div>` +
+    (chips === "" ? "" : `<div class="design-refs">${chips}</div>`) +
     folds + `</div></details>`
   );
 }
@@ -1834,8 +1851,9 @@ function designCoverageBlock(c: DesignCoverage, ctx: RenderCtx): string {
     `<details class="coverage-row" id="${escapeHtml(c.id)}">` +
     `<summary>${icon("chev", "tick")}<span class="coverage-title">` +
     marked(safeInline(c.title), d, "title", c.id) +
-    `</span><span class="rrefs">${chip(d)}${chips}</span></summary>` +
+    `</span><span class="rrefs">${chip(d)}</span></summary>` +
     `<div class="coverage-body">${marked(safeBlock(c.body), d, "body", c.id)}` +
+    (chips === "" ? "" : `<div class="design-refs">${chips}</div>`) +
     folds + `</div></details>`
   );
 }

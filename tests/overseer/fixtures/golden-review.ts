@@ -454,7 +454,6 @@ export function goldenPayload(): PublishPayload {
         {
           id: "mod_gate",
           title: "The workspace session boundary",
-          role: "core policy",
           paths: ["src/auth.ts", "src/server.ts"],
           body:
             "`src/auth.ts` decides whether a request has a workspace session. `src/server.ts` adapts review requests into that decision before dispatching a route.",

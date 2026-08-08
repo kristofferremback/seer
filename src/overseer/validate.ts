@@ -110,7 +110,6 @@ export interface NoteInput {
 export interface DesignModuleInput {
   id: string;
   title: string;
-  role: string;
   paths: string[];
   body: string;
   refs: RefPointerInput[];
@@ -531,7 +530,7 @@ export function publishUsage(payload: PublishPayload, hunks: number): PublishUsa
   const designCoverage = design.coverage ?? [];
   const designProse =
     len(design.placement) +
-    sum(designModules.map((x) => len(x?.title) + len(x?.role) + len(x?.body) + sum((x?.paths ?? []).map(len)))) +
+    sum(designModules.map((x) => len(x?.title) + len(x?.body) + sum((x?.paths ?? []).map(len)))) +
     sum(designCoverage.map((x) => len(x?.title) + len(x?.body)));
   const bodies =
     len(payload.authorIntent) +
@@ -548,7 +547,7 @@ export function publishUsage(payload: PublishPayload, hunks: number): PublishUsa
     sum((payload.prs ?? []).map((p) => len(p?.gist) + len(p?.detail))) +
     sum(statements.map((x) => len(x?.text))) +
     sum(notes.map((x) => len(x?.text) + sum((x?.checks ?? []).map(len)))) +
-    sum(designModules.map((x) => len(x?.title) + len(x?.role) + sum((x?.paths ?? []).map(len)))) +
+    sum(designModules.map((x) => len(x?.title) + sum((x?.paths ?? []).map(len)))) +
     sum(designCoverage.map((x) => len(x?.title))) +
     sum(groups.map((x) => len(x?.title) + sum((x?.fileNotes ?? []).map((f) => len(f?.text)))));
   return {
@@ -909,10 +908,6 @@ export function validatePublish(
     if (required(errors, `${at}.title`, m.title)) {
       capText(errors, `${at}.title`, m.title, BUDGETS.chars.designModuleTitle);
       checkLine(errors, `${at}.title`, m.title);
-    }
-    if (required(errors, `${at}.role`, m.role)) {
-      capText(errors, `${at}.role`, m.role, BUDGETS.chars.designModuleRole);
-      checkLine(errors, `${at}.role`, m.role);
     }
     if (required(errors, `${at}.body`, m.body)) {
       capText(errors, `${at}.body`, m.body, BUDGETS.chars.designModuleBody);
