@@ -502,10 +502,11 @@ text, so a returning reader sees what is new and what was revised. An id reused 
 prior version must name an entity of the same type. You never write what changed about
 your own account.
 
-**The second pass.** `GET /api/reviews/:slug` with the same bearer token returns the
-current version and its annotations; `GET /api/reviews/:slug/v/:n` returns an earlier
-one. That is where the prior version and its open annotations come from. Both are
-published record.
+**The second pass.** `GET /api/reviews/:slug` with the same bearer token returns
+`{ document, version, latestVersion, ... }`; the authored and derived review fields are
+under `document`, and its annotations are `document.annotations`. `GET
+/api/reviews/:slug/v/:n` returns the same envelope for an earlier version. That is where
+the prior version and its open annotations come from. Both are published record.
 
 **Answering an annotation.** A signed-in member files a question. Only an API key for
 the review's workspace answers one, so answering is yours and no one else's:

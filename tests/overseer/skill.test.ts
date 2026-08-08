@@ -55,6 +55,8 @@ describe("overseer skill doc", () => {
   test("documents answering an annotation as the skill's own act", () => {
     expect(doc).toContain("POST /api/reviews/:slug/annotations");
     expect(doc).toContain("GET /api/reviews/:slug");
+    expect(doc).toContain("{ document, version, latestVersion, ... }");
+    expect(doc).toContain("document.annotations");
     expect(doc).toContain('"answer"');
   });
 
