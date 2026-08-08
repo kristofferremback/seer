@@ -34,6 +34,7 @@ import {
   chip,
   computeDelta,
   DeltaIndex,
+  designPathsHtml,
   evidenceFieldNames,
   marked,
   movedChip,
@@ -66,6 +67,8 @@ import {
 import {
   prKey,
   type Annotation,
+  type DesignCoverage,
+  type DesignModule,
   type Evidence,
   type Freshness,
   type Hunk,
@@ -374,6 +377,7 @@ const STYLE = `  @font-face {
   .k-change { color: hsl(var(--change)); }
   .k-remove { color: hsl(var(--remove)); }
   .k-keep { color: hsl(var(--muted)); }
+  .k-decision { color: hsl(var(--change)); }
   .k-risk { color: hsl(var(--risk)); }
   .k-note { color: hsl(var(--note)); }
 
@@ -571,13 +575,18 @@ const STYLE = `  @font-face {
   /* press feedback: tonal only, no lift */
   .note > summary:active,
   .row > summary:active,
+  .dmodule > summary:active,
+  .coverage-row > summary:active,
   .grp > summary:active,
   .frow > summary:active,
   .fold > summary:active { background-color: hsl(var(--ink) / 0.06); }
   @media (hover: hover) and (pointer: fine) {
-    .note > summary, .row > summary, .grp > summary, .frow > summary, .fold > summary { transition: background-color 150ms ease; }
+    .note > summary, .row > summary, .dmodule > summary, .coverage-row > summary,
+    .grp > summary, .frow > summary, .fold > summary { transition: background-color 150ms ease; }
     .note > summary:hover,
     .row > summary:hover,
+    .dmodule > summary:hover,
+    .coverage-row > summary:hover,
     .grp > summary:hover,
     .frow > summary:hover,
     .fold > summary:hover { background-color: hsl(var(--ink) / 0.035); }
@@ -588,6 +597,8 @@ const STYLE = `  @font-face {
     details[open] > .fold-body,
     details[open] > .note-body,
     details[open] > .row-body,
+    details[open] > .dmodule-body,
+    details[open] > .coverage-body,
     details[open] > .grp-body,
     details[open] > .frow-body { animation: unfold 200ms cubic-bezier(0.2, 0.9, 0.25, 1); }
   }
@@ -743,7 +754,38 @@ const STYLE = `  @font-face {
     .rrefs { margin-top: 1px; }
   }
 
-  /* ---- review notes ---- */
+  /* ---- provenance and code design ---- */
+  .account-label { margin: 14px 0 5px; font: 500 10.5px/1.25 var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; color: hsl(var(--muted)); }
+  .author-intent { border-left: 2px solid hsl(var(--line)); padding-left: 12px; color: hsl(var(--ink-soft)); }
+  .provenance { display: flex; flex-wrap: wrap; gap: 6px; margin: 15px 0 4px; }
+  .source-tag {
+    border: 1px solid hsl(var(--line)); border-radius: 3px; padding: 5px 7px;
+    font: 10.5px/1.2 var(--font-mono); color: hsl(var(--muted));
+  }
+  #design { margin-top: 38px; }
+  #design > h2 { margin-bottom: 7px; }
+  .placement { max-width: 760px; color: hsl(var(--ink-soft)); margin-bottom: 18px; }
+  .design-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .dmodule, .coverage-row { border: 1px solid hsl(var(--line)); background: hsl(var(--paper)); }
+  .dmodule > summary, .coverage-row > summary {
+    list-style: none; cursor: pointer; display: grid; align-items: start;
+    grid-template-columns: 14px minmax(0, 1fr) auto; column-gap: 9px; padding: 13px 14px;
+  }
+  .dmodule > summary::-webkit-details-marker, .coverage-row > summary::-webkit-details-marker { display: none; }
+  .dmodule > summary .tick, .coverage-row > summary .tick { margin-top: 3px; }
+  .dmodule-head { min-width: 0; }
+  .dmodule-title, .coverage-title { display: block; font-size: 14px; font-weight: 560; color: hsl(var(--ink)); }
+  .dmodule-role { display: block; margin-top: 3px; font: 10.5px/1.25 var(--font-mono); color: hsl(var(--muted)); text-transform: uppercase; letter-spacing: 0.04em; }
+  .dmodule-body, .coverage-body { padding: 0 14px 15px 37px; color: hsl(var(--ink-soft)); }
+  .dmodule-body > p:first-child, .coverage-body > p:first-child { margin-top: 0; }
+  .dpaths { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0; }
+  .dpath { display: inline-block; padding: 4px 6px; border-radius: 3px; background: hsl(var(--paper-sunk)); font: 10.5px/1.2 var(--font-mono); color: hsl(var(--muted)); }
+  .coverage-list { border-top: 1px solid hsl(var(--line)); }
+  .coverage-row { border-width: 0 0 1px; }
+  .design-subhead { margin: 25px 0 6px; font: 500 11px/1.3 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: hsl(var(--muted)); }
+  @media (max-width: 720px) { .design-grid { grid-template-columns: 1fr; } }
+
+  /* ---- review focus ---- */
   /* the h2's own rule is this list's top edge; a second one would stutter */
   #notes h2, #walkthrough h2 { margin-bottom: 2px; }
   .notes { border-top: 0; }
@@ -1133,6 +1175,9 @@ const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
   </symbol>
   <symbol id="i-keep" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <line x1="5" x2="19" y1="9" y2="9"/><line x1="5" x2="19" y1="15" y2="15"/>
+  </symbol>
+  <symbol id="i-decision" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m12 3 9 9-9 9-9-9z"/><path d="M9.7 9a2.5 2.5 0 0 1 4.8 1c0 1.7-2.5 2-2.5 3.5"/><path d="M12 17h.01"/>
   </symbol>
   <symbol id="i-risk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>
@@ -1528,7 +1573,7 @@ function prBody(ownerId: string, body: string, d: EntityDelta | null): string {
   if (inner === "") return "";
   return (
     `<details class="fold" id="${escapeHtml(ownerId)}-body">` +
-    `<summary>${icon("chev", "tick")}<span class="fh"><b>description</b></span></summary>` +
+    `<summary>${icon("chev", "tick")}<span class="fh"><b>author description</b></span></summary>` +
     `<div class="fold-body prbody-body">${inner}</div></details>`
   );
 }
@@ -1544,6 +1589,8 @@ function refsById(doc: ReviewDoc): Map<string, Ref> {
   };
   for (const s of doc.statements) take(s.refs, s.evidence);
   for (const n of doc.notes) take(n.refs, n.evidence);
+  for (const m of doc.codeDesign?.modules ?? []) take(m.refs, []);
+  for (const c of doc.codeDesign?.coverage ?? []) take(c.refs, []);
   return byId;
 }
 
@@ -1755,6 +1802,69 @@ function removedStub(e: EntityDelta, cls: string, headCls: string): string {
   );
 }
 
+function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
+  const refs = uniqueRefs(m.refs);
+  const chips = refChips(m.id, refs);
+  const folds = refs.map((r) => refFold(m.id, r)).join("");
+  const d = ctx.delta ? ctx.delta.get("module", m.id) : null;
+  return (
+    `<details class="dmodule" id="${escapeHtml(m.id)}">` +
+    `<summary>${icon("chev", "tick")}<span class="dmodule-head">` +
+    `<span class="dmodule-title">${marked(safeInline(m.title), d, "title", m.id)}</span>` +
+    `<span class="dmodule-role">${marked(safeInline(m.role), d, "role", m.id)}</span>` +
+    `</span><span class="rrefs">${chip(d)}${chips}</span></summary>` +
+    `<div class="dmodule-body">${marked(safeBlock(m.body), d, "body", m.id)}` +
+    `<div class="dpaths">${marked(designPathsHtml(m.paths), d, "paths", m.id)}</div>` +
+    folds + `</div></details>`
+  );
+}
+
+function designCoverageBlock(c: DesignCoverage, ctx: RenderCtx): string {
+  const refs = uniqueRefs(c.refs);
+  const chips = refChips(c.id, refs);
+  const folds = refs.map((r) => refFold(c.id, r)).join("");
+  const d = ctx.delta ? ctx.delta.get("coverage", c.id) : null;
+  return (
+    `<details class="coverage-row" id="${escapeHtml(c.id)}">` +
+    `<summary>${icon("chev", "tick")}<span class="coverage-title">` +
+    marked(safeInline(c.title), d, "title", c.id) +
+    `</span><span class="rrefs">${chip(d)}${chips}</span></summary>` +
+    `<div class="coverage-body">${marked(safeBlock(c.body), d, "body", c.id)}` +
+    folds + `</div></details>`
+  );
+}
+
+function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
+  const design = doc.codeDesign ?? { placement: "", modules: [], coverage: [] };
+  const d = ctx.delta ? ctx.delta.get("design", "design") : null;
+  const removedModules = ctx.delta?.removed("module") ?? [];
+  const removedCoverage = ctx.delta?.removed("coverage") ?? [];
+  const hasContent =
+    design.placement.trim() !== "" ||
+    design.modules.length > 0 ||
+    design.coverage.length > 0 ||
+    removedModules.length > 0 ||
+    removedCoverage.length > 0 ||
+    d !== null;
+  if (!hasContent) return "";
+  const modules =
+    design.modules.map((m) => designModuleBlock(m, ctx)).join("") +
+    removedModules.map((e) => removedStub(e, "dmodule", "dmodule-title")).join("");
+  const coverage =
+    design.coverage.map((c) => designCoverageBlock(c, ctx)).join("") +
+    removedCoverage.map((e) => removedStub(e, "coverage-row", "coverage-title")).join("");
+  const placement = marked(safeBlock(design.placement), d, "placement", "design");
+  return (
+    `<section id="design"><h2>Code design</h2>` +
+    (placement === "" ? "" : `<div class="placement">${placement}</div>`) +
+    (modules === "" ? "" : `<div class="design-grid">${modules}</div>`) +
+    (coverage === ""
+      ? ""
+      : `<h3 class="design-subhead">Sprawl check</h3><div class="coverage-list">${coverage}</div>`) +
+    `</section>\n`
+  );
+}
+
 function noteRow(n: Note, ctx: RenderCtx): string {
   const refs = uniqueRefs(n.refs);
   const chips = refChips(n.id, refs);
@@ -1939,12 +2049,13 @@ function questionsSection(
   return `<section id="questions"><h2>Questions</h2>${blocks}${form}</section>\n`;
 }
 
-/** Risks first, then notes, each keeping the order it was authored in. A risk is the
- *  thing a reader would miss, so it does not wait behind an observation. */
+/** Decisions first, then risks, then observations. The page exists to put a human
+ *  in a position to judge, so an explicit decision is the first review focus. */
 function notesInOrder(notes: Note[]): Note[] {
   return [
+    ...notes.filter((n) => n.kind === "decision"),
     ...notes.filter((n) => n.kind === "risk"),
-    ...notes.filter((n) => n.kind !== "risk"),
+    ...notes.filter((n) => n.kind === "note"),
   ];
 }
 
@@ -1977,7 +2088,7 @@ export interface TimelineEntry {
   revised: number;
   added: number;
   removed: number;
-  /** The unchipped fields that moved, named: "title", "summary", or both. They carry
+  /** The unchipped fields that moved, such as title, author intent or summary. They carry
    *  marks rather than a chip, and the menu says so rather than saying nothing. */
   restated: string[];
   codeMoved: boolean;
@@ -2115,6 +2226,7 @@ export function renderReviewPage(input: RenderInput): string {
     annotations: byTarget,
   };
   const review = delta ? delta.get("review", "review") : null;
+  const intentDelta = delta ? delta.get("intent", "intent") : null;
   const summaryDelta = delta ? delta.get("summary", "summary") : null;
 
   const behind = doc.prs.filter(
@@ -2152,6 +2264,21 @@ export function renderReviewPage(input: RenderInput): string {
           .join("")
       : "");
   // The page says what it is measuring against, once, next to what it is.
+  const hasCodeDesign = (() => {
+    const d = doc.codeDesign;
+    const current =
+      !!d && (d.placement.trim() !== "" || d.modules.length > 0 || d.coverage.length > 0);
+    const historical =
+      !!delta &&
+      (delta.get("design", "design") !== null ||
+        delta.removed("module").length > 0 ||
+        delta.removed("coverage").length > 0);
+    return current || historical;
+  })();
+  const designLink = hasCodeDesign
+    ? `<span class="nb"><a href="#design">code design</a> ·</span> `
+    : "";
+
   const baseMark =
     input.baseVersion == null
       ? ""
@@ -2196,15 +2323,25 @@ export function renderReviewPage(input: RenderInput): string {
     // request links before the prose, which is the order they are wanted in.
     `<div class="lede">` +
     chain(doc, ctx) +
-    `<section id="summary"><h2>Summary</h2>` +
+    `<section id="summary"><h2>Overview</h2>` +
+    (doc.authorIntent == null || doc.authorIntent.trim() === ""
+      ? ""
+      : `<p class="account-label">Author intent · from pull request descriptions</p>` +
+        `<div class="author-intent">${marked(safeBlock(doc.authorIntent), intentDelta, "authorIntent", "intent")}</div>` +
+        `<p class="account-label">Witness account · verified against the code</p>`) +
     `${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary")}` +
     questionsHere(ctx, "summary", "summary") +
+    `<p class="provenance"><span class="source-tag">author record · pull request descriptions</span>` +
+    `<span class="source-tag">witness account · overview and implementation</span>` +
+    `<span class="source-tag">judgment · yours</span></p>` +
     `<div class="rows">${rows}</div>` +
-    `<p class="contents"><span class="nb"><a href="#summary">summary</a> ·</span> ` +
-    `<span class="nb"><a href="#notes">review notes</a> ·</span> ` +
-    `<span class="nb"><a href="#walkthrough">walkthrough</a></span></p>` +
+    `<p class="contents"><span class="nb"><a href="#summary">overview</a> ·</span> ` +
+    designLink +
+    `<span class="nb"><a href="#notes">review focus</a> ·</span> ` +
+    `<span class="nb"><a href="#walkthrough">implementation walkthrough</a></span></p>` +
     `</section></div>\n` +
-    `<section id="notes"><h2>Review notes</h2><div class="notes">${notes}</div></section>\n` +
+    codeDesignSection(doc, ctx) +
+    `<section id="notes"><h2>Review focus</h2><div class="notes">${notes}</div></section>\n` +
     walkthroughSection(doc, delta, (type, id) => questionsHere(ctx, type, id)) +
     `\n` +
     questionsSection(input, annotations, ctx.basePath) +

@@ -44,6 +44,8 @@ describe("overseer skill doc", () => {
     expect(doc).toContain("{ id, repo, number, gist, detail, detailRef, parent }");
     expect(doc).toContain("{ id, kind, text, prs[], refs[], body, evidence[] }");
     expect(doc).toContain("{ id, kind, text, body, checks[], refs[], evidence[] }");
+    expect(doc).toContain("{ placement, modules[], coverage[] }");
+    expect(doc).toContain("{ id, title, role, paths[], body, refs[] }");
     expect(doc).toContain("{ id, title, significance, paragraph, hunks[], fileNotes[] }");
     // Every list is required, sent as [] when unused: the doc must not call one optional.
     expect(doc).toContain("Every list field in the");
@@ -77,14 +79,30 @@ describe("overseer skill doc", () => {
     expect(doc).toContain("decomposition");
   });
 
+  test("separates attributed intent, the witness account, and implementation", () => {
+    expect(doc).toContain("The overview gives the forest. The walkthrough");
+    expect(doc).toContain("`authorIntent` paraphrases only the problem");
+    expect(doc).toContain("The summary is the witness account");
+    expect(doc).toContain("For a stack, combine them into the net intent");
+    expect(doc).toContain("control flow, data flow, state transition or");
+    expect(doc).toContain("perform a sprawl check");
+    expect(doc).toContain("module that owns the policy or state");
+    expect(doc).toContain("Use plain technical English.");
+  });
+
   test("names the graded failure modes", () => {
     expect(doc).toContain("assurance-filed-as-risk");
     expect(doc).toContain("label-prose");
+    expect(doc).toContain("stack-as-changelog");
+    expect(doc).toContain("walkthrough-as-inventory");
+    expect(doc).toContain("sprawl-without-an-owner");
+    expect(doc).toContain("intent-substitution");
     expect(doc).toContain("unclaimed-churn-hidden-in-a-big-group");
-    expect(doc).toContain("summary-buries-intent");
+    expect(doc).toContain("summary-buries-result");
   });
 
   test("covers the publish contract", () => {
+    expect(doc).toContain("{ slug, title, authorIntent, summary");
     expect(doc).toContain("POST /api/reviews");
     expect(doc).toContain("multipart/form-data");
     expect(doc).toContain("document");

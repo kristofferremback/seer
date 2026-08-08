@@ -113,21 +113,60 @@ describe("the page itself", () => {
     expect(stripped).toContain("data-theme-toggle hidden");
   });
 
-  test("risks precede notes whatever order they were published in", () => {
+  test("the page names the forest, design, focus, and implementation layers", () => {
+    const html = page(doc());
+    expect(html).toContain('<section id="summary"><h2>Overview</h2>');
+    expect(html).toContain('<section id="design"><h2>Code design</h2>');
+    expect(html).toContain('<section id="notes"><h2>Review focus</h2>');
+    expect(html).toContain('<section id="walkthrough"><h2>Implementation walkthrough</h2>');
+    expect(html).toContain('<a href="#summary">overview</a>');
+    expect(html).toContain('<a href="#design">code design</a>');
+    expect(html).toContain("Author intent · from pull request descriptions");
+    expect(html).toContain("Witness account · verified against the code");
+    expect(html).toContain(doc().authorIntent!);
+    expect(html).toContain("author record · pull request descriptions");
+    expect(html).toContain("witness account · overview and implementation");
+  });
+
+  test("code design renders responsibility areas, paths, coverage, and refs", () => {
+    const html = page(doc());
+    expect(html).toContain('class="dmodule" id="mod_gate"');
+    expect(html).toContain("The workspace session boundary");
+    expect(html).toContain("core policy");
+    expect(html).toContain('<span class="dpath">src/auth.ts</span>');
+    expect(html).toContain('class="coverage-row" id="cov_review_routes"');
+    expect(html).toContain("Sprawl check");
+    expect(html).toContain('href="#mod_gate-ref_mod_gate"');
+  });
+
+  test("a document published before the new overview fields still renders", () => {
+    const legacy = doc();
+    delete legacy.codeDesign;
+    delete legacy.authorIntent;
+    const html = page(legacy);
+    expect(html).not.toContain('<section id="design"');
+    expect(html).not.toContain('<a href="#design">');
+    expect(html).not.toContain("Author intent · from pull request descriptions");
+    expect(html).toContain("Reviews carry private source");
+  });
+
+  test("decisions precede risks and notes whatever order they were published in", () => {
     const html = page(
       doc({
         notes: [
           note({ id: "no_one", kind: "note", text: "An observation" }),
           note({ id: "no_two", kind: "risk", text: "A risk" }),
+          note({ id: "no_five", kind: "decision", text: "A decision" }),
           note({ id: "no_three", kind: "note", text: "Another observation" }),
           note({ id: "no_four", kind: "risk", text: "A second risk" }),
         ],
       }),
     );
-    const order = [...html.matchAll(/<details class="note is-(risk|note)" id="(no_[a-z]+)"/g)].map(
+    const order = [...html.matchAll(/<details class="note is-(decision|risk|note)" id="(no_[a-z]+)"/g)].map(
       (m) => [m[1], m[2]],
     );
     expect(order).toEqual([
+      ["decision", "no_five"],
       ["risk", "no_two"],
       ["risk", "no_four"],
       ["note", "no_one"],

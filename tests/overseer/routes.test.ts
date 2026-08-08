@@ -255,6 +255,7 @@ describe("POST /api/reviews", () => {
     expect(stored.doc.id).toMatch(/^rev_/);
     expect(stored.doc.kind).toBe("stack");
     expect(stored.doc.title).toBe(goldenPayload().title);
+    expect(stored.doc.authorIntent).toBe(goldenPayload().authorIntent);
   });
 
   test("the stored document carries the derived halves the renderer needs", async () => {
@@ -274,6 +275,11 @@ describe("POST /api/reviews", () => {
       .flatMap((s) => s.refs)
       .find((r) => r.path === "src/session.ts")!;
     expect(outside.origin).toBe("outside");
+    // Code design is stored as responsibility and coverage claims with resolved refs.
+    expect(doc.codeDesign?.placement).toBe(goldenPayload().codeDesign.placement);
+    expect(doc.codeDesign?.modules[0]?.paths).toEqual(["src/auth.ts", "src/server.ts"]);
+    expect(doc.codeDesign?.modules[0]?.refs[0]?.snippet).toContain("src/auth.ts line 40");
+    expect(doc.codeDesign?.coverage[0]?.refs[0]?.path).toBe("src/server.ts");
     // Pull request facts and marks are derived.
     const pr12 = doc.prs.find((p) => p.number === 12)!;
     expect(pr12.title).toBe(PULLS[12]!.title);

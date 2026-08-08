@@ -19,10 +19,12 @@ Overseer derives from the GitHub API and the skill may not author:
 
 The skill authors and Overseer may not invent:
 
-- the summary
-- statements: what changed, of what kind, and why it matters
-- notes: what is easy to miss
-- the walkthrough: how the change decomposes, in what order, and what each file is doing there
+- author intent: what the pull request descriptions say the problem and reason are
+- the summary: what the witness verifies, its implication and the high-level solution
+- statements: the behavior, contract or architectural consequences to judge
+- review focus: decisions the human must make and things easy to miss
+- code design: policy/state ownership, responsibility areas and conceptual path coverage
+- the walkthrough: how the implementation works, decomposed in reading order
 - which refs to attach to which claim
 
 This split is the single most load-bearing decision in the model. In the prototype the agent authored line numbers by hand and drifted three separate times: a ref labelled `L38-49` rendered 38 to 47, two hunks in one file overlapped, and a hunk claimed a base range that its own PR had already rewritten. None of those are possible once the numbers come from the diff instead of from a language model.
@@ -38,10 +40,12 @@ review
   version         derived: int, incremented on each publish to the same slug
   title           authored, <= 80 chars
   kind            derived: single | stack | set
-  summary         authored, <= 2 paragraphs, <= 600 chars, constrained markdown
+  author_intent   authored paraphrase of PR descriptions, <= 2 paragraphs, <= 600 chars
+  summary         authored witness account, <= 2 paragraphs, <= 600 chars, constrained markdown
   prs[]           1..n
   statements[]    3..6
   notes[]         0..6
+  code_design     authored: placement, modules, conceptual coverage
   groups[]        2..8
   annotations[]   0..n, written after publication
   created_at, updated_at
@@ -50,7 +54,7 @@ review
 
 `kind` is derived, not declared: one pull request is `single`, several where each is the base of the next is `stack`, anything else is `set`. The renderer draws the same chain either way; the difference is only whether the chain has edges or is a list.
 
-`summary` opens with intent. A reader who stops after the first sentence should know what the change is for; mechanism comes after. The first rendering of this very document buried its own purpose and read, for a moment, as if the tool were the reviewer. That is the failure this rule exists to prevent, and the skill gets graded on it.
+`author_intent` and `summary` are the forest with provenance kept visible. `author_intent` paraphrases only the problem and reason stated in the pull request descriptions. `summary` is the witness's independent account of what the code accomplishes, its important implication and high-level mechanism. A mismatch between them is a finding, not something the witness silently resolves by replacing the author's account. For a stack both describe the completed feature, fix or implementation, not the pull requests in sequence. File names, test counts and minor edge cases stay out. The first rendering of this very document buried its own purpose and read, for a moment, as if the tool were the reviewer. That is the failure this split exists to prevent, and the skill gets graded on it.
 
 ### PullRequest
 
@@ -74,7 +78,7 @@ pr
 
 `kinds[]` is derived on purpose. The marks on a pull request card are then provably tied to real claims, instead of being a second thing the skill can get out of step with the first.
 
-Every pull request in the review is realized by at least one statement. A pull request that warrants no statement warrants a question, namely why it is in the review at all. Its `gist` and `detail` are already mandatory; this closes the other gap, a card the overview never mentions.
+Every pull request in the review is realized by at least one statement. A pull request that warrants no statement warrants a question, namely why it is in the review at all. Its `gist` names the part of the whole change that this pull request contributes. Its `detail` gives the reason for that slice and its high-level mechanism, rather than repeating the GitHub title or listing files. Both are mandatory; this closes the other gap, a card the overview never mentions.
 
 `author` and `co_authors[]` are how attribution survives: agent-written changes already announce themselves through Co-Authored-By trailers, so who wrote what, human or agent, is a derivable fact and Overseer derives it. `body` is the description the author actually published, rendered behind a disclosure on the card so it is available without being re-summarized. Review comments and threads are also derived and handed to the skill as context, but rendering them is deferred, see the end of this document.
 
@@ -93,7 +97,7 @@ statement
   evidence[]  ordered: ref | payload | figure | example | attachment | bundle
 ```
 
-`body` is prose, and it is where the reader opts in. It should cover why the change exists, what it does, and how it is built. Those are areas to cover, never labels to print. The prototype tried printing them as labels and it read as a form.
+`body` is prose, and it is where the reader opts in. It explains why the change exists, its important implication, and the high-level mechanism. Low-level control flow belongs in the walkthrough. These are areas to cover, never labels to print. The prototype tried printing them as labels and it read as a form.
 
 Constraint: every statement carries at least one ref. A claim with nothing behind it does not belong on the page.
 
@@ -101,12 +105,12 @@ The prototype also had a fourth kind, `keep`, for stating what a change delibera
 
 ### Note
 
-Only things a reviewer would otherwise miss. Contract changes and data flow are not notes, they are statements: they are the change itself. The prototype had them as notes and the ordering made risks look more important than the contract, which was backwards.
+Only things a reviewer would otherwise miss or must personally judge. Contract changes and data flow are not notes, they are statements: they are the change itself. The prototype had them as notes and the ordering made risks look more important than the contract, which was backwards. A `decision` is drawn before risks and observations because the reader's judgment is the purpose of the page.
 
 ```
 note
   id
-  kind      risk | note
+  kind      decision | risk | note
   text      authored, <= 140 chars
   body      authored, <= 1600 chars, constrained markdown
   checks[]  0..5 ordered strings, each <= 120 chars
@@ -114,9 +118,32 @@ note
   evidence[]
 ```
 
-Render order is fixed: risks first, then notes, authored order within each. The renderer decides this, not the payload.
+Render order is fixed: decisions first, then risks, then notes, authored order within each. The renderer decides this, not the payload.
 
-Constraint: a note of kind `risk` must carry either a non-empty `checks[]` or at least one ref into a changed hunk. A risk has to point at something falsifiable. This exists because a reviewer agent in the prototype filed "tokens carry 75 random bits, lookup is one primary-key hit" as a risk, when it is an assurance. The constraint would not have caught that one, but it raises the cost of filing a vague risk, and `checks[]` is the field that makes a real risk actionable.
+Constraint: a note of kind `risk` must carry either a non-empty `checks[]` or at least one ref into a changed hunk. A risk has to point at something falsifiable. This exists because a reviewer agent in the prototype filed "tokens carry 75 random bits, lookup is one primary-key hit" as a risk, when it is an assurance. The constraint would not have caught that one, but it raises the cost of filing a vague risk, and `checks[]` is the field that makes a real risk actionable. A `decision` carries a check or ref showing what the reader should inspect; a free-floating philosophical question is not review focus.
+
+### CodeDesign
+
+The account of where the change lives in the code and whether every conceptual path reaches it. It is authored judgment, not a second file list.
+
+```
+code_design
+  placement       authored, <= 800 chars; central policy/state owner and why
+  modules[]       0..6 responsibility areas
+    id
+    title         <= 60 chars
+    role          <= 40 chars
+    paths[]       concrete paths, each <= 180 chars
+    body          <= 800 chars
+    refs[]        at least one
+  coverage[]      0..8 conceptual paths
+    id
+    title         <= 80 chars
+    body          <= 600 chars
+    refs[]        at least one
+```
+
+`modules[]` distinguishes the policy or state owner from entry adapters, consumers and presentation. `coverage[]` is the sprawl check: fresh reads, cached reads, asynchronous work, repair and other distinct paths the feature must cover. Every entry is ref-backed. The object and its lists are always present in a new publish, but may be empty for a change with no useful code-design judgment; avoiding dead prose wins over filling the section.
 
 ### Group
 
@@ -140,6 +167,8 @@ The known cost of float ordering is precision decay after many insertions in the
 There are no rules for what counts as significant beyond a convention that behavior outranks mechanism outranks tests outranks chore, and that is deliberate: the judgment is the product.
 
 The walkthrough is a partition of the diff, not a selection from it. Every hunk in every pull request belongs to exactly one group, and a hunk left unclaimed is a 422 naming the path and range. Nothing can be left out of the account by being left out of the walkthrough: mechanical churn does not escape, it gets grouped as the chore it is and ranked last, which costs the skill one line and buys the reader a guarantee, that absence on the page means absence in the diff.
+
+The group paragraph is technical documentation of that part of the implementation. It explains the control flow, data flow, state transition or responsibility split that makes the hunks one mechanism. Exact functions, types, routes and values belong here when they clarify the explanation. A file note names that file's specific role. Across groups, the walkthrough identifies the module that owns the central policy or state, the entry points that adapt into it, and the read surfaces that consume it. Cross-cutting changes account for every distinct path that must participate, so a reader can judge both placement and missing sprawl. A file or symbol inventory is not an explanation; the rows under the paragraph already provide the inventory.
 
 ### Hunk
 
@@ -253,13 +282,13 @@ annotation
 
 ## Authored text is constrained markdown
 
-`summary`, statement and note bodies, and group paragraphs accept a fixed subset: emphasis, inline code, links, lists, and fenced code. Headings, tables, raw HTML, and inline images are rejected with a 422 naming the construct, not silently stripped. Structure belongs to the schema, and images are attachments, which are first class evidence rather than inline decoration. One-line fields (`text`, `gist`, `title`, captions, checks) stay plain: no markup at all except inline code.
+`author_intent`, `summary`, design placement and bodies, statement and note bodies, and group paragraphs accept a fixed subset: emphasis, inline code, links, lists, and fenced code. Headings, tables, raw HTML, and inline images are rejected with a 422 naming the construct, not silently stripped. Structure belongs to the schema, and images are attachments, which are first class evidence rather than inline decoration. One-line fields (`text`, `gist`, `title`, captions, checks) stay plain: no markup at all except inline code.
 
 ## Budgets are the schema, not a guideline
 
 Every cap above is enforced on write and returns a 422 naming the field and the overage. A prompt asking for brevity is advice; a schema that refuses a seventh statement is a design.
 
-The counts for a single pull request: 3 to 6 statements, at most 6 notes, 2 to 8 groups, and hard caps on every one-line field. The prototype settled at 5 statements, 5 notes and 6 groups for a three-pull-request stack, comfortably inside even this budget, which is the right density for a phone screen.
+The counts for a single pull request: 3 to 6 statements, at most 6 review-focus notes, at most 6 design modules, at most 8 coverage paths, 2 to 8 groups, and hard caps on every one-line field. The prototype settled at 5 statements, 5 notes and 6 groups for a three-pull-request stack, comfortably inside even this budget, which is the right density for a phone screen.
 
 Breadth scales with decomposition, not with diff size. Each additional pull request in the review adds 2 to the statement ceiling and 4 to the group ceiling, to absolute ceilings of 12 and 16. Notes stay at 6 regardless: things a reviewer would miss do not multiply with size. Line count is deliberately not the scaler, because 8,000 lines of codegen deserve a smaller review than 800 lines of auth rewrite. The pull request is the unit the author controls, and it is an honest proxy for how many independent judgments the change contains, which is what a review actually scales with. Depth needs no scaling because it is unbounded already: a group can hold five hundred hunks and a statement can stack all the evidence it needs. The top of the page staying one screen is not the review being small, it is the review being sorted.
 
@@ -275,6 +304,8 @@ A monolithic pull request that exhausts its budget is not an error, and the writ
 - caps
 - every statement has at least one ref
 - a `risk` note has checks or a ref into a changed hunk
+- a `decision` has a check or ref showing what to judge
+- every design module and coverage path has a ref; module paths are concrete
 - every pull request and every ref in one review names the same repo, until multi-repo is actually built
 - markdown outside the allowed subset is a 422 naming the construct
 - every attachment is referenced by some `evidence[]`, carries a required `alt`, and is `image/*`
@@ -295,7 +326,7 @@ POST  /api/reviews/:slug/annotations
 
 A review is authored in one shot. The skill reads the pull requests, forms its view, and publishes a whole document with its attachments; it does not build one up over many calls. Annotations are the only thing written afterward.
 
-One shot does not mean one pass. Publishing to an existing slug creates the next version, exactly as uploading a bundle does in Seer, and prior versions stay readable at `/r/:slug/v/:n`. This is how reviewing happens in passes: the branch moves, the skill publishes again, and the reader comes back to the same link. On a second pass the skill is given the prior version and the open annotations, which is published record, not private context, and it keeps the ids of statements, notes and groups whose claims survive. The renderer derives the delta between any two versions from those ids and the text, so a returning reader sees what is new, what was revised, and what was answered, as marks on the rows rather than as a changelog to read. Derived, never authored: the skill does not get to say what changed about its own account.
+One shot does not mean one pass. Publishing to an existing slug creates the next version, exactly as uploading a bundle does in Seer, and prior versions stay readable at `/r/:slug/v/:n`. This is how reviewing happens in passes: the branch moves, the skill publishes again, and the reader comes back to the same link. On a second pass the skill is given the prior version and the open annotations, which is published record, not private context, and it keeps the ids of statements, notes, design modules, coverage paths and groups whose claims survive. The renderer derives the delta between any two versions from those ids and the text, so a returning reader sees what is new, what was revised, and what was answered, as marks on the rows rather than as a changelog to read. Derived, never authored: the skill does not get to say what changed about its own account.
 
 Annotations belong to the review, not to a version, and each records the version it was filed against, so a question asked on pass one is still open on pass three and its quote still resolves against the version that produced it.
 
@@ -307,7 +338,7 @@ The renderer gives every review a revision menu: the versions as a timeline, eac
 
 The same machinery covers derived text. A pull request description that changed between passes is word-diffed like any authored body, which is how "the agent improved the description" stops meaning "read all 600 words again."
 
-How the delta renders is part of the design, not a renderer whim. Changed text is highlighted in place at word level, the way a diff colors a line, and the prior text is one tap away, anchored to the span it replaced: opened in place on a phone, on hover or click at a desk. A revised section announces itself where it changed, never in a legend somewhere else. Removed rows render as collapsed stubs in the delta view, openable to their full former content. The summary is not exempt: it is authored text like any body, and it diffs like one. The page states which base version its marks are measured against, and row-level marks exist only as the sum of their spans, so a mark can never claim a change the text does not show.
+How the delta renders is part of the design, not a renderer whim. Changed text is highlighted in place at word level, the way a diff colors a line, and the prior text is one tap away, anchored to the span it replaced: opened in place on a phone, on hover or click at a desk. A revised section announces itself where it changed, never in a legend somewhere else. Removed rows render as collapsed stubs in the delta view, openable to their full former content. Author intent, the witness summary and code design are not exempt: authored text diffs wherever it appears. The page states which base version its marks are measured against, and row-level marks exist only as the sum of their spans, so a mark can never claim a change the text does not show.
 
 Viewing is the refresh trigger. Opening `/r/:slug` compares the stored head SHAs against GitHub, rate limited to once a minute per review, and kicks an asynchronous re-derivation when a head has moved. The page renders the stored document immediately and updates its freshness marks when the refresh lands, over the same live channel Seer already uses for bundles. `POST /api/reviews/:slug/refresh` stays for explicit calls, but nothing depends on remembering to make one: a review someone is looking at cannot silently claim `current` while the branch moves underneath it, because looking at it is what checks.
 
@@ -331,4 +362,4 @@ Seer bundles are public by link, because a bundle is something you want to hand 
 
 ## Open questions
 
-None outstanding. The next decision is where the skill lives and what its instructions are, which is a separate document.
+None outstanding in the document model. Witness instructions live separately in `skill.md`.
