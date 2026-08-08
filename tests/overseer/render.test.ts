@@ -121,11 +121,14 @@ describe("the page itself", () => {
     expect(html).toContain('<section id="walkthrough"><h2>Implementation walkthrough</h2>');
     expect(html).toContain('<a href="#summary">overview</a>');
     expect(html).toContain('<a href="#design">code design</a>');
-    expect(html).toContain("Author intent · from pull request descriptions");
-    expect(html).toContain("Witness account · verified against the code");
+    expect(html).toContain('<p class="account-title"><svg class="account-icon"');
+    expect(html).toContain("<span>Author intent</span>");
+    expect(html).toContain("<span>Witness account</span>");
     expect(html).toContain(doc().authorIntent!);
-    expect(html).toContain("author record · pull request descriptions");
-    expect(html).toContain("witness account · overview and implementation");
+    expect(html).not.toContain("from pull request descriptions");
+    expect(html).not.toContain("verified against the code");
+    expect(html).not.toContain('class="provenance"');
+    expect(html).not.toContain('class="source-tag"');
   });
 
   test("code design renders responsibility areas, paths, coverage, and refs", () => {
@@ -135,7 +138,8 @@ describe("the page itself", () => {
     expect(html).toContain("core policy");
     expect(html).toContain('<span class="dpath">src/auth.ts</span>');
     expect(html).toContain('class="coverage-row" id="cov_review_routes"');
-    expect(html).toContain("Sprawl check");
+    expect(html).toContain('<h3 class="design-heading">');
+    expect(html).toContain("<span>Coverage</span>");
     expect(html).toContain('href="#mod_gate-ref_mod_gate"');
   });
 
@@ -146,7 +150,7 @@ describe("the page itself", () => {
     const html = page(legacy);
     expect(html).not.toContain('<section id="design"');
     expect(html).not.toContain('<a href="#design">');
-    expect(html).not.toContain("Author intent · from pull request descriptions");
+    expect(html).not.toContain("<span>Author intent</span>");
     expect(html).toContain("Reviews carry private source");
   });
 

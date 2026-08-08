@@ -4,6 +4,8 @@ globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
 alwaysApply: false
 ---
 
+@AGENTS.md
+
 ## Publishing previews to the deployed Seer
 
 This repo is Seer's source, and a production instance runs at **https://seer.build**. Use it to share anything with the user that reads better rendered than pasted — plans, design mockups, diagrams, reports. The user's Claude artifacts do not render for them; Seer is the replacement. (Voice-transcribed messages sometimes garble "seer" as "CR".)

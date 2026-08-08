@@ -447,7 +447,7 @@ describe("the marks on the page", () => {
     });
     const html = page(after, before);
     const overview = html.slice(html.indexOf('<section id="summary"'), html.indexOf('<div class="rows">'));
-    expect(overview).toContain("Author intent · from pull request descriptions");
+    expect(overview).toContain("<span>Author intent</span>");
     expect(overview).toContain('class="dw');
     expect(computeDelta(side(before), side(after)).entities.some((e) => e.kind === "intent")).toBe(true);
   });

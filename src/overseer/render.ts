@@ -451,7 +451,7 @@ const STYLE = `  @font-face {
   .title {
     margin-top: 15px;
     font-family: var(--font-body);
-    font-weight: 600;
+    font-weight: 550;
     font-size: 21px;
     line-height: 1.28;
     letter-spacing: -0.012em;
@@ -489,7 +489,7 @@ const STYLE = `  @font-face {
   section { margin-top: 30px; scroll-margin-top: 20px; }
   h2 {
     font-family: var(--font-body);
-    font-weight: 600;
+    font-weight: 550;
     font-size: 15px;
     line-height: 1.4;
     color: hsl(var(--ink));
@@ -754,14 +754,16 @@ const STYLE = `  @font-face {
     .rrefs { margin-top: 1px; }
   }
 
-  /* ---- provenance and code design ---- */
-  .account-label { margin: 14px 0 5px; font: 500 10.5px/1.25 var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; color: hsl(var(--muted)); }
-  .author-intent { border-left: 2px solid hsl(var(--line)); padding-left: 12px; color: hsl(var(--ink-soft)); }
-  .provenance { display: flex; flex-wrap: wrap; gap: 6px; margin: 15px 0 4px; }
-  .source-tag {
-    border: 1px solid hsl(var(--line)); border-radius: 3px; padding: 5px 7px;
-    font: 10.5px/1.2 var(--font-mono); color: hsl(var(--muted));
+  /* ---- the two accounts and code design ---- */
+  .account { margin-top: 17px; }
+  .account-title {
+    display: flex; align-items: center; gap: 7px; margin: 0 0 7px;
+    font-family: var(--font-body); font-size: 13px; font-weight: 500;
+    line-height: 1.35; color: hsl(var(--muted));
   }
+  .account-icon { display: block; flex: none; width: 14px; height: 14px; stroke-width: 1.7; }
+  .author-intent { border-left: 2px solid hsl(var(--line)); padding-left: 12px; color: hsl(var(--ink-soft)); }
+  .witness-account { color: hsl(var(--ink)); }
   #design { margin-top: 38px; }
   #design > h2 { margin-bottom: 7px; }
   .placement { max-width: 760px; color: hsl(var(--ink-soft)); margin-bottom: 18px; }
@@ -774,15 +776,19 @@ const STYLE = `  @font-face {
   .dmodule > summary::-webkit-details-marker, .coverage-row > summary::-webkit-details-marker { display: none; }
   .dmodule > summary .tick, .coverage-row > summary .tick { margin-top: 3px; }
   .dmodule-head { min-width: 0; }
-  .dmodule-title, .coverage-title { display: block; font-size: 14px; font-weight: 560; color: hsl(var(--ink)); }
-  .dmodule-role { display: block; margin-top: 3px; font: 10.5px/1.25 var(--font-mono); color: hsl(var(--muted)); text-transform: uppercase; letter-spacing: 0.04em; }
+  .dmodule-title, .coverage-title { display: block; font-size: 14px; font-weight: 500; color: hsl(var(--ink)); }
+  .dmodule-role { display: block; margin-top: 3px; font: 400 12px/1.3 var(--font-body); color: hsl(var(--muted)); }
   .dmodule-body, .coverage-body { padding: 0 14px 15px 37px; color: hsl(var(--ink-soft)); }
   .dmodule-body > p:first-child, .coverage-body > p:first-child { margin-top: 0; }
   .dpaths { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0; }
   .dpath { display: inline-block; padding: 4px 6px; border-radius: 3px; background: hsl(var(--paper-sunk)); font: 10.5px/1.2 var(--font-mono); color: hsl(var(--muted)); }
   .coverage-list { border-top: 1px solid hsl(var(--line)); }
   .coverage-row { border-width: 0 0 1px; }
-  .design-subhead { margin: 25px 0 6px; font: 500 11px/1.3 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: hsl(var(--muted)); }
+  .design-heading {
+    display: flex; align-items: center; gap: 7px; margin: 25px 0 7px;
+    font: 500 14px/1.35 var(--font-body); color: hsl(var(--ink-soft));
+  }
+  .design-heading .ic { color: hsl(var(--muted)); }
   @media (max-width: 720px) { .design-grid { grid-template-columns: 1fr; } }
 
   /* ---- review focus ---- */
@@ -1365,7 +1371,7 @@ const DELTA_STYLE = `
   .revlist { margin: 8px 0 0; padding: 0; list-style: none; border-top: 1px solid hsl(var(--line)); }
   .rv { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; padding: 5px 0; border-bottom: 1px solid hsl(var(--line)); font-size: 12.5px; color: hsl(var(--muted)); }
   .rv-n { font-family: var(--font-mono); color: hsl(var(--ink-soft)); }
-  .rv.is-here .rv-n { font-weight: 600; color: hsl(var(--ink)); }
+  .rv.is-here .rv-n { font-weight: 500; color: hsl(var(--ink)); }
   .rv.is-base { background: hsl(var(--paper-sunk)); }
   .rv-from { margin-left: auto; }
 `;
@@ -1393,9 +1399,9 @@ const SHARE_STYLE = `
     background: hsl(var(--paper-sunk));
   }
   .sharebox[hidden] { display: none; }
-  .sharebox .eyebrow {
-    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em;
-    text-transform: uppercase; color: hsl(var(--muted)); margin: 0 0 8px;
+  .sharebox .share-title {
+    font-family: var(--font-body); font-size: 13.5px; font-weight: 500;
+    color: hsl(var(--ink-soft)); margin: 0 0 8px;
   }
   .sharebox p { margin: 0; font-size: 13.5px; color: hsl(var(--muted)); }
   .share-list { list-style: none; margin: 0 0 10px; padding: 0; }
@@ -1538,7 +1544,7 @@ function sharePanel(canShare: boolean): string {
   if (!canShare) return "";
   return (
     `<div class="sharebox" data-sharebox hidden>` +
-    `<p class="eyebrow">Share this review</p>` +
+    `<p class="share-title">Share this review</p>` +
     `<ul class="share-list" data-share-list></ul>` +
     `<p data-share-empty>No link opens this review yet.</p>` +
     `<div class="share-fresh" data-share-fresh hidden>` +
@@ -1860,7 +1866,8 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
     (modules === "" ? "" : `<div class="design-grid">${modules}</div>`) +
     (coverage === ""
       ? ""
-      : `<h3 class="design-subhead">Sprawl check</h3><div class="coverage-list">${coverage}</div>`) +
+      : `<h3 class="design-heading">${icon("branch")}<span>Coverage</span></h3>` +
+        `<div class="coverage-list">${coverage}</div>`) +
     `</section>\n`
   );
 }
@@ -2326,14 +2333,15 @@ export function renderReviewPage(input: RenderInput): string {
     `<section id="summary"><h2>Overview</h2>` +
     (doc.authorIntent == null || doc.authorIntent.trim() === ""
       ? ""
-      : `<p class="account-label">Author intent · from pull request descriptions</p>` +
+      : `<div class="account"><p class="account-title">${icon("pr", "account-icon")}` +
+        `<span>Author intent</span></p>` +
         `<div class="author-intent">${marked(safeBlock(doc.authorIntent), intentDelta, "authorIntent", "intent")}</div>` +
-        `<p class="account-label">Witness account · verified against the code</p>`) +
-    `${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary")}` +
+        `</div>`) +
+    `<div class="account"><p class="account-title">${icon("eye", "account-icon")}` +
+    `<span>Witness account</span></p>` +
+    `<div class="witness-account">${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary")}</div>` +
+    `</div>` +
     questionsHere(ctx, "summary", "summary") +
-    `<p class="provenance"><span class="source-tag">author record · pull request descriptions</span>` +
-    `<span class="source-tag">witness account · overview and implementation</span>` +
-    `<span class="source-tag">judgment · yours</span></p>` +
     `<div class="rows">${rows}</div>` +
     `<p class="contents"><span class="nb"><a href="#summary">overview</a> ·</span> ` +
     designLink +
