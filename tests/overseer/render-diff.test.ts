@@ -225,7 +225,7 @@ describe("the walkthrough", () => {
     expect(section).not.toContain("<button");
     expect(section).not.toContain("<script");
     // The contents row points at it.
-    expect(html).toContain('<a href="#walkthrough">walkthrough</a>');
+    expect(html).toContain('<a href="#walkthrough">implementation walkthrough</a>');
   });
 
   test("a group naming a hunk the document has no facts for draws the rest", () => {

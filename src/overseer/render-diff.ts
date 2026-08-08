@@ -516,7 +516,7 @@ export function walkthroughSection(
         .join("")
     : "";
   return (
-    `<section id="walkthrough"><h2>Walkthrough</h2>` +
+    `<section id="walkthrough"><h2>Implementation walkthrough</h2>` +
     unaccountedBlock(doc.unaccounted ?? []) +
     `<div class="walk">${groups}${removed}</div></section>`
   );

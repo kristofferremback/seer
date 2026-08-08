@@ -41,6 +41,9 @@ import {
 } from "./validate";
 import {
   prKey,
+  type CodeDesign,
+  type DesignCoverage,
+  type DesignModule,
   type Evidence,
   type Group,
   type Hunk,
@@ -219,6 +222,16 @@ function pointerSites(payload: PublishPayload): { field: string; pointer: RefPoi
   payload.notes.forEach((n, i) => {
     n.refs.forEach((r, j) => sites.push({ field: `notes[${i}].refs[${j}]`, pointer: r }));
     evidenceSites(`notes[${i}]`, n.evidence);
+  });
+  payload.codeDesign.modules.forEach((m, i) => {
+    m.refs.forEach((r, j) =>
+      sites.push({ field: `codeDesign.modules[${i}].refs[${j}]`, pointer: r }),
+    );
+  });
+  payload.codeDesign.coverage.forEach((c, i) => {
+    c.refs.forEach((r, j) =>
+      sites.push({ field: `codeDesign.coverage[${i}].refs[${j}]`, pointer: r }),
+    );
   });
   return sites;
 }
@@ -519,6 +532,26 @@ function buildDocument(args: {
     evidence: resolveEvidence(n.evidence, refs, attachments),
   }));
 
+  const designModules: DesignModule[] = payload.codeDesign.modules.map((m) => ({
+    id: m.id,
+    title: m.title,
+    role: m.role,
+    paths: m.paths,
+    body: m.body,
+    refs: m.refs.map((r) => refs.get(pointerKey(r))!),
+  }));
+  const designCoverage: DesignCoverage[] = payload.codeDesign.coverage.map((c) => ({
+    id: c.id,
+    title: c.title,
+    body: c.body,
+    refs: c.refs.map((r) => refs.get(pointerKey(r))!),
+  }));
+  const codeDesign: CodeDesign = {
+    placement: payload.codeDesign.placement,
+    modules: designModules,
+    coverage: designCoverage,
+  };
+
   const groups: Group[] = payload.groups.map((g) => ({
     id: g.id,
     title: g.title,
@@ -541,6 +574,7 @@ function buildDocument(args: {
 
   return {
     title: payload.title,
+    authorIntent: payload.authorIntent,
     kind: review.kind,
     // The authored handle travels with the minted id: the next publish to this slug
     // reads it back as the prior version's attachment ids, which is what keeps the
@@ -560,6 +594,7 @@ function buildDocument(args: {
     prs,
     statements,
     notes,
+    codeDesign,
     groups,
     hunks,
     skillContext: review.skillContext,
@@ -690,13 +725,14 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   const priorVersion = existing ? getReviewVersion(ws, slug, existing.latest_version) : null;
   // The prior document as the validator reads it. Attachments are mapped back to the
   // handles the prior publish authored, because those are the ids this payload's
-  // statements, notes and groups share a namespace with; the minted `att_` ids are
+  // statements, notes, design entities and groups share a namespace with; the minted `att_` ids are
   // Overseer's own and no payload ever names them.
   const priorDoc = priorVersion ? priorVersion.doc : null;
   const prior: PriorDoc | null = priorDoc
     ? {
         statements: priorDoc.statements,
         notes: priorDoc.notes,
+        codeDesign: priorDoc.codeDesign,
         groups: priorDoc.groups,
         attachments: (priorDoc.attachments ?? []).map((a) => ({ id: a.authoredId })),
       }

@@ -107,6 +107,28 @@ export interface NoteInput {
   evidence: EvidenceInput[];
 }
 
+export interface DesignModuleInput {
+  id: string;
+  title: string;
+  role: string;
+  paths: string[];
+  body: string;
+  refs: RefPointerInput[];
+}
+
+export interface DesignCoverageInput {
+  id: string;
+  title: string;
+  body: string;
+  refs: RefPointerInput[];
+}
+
+export interface CodeDesignInput {
+  placement: string;
+  modules: DesignModuleInput[];
+  coverage: DesignCoverageInput[];
+}
+
 export interface GroupInput {
   id: string;
   title: string;
@@ -127,10 +149,12 @@ export interface AttachmentInput {
 /** The whole document the skill publishes, in one shot. */
 export interface PublishPayload {
   title: string;
+  authorIntent: string;
   summary: string;
   prs: PrInput[];
   statements: StatementInput[];
   notes: NoteInput[];
+  codeDesign: CodeDesignInput;
   groups: GroupInput[];
   attachments: AttachmentInput[];
 }
@@ -145,6 +169,10 @@ export interface DerivedFacts {
 export interface PriorDoc {
   statements: { id: string }[];
   notes: { id: string }[];
+  codeDesign?: {
+    modules?: { id: string }[];
+    coverage?: { id: string }[];
+  };
   groups: { id: string }[];
   /** Attachments share the id namespace within a version, so they share it across
    *  versions too: an id that named an attachment cannot come back as a statement. */
@@ -430,8 +458,24 @@ function normalizeLists(errors: ValidationError[], input: PublishPayload): Publi
   const notes = requireList(errors, "notes", payload.notes);
   const groups = requireList(errors, "groups", payload.groups);
   const attachments = requireList(errors, "attachments", payload.attachments);
+  const hasCodeDesign = requireObject(errors, "codeDesign", payload.codeDesign);
+  const codeDesign = hasCodeDesign ? asRecord(payload.codeDesign) : ({} as CodeDesignInput);
+  const designModules = requireList(errors, "codeDesign.modules", codeDesign.modules);
+  const designCoverage = requireList(errors, "codeDesign.coverage", codeDesign.coverage);
   return {
     ...payload,
+    codeDesign: {
+      ...codeDesign,
+      modules: designModules.map((m, i) => ({
+        ...asRecord(m),
+        paths: requireList(errors, `codeDesign.modules[${i}].paths`, m?.paths),
+        refs: requireList(errors, `codeDesign.modules[${i}].refs`, m?.refs),
+      })),
+      coverage: designCoverage.map((c, i) => ({
+        ...asRecord(c),
+        refs: requireList(errors, `codeDesign.coverage[${i}].refs`, c?.refs),
+      })),
+    },
     prs: prs.map(asRecord),
     statements: statements.map((s, i) => ({
       ...asRecord(s),
@@ -468,6 +512,7 @@ export interface PublishUsage {
   statements: { used: number; min: number; max: number };
   notes: { used: number; min: number; max: number };
   groups: { used: number; min: number; max: number };
+  design: { modules: number; coverage: number; prose: number };
   hunks: number;
   /** Every authored character on the page, which is the number the skill calibrates
    *  against, plus the prose-only subset so the two readings never have to be guessed. */
@@ -481,8 +526,19 @@ export function publishUsage(payload: PublishPayload, hunks: number): PublishUsa
   const statements = payload.statements ?? [];
   const notes = payload.notes ?? [];
   const groups = payload.groups ?? [];
+  const design = payload.codeDesign ?? { placement: "", modules: [], coverage: [] };
+  const designModules = design.modules ?? [];
+  const designCoverage = design.coverage ?? [];
+  const designProse =
+    len(design.placement) +
+    sum(designModules.map((x) => len(x?.title) + len(x?.role) + len(x?.body) + sum((x?.paths ?? []).map(len)))) +
+    sum(designCoverage.map((x) => len(x?.title) + len(x?.body)));
   const bodies =
+    len(payload.authorIntent) +
     len(payload.summary) +
+    len(design.placement) +
+    sum(designModules.map((x) => len(x?.body))) +
+    sum(designCoverage.map((x) => len(x?.body))) +
     sum(statements.map((x) => len(x?.body))) +
     sum(notes.map((x) => len(x?.body))) +
     sum(groups.map((x) => len(x?.paragraph)));
@@ -492,11 +548,14 @@ export function publishUsage(payload: PublishPayload, hunks: number): PublishUsa
     sum((payload.prs ?? []).map((p) => len(p?.gist) + len(p?.detail))) +
     sum(statements.map((x) => len(x?.text))) +
     sum(notes.map((x) => len(x?.text) + sum((x?.checks ?? []).map(len)))) +
+    sum(designModules.map((x) => len(x?.title) + len(x?.role) + sum((x?.paths ?? []).map(len)))) +
+    sum(designCoverage.map((x) => len(x?.title))) +
     sum(groups.map((x) => len(x?.title) + sum((x?.fileNotes ?? []).map((f) => len(f?.text)))));
   return {
     statements: { used: statements.length, min: BUDGETS.statements.min, max: maxStatements(prCount) },
     notes: { used: notes.length, min: BUDGETS.notes.min, max: maxNotes() },
     groups: { used: groups.length, min: BUDGETS.groups.min, max: maxGroups(prCount) },
+    design: { modules: designModules.length, coverage: designCoverage.length, prose: designProse },
     hunks,
     prose: { total, bodies, perPr: Math.round(total / prCount) },
   };
@@ -566,6 +625,21 @@ export function validatePublish(
   if (required(errors, "title", payload.title)) {
     capText(errors, "title", payload.title, BUDGETS.chars.reviewTitle);
     checkLine(errors, "title", payload.title);
+  }
+
+  const hasAuthorIntent = required(errors, "authorIntent", payload.authorIntent);
+  if (hasAuthorIntent) {
+    capText(errors, "authorIntent", payload.authorIntent, BUDGETS.chars.authorIntent);
+    checkBody(errors, "authorIntent", payload.authorIntent);
+  }
+  const intentParagraphs = hasAuthorIntent ? paragraphsOf(payload.authorIntent) : 0;
+  if (intentParagraphs > BUDGETS.paragraphs.authorIntent) {
+    errors.push({
+      field: "authorIntent",
+      rule: "cap_paragraphs",
+      message: `authorIntent is ${intentParagraphs} paragraphs, the cap is ${BUDGETS.paragraphs.authorIntent}`,
+      overage: intentParagraphs - BUDGETS.paragraphs.authorIntent,
+    });
   }
 
   const hasSummary = required(errors, "summary", payload.summary);
@@ -774,9 +848,9 @@ export function validatePublish(
     // "a risk note has checks or a ref into a changed hunk": a risk has to point at
     // something falsifiable. Any ref backing the note counts, whether it sits in refs[]
     // or in evidence[] as a ref: both are the note's pointers into the code.
+    const hasChecks = n.checks.some((c) => typeof c === "string" && c.trim() !== "");
+    const evidenceRefs = n.evidence.flatMap((e) => (e.type === "ref" ? [e.ref] : []));
     if (n.kind === "risk") {
-      const hasChecks = n.checks.some((c) => typeof c === "string" && c.trim() !== "");
-      const evidenceRefs = n.evidence.flatMap((e) => (e.type === "ref" ? [e.ref] : []));
       const pointsAtChange = [...n.refs, ...evidenceRefs].some((r) =>
         refTouchesChange(r, changedRefKeys),
       );
@@ -788,6 +862,13 @@ export function validatePublish(
         });
       }
     }
+    if (n.kind === "decision" && !hasChecks && n.refs.length === 0 && evidenceRefs.length === 0) {
+      errors.push({
+        field: at,
+        rule: "decision_unanchored",
+        message: `${at} is a decision with neither a check nor a ref showing what the reader should judge`,
+      });
+    }
 
     checkEvidence(
       errors,
@@ -798,6 +879,90 @@ export function validatePublish(
       referencedAttachments,
       bundleExists,
     );
+  });
+
+  // ---- code design: placement, responsibility areas, and conceptual coverage ----
+
+  const design = payload.codeDesign;
+  const hasDesign = design.modules.length > 0 || design.coverage.length > 0;
+  if (hasDesign) {
+    if (required(errors, "codeDesign.placement", design.placement)) {
+      capText(errors, "codeDesign.placement", design.placement, BUDGETS.chars.designPlacement);
+      checkBody(errors, "codeDesign.placement", design.placement);
+    }
+  } else if (typeof design.placement === "string" && design.placement.trim() !== "") {
+    capText(errors, "codeDesign.placement", design.placement, BUDGETS.chars.designPlacement);
+    checkBody(errors, "codeDesign.placement", design.placement);
+  } else if (typeof design.placement !== "string") {
+    isText(errors, "codeDesign.placement", design.placement);
+  }
+
+  capCount(
+    errors,
+    "codeDesign.modules",
+    design.modules.length,
+    BUDGETS.designModules.max,
+    "modules",
+  );
+  design.modules.forEach((m, i) => {
+    const at = `codeDesign.modules[${i}]`;
+    if (required(errors, `${at}.title`, m.title)) {
+      capText(errors, `${at}.title`, m.title, BUDGETS.chars.designModuleTitle);
+      checkLine(errors, `${at}.title`, m.title);
+    }
+    if (required(errors, `${at}.role`, m.role)) {
+      capText(errors, `${at}.role`, m.role, BUDGETS.chars.designModuleRole);
+      checkLine(errors, `${at}.role`, m.role);
+    }
+    if (required(errors, `${at}.body`, m.body)) {
+      capText(errors, `${at}.body`, m.body, BUDGETS.chars.designModuleBody);
+      checkBody(errors, `${at}.body`, m.body);
+    }
+    if (m.paths.length === 0) {
+      errors.push({
+        field: `${at}.paths`,
+        rule: "design_module_empty",
+        message: `${at} names no path; a module is a responsibility area in concrete code`,
+      });
+    }
+    m.paths.forEach((path, j) =>
+      checkPath(errors, `${at}.paths[${j}]`, path, BUDGETS.chars.designPath),
+    );
+    if (m.refs.length === 0) {
+      errors.push({
+        field: `${at}.refs`,
+        rule: "design_module_unreferenced",
+        message: `${at} has no ref backing its placement claim`,
+      });
+    }
+    m.refs.forEach((r, j) => checkRef(errors, `${at}.refs[${j}]`, r, homeRepo));
+  });
+
+  capCount(
+    errors,
+    "codeDesign.coverage",
+    design.coverage.length,
+    BUDGETS.designCoverage.max,
+    "paths",
+  );
+  design.coverage.forEach((c, i) => {
+    const at = `codeDesign.coverage[${i}]`;
+    if (required(errors, `${at}.title`, c.title)) {
+      capText(errors, `${at}.title`, c.title, BUDGETS.chars.designCoverageTitle);
+      checkLine(errors, `${at}.title`, c.title);
+    }
+    if (required(errors, `${at}.body`, c.body)) {
+      capText(errors, `${at}.body`, c.body, BUDGETS.chars.designCoverageBody);
+      checkBody(errors, `${at}.body`, c.body);
+    }
+    if (c.refs.length === 0) {
+      errors.push({
+        field: `${at}.refs`,
+        rule: "design_coverage_unreferenced",
+        message: `${at} has no ref backing its coverage claim`,
+      });
+    }
+    c.refs.forEach((r, j) => checkRef(errors, `${at}.refs[${j}]`, r, homeRepo));
   });
 
   // ---- groups, and the partition of the diff ----
@@ -949,6 +1114,8 @@ export function validatePublish(
     // reuses no ids: this rule reports nothing rather than crashing on it.
     for (const s of prior.statements ?? []) typeOfPriorId.set(s.id, "statement");
     for (const n of prior.notes ?? []) typeOfPriorId.set(n.id, "note");
+    for (const m of prior.codeDesign?.modules ?? []) typeOfPriorId.set(m.id, "module");
+    for (const c of prior.codeDesign?.coverage ?? []) typeOfPriorId.set(c.id, "coverage");
     for (const g of prior.groups ?? []) typeOfPriorId.set(g.id, "group");
     for (const a of prior.attachments ?? []) typeOfPriorId.set(a.id, "attachment");
     const check = (id: string, kind: string, field: string) => {
@@ -963,6 +1130,12 @@ export function validatePublish(
     };
     payload.statements.forEach((s, i) => check(s.id, "statement", `statements[${i}].id`));
     payload.notes.forEach((n, i) => check(n.id, "note", `notes[${i}].id`));
+    payload.codeDesign.modules.forEach((m, i) =>
+      check(m.id, "module", `codeDesign.modules[${i}].id`),
+    );
+    payload.codeDesign.coverage.forEach((c, i) =>
+      check(c.id, "coverage", `codeDesign.coverage[${i}].id`),
+    );
     payload.groups.forEach((g, i) => check(g.id, "group", `groups[${i}].id`));
     payload.attachments.forEach((a, i) => check(a.id, "attachment", `attachments[${i}].id`));
   }
@@ -988,6 +1161,12 @@ export function validatePublish(
   };
   payload.statements.forEach((s, i) => claimId(s.id, "statement", `statements[${i}].id`));
   payload.notes.forEach((n, i) => claimId(n.id, "note", `notes[${i}].id`));
+  payload.codeDesign.modules.forEach((m, i) =>
+    claimId(m.id, "module", `codeDesign.modules[${i}].id`),
+  );
+  payload.codeDesign.coverage.forEach((c, i) =>
+    claimId(c.id, "coverage", `codeDesign.coverage[${i}].id`),
+  );
   payload.groups.forEach((g, i) => claimId(g.id, "group", `groups[${i}].id`));
   // Attachments share the namespace: two attachments under one id would let a single
   // evidence reference mark both as referenced, and an unreferenced upload would ship.

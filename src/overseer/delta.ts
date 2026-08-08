@@ -9,9 +9,10 @@
 // WHAT IS DIFFED
 //
 // Every authored field, plus the one derived prose field the page shows whole:
-// the review title and summary, a statement's line and body, a note's line,
-// body and checks, a group's title and paragraph, a pull request's gist and
-// detail, and the pull request description GitHub holds. Authorship also reaches
+// the review title, attributed author intent and summary, code-design placement,
+// module and coverage prose, a statement's line and body, a note's line, body and
+// checks, a group's title and paragraph, a pull request's gist and detail, and the
+// pull request description GitHub holds. Authorship also reaches
 // into evidence, and it is diffed there too: an example's code and caption, an
 // attachment's alt text and caption, a bundle's caption, and a figure's node and
 // edge labels. Snippets, hunks, payload sides and every other quoted thing are
@@ -72,7 +73,17 @@ export const DENSE = 0.4;
  *  republished whole, which is what a reader of a rewritten essay wants anyway. */
 export const MAX_DIFF_WORDS = 2000;
 
-export type DeltaEntityKind = "review" | "summary" | "statement" | "note" | "group" | "pr";
+export type DeltaEntityKind =
+  | "review"
+  | "intent"
+  | "summary"
+  | "design"
+  | "module"
+  | "coverage"
+  | "statement"
+  | "note"
+  | "group"
+  | "pr";
 export type DeltaStatus = "new" | "revised" | "removed";
 
 /** A run of base words replaced by a run of current words. Indices are word
@@ -374,6 +385,23 @@ function statementFields(s: ReviewDoc["statements"][number]): FieldSpec[] {
   ];
 }
 
+export function designPathsHtml(paths: string[]): string {
+  return paths.map((p) => `<span class="dpath">${escapeHtml(p)}</span>`).join(" ");
+}
+
+function moduleFields(m: NonNullable<ReviewDoc["codeDesign"]>["modules"][number]): FieldSpec[] {
+  return [
+    spec("title", true, safeInline(m.title)),
+    spec("role", true, safeInline(m.role)),
+    spec("body", false, safeBlock(m.body)),
+    spec("paths", false, designPathsHtml(m.paths)),
+  ];
+}
+
+function coverageFields(c: NonNullable<ReviewDoc["codeDesign"]>["coverage"][number]): FieldSpec[] {
+  return [spec("title", true, safeInline(c.title)), spec("body", false, safeBlock(c.body))];
+}
+
 function noteFields(n: ReviewDoc["notes"][number]): FieldSpec[] {
   return [
     spec("text", true, safeInline(n.text)),
@@ -582,6 +610,15 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
   );
   if (title) entities.push(title);
 
+  const intent = compare(
+    "intent",
+    "intent",
+    [spec("authorIntent", false, safeBlock(prev.doc.authorIntent ?? ""))],
+    [spec("authorIntent", false, safeBlock(cur.doc.authorIntent ?? ""))],
+    false,
+  );
+  if (intent) entities.push(intent);
+
   // The summary is a body like any other body, and it is diffed like one.
   const summary = compare(
     "summary",
@@ -609,6 +646,18 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
   for (const [key, pr] of priorPrs) if (!nowPrs.has(key)) entities.push(gone("pr", key, prFields(pr)));
 
   walk("statement", prev.doc.statements, cur.doc.statements, statementFields, entities);
+  const priorDesign = prev.doc.codeDesign ?? { placement: "", modules: [], coverage: [] };
+  const currentDesign = cur.doc.codeDesign ?? { placement: "", modules: [], coverage: [] };
+  const placement = compare(
+    "design",
+    "design",
+    [spec("placement", false, safeBlock(priorDesign.placement))],
+    [spec("placement", false, safeBlock(currentDesign.placement))],
+    false,
+  );
+  if (placement) entities.push(placement);
+  walk("module", priorDesign.modules, currentDesign.modules, moduleFields, entities);
+  walk("coverage", priorDesign.coverage, currentDesign.coverage, coverageFields, entities);
   walk("note", prev.doc.notes, cur.doc.notes, noteFields, entities);
   const hunksOf = (doc: ReviewDoc) =>
     new Map(doc.hunks.map((h, i) => [h.id, { path: h.path, at: i }] as const));
@@ -671,9 +720,18 @@ export class DeltaIndex {
     // be a denial the page contradicts, so they are named rather than counted.
     const restated: string[] = [];
     for (const e of this.delta.entities) {
-      const chips = e.kind !== "review" && e.kind !== "summary";
+      const chips =
+        e.kind !== "review" && e.kind !== "intent" && e.kind !== "summary" && e.kind !== "design";
       if (!chips && e.status === "revised" && e.fields.length > 0) {
-        restated.push(e.kind === "review" ? "title" : "summary");
+        restated.push(
+          e.kind === "review"
+            ? "title"
+            : e.kind === "intent"
+              ? "author intent"
+              : e.kind === "summary"
+                ? "summary"
+                : "code design",
+        );
       }
       // A pull request whose only movement is its head sha is code moved, not
       // revised: nothing it says on the page changed.
@@ -684,8 +742,9 @@ export class DeltaIndex {
       else removed++;
       if (e.codeMoved) codeMoved++;
     }
-    // Title before summary, always, so two renders of one pair agree.
-    restated.sort((a, b) => (a === b ? 0 : a === "title" ? -1 : 1));
+    // Title, author intent, summary, code design, always.
+    const order = ["title", "author intent", "summary", "code design"];
+    restated.sort((a, b) => order.indexOf(a) - order.indexOf(b));
     return { revised, added, removed, codeMoved, restated };
   }
 }

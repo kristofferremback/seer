@@ -412,6 +412,12 @@ describe("the marks on the page", () => {
     ["note body", (d) => { d.notes[0]!.body = "A body the note now carries."; }],
     ["note check", (d) => { d.notes[0]!.checks = ["a check worded differently"]; }],
     ["note kind", (d) => { d.notes[0]!.kind = "note"; }],
+    ["module title", (d) => { d.codeDesign!.modules[0]!.title = "The shared session boundary"; }],
+    ["module role", (d) => { d.codeDesign!.modules[0]!.role = "policy owner"; }],
+    ["module body", (d) => { d.codeDesign!.modules[0]!.body = "The policy now has a revised responsibility split."; }],
+    ["module paths", (d) => { d.codeDesign!.modules[0]!.paths.push("src/read.ts"); }],
+    ["coverage title", (d) => { d.codeDesign!.coverage[0]!.title = "Every review read surface"; }],
+    ["coverage body", (d) => { d.codeDesign!.coverage[0]!.body = "Every read surface reaches the shared boundary."; }],
     ["group title", (d) => { d.groups[0]!.title = "The session gate"; }],
     ["group paragraph", (d) => { d.groups[0]!.paragraph = "A paragraph the group now carries."; }],
     ["group kind", (d) => { d.groups[0]!.kind = "remove"; }],
@@ -433,6 +439,42 @@ describe("the marks on the page", () => {
       }
     });
   }
+
+  test("a revised author-intent account is marked separately from the witness summary", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.authorIntent += " The author also names the private-source boundary.";
+    });
+    const html = page(after, before);
+    const overview = html.slice(html.indexOf('<section id="summary"'), html.indexOf('<div class="rows">'));
+    expect(overview).toContain("Author intent · from pull request descriptions");
+    expect(overview).toContain('class="dw');
+    expect(computeDelta(side(before), side(after)).entities.some((e) => e.kind === "intent")).toBe(true);
+  });
+
+  test("a revised placement is marked and named in the revision menu", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.codeDesign!.placement += " The renderer stays downstream of the decision.";
+    });
+    const html = page(after, before);
+    const design = html.slice(html.indexOf('<section id="design"'), html.indexOf('<section id="notes"'));
+    expect(design).toContain('class="dw');
+    expect(computeDelta(side(before), side(after)).entities.some((e) => e.kind === "design")).toBe(true);
+  });
+
+  test("a removed design remains reachable in the delta view", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.codeDesign = { placement: "", modules: [], coverage: [] };
+    });
+    const html = page(after, before);
+    const design = html.slice(html.indexOf('<section id="design"'), html.indexOf('<section id="notes"'));
+    expect(html).toContain('<a href="#design">code design</a>');
+    expect(design).toContain("Code design");
+    expect(design).toContain("The workspace session boundary");
+    expect(design).toContain("Every review read route");
+  });
 
   test("a chip on a card whose description was emptied still has a mark under it", () => {
     const before = doc();

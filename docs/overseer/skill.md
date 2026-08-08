@@ -38,29 +38,80 @@ readable on its own.", "One hunk, easy to skim past.", "worth holding in mind wh
 reading the risks." Anything that describes the review, or the reading of the review, or
 how significant a section is, is not about the code and does not belong on the page.
 
-**The one-liner says what. The body says why.** The one-liner is what changed, in the
-fewest words that stay precise. The body is what the diff cannot show: why it was
-needed, what it costs, what breaks if it is wrong. If a body's first sentence restates
-its one-liner, cut that sentence. The diff already proves the what; you are the only
-source of the why.
+**The one-liner says what. The body says why and, only as far as needed here, how.**
+The one-liner names the behavior, contract, feature, fix or implementation that changed.
+The body explains the problem it solves, why that problem matters, and the high-level
+mechanism. It also says what this implies for a caller, operator or later change when
+that implication is not obvious. If a body's first sentence restates its one-liner, cut
+that sentence. Low-level control flow belongs in the walkthrough.
 
 **Caps are ceilings, not targets.** Most statement bodies want two to four sentences. A
 group paragraph wants one or two. Reaching a cap should be rare and earned. There is no
 floor on prose: a small change gets a small review, and three modest fixes want three
 short statements, two or three groups, and often no notes at all.
 
-**Progressive disclosure is the shape.** The summary is one screen. Statements are
-headlines. Bodies serve the reader who wants the why. Evidence serves the reader who
-wants proof. Each layer is complete at its own depth, and no layer may need the one
-below it to make sense.
+**Progressive disclosure is the shape.** The overview gives the forest. The walkthrough
+explains the code. Evidence proves individual claims. Each layer is complete at its own
+depth, and no layer may require the reader to reconstruct the layer above it.
 
-That shape and the ban on restating collide at the walkthrough, because a group and a
-statement can cover the same code. Split them by subject rather than by depth: the group
-paragraph owns the situation the hunks answer to, and the statement body owns what was
-built. For the drawer example, the group says the drawer is positioned by `translate3d`
-so its bottom fifth is off-screen; the statement says a context publishes the live snap
-and the content renders a spacer sized from it. Neither repeats the other, and each is
-readable alone.
+Write the overview as a briefing on the feature, fix or implementation, not as a tour of
+the diff:
+
+- `authorIntent` paraphrases only the problem and reason the pull request descriptions
+  state. For a stack, combine them into the net intent rather than narrating pull requests
+  in order. If they state no problem, say that plainly instead of inventing one.
+- The summary is the witness account: what the code actually accomplishes, its important
+  implication, and the high-level route the solution takes. Verify `authorIntent` against
+  the diff. If the implementation solves a narrower or different problem, say that
+  discrepancy plainly instead of silently replacing the author's account.
+- Each pull request card says which part of that result the pull request contributes.
+  Its gist names the contribution. Its detail gives the reason for that slice and its
+  high-level mechanism.
+- Each statement names one behavior, contract or architectural consequence the reader
+  may need to judge. Its body explains the reason and implication before implementation
+  detail.
+
+Write the walkthrough as technical documentation of the implementation. A group
+paragraph explains how its code works: the control flow, data flow, state transition or
+responsibility split that joins those hunks. Name exact functions, types, routes and
+values when they make the explanation clearer. A file note says the file's specific
+role in that mechanism. Do not say that a group "touches" files, list symbols without
+explaining their relationship, or narrate that hunks were added. The file rows and diff
+already show that.
+
+Across the walkthrough, explain the code design as well as the execution. Name the
+module that owns the policy or state, the entry points that adapt requests into it, and
+the read or presentation surfaces that consume its result. Say why the central rule
+lives where it does when placement affects whether callers can bypass or duplicate it.
+A reader should be able to tell whether the feature was solved in the right layer.
+
+For a cross-cutting change, perform a sprawl check. Enumerate the distinct paths that
+must participate, such as fresh reads, cached reads, asynchronous work, repair paths and
+presentation, and account for each in the relevant groups or file notes. Separate
+necessary adapters from duplicated policy. If one module accumulates several unrelated
+responsibilities, or a call site appears to be missing, say so in a note. A list of every
+changed file is not a sprawl check; the walkthrough already has that list.
+
+Publish that judgment in `codeDesign`. `placement` explains where the central policy or
+state lives and why that layer is correct. `modules[]` names responsibility areas with
+concrete paths and refs. `coverage[]` names conceptual paths that must reach the design,
+with refs proving each path. This section is optional in substance, not in shape: a
+change with no useful code-design judgment sends an empty placement and empty lists
+rather than inventing architecture prose.
+
+Use plain technical English. Prefer short subject-verb sentences and one causal step per
+sentence. Keep technical names that carry meaning; explain what they do rather than
+replacing the explanation with jargon. "The handler reads the session, loads the
+workspace, then queries reviews in that workspace" is better than "Workspace-aware
+review retrieval is performed."
+
+The overview and walkthrough can cover the same code because they answer different
+questions. For the drawer example, the overview says the footer remains visible at a
+partial snap because content reserves the hidden part of the drawer. The walkthrough
+says Vaul publishes the active snap through `ActiveSnapPointContext`,
+`getSnapPointOffset` converts it to hidden height, and `ResponsiveDialogContent` renders
+that height as a spacer. One explains the result and its reason; the other explains the
+implementation.
 
 **Some changes have no why, and inventing one is the failure.** A rename, a padding
 token, a dependency bump: the diff shows everything there is. Say what it is in a line
@@ -95,6 +146,12 @@ number of things worth saying, not in the number of lines changed. It is the sam
 rule as "breadth scales with decomposition" below, applied to prose. Reaching for
 length because the diff was large is the exact move that produced the 10,900 pass.
 
+The code-design account is per review, not per pull request. A useful one is commonly
+600 to 1,200 characters across placement, modules and coverage. It may bring a focused
+single-pull-request review above the old 2,700-character anchor; that is earned when it
+explains placement or closes a real sprawl question, not merely because more fields now
+exist. Read `usage.design.prose` separately before cutting it.
+
 The per-field caps are no help in judging this. They permit over 24,000 characters
 for a single pull request, an order of magnitude past the anchor, so clearing every
 one of them says nothing about whether the review is the right size.
@@ -127,9 +184,10 @@ declare it.
 
 **Statements** are the change itself. Contract changes and data flow are statements,
 always. A statement is one line, at most 120 characters, no markup, with `kind` of
-`add`, `change`, or `remove`, and at least one ref behind it. Its `body` covers why the
-change exists, what it does, and how it is built. Those are areas to cover, not labels
-to print.
+`add`, `change`, or `remove`, and at least one ref behind it. Its `body` explains why the
+change exists, its important implication, and the high-level mechanism. Leave
+line-by-line implementation to the walkthrough. These are areas to cover, not labels to
+print.
 
 Every pull request in the review is realized by at least one statement. A pull request
 that warrants no statement warrants a question about why it is in the review. A
@@ -138,14 +196,20 @@ assembled from the pr entity's fields, `"threahq/threa#1730"` shaped, and a stat
 may span several: a change completed across three pull requests is one statement
 listing three, which is exactly the shape a per-pull-request reading hides.
 
-**Notes** are only what a reviewer would otherwise miss. A note is `risk` or `note`. A
-risk carries either `checks[]` (up to 5, each a falsifiable thing to verify) or a ref
-into a changed hunk. If your note reads as reassurance, it is not a risk, and probably
-not a note at all.
+**Review focus** is only what a reviewer would otherwise miss or must personally judge.
+Its entities use the existing note shape with `kind` of `decision`, `risk` or `note`.
+A `decision` asks a real design or product question; its body states the trade-off and it
+carries a check or ref showing what to inspect. A risk carries either `checks[]` (up to
+5, each a falsifiable thing to verify) or a ref into a changed hunk. If your risk reads
+as reassurance, it is not a risk, and probably not a note at all.
 
-**The summary** opens with intent. A reader who stops after the first sentence knows
-what the change is for. Mechanism comes second. At most 2 paragraphs and 600
-characters.
+**`authorIntent` and the summary** are the forest, with provenance kept visible.
+`authorIntent` is a faithful, concise account of the problem and reason stated in the
+pull request descriptions. The summary is the independent witness account of what the
+code accomplishes, its high-level mechanism and its most important implication. For a
+stack, both describe the completed feature, fix or implementation, not the sequence of
+pull requests. Do not spend either on file names, test counts, review process or minor
+edge cases. Each is at most 2 paragraphs and 600 characters.
 
 ## Grouping is a partition
 
@@ -172,14 +236,17 @@ path and the range, so the arithmetic is checked, not trusted.
   that the ranking is your judgment, which is the product.
 
 A group carries a `title` (60 chars), a `paragraph` (600 chars), its `hunks[]`, and
-`fileNotes[]` of `{ path, text }` at 120 characters each. The paragraph says what this
-set of hunks does and why these hunks are one thing. It does not announce itself, rank
-itself, or tell the reader how to read it; the ordering already says what matters most.
-One or two sentences is the usual size, and a chore group often needs only its title. Every list field in the
+`fileNotes[]` of `{ path, text }` at 120 characters each. The paragraph explains how the
+implementation works and why these hunks form one mechanism. Prefer execution order,
+data movement, state changes and responsibility boundaries over a file inventory. It
+does not announce itself, rank itself, or tell the reader how to read it; the ordering
+already says what matters most. One or two sentences is the usual size. A chore group
+states the mechanical operation plainly and stops. Every list field in the
 document's top level and its entities is required, including this one: `prs`,
-`statements`, `notes`, `groups`, `attachments`, a statement's `prs`, `refs` and
-`evidence`, a note's `checks`, `refs` and `evidence`, and a group's `hunks` and
-`fileNotes`. A list with nothing in it is sent as `[]`, and an omitted key is a 422
+`statements`, `notes`, `codeDesign.modules`, `codeDesign.coverage`, `groups`,
+`attachments`, a statement's `prs`, `refs` and `evidence`, a note's `checks`, `refs` and
+`evidence`, a design module's `paths` and `refs`, a coverage item's `refs`, and a group's
+`hunks` and `fileNotes`. A list with nothing in it is sent as `[]`, and an omitted key is a 422
 saying the field is required and is a list. A ref's `highlight[]` is the one list that
 may be omitted; a payload's `highlight[]` may not.
 
@@ -258,11 +325,14 @@ request gets 8 groups and 6 statements, and no honest partition changes that.** 
 neighbours that share a subject rather than dropping anything: a partition at a coarser
 grain is still a partition, and a hunk left unclaimed is a 422.
 
-Character caps: title 80, summary 600 over at most 2 paragraphs, pr gist 100, pr detail
+Character caps: title 80, author intent 600 over at most 2 paragraphs, summary 600 over
+at most 2 paragraphs, pr gist 100, pr detail
 400, statement
 text 120, statement body 1200, note text 140, note body 1600, each check 120, group
-title 60, group paragraph 600, file note 120, payload side 800, example text 800,
-caption 120, attachment alt 140, figure node label 40, figure edge label 24.
+title 60, group paragraph 600, file note 120, code-design placement 800, module title
+60, module role 40, module body 800, design path 180, coverage title 80, coverage body
+600, payload side 800, example text 800, caption 120, attachment alt 140, figure node
+label 40, figure edge label 24.
 
 Breadth scales with decomposition, not with diff size. 8,000 lines of codegen deserve a
 smaller review than 800 lines of an auth rewrite.
@@ -351,8 +421,8 @@ curl -X POST "$SEER_URL/api/reviews" \
   -F att_flow=@flow.png
 ```
 
-The document is `{ slug, title, summary, prs[], statements[], notes[], groups[],
-attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries an
+The document is `{ slug, title, authorIntent, summary, prs[], statements[], notes[],
+codeDesign, groups[], attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries an
 `id` you author, unique within the document and stable across versions:
 
 - **pr**: `{ id, repo, number, gist, detail, detailRef, parent }`. `gist` is one line,
@@ -364,8 +434,13 @@ attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`. Every entity carries
   `change` or `remove`. `prs[]` names the pull requests the statement realizes, each a
   `repo#number` string assembled from the pr entity's `repo` and `number`, such as
   `"threahq/threa#1730"`.
-- **note**: `{ id, kind, text, body, checks[], refs[], evidence[] }`. `kind` is `risk`
-  or `note`.
+- **note**: `{ id, kind, text, body, checks[], refs[], evidence[] }`. `kind` is
+  `decision`, `risk` or `note`.
+- **codeDesign**: `{ placement, modules[], coverage[] }`. A module is
+  `{ id, title, role, paths[], body, refs[] }`; a coverage item is
+  `{ id, title, body, refs[] }`. Every module and coverage item has at least one ref.
+  The lists are capped at 6 modules and 8 coverage paths. Send empty strings and lists
+  when the change has no useful design account.
 - **group**: `{ id, title, significance, paragraph, hunks[], fileNotes[] }`.
 - **attachment**: `{ id, mediaType, alt, caption }`. `caption` is the one optional
   field here; `alt` is required, and the part carrying the bytes is named for `id`.
@@ -381,6 +456,7 @@ that says how big the thing you just made actually is:
 usage: {
   statements: { used, min, max },   notes: { used, min, max },
   groups:     { used, min, max },   hunks,
+  design: { modules, coverage, prose },
   prose: { total, bodies, perPr }
 }
 ```
@@ -390,8 +466,8 @@ number of pull requests, which is the figure to compare against the calibration 
 roughly 2,700 characters for a pull request of about 130 changed lines, whatever the size
 of its diff. Well past that and the review is long, whatever the per-field caps say.
 
-`prose.bodies` is the subset that is paragraphs: the summary, statement bodies, note
-bodies, and group paragraphs. `total` is those plus every line and label around them:
+`prose.bodies` is the subset that is paragraphs: author intent, the summary, design
+placement and bodies, statement bodies, note bodies, and group paragraphs. `total` is those plus every line and label around them:
 the title, each pr gist and detail, statement and note lines, note checks, group titles,
 and file notes. Read the split when you are deciding what to cut. A large `bodies` is
 prose, and prose is where cutting works. A large `total - bodies` is structure, many
@@ -417,8 +493,8 @@ written: a 422 leaves the workspace exactly as it found it. Fix the named fields
 post the whole document again.
 
 **Republishing.** Publishing to an existing slug creates the next version and the prior
-one stays readable. Keep the ids of statements, notes and groups whose claims survive,
-and give new ids to new claims. Overseer derives the delta from those ids and from the
+one stays readable. Keep the ids of statements, notes, design modules, coverage paths
+and groups whose claims survive, and give new ids to new claims. Overseer derives the delta from those ids and from the
 text, so a returning reader sees what is new and what was revised. An id reused from the
 prior version must name an entity of the same type. You never write what changed about
 your own account.
@@ -458,6 +534,22 @@ reader came for the change and had to walk past you to reach it.
 **restated-one-liner.** A body whose first sentence says again what its one-line text
 already said. The reader pays twice and learns once.
 
+**stack-as-changelog.** Explaining a stack as "first PR A, then PR B" instead of naming
+the completed feature, fix or implementation and what each pull request contributes to
+it. The branch order is already visible on the page.
+
+**walkthrough-as-inventory.** Listing files, symbols or hunks without explaining the
+control flow, data flow, state change or responsibility split between them. Names are
+useful only when they make the mechanism clearer.
+
+**sprawl-without-an-owner.** Naming many changed modules without identifying where the
+central rule lives, which modules are adapters, and whether every entry path reaches the
+rule. File coverage is not design coverage.
+
+**intent-substitution.** Replacing the problem stated in the pull request descriptions
+with a narrower mechanism the diff happens to emphasize. The witness verifies the
+author's record; it does not erase it. A mismatch is a finding to state.
+
 **ceiling-filling.** Writing to the cap because the cap exists. A 1200-character body on
 a one-token change is not thoroughness, it is noise with the volume of thoroughness, and
 it buries the changes that needed the room.
@@ -466,13 +558,13 @@ it buries the changes that needed the room.
 so the partition passes while the account lies. Churn gets its own group, named for what
 it is, ranked last.
 
-**summary-buries-intent.** Opening the summary with mechanism. The first sentence says
-what the change is for.
+**summary-buries-result.** Opening the witness account with low-level mechanism. Its
+first sentence says what the code accomplishes and its important implication.
 
 ## Constraints on authored text
 
-`summary`, statement and note bodies, and group paragraphs accept emphasis, inline code,
-links, lists, and fenced code. Headings, tables, raw HTML, and inline images are a 422
+`authorIntent`, `summary`, design placement and bodies, statement and note bodies, and
+group paragraphs accept emphasis, inline code, links, lists, and fenced code. Headings, tables, raw HTML, and inline images are a 422
 naming the construct. One-line fields stay plain, inline code only.
 
 One repo per review until multi-repo is built. Every pull request and every ref in one
