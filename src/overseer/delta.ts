@@ -549,7 +549,9 @@ const MATCH_STOP = new Set([
 function matchWord(raw: string): string {
   let word = raw.toLowerCase().replace(/^&+|;+$/g, "");
   if (/^(reader|reading|reads?)$/.test(word)) return "read";
-  if (word.includes("publish")) return "publish";
+  if (/^(intent|provenance|purpose)$/.test(word)) return "purpose";
+  if (/^(decision|decisions|judgment|judgements|tradeoff|tradeoffs)$/.test(word)) return "decision";
+  if (word.includes("publish") || word.startsWith("publicat")) return "publish";
   if (/^(revision|revisions|revised|version|versions|delta|deltas|redline|redlines)$/.test(word)) return "change";
   if (word.length > 6 && word.endsWith("ing")) word = word.slice(0, -3);
   else if (word.length > 5 && word.endsWith("ed")) word = word.slice(0, -2);
@@ -602,9 +604,9 @@ function matchStrength(prior: FieldSpec[], current: FieldSpec[]): { score: numbe
   };
 }
 
-/** Exact ids, then the strongest eligible authored resemblance. Global greedy
- *  assignment keeps one prior section from becoming the ancestor of two current
- *  sections; score and position only break ties, never make a weak pair eligible. */
+/** Exact ids, then an order-preserving alignment of eligible authored resemblance.
+ *  Exact handles may move freely; rough matches act as heading anchors, so a removed
+ *  middle section remains a gap instead of making every later section look replaced. */
 function entityMatches<T extends { id: string }>(
   prior: T[],
   current: T[],
@@ -621,27 +623,48 @@ function entityMatches<T extends { id: string }>(
       used.add(exact.id);
     }
   }
-  const candidates: Array<{ score: number; distance: number; current: T; prior: T }> = [];
-  current.forEach((now, ci) => {
-    if (matches.has(now.id)) return;
-    prior.forEach((was, pi) => {
-      if (used.has(was.id)) return;
-      const strength = matchStrength(priorFields(was), currentFields(now));
-      if (strength.eligible) candidates.push({
-        score: strength.score,
-        distance: Math.abs(ci - pi),
-        current: now,
-        prior: was,
-      });
-    });
-  });
-  candidates.sort((a, b) => b.score - a.score || a.distance - b.distance);
-  const claimedCurrent = new Set(matches.keys());
-  for (const candidate of candidates) {
-    if (claimedCurrent.has(candidate.current.id) || used.has(candidate.prior.id)) continue;
-    matches.set(candidate.current.id, candidate.prior);
-    claimedCurrent.add(candidate.current.id);
-    used.add(candidate.prior.id);
+  const loosePrior = prior.filter((x) => !used.has(x.id));
+  const looseCurrent = current.filter((x) => !matches.has(x.id));
+  const rows = looseCurrent.length + 1;
+  const cols = loosePrior.length + 1;
+  const score = Array.from({ length: rows }, () => new Float64Array(cols));
+  const step = Array.from(
+    { length: rows },
+    () => new Array<"current" | "prior" | "match" | null>(cols).fill(null),
+  );
+  for (let i = 1; i < rows; i++) {
+    for (let j = 1; j < cols; j++) {
+      let best = score[i - 1]![j]!;
+      let move: "current" | "prior" | "match" = "current";
+      if (score[i]![j - 1]! > best) {
+        best = score[i]![j - 1]!;
+        move = "prior";
+      }
+      const strength = matchStrength(
+        priorFields(loosePrior[j - 1]!),
+        currentFields(looseCurrent[i - 1]!),
+      );
+      // The small bonus prefers two credible anchors to one only marginally stronger
+      // pair, which is what preserves a three-to-two section edit as one removal.
+      const paired = score[i - 1]![j - 1]! + strength.score + 0.02;
+      if (strength.eligible && paired > best) {
+        best = paired;
+        move = "match";
+      }
+      score[i]![j] = best;
+      step[i]![j] = move;
+    }
+  }
+  let i = looseCurrent.length;
+  let j = loosePrior.length;
+  while (i > 0 && j > 0) {
+    const move = step[i]![j];
+    if (move === "match") {
+      matches.set(looseCurrent[i - 1]!.id, loosePrior[j - 1]!);
+      i--;
+      j--;
+    } else if (move === "prior") j--;
+    else i--;
   }
   return matches;
 }

@@ -221,18 +221,25 @@ describe("the delta itself", () => {
     expect(statuses).toEqual(["new", "removed"]);
   });
 
-  test("a removed middle section stays before the next surviving anchor", () => {
-    const make = (id: string, title: string) => ({ id, title, body: `${title} body`, paths: [], refs: [] });
+  test("rough anchors keep a removed middle section before the next survivor", () => {
+    const make = (id: string, title: string) => ({ id, title, body: `${title} responsibility`, paths: [], refs: [] });
     const before = doc((d) => {
-      d.codeDesign!.modules = [make("one", "First owner"), make("two", "Middle owner"), make("three", "Last owner")];
+      d.codeDesign!.modules = [
+        make("old-first", "First ownership boundary"),
+        make("old-middle", "Middle cache owner"),
+        make("old-last", "Last reader surface"),
+      ];
     });
     const after = doc((d) => {
-      d.codeDesign!.modules = [make("one", "First owner"), make("three", "Last owner")];
+      d.codeDesign!.modules = [
+        make("new-first", "First owner boundary"),
+        make("new-last", "Last reading surface"),
+      ];
     });
     const delta = new DeltaIndex(computeDelta(side(before), side(after)));
-    expect(delta.removedBefore("module", "three").map((e) => e.id)).toEqual(["two"]);
+    expect(delta.removedBefore("module", "new-last").map((e) => e.id)).toEqual(["old-middle"]);
     const html = page(after, before);
-    expect(html.indexOf("Middle owner")).toBeLessThan(html.indexOf('id="three"'));
+    expect(html.indexOf("Middle cache owner")).toBeLessThan(html.indexOf('id="new-last"'));
   });
 
   test("a body gets one field-level Edited control regardless of density", () => {
