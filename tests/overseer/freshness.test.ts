@@ -11,7 +11,12 @@ import { test, expect, beforeAll, beforeEach, afterAll, describe } from "bun:tes
 import { startServer } from "../../src/server";
 import { config } from "../../src/config";
 import { createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
-import { findPrStatus } from "../../src/overseer/installations";
+import {
+  findPrStatus,
+  listReviewPrs,
+  lookupPrStatus,
+  setReviewPrs,
+} from "../../src/overseer/installations";
 import type { GithubClient, GithubPull } from "../../src/overseer/github";
 import { setGithubClientFactory } from "../../src/overseer/github-app";
 import {
@@ -406,6 +411,114 @@ describe("the live channel", () => {
     expect(await upgrade(wsB, "sealed", "review")).toBe("refused");
     // The bundle channel is unchanged by any of this.
     expect(await upgrade(wsA, "rate", "bundle")).toBe("open");
+  });
+});
+
+describe("the repair heals what it observed", () => {
+  /** A client answering as a repository that has since been renamed: the numeric id is
+   *  the only thing that still joins its answer to the document's frozen name. */
+  function renamedClient(newName: string, repoId: number, head: (n: number) => string): GithubClient {
+    return {
+      async installationFor(): Promise<number> {
+        return TEST_INSTALLATION;
+      },
+      async getPull(_repo: string, number: number): Promise<GithubPull> {
+        return {
+          number,
+          title: "A pull request",
+          body: null,
+          state: "open",
+          user: { login: "someone" },
+          head: { sha: head(number), ref: "topic" },
+          base: { sha: "1".repeat(40), ref: "main", repo: { id: repoId, full_name: newName } },
+          updated_at: "2026-07-19T06:27:55Z",
+        };
+      },
+    } as unknown as GithubClient;
+  }
+
+  test("a refresh fills in the numeric id a backfilled row never had", async () => {
+    storeGoldenReview(wsA, "backfilled");
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
+    // What the backfill leaves: the pull requests named, and nothing numeric.
+    setReviewPrs(wsA, "backfilled", [
+      { repo: GOLDEN_REPO, number: 12 },
+      { repo: GOLDEN_REPO, number: 13 },
+    ]);
+    const repoId = 42_000_042;
+    setGithubClientFactory(() =>
+      renamedClient("golden/renamed-since", repoId, (n) =>
+        n === 12 ? GOLDEN_HEAD_SHA_12 : GOLDEN_HEAD_SHA_13,
+      ),
+    );
+
+    expect(
+      (
+        await fetch(`${base}/api/reviews/backfilled/refresh`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${keyA}` },
+        })
+      ).status,
+    ).toBe(200);
+
+    // The status row is filed under the current name, so the document's name reaches it
+    // only through the id the repair wrote back.
+    expect(listReviewPrs(wsA, "backfilled").map((r) => [r.repo, r.repo_id])).toEqual([
+      [GOLDEN_REPO, repoId],
+      [GOLDEN_REPO, repoId],
+    ]);
+    expect(lookupPrStatus(wsA, GOLDEN_REPO, 12)?.head_sha).toBe(GOLDEN_HEAD_SHA_12);
+    expect(lookupPrStatus(wsA, GOLDEN_REPO, 13)?.head_sha).toBe(GOLDEN_HEAD_SHA_13);
+  });
+});
+
+describe("a refresh publishes to every review it rewrote", () => {
+  test("the sibling naming the same pull request hears the moved head", async () => {
+    storeGoldenReview(wsA, "pressed");
+    storeGoldenReview(wsA, "sibling");
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
+    const repoId = 1301620029;
+    for (const slug of ["pressed", "sibling"]) {
+      setReviewPrs(wsA, slug, [
+        { repo: GOLDEN_REPO, number: 12, repoId },
+        { repo: GOLDEN_REPO, number: 13, repoId },
+      ]);
+    }
+    setGithubClientFactory(
+      () => countingClient((_repo, n) => (n === 12 ? "5".repeat(40) : GOLDEN_HEAD_SHA_13)).client,
+    );
+
+    const url = `ws://localhost:${server.port}/ws/livereload?kind=review&ws=${wsA}&slug=sibling`;
+    const socket = new WebSocket(url);
+    await new Promise<void>((resolve) => {
+      socket.onopen = () => resolve();
+    });
+    const message = new Promise<string>((resolve) => {
+      socket.onmessage = (e) => resolve(String(e.data));
+    });
+
+    // The button on the other page. The row it rewrites is the workspace's, and this
+    // review renders from it too.
+    expect(
+      (
+        await fetch(`${base}/api/reviews/pressed/refresh`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${keyA}` },
+        })
+      ).status,
+    ).toBe(200);
+
+    expect(JSON.parse(await message)).toEqual({
+      type: "review",
+      prs: [
+        { pr: `${GOLDEN_REPO}#12`, status: "open", freshness: "behind" },
+        { pr: `${GOLDEN_REPO}#13`, status: "open", freshness: "current" },
+      ],
+      behind: 1,
+      unknown: 0,
+      total: 2,
+    });
+    socket.close();
   });
 });
 

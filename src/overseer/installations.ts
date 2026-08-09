@@ -543,6 +543,30 @@ export function healReviewPrRepoId(
   );
 }
 
+/**
+ * Heal a backfilled row from an observation the review itself asked for.
+ *
+ * The match is the name the document froze at publication, not the name GitHub uses
+ * now — after a rename those differ, and the document's is the only one this row can
+ * be found by. The name is left exactly as it stands: `review_prs.repo` is what the
+ * page says, and it is never rewritten underneath the document. Only the numeric id
+ * is filled in, which is what every reader keyed off the name needs to stop being
+ * blind to the rename.
+ */
+export function healReviewPrRepoIdBySlug(
+  wsId: string,
+  slug: string,
+  documentRepoName: string,
+  prNumber: number,
+  repoId: number,
+): void {
+  db.run(
+    "UPDATE review_prs SET repo_id = ? " +
+      "WHERE workspace_id = ? AND slug = ? AND pr_number = ? AND repo_id IS NULL AND lower(repo) = ?",
+    [repoId, wsId, slug, prNumber, documentRepoName.toLowerCase()],
+  );
+}
+
 // ---- github_pr_status ----
 
 export interface PrStatusRow {

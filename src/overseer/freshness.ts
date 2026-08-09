@@ -27,7 +27,13 @@ import { getReviewVersion, resolveReview, type ReviewDoc } from "./db";
 import { parseUpdatedAt } from "./derive";
 import type { GithubClient } from "./github";
 import { githubClientFor } from "./github-app";
-import { lookupPrStatus, statusOf, upsertPrStatus } from "./installations";
+import {
+  healReviewPrRepoIdBySlug,
+  lookupPrStatus,
+  reviewsNaming,
+  statusOf,
+  upsertPrStatus,
+} from "./installations";
 import { freshnessOf, readableWorkspaces, statusesOf } from "./read";
 import { prKey, type Freshness } from "./types";
 
@@ -141,6 +147,11 @@ export async function checkReview(
       const pull = await client.getPull(pr.repo, pr.number);
       const installationId = (await client.installationFor?.(pr.repo)) ?? null;
       const repoId = pull.base?.repo?.id ?? known?.repo_id ?? null;
+      // A review published before the App knows its pull requests only by name. This
+      // observation is the first thing to learn their numeric ids, and a repair that
+      // did not record them would leave the row as blind to a rename afterwards as it
+      // was before — a refresh that succeeded and healed nothing.
+      if (repoId !== null) healReviewPrRepoIdBySlug(wsId, slug, pr.repo, pr.number, repoId);
       // One row, one writer, one precondition: a refresh goes through the same upsert a
       // publish and a delivery do, so a slow refresh cannot roll back a newer fact.
       if (installationId !== null && repoId !== null) {
@@ -281,7 +292,21 @@ export async function handleRefreshReview(req: Request, slug: string): Promise<R
   }
 
   const result = await checkReview(ws, slug, row.doc);
-  if (result.changed) publishReview(ws, slug);
+  if (result.changed) {
+    // The rows this wrote are the workspace's, not this review's: every review naming
+    // the same pull request renders from them, so a refresh that published only the
+    // page whose button was pressed would leave its siblings showing what the check
+    // just disproved. The webhook path fans out through the same join; so does this.
+    const slugs = new Set<string>([slug]);
+    for (const pr of row.doc.prs) {
+      const status = lookupPrStatus(ws, pr.repo, pr.number);
+      if (!status) continue;
+      // A status row the backfill left without a numeric id matches by name only, and
+      // an id no repository has is how that is said to a join that takes both.
+      for (const s of reviewsNaming(ws, status.repo_id ?? -1, pr.repo, pr.number)) slugs.add(s);
+    }
+    for (const s of slugs) publishReview(ws, s);
+  }
   return answer(
     true,
     result.prs.map((p) => ({ pr: p.pr, freshness: p.freshness })),

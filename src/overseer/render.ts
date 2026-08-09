@@ -2391,6 +2391,10 @@ export function asOfMark(observedAt: number | null, now: number): string {
  * because the thing the reader asked for was a newer `observed_at`, which no message
  * carries. A reload renders the answer they actually wanted: the same readings, newly
  * dated, with the "as of" gone.
+ *
+ * It reloads on an observation, though, and not on any 200: a refusal inside the
+ * window is answered with the recorded reading, and the button says so rather than
+ * reloading the page it was pressed on.
  */
 function refreshScript(slug: string): string {
   return (
@@ -2398,7 +2402,12 @@ function refreshScript(slug: string): string {
     `b.addEventListener("click",()=>{b.disabled=true;b.textContent="checking\\u2026";` +
     `fetch("/api/reviews/"+encodeURIComponent(${JSON.stringify(slug)})+"/refresh",` +
     `{method:"POST",headers:{"accept":"application/json"}})` +
-    `.then((r)=>{if(!r.ok)throw new Error(String(r.status));location.reload()})` +
+    `.then((r)=>{if(!r.ok)throw new Error(String(r.status));return r.json()})` +
+    // The route answers 200 with `checked:false` when the window refused a fresh
+    // fetch, and reloading on that would hand the reader the same stale page dressed
+    // as a new observation — which is the one thing this button must not do.
+    `.then((d)=>{if(d&&d.checked===false){b.disabled=false;` +
+    `b.textContent="checked moments ago \\u2014 try again shortly";return}location.reload()})` +
     // A failed repair says so and stays pressable. Swallowing it would leave a page
     // that looks refreshed and is not, which is the failure this control exists for.
     `.catch(()=>{b.disabled=false;b.textContent="refresh failed \\u2014 try again"})})})();`
