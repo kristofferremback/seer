@@ -67,10 +67,10 @@ test("a malformed stored document aborts the v5 backfill, naming the row", async
   expect(out).toContain("all assertions passed");
 });
 
-// The drop is its own release: an ordinary boot of this image must stop at v5 with the
-// table standing, so the previous image can keep serving through the overlap and a
-// rollback still recognises the database.
-test("an ordinary boot stops at v5 and leaves review_freshness standing", async () => {
+// The drop is its own release: an ordinary boot of this image must leave the table
+// standing, so the previous image can keep serving through the graceful-shutdown
+// overlap, which calls listFreshness() on every review render.
+test("an ordinary boot leaves review_freshness standing", async () => {
   const { code, out } = await runScenario("v5stops");
   expect(code).toBe(0);
   expect(out).toContain("all assertions passed");
@@ -78,6 +78,15 @@ test("an ordinary boot stops at v5 and leaves review_freshness standing", async 
 
 test("a v5 db drops review_freshness and keeps everything else, when asked", async () => {
   const { code, out } = await runScenario("v5drop");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
+// The sequence a real operator produces, and the one whose absence hid a defect: boot
+// this release ordinarily, then opt in later. While the drop was a gated step inside
+// the version ladder, the first boot walked past it and the second could never run it.
+test("opting into the drop after an ordinary boot still drops it", async () => {
+  const { code, out } = await runScenario("v5dropafterboot");
   expect(code).toBe(0);
   expect(out).toContain("all assertions passed");
 });

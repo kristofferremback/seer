@@ -35,7 +35,7 @@ import {
   statusOf,
   upsertPrStatus,
 } from "./installations";
-import { freshnessOf, readableWorkspaces, statusesOf } from "./read";
+import { askingUserId, freshnessOf, readableWorkspaces, statusesOf } from "./read";
 import { prKey, type Freshness } from "./types";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -129,9 +129,15 @@ export async function checkReview(
   slug: string,
   doc: ReviewDoc,
   // The observation is made as the workspace whose review it is, through an
-  // installation that workspace holds. A repository it no longer holds fails the same
-  // way an unreachable GitHub does: the last observation stands.
-  client: GithubClient = githubClientFor(wsId),
+  // installation that workspace holds, and failing that as the person who asked for it.
+  // A repository neither reaches fails the same way an unreachable GitHub does: the last
+  // observation stands.
+  //
+  // askingUserId is undefined for anything not triggered by a person. Nothing calls this
+  // that way today -- the automatic on-view check was deleted -- but the parameter says
+  // what the default means rather than leaving it to be inferred.
+  askingUserId?: string,
+  client: GithubClient = githubClientFor(wsId, askingUserId),
 ): Promise<CheckResult> {
   const prs: PrFreshness[] = [];
   let changed = false;
@@ -299,7 +305,7 @@ export async function handleRefreshReview(req: Request, slug: string): Promise<R
     );
   }
 
-  const result = await checkReview(ws, slug, row.doc);
+  const result = await checkReview(ws, slug, row.doc, askingUserId(req));
   if (result.changed) {
     // The rows this wrote are the workspace's, not this review's: every review naming
     // the same pull request renders from them, so a refresh that published only the

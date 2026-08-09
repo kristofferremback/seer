@@ -30,6 +30,7 @@ import {
 } from "../../src/overseer/github-app";
 import { githubOAuth } from "../../src/overseer/github-oauth";
 import { dbWorkspaceHoldings } from "../../src/overseer/installations";
+import { githubUserOAuth } from "../../src/overseer/github-user-oauth";
 import { offlineGithubClientFactory } from "../offline-github";
 
 migrate();
@@ -562,10 +563,17 @@ test("a token minted by repository id is not served to the repository named that
 
 // ---- the test seam successor ----
 
-test("the suite cannot reach the network through either seam", async () => {
+// Three seams now, not two. The user OAuth transport arrived without an offline default,
+// so githubUserOAuth() fell through to a real fetch client — and nothing noticed, because
+// no test in the suite touches the callback route yet. The leak was latent rather than
+// live, which is the worst kind to rely on noticing: the first test to exercise that route
+// would have opened a socket to github.com with the configured client secret, silently.
+// The count in this test's name has been wrong once already, so it is spelled out.
+test("the suite cannot reach the network through any of the three seams", async () => {
   expect(() => githubClientFor("ws_a").getPull(REPO, 1723)).toThrow(/GitHub is offline/);
   expect(() => githubOAuth().exchangeCode("code")).toThrow(/GitHub is offline/);
   expect(() => githubOAuth().listUserInstallations("tok")).toThrow(/GitHub is offline/);
+  expect(() => githubUserOAuth().exchangeAndIdentify("code")).toThrow(/GitHub is offline/);
 });
 
 test("with no factory installed, no client is built without a holdings source", () => {

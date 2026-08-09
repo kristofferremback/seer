@@ -638,10 +638,15 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > config.maxUploadBytes) return tooBig();
 
-  // Every GitHub call this publish makes is made as the workspace, through an
-  // installation the workspace has connected. There is no server-wide token behind
-  // this: a repository no held installation covers is refused by the client itself.
-  const github = githubClientFor(ws);
+  // Every GitHub call this publish makes is made as the workspace first, through an
+  // installation the workspace has connected, and failing that as the PERSON whose api
+  // key authenticated this request. There is no server-wide token behind either: a
+  // repository neither covers is refused by the client itself.
+  //
+  // auth.userId rather than the workspace is the whole point. A key belongs to one
+  // person, so a publish spends that person's credentials and nobody else's, even though
+  // the review it produces lands in a workspace their colleagues can read.
+  const github = githubClientFor(ws, auth.userId);
 
   let body: PublishBody;
   try {

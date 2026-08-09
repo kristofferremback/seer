@@ -88,6 +88,10 @@ export const config = {
   // GITHUB_TOKEN is gone: every GitHub call is made with a credential minted for the
   // installation a workspace holds, so there is no server-wide token to fall back to.
   githubApp: githubAppConfig(),
+  githubOAuth: {
+    clientId: required("GITHUB_OAUTH_CLIENT_ID"),
+    clientSecret: required("GITHUB_OAUTH_CLIENT_SECRET"),
+  },
 
   // Viewer auth (Google OIDC). AUTH_DISABLED=true skips it entirely — local dev only.
   authDisabled,

@@ -8,6 +8,7 @@
 import type { GithubClient } from "../src/overseer/github";
 import type { GithubClientFactory } from "../src/overseer/github-app";
 import type { GithubOAuth } from "../src/overseer/github-oauth";
+import type { GithubUserOAuth } from "../src/overseer/github-user-oauth";
 
 function refuse(method: string): never {
   throw new Error(
@@ -38,6 +39,22 @@ export function offlineGithubClientFactory(): GithubClientFactory {
 }
 
 /** The OAuth leg is not a GithubClient, so it needs its own offline default. */
+/** The third seam. The App's client and the App's OAuth both have an offline default
+ *  here; the user OAuth transport arrived without one, so `githubUserOAuth()` fell
+ *  through to a real fetch client and the suite would have opened a socket to github.com
+ *  with the configured client secret the first time any test touched the callback route.
+ *  Nothing exercised it yet, which is exactly why it went unnoticed. */
+export function offlineGithubUserOAuth(): GithubUserOAuth {
+  return {
+    async exchangeAndIdentify(): Promise<never> {
+      throw new Error(
+        "[tests] GitHub is offline in tests: the user OAuth transport was called with no " +
+          "fake installed. Install one with setGithubUserOAuth().",
+      );
+    },
+  };
+}
+
 export function offlineGithubOAuth(): GithubOAuth {
   return {
     exchangeCode: () => refuse("exchangeCode"),

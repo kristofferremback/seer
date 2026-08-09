@@ -19,6 +19,7 @@ import {
   type GithubClient,
   type GithubPull,
 } from "./github";
+import { createUserGithubClient } from "./github-user";
 
 // ---- the app JWT ----
 
@@ -380,6 +381,10 @@ export interface WorkspaceClientOptions {
   workspaceId: string;
   holdings: WorkspaceHoldings;
   app: AppApi;
+  /** The person making this request. Omitted for webhook and other non-human paths. */
+  askingUserId?: string;
+  /** Injection seam for tests; production builds this from askingUserId. */
+  userClient?: GithubClient;
   apiBase?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
@@ -441,7 +446,8 @@ export function createWorkspaceGithubClient(options: WorkspaceClientOptions): Gi
       new GithubRoutingError(
         `${repo} is not reachable anonymously, and no GitHub App installation this workspace ` +
           `holds covers it. If the repository is private, install the app on the ` +
-          `${accountOf(repo)} account and connect it in workspace settings.`,
+          `${accountOf(repo)} account and connect it in workspace settings — or connect a ` +
+          `GitHub account that can read ${repo}.`,
       );
     // When the anonymous read fails the way a private repository fails, the refusal the
     // routing check would have thrown is still the actionable half of the answer, so it
@@ -480,12 +486,55 @@ export function createWorkspaceGithubClient(options: WorkspaceClientOptions): Gi
     };
   }
 
+  const userClient =
+    options.userClient ??
+    (options.askingUserId
+      ? createUserGithubClient(options.askingUserId, {
+          apiBase: options.apiBase,
+          fetchImpl: options.fetchImpl,
+          timeoutMs: options.timeoutMs,
+        })
+      : null);
+
+  /**
+   * The asking user's credential first, the anonymous fallback beneath it.
+   *
+   * The order is not taste: the credential can read the private repositories anonymity
+   * never will, and it spends the person's own hourly budget rather than the host's
+   * shared sixty. The user client refuses with a routing error exactly when no
+   * credential of theirs can read the repository — which is the one case anonymity may
+   * still answer, a public repository reached by someone with nothing connected. Any
+   * other failure is the user path's own and passes through.
+   */
+  function userThenAnonymous(repo: string, user: GithubClient): GithubClient {
+    const anon = anonymous(repo);
+    const fall = async <T>(viaUser: () => Promise<T>, viaAnon: () => Promise<T>): Promise<T> => {
+      try {
+        return await viaUser();
+      } catch (err) {
+        if (err instanceof GithubRoutingError) return viaAnon();
+        throw err;
+      }
+    };
+    return {
+      getPull: (r, n) => fall(() => user.getPull(r, n), () => anon.getPull(r, n)),
+      listCommits: (r, n) => fall(() => user.listCommits(r, n), () => anon.listCommits(r, n)),
+      listFiles: (r, n) => fall(() => user.listFiles(r, n), () => anon.listFiles(r, n)),
+      listReviewComments: (r, n) =>
+        fall(() => user.listReviewComments(r, n), () => anon.listReviewComments(r, n)),
+      getFileAtSha: (r, p, sha) =>
+        fall(() => user.getFileAtSha(r, p, sha), () => anon.getFileAtSha(r, p, sha)),
+      getPullDiff: (r, n) => fall(() => user.getPullDiff(r, n), () => anon.getPullDiff(r, n)),
+    };
+  }
+
   async function authorize(repo: string): Promise<GithubClient> {
     assertRepo(repo);
     const installationId = await app.installationForRepo(repo);
-    if (installationId === null) return anonymous(repo);
-    const held = await holdings.installationIds(workspaceId);
-    if (!held.includes(installationId)) return anonymous(repo);
+    const held = installationId === null ? [] : await holdings.installationIds(workspaceId);
+    if (installationId === null || !held.includes(installationId)) {
+      return userClient ? userThenAnonymous(repo, userClient) : anonymous(repo);
+    }
     const id = app.repositoryId(repo);
     let token: string;
     try {
@@ -557,7 +606,7 @@ export function createWorkspaceGithubClient(options: WorkspaceClientOptions): Gi
 // lookup would make a real request with real app credentials, silently, because a 404
 // from routing is indistinguishable from "not installed".
 
-export type GithubClientFactory = (workspaceId: string) => GithubClient;
+export type GithubClientFactory = (workspaceId: string, askingUserId?: string) => GithubClient;
 
 let injectedFactory: GithubClientFactory | null = null;
 let holdingsSource: WorkspaceHoldings | null = null;
@@ -577,8 +626,21 @@ export function appCredentials(): AppCredentials {
   return { appId: app.appId, privateKeyPem: app.privateKeyPem };
 }
 
-export function githubClientFor(workspaceId: string): GithubClient {
-  if (injectedFactory) return injectedFactory(workspaceId);
+/**
+ * The client a request should use, for a workspace and for the person behind the request.
+ *
+ * `askingUserId` is what makes a personal credential reachable, and leaving it off is
+ * how the confused deputy gets rebuilt: a workspace is a group, so a credential resolved
+ * from the workspace alone is one member's access handed to every other member. It is
+ * therefore OPTIONAL rather than defaulted, and every caller that has a person passes one.
+ *
+ * Exactly one caller legitimately has none. A webhook is delivered by GitHub, not
+ * requested by anybody, so there is no person whose credential it could be entitled to
+ * spend -- and it must reach installations only. That call site passes nothing, on
+ * purpose, and a test asserts it stays that way.
+ */
+export function githubClientFor(workspaceId: string, askingUserId?: string): GithubClient {
+  if (injectedFactory) return injectedFactory(workspaceId, askingUserId);
   if (!holdingsSource) {
     throw new Error(
       "No workspace holdings source is installed, so no workspace can be routed to an installation.",
@@ -589,6 +651,7 @@ export function githubClientFor(workspaceId: string): GithubClient {
     workspaceId,
     holdings: holdingsSource,
     app: defaultApp,
+    askingUserId,
   });
 }
 

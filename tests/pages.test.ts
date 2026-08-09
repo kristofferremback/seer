@@ -36,6 +36,7 @@ function settings(over: Partial<SettingsData> = {}): SettingsData {
       { id: "key_bbbbbbbbbb", name: "imported from env", hint: "(pre-workspace key)", created: "2026-06-02", lastUsed: "2 days ago", isLegacy: true },
     ],
     installations: [],
+    credentials: [],
     githubInstallUrl: "https://github.com/apps/seer-overseer-test/installations/new",
     shares: [
       {

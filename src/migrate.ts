@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 5 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 7 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -29,24 +29,23 @@ import { hashKey, tinyId } from "./ids";
 // latest version. Purely additive as DDL, and the one migration in this repo that
 // reads an application-level document rather than doing pure DDL — see backfillReviewPrs.
 //
-// v6 drops the freshness table — and it does NOT run in this release. This is the
-// release where v5 lands and the write stops; the drop is the release after. Splitting
-// them is what keeps the graceful-shutdown redeploy overlap from serving
-// `no such table: review_freshness` out of the old container, which calls
-// listFreshness() on every review render.
+// v6 adds github_user_credentials: a GitHub credential belonging to a person rather than
+// to a workspace, and the first table here whose secret is encrypted rather than hashed,
+// because it is the first one Seer has to read back. Purely additive.
 //
-// READ THIS BEFORE DEPLOYING: the split does NOT make this release rollback-safe, and an
-// earlier version of this comment claimed it did. The previous image's migrate() throws on
-// any user_version above 4, so once a database has been walked to 5 the old image refuses
-// to start on it. Going back means restoring the database, not redeploying the image.
-// Splitting v6 out fixes the overlap window and buys nothing for rollback; saying
-// otherwise in the one file you open when a release has gone wrong is the worst possible
-// place to be wrong.
+// The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
+// this table, which is not a renumbering for tidiness: a conditional step inside a
+// monotonic ladder is unreachable the moment anything is added after it. An ordinary
+// boot skipped the gate, landed on the next number, and left the drop permanently
+// impossible — its condition testing a version already passed. It lives in `meta` now.
+// See dropFreshnessIfOptedIn, which explains why time and shape are different facts.
 //
-// SEER_DROP_FRESHNESS=1 opts a database in early, so the drop can be exercised and so the
-// next release is a one-line change (delete the gate) rather than a new migration. A
-// database already at 6 is accepted either way: having opted in is not a reason to be
-// refused at the next boot.
+// READ THIS BEFORE DEPLOYING: none of this makes a release rollback-safe, and an earlier
+// version of this comment claimed the split did. The previous image's migrate() refuses
+// any user_version it does not know, so once a database has been walked forward the old
+// image will not start on it. Going back means restoring the database, not redeploying
+// the image. Saying otherwise in the one file you open when a release has gone wrong is
+// the worst available place to be wrong.
 
 const V1_SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
@@ -330,6 +329,25 @@ const V4_SHARES = `
 // different processes. Both bearer handles are hashed exactly as an API key or a share
 // token is — `hashKey` and nothing else — and the row burns twice: `consumed_at` when
 // the callback spends the nonce, `attached_at` when the POST spends the attach handle.
+const V6_GITHUB_USER_CREDENTIALS = `
+  CREATE TABLE IF NOT EXISTS github_user_credentials (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('oauth','pat')),
+    label TEXT NOT NULL,
+    secret TEXT NOT NULL,
+    account_login TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    scopes TEXT NOT NULL,
+    expires_at INTEGER,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    revoked_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_github_user_credentials_live
+    ON github_user_credentials (user_id) WHERE revoked_at IS NULL;
+`;
+
 const V5_GITHUB_APP = `
   CREATE TABLE IF NOT EXISTS github_installations (
     id TEXT PRIMARY KEY,
@@ -485,15 +503,25 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 6) {
-    throw new Error(`Unexpected database user_version ${uv}; expected 0, 1, 2, 3, 4, 5, or 6`);
+  if (uv > 7) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 7`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
   if (userVersion() < 3) migrateToV3();
   if (userVersion() < 4) migrateToV4();
   if (userVersion() < 5) migrateToV5();
-  if (userVersion() < 6 && process.env.SEER_DROP_FRESHNESS === "1") migrateToV6();
+  if (userVersion() < 6) migrateToV6();
+  if (userVersion() < 7) migrateToV7();
+  // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
+  // the middle of it is a trap, and this file fell into it once: the freshness drop was
+  // a gated v6, the very next migration added below it was an ungated v7, and an
+  // ordinary boot walked a v5 database straight past the gate to 7. After that the
+  // drop could never run again, because its own condition tested a version already
+  // exceeded, and no amount of setting the variable or deleting the gate would bring it
+  // back. A version says what shape a database has reached; an opt-in says what its
+  // operator has chosen. Those are different facts and only the first one belongs here.
+  dropFreshnessIfOptedIn();
   ensureAdditiveColumns();
 }
 
@@ -515,16 +543,61 @@ function ensureAdditiveColumns(): void {
   }
 }
 
-// The one destructive migration in the repo, and it only removes a second recording of
-// a fact `review_prs` already holds. Nothing has read or written the table since v5, so
-// there is nothing to carry forward; IF EXISTS in case a future release stops creating
-// it in V3_REVIEWS. Gated on SEER_DROP_FRESHNESS in this release — see the header.
+function migrateToV7(): void {
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE github_user_oauth_claims (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        nonce_hash TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        consumed_at INTEGER
+      );
+    `);
+    db.run("PRAGMA user_version = 7");
+  })();
+  console.log("[seer] migrated to schema v7 (GitHub user OAuth claims).");
+}
+
 function migrateToV6(): void {
   db.transaction(() => {
-    db.run("DROP TABLE IF EXISTS review_freshness");
+    db.exec(V6_GITHUB_USER_CREDENTIALS);
     db.run("PRAGMA user_version = 6");
   })();
-  console.log("[seer] migrated to schema v6 (dropped the freshness table).");
+  console.log("[seer] migrated to schema v6 (GitHub user credentials).");
+}
+
+/**
+ * The one destructive change in the repo, and deliberately not a schema version.
+ *
+ * It removes a second recording of a fact `review_prs` already holds, and nothing has
+ * read or written the table since v5, so there is nothing to carry forward. What it is
+ * waiting for is a release rather than a shape: the graceful-shutdown overlap means an
+ * old container is still calling listFreshness() while the new one migrates, so the
+ * table has to outlive one deploy before it can go.
+ *
+ * "Wait a release" is a fact about time, and the ladder above records shape. Numbering
+ * this put a conditional step in the middle of a monotonic sequence, and the next
+ * migration added after it walked ordinary databases straight over the gate, leaving the
+ * drop permanently unreachable. So the opt-in lives in `meta` instead, where nothing can
+ * leapfrog it and where having passed it is not confused with having risen above it.
+ *
+ * Deleting the gate next release means deleting the env check and nothing else: a
+ * database that already opted in is left alone by the key, and one that has not gets the
+ * drop on its next boot.
+ */
+const FRESHNESS_DROPPED = "freshness_dropped";
+
+function dropFreshnessIfOptedIn(): void {
+  if (process.env.SEER_DROP_FRESHNESS !== "1") return;
+  if (getMeta(FRESHNESS_DROPPED)) return;
+  db.transaction(() => {
+    // IF EXISTS in case a future release stops creating it in V3_REVIEWS.
+    db.run("DROP TABLE IF EXISTS review_freshness");
+    setMeta(FRESHNESS_DROPPED, new Date().toISOString());
+  })();
+  console.log("[seer] dropped the freshness table (SEER_DROP_FRESHNESS=1).");
 }
 
 function migrateToV5(): void {

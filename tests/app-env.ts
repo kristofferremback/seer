@@ -16,4 +16,6 @@ process.env.GITHUB_APP_PRIVATE_KEY = Buffer.from(
 ).toString("base64");
 process.env.GITHUB_APP_CLIENT_ID = "Iv1.testclientid";
 process.env.GITHUB_APP_CLIENT_SECRET = "test-client-secret";
+process.env.GITHUB_OAUTH_CLIENT_ID = "Ov23.testclientid";
+process.env.GITHUB_OAUTH_CLIENT_SECRET = "test-oauth-client-secret";
 process.env.GITHUB_WEBHOOK_SECRET = "test-webhook-secret";

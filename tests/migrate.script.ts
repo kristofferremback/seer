@@ -43,6 +43,32 @@ const V5_TABLES = [
   "github_app_claims",
 ];
 
+const V6_TABLES = ["github_user_credentials"];
+
+/** The credential table has two properties the design argues for at length and the
+ *  table-exists loops cannot see. A credential belongs to a PERSON: a workspace_id column
+ *  would be the confused deputy rebuilt, so its absence is asserted rather than assumed.
+ *  And the live-credential index is what every read goes through. */
+function assertCredentialShape(database: Database): void {
+  const cols = database
+    .query<{ name: string }, []>("PRAGMA table_info(github_user_credentials)")
+    .all()
+    .map((c) => c.name);
+  assert(cols.includes("user_id"), "credentials are keyed on a user");
+  assert(
+    !cols.includes("workspace_id"),
+    `a credential must not carry a workspace_id; got columns ${cols.join(", ")}`,
+  );
+  const idx = database
+    .query<{ name: string }, []>("PRAGMA index_list(github_user_credentials)")
+    .all()
+    .map((i) => i.name);
+  assert(
+    idx.some((n) => n.includes("github_user_credentials")),
+    `the live-credential index is missing; got ${idx.join(", ") || "none"}`,
+  );
+}
+
 // ---- seed a v0-with-data database + zip layout BEFORE importing app modules ----
 function seedV0() {
   mkdirSync(dataDir, { recursive: true });
@@ -85,7 +111,7 @@ if (SCENARIO === "v0") {
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 5, `user_version should be 5, got ${uv}`);
+  assert(uv === 7, `user_version should be 7, got ${uv}`);
 
   const user = db.query("SELECT * FROM users").get() as { id: string; email: string } | null;
   assert(!!user, "root user exists");
@@ -148,7 +174,7 @@ if (SCENARIO === "fresh") {
   const wsId = getMeta("legacy_workspace_id")!;
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 5, `user_version should be 5, got ${uv}`);
+  assert(uv === 7, `user_version should be 7, got ${uv}`);
   const iCount = (db.query("SELECT COUNT(*) c FROM images").get() as { c: number }).c;
   assert(iCount === 0, `fresh db has an empty images table, got ${iCount}`);
   const user = db.query("SELECT * FROM users").get() as { email: string } | null;
@@ -162,7 +188,8 @@ if (SCENARIO === "fresh") {
   const bCount = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount === 0, `fresh db has no bundles, got ${bCount}`);
   // v3/v4: the overseer tables and the shares table exist on a fresh boot too.
-  for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES]) {
+  assertCredentialShape(db as unknown as Database);
+  for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES, ...V6_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} exists on a fresh db`);
   }
@@ -242,9 +269,10 @@ if (SCENARIO === "v2") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 5, `user_version should be 5, got ${uv}`);
+  assert(uv === 7, `user_version should be 7, got ${uv}`);
 
-  for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES]) {
+  assertCredentialShape(db as unknown as Database);
+  for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES, ...V6_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} created on the walk up from v2`);
   }
@@ -258,23 +286,23 @@ if (SCENARIO === "v2") {
   // A second run is a no-op: still v4, no duplicate rows, no throw.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 5, `user_version stays 5 after re-run, got ${uv2}`);
+  assert(uv2 === 7, `user_version stays 7 after re-run, got ${uv2}`);
   const bCount2 = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount2 === 1, `no duplicate bundles after re-run, got ${bCount2}`);
   const rCount = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount === 0, `reviews table starts empty, got ${rCount}`);
 
   // A database from a newer binary is refused rather than half-read.
-  db.run("PRAGMA user_version = 7");
+  db.run("PRAGMA user_version = 8");
   let threw = false;
   try {
     migrate();
   } catch (err) {
     threw = true;
-    assert(/user_version 7/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
+    assert(/user_version 8/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
   }
   assert(threw, "migrate must throw on a user_version newer than it knows");
-  db.run("PRAGMA user_version = 5");
+  db.run("PRAGMA user_version = 6");
 
   console.log("migrate v2: all assertions passed");
   process.exit(0);
@@ -322,8 +350,9 @@ if (SCENARIO === "v3") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 5, `user_version should be 5, got ${uv}`);
-  for (const table of [...V4_TABLES, ...V5_TABLES]) {
+  assert(uv === 7, `user_version should be 7, got ${uv}`);
+  assertCredentialShape(db as unknown as Database);
+  for (const table of [...V4_TABLES, ...V5_TABLES, ...V6_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} created by v4`);
   }
@@ -366,7 +395,7 @@ if (SCENARIO === "v3") {
   // A second run is a no-op.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 5, `user_version stays 5 after re-run, got ${uv2}`);
+  assert(uv2 === 7, `user_version stays 7 after re-run, got ${uv2}`);
   const rCount2 = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount2 === 1, `no duplicate reviews after re-run, got ${rCount2}`);
   const sCount = (db.query("SELECT COUNT(*) c FROM shares").get() as { c: number }).c;
@@ -603,7 +632,7 @@ if (SCENARIO === "v5stops") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 5, `an ordinary boot stops at 5, got ${uv}`);
+  assert(uv === 7, `ordinary boot reaches 7, got ${uv}`);
   const still = db
     .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
     .get();
@@ -617,6 +646,59 @@ if (SCENARIO === "v5stops") {
   process.exit(0);
 }
 
+// ---- the sequence a real operator produces: boot first, opt in afterwards ----
+//
+// This is the case that was missing, and its absence hid a real defect. The drop used
+// to be a gated step inside the version ladder, so an ordinary boot walked past it to
+// the next number and left its condition testing a version already exceeded. From then
+// on nothing could drop the table: not the environment variable, not deleting the gate.
+//
+// Neither existing scenario could see it. One boots without the variable and stops;
+// the other seeds a database that has never run this release and opts in immediately.
+// Only booting twice, the way a person actually would, reaches it.
+if (SCENARIO === "v5dropafterboot") {
+  process.env.AUTH_DISABLED = "true";
+  delete process.env.ALLOWED_EMAILS;
+  delete process.env.SEER_DROP_FRESHNESS;
+  seedV5();
+
+  const { migrate } = await import("../src/migrate");
+  const { db } = await import("../src/db");
+
+  // Boot one: ordinary, no opt-in. The table stands, as the release intends.
+  migrate();
+  const first = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(first === 7, `ordinary boot reaches 7, got ${first}`);
+  assert(
+    !!db
+      .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
+      .get(),
+    "the table is still standing after an ordinary boot",
+  );
+
+  // Boot two: the operator opts in, exactly as the header promises they may.
+  process.env.SEER_DROP_FRESHNESS = "1";
+  migrate();
+
+  assert(
+    !db
+      .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
+      .get(),
+    "opting in AFTER an ordinary boot still drops the table",
+  );
+  // And it is recorded outside the version, which is what makes it reachable at all.
+  const stamped = db
+    .query("SELECT value FROM meta WHERE key = ?")
+    .get("freshness_dropped") as { value: string } | null;
+  assert(!!stamped, "the drop is recorded in meta rather than in user_version");
+  const after = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(after === 7, `and the version is untouched by it, got ${after}`);
+
+  // Idempotent: a third boot with the variable still set does nothing and says nothing.
+  migrate();
+  console.log("migrate v5dropafterboot: all assertions passed");
+  process.exit(0);
+}
 if (SCENARIO === "v5drop") {
   process.env.AUTH_DISABLED = "true";
   delete process.env.ALLOWED_EMAILS;
@@ -637,7 +719,7 @@ if (SCENARIO === "v5drop") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 6, `user_version should be 6, got ${uv}`);
+  assert(uv === 7, `user_version should be 7, got ${uv}`);
   const dropped = db
     .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
     .get();
@@ -655,7 +737,7 @@ if (SCENARIO === "v5drop") {
   // walk was clean are assertions that the survivor still answers.
   // Only the tables this seed actually wrote: v6 creates nothing, so a table the v5
   // seed never made would be missing for a reason that has nothing to do with the drop.
-  for (const table of ["reviews", "review_versions", ...V4_TABLES, ...V5_TABLES]) {
+  for (const table of ["reviews", "review_versions", ...V4_TABLES, ...V5_TABLES, ...V6_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} survives the v6 drop`);
   }
@@ -691,7 +773,7 @@ if (SCENARIO === "v5drop") {
   // A second run is a no-op: still 6, nothing to re-drop.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 6, `user_version stays 6 after re-run, got ${uv2}`);
+  assert(uv2 === 7, `user_version stays 7 after re-run, got ${uv2}`);
 
   console.log("migrate v5drop: all assertions passed");
   process.exit(0);
