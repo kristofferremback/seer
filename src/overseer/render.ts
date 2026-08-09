@@ -1368,16 +1368,18 @@ const DELTA_STYLE = `
      its note body does have Edited, it follows that control instead of leaking a
      green addition into the clean view. */
   .note-body:has(> .dchange > .dtog:not(:checked)) > .checks .dw { background: none; }
-  details:not([open]) > summary .dw:not(.dnew) { background: none; }
+  details:not([open]) > summary .dw { background: none; }
   details:not([open]) > summary .dcut { visibility: hidden; }
   .dold, .dp { color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
   .dp { display: none; }
   .dtog:checked + .dw + .dp { display: inline; }
   .dp.dpb { margin-top: 6px; padding: 6px 8px; text-decoration: none; }
   details.row[open] > summary .dp, details.note[open] > summary .dp, details.card[open] > summary .dp, details.grp[open] > summary .dp { display: inline; }
-  .dgoneunit { opacity: 0.85; }
+  .dgoneunit { opacity: 0.78; }
   .dgoneunit .dgone-body, .dgoneunit .grp-body, .dgoneunit .card-body { padding: 4px 0 8px; }
   .dgoneunit > summary .dp { display: inline; text-decoration: none; }
+  .dgoneunit:not([open]) > summary .dp { color: hsl(var(--muted)); background: none; }
+  .dgoneunit:not([open]) > summary .ic { color: hsl(var(--muted)); }
   .dgoneunit .dgone-body .dp, .dgoneunit .grp-body .dp, .dgoneunit .card-body .dp { display: block; text-decoration: none; }
   ins.dnew { text-decoration: none; }
   .dw.dcut { display: inline-block; width: 5px; height: 0.85em; margin: 0 1px; vertical-align: -0.13em; background: var(--word-rem); border-radius: 2px; }
@@ -1828,6 +1830,18 @@ function removedStub(e: EntityDelta, cls: string, headCls: string): string {
   );
 }
 
+function removedStubsBefore(
+  ctx: RenderCtx,
+  kind: "statement" | "note" | "module" | "coverage",
+  currentId: string | null,
+  cls: string,
+  headCls: string,
+): string {
+  return (ctx.delta?.removedBefore(kind, currentId) ?? [])
+    .map((e) => removedStub(e, cls, headCls))
+    .join("");
+}
+
 function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
   const refs = uniqueRefs(m.refs);
   const chips = refChips(m.id, refs);
@@ -1875,11 +1889,21 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
     d !== null;
   if (!hasContent) return "";
   const modules =
-    design.modules.map((m) => designModuleBlock(m, ctx)).join("") +
-    removedModules.map((e) => removedStub(e, "dmodule", "dmodule-title")).join("");
+    design.modules
+      .map((m) =>
+        removedStubsBefore(ctx, "module", m.id, "dmodule", "dmodule-title") +
+        designModuleBlock(m, ctx),
+      )
+      .join("") +
+    removedStubsBefore(ctx, "module", null, "dmodule", "dmodule-title");
   const coverage =
-    design.coverage.map((c) => designCoverageBlock(c, ctx)).join("") +
-    removedCoverage.map((e) => removedStub(e, "coverage-row", "coverage-title")).join("");
+    design.coverage
+      .map((c) =>
+        removedStubsBefore(ctx, "coverage", c.id, "coverage-row", "coverage-title") +
+        designCoverageBlock(c, ctx),
+      )
+      .join("") +
+    removedStubsBefore(ctx, "coverage", null, "coverage-row", "coverage-title");
   const placement = marked(safeBlock(design.placement), d, "placement", "design");
   return (
     `<section id="design"><h2>Code design</h2>` +
@@ -2268,29 +2292,21 @@ export function renderReviewPage(input: RenderInput): string {
     : `version ${input.version}`;
 
   const rows =
-    doc.statements.map((s) => statementRow(s, ctx)).join("") +
-    (delta
-      ? delta
-          .removed("statement")
-          .map((e) => removedStub(e, "row", "rwhat"))
-          .join("")
-      : "");
+    doc.statements
+      .map((s) => removedStubsBefore(ctx, "statement", s.id, "row", "rwhat") + statementRow(s, ctx))
+      .join("") +
+    removedStubsBefore(ctx, "statement", null, "row", "rwhat");
+  const removedNotesBefore = (id: string | null) =>
+    (delta?.removedBefore("note", id) ?? [])
+      .map((e) =>
+        removedStub(e, `note is-${escapeHtml(e.formerKind ?? "note")}`, "none"),
+      )
+      .join("");
   const notes =
     notesInOrder(doc.notes)
-      .map((n) => noteRow(n, ctx))
+      .map((n) => removedNotesBefore(n.id) + noteRow(n, ctx))
       .join("") +
-    (delta
-      ? delta
-          .removed("note")
-          .map((e) =>
-            removedStub(
-              e,
-              `note is-${escapeHtml(e.formerKind ?? "note")}`,
-              "none",
-            ),
-          )
-          .join("")
-      : "");
+    removedNotesBefore(null);
   // The page says what it is measuring against, once, next to what it is.
   const hasCodeDesign = (() => {
     const d = doc.codeDesign;

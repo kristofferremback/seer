@@ -487,38 +487,38 @@ export function walkthroughSection(
 ): string {
   const byId = new Map(doc.hunks.map((h) => [h.id, h] as const));
   const order = new Map(doc.hunks.map((h, i) => [h.id, i] as const));
-  const groups = groupsInOrder(doc.groups)
-    .map((g) => groupBlock(g, byId, order, delta ? delta.get("group", g.id) : null, here))
-    .join("");
   // A group the base version had and this one does not is a stub, like any other
   // removed entity: the walkthrough is a partition of the diff, and a partition
   // that quietly lost a part is a partition a reader cannot check.
-  const removed = delta
-    ? delta
-        .removed("group")
-        .map(
-          (e) =>
-            `<details class="grp dgoneunit" id="dgone-${safeId(e.id)}">` +
-            // A removed group keeps the kind it was removed with, in its icon, the
-            // way every other removed row does.
-            `<summary>${icon("chev", "tick")}${
-              e.formerKind === null
-                ? ""
-                : icon(e.formerKind, `ic k-${escapeHtml(e.formerKind)}`, e.formerKind)
-            }` +
-            `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
-            chip(e) +
-            `</summary>` +
-            `<div class="grp-body">${(e.former ? e.former.body : [])
-              .map((h) => `<div class="dp dpb">${h}</div>`)
-              .join("")}</div></details>`,
-        )
-        .join("")
-    : "";
+  const removedGroup = (e: EntityDelta) =>
+    `<details class="grp dgoneunit" id="dgone-${safeId(e.id)}">` +
+    // A removed group keeps the kind it was removed with, in its icon, the
+    // way every other removed row does.
+    `<summary>${icon("chev", "tick")}${
+      e.formerKind === null
+        ? ""
+        : icon(e.formerKind, `ic k-${escapeHtml(e.formerKind)}`, e.formerKind)
+    }` +
+    `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
+    chip(e) +
+    `</summary>` +
+    `<div class="grp-body">${(e.former ? e.former.body : [])
+      .map((h) => `<div class="dp dpb">${h}</div>`)
+      .join("")}</div></details>`;
+  const removedBefore = (id: string | null) =>
+    (delta?.removedBefore("group", id) ?? []).map(removedGroup).join("");
+  const groups =
+    groupsInOrder(doc.groups)
+      .map(
+        (g) =>
+          removedBefore(g.id) +
+          groupBlock(g, byId, order, delta ? delta.get("group", g.id) : null, here),
+      )
+      .join("") + removedBefore(null);
   return (
     `<section id="walkthrough"><h2>Implementation walkthrough</h2>` +
     unaccountedBlock(doc.unaccounted ?? []) +
-    `<div class="walk">${groups}${removed}</div></section>`
+    `<div class="walk">${groups}</div></section>`
   );
 }
 

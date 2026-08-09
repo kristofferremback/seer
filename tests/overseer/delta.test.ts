@@ -173,6 +173,68 @@ describe("the delta itself", () => {
     expect(e.fields.length).toBe(1);
   });
 
+  test("a renamed id with the same heading is revised rather than replaced", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.codeDesign!.modules[0]!.id = "mod_session_owner";
+      d.codeDesign!.modules[0]!.body += " The route remains an adapter.";
+    });
+    const modules = computeDelta(side(before), side(after)).entities.filter(
+      (e) => e.kind === "module",
+    );
+    expect(modules).toHaveLength(1);
+    expect(modules[0]!.id).toBe("mod_session_owner");
+    expect(modules[0]!.status).toBe("revised");
+  });
+
+  test("a partial heading match anchors an inline section diff", () => {
+    const before = doc();
+    const after = doc((d) => {
+      const module = d.codeDesign!.modules[0]!;
+      module.id = "mod_session_ownership";
+      module.title = "Workspace session ownership boundary";
+      module.body = "The workspace session boundary remains owned by auth and adapted by the server.";
+    });
+    const modules = computeDelta(side(before), side(after)).entities.filter(
+      (e) => e.kind === "module",
+    );
+    expect(modules).toHaveLength(1);
+    expect(modules[0]!.status).toBe("revised");
+    expect(modules[0]!.fields.map((f) => f.field)).toContain("title");
+  });
+
+  test("unrelated headings remain honestly new and removed", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.codeDesign!.modules = [{
+        id: "mod_mail",
+        title: "Outbound mail delivery",
+        body: "A queue sends notification messages.",
+        paths: ["src/mail.ts"],
+        refs: [],
+      }];
+    });
+    const statuses = computeDelta(side(before), side(after)).entities
+      .filter((e) => e.kind === "module")
+      .map((e) => e.status)
+      .sort();
+    expect(statuses).toEqual(["new", "removed"]);
+  });
+
+  test("a removed middle section stays before the next surviving anchor", () => {
+    const make = (id: string, title: string) => ({ id, title, body: `${title} body`, paths: [], refs: [] });
+    const before = doc((d) => {
+      d.codeDesign!.modules = [make("one", "First owner"), make("two", "Middle owner"), make("three", "Last owner")];
+    });
+    const after = doc((d) => {
+      d.codeDesign!.modules = [make("one", "First owner"), make("three", "Last owner")];
+    });
+    const delta = new DeltaIndex(computeDelta(side(before), side(after)));
+    expect(delta.removedBefore("module", "three").map((e) => e.id)).toEqual(["two"]);
+    const html = page(after, before);
+    expect(html.indexOf("Middle owner")).toBeLessThan(html.indexOf('id="three"'));
+  });
+
   test("a body gets one field-level Edited control regardless of density", () => {
     const before = doc((d) => {
       d.statements[0]!.body = "one two three four five six seven eight nine ten";
@@ -602,6 +664,11 @@ describe("the marks on the page", () => {
     expect(stub).toContain("Reviews move behind the workspace session gate");
     expect(stub).toContain("The gate is the helper bundles already use.");
     expect(stub).toContain('<span class="rev">removed</span>');
+    expect(html).toContain(
+      ".dgoneunit:not([open]) > summary .dp { color: hsl(var(--muted)); background: none; }",
+    );
+    expect(html).toContain("details:not([open]) > summary .dw { background: none; }");
+    expect(html).not.toContain("summary .dw:not(.dnew)");
   });
 
   test("a pull request the base version carried and this one does not stays as a stub", () => {

@@ -31,12 +31,12 @@
 //
 // MATCHING
 //
-// Entities match by id alone. Ids are the data model's handles and they are
-// stable across publishes, so a positional fallback would only ever pair two
-// things that are not the same thing. An id present in both sides is compared
-// field by field; an id only on the current side is new; an id only on the base
-// side is removed, and its former content is carried out whole so an absence
-// stays reviewable.
+// Stable ids match first. Witnesses can still rename an id while refining the same
+// section, so unmatched entities get a conservative second pass over their heading,
+// authored body, and code names. Exact or strong rough matches are compared
+// field by field; weak matches remain honestly new and removed. Reordering never
+// breaks an identity, and a true removal remembers the next surviving section so its
+// quiet stub stays near the place it left.
 //
 // TOKENS AND THE THRESHOLD
 //
@@ -121,6 +121,9 @@ export interface EntityDelta {
   formerKind: string | null;
   /** Set on a pull request whose head sha moved between the two versions. */
   codeMoved: boolean;
+  /** Current entity that followed this one in the base ordering. Removed entities
+   *  use it to keep their collapsed stub near the place it left. */
+  insertBefore?: string | null;
 }
 
 export interface Delta {
@@ -535,6 +538,126 @@ function gone(
   };
 }
 
+const MATCH_STOP = new Set([
+  "and", "are", "for", "from", "has", "have", "into", "one", "that", "the",
+  "their", "them", "they", "this", "under", "was", "were", "while", "with",
+]);
+
+/** Rough morphology is enough here: this is a conservative identity fallback, not a
+ *  prose search engine. The small concept folds catch the vocabulary review headings
+ *  naturally use while leaving ordinary technical nouns distinct. */
+function matchWord(raw: string): string {
+  let word = raw.toLowerCase().replace(/^&+|;+$/g, "");
+  if (/^(reader|reading|reads?)$/.test(word)) return "read";
+  if (word.includes("publish")) return "publish";
+  if (/^(revision|revisions|revised|version|versions|delta|deltas|redline|redlines)$/.test(word)) return "change";
+  if (word.length > 6 && word.endsWith("ing")) word = word.slice(0, -3);
+  else if (word.length > 5 && word.endsWith("ed")) word = word.slice(0, -2);
+  else if (word.length > 4 && word.endsWith("es")) word = word.slice(0, -2);
+  else if (word.length > 3 && word.endsWith("s")) word = word.slice(0, -1);
+  return word;
+}
+
+function matchWords(specs: FieldSpec[], headOnly: boolean): Set<string> {
+  const chosen = headOnly ? specs.slice(0, 1) : specs;
+  return new Set(
+    chosen
+      .flatMap((f) => wordToks(f.html).map((t) => matchWord(t.raw)))
+      .filter((w) => w.length > 2 && !MATCH_STOP.has(w)),
+  );
+}
+
+function matchCodes(specs: FieldSpec[]): Set<string> {
+  const out = new Set<string>();
+  for (const f of specs) {
+    for (const code of f.html.matchAll(/<code>(.*?)<\/code>/g)) {
+      for (const name of code[1]!.matchAll(/[A-Za-z_$][\w$]*/g)) out.add(name[0].toLowerCase());
+    }
+  }
+  return out;
+}
+
+function dice(a: Set<string>, b: Set<string>): number {
+  let shared = 0;
+  for (const word of a) if (b.has(word)) shared++;
+  return (2 * shared) / Math.max(1, a.size + b.size);
+}
+
+function matchStrength(prior: FieldSpec[], current: FieldSpec[]): { score: number; eligible: boolean } {
+  const pt = matchWords(prior, true);
+  const ct = matchWords(current, true);
+  const exact = [...pt].join(" ") === [...ct].join(" ") && pt.size > 0;
+  if (exact) return { score: 2, eligible: true };
+  const title = dice(pt, ct);
+  const body = dice(matchWords(prior, false), matchWords(current, false));
+  const code = dice(matchCodes(prior), matchCodes(current));
+  const score = title * 0.65 + body * 0.25 + code * 0.1;
+  return {
+    score,
+    eligible:
+      title >= 0.6 ||
+      score >= 0.26 ||
+      (title >= 0.1 && (body >= 0.18 || score >= 0.12)) ||
+      (code >= 0.5 && body >= 0.18),
+  };
+}
+
+/** Exact ids, then the strongest eligible authored resemblance. Global greedy
+ *  assignment keeps one prior section from becoming the ancestor of two current
+ *  sections; score and position only break ties, never make a weak pair eligible. */
+function entityMatches<T extends { id: string }>(
+  prior: T[],
+  current: T[],
+  priorFields: (x: T) => FieldSpec[],
+  currentFields: (x: T) => FieldSpec[],
+): Map<string, T> {
+  const matches = new Map<string, T>();
+  const used = new Set<string>();
+  const byId = new Map(prior.map((x) => [x.id, x]));
+  for (const x of current) {
+    const exact = byId.get(x.id);
+    if (exact) {
+      matches.set(x.id, exact);
+      used.add(exact.id);
+    }
+  }
+  const candidates: Array<{ score: number; distance: number; current: T; prior: T }> = [];
+  current.forEach((now, ci) => {
+    if (matches.has(now.id)) return;
+    prior.forEach((was, pi) => {
+      if (used.has(was.id)) return;
+      const strength = matchStrength(priorFields(was), currentFields(now));
+      if (strength.eligible) candidates.push({
+        score: strength.score,
+        distance: Math.abs(ci - pi),
+        current: now,
+        prior: was,
+      });
+    });
+  });
+  candidates.sort((a, b) => b.score - a.score || a.distance - b.distance);
+  const claimedCurrent = new Set(matches.keys());
+  for (const candidate of candidates) {
+    if (claimedCurrent.has(candidate.current.id) || used.has(candidate.prior.id)) continue;
+    matches.set(candidate.current.id, candidate.prior);
+    claimedCurrent.add(candidate.current.id);
+    used.add(candidate.prior.id);
+  }
+  return matches;
+}
+
+function nextSurvivor<T extends { id: string }>(
+  prior: T[],
+  at: number,
+  priorToCurrent: Map<string, string>,
+): string | null {
+  for (let i = at + 1; i < prior.length; i++) {
+    const id = priorToCurrent.get(prior[i]!.id);
+    if (id) return id;
+  }
+  return null;
+}
+
 function walk<T extends { id: string; kind?: string }>(
   kind: DeltaEntityKind,
   prior: T[],
@@ -542,9 +665,10 @@ function walk<T extends { id: string; kind?: string }>(
   fieldsOf: (x: T) => FieldSpec[],
   out: EntityDelta[],
 ): void {
-  const was = new Map(prior.map((x) => [x.id, x]));
+  const matches = entityMatches(prior, current, fieldsOf, fieldsOf);
+  const priorToCurrent = new Map([...matches].map(([id, was]) => [was.id, id]));
   for (const x of current) {
-    const p = was.get(x.id);
+    const p = matches.get(x.id);
     if (!p) {
       out.push(born(kind, x.id, fieldsOf(x)));
       continue;
@@ -552,8 +676,12 @@ function walk<T extends { id: string; kind?: string }>(
     const d = compare(kind, x.id, fieldsOf(p), fieldsOf(x), false);
     if (d) out.push(d);
   }
-  const now = new Set(current.map((x) => x.id));
-  for (const x of prior) if (!now.has(x.id)) out.push(gone(kind, x.id, fieldsOf(x), x.kind ?? null));
+  prior.forEach((x, i) => {
+    if (priorToCurrent.has(x.id)) return;
+    const d = gone(kind, x.id, fieldsOf(x), x.kind ?? null);
+    d.insertBefore = nextSurvivor(prior, i, priorToCurrent);
+    out.push(d);
+  });
 }
 
 /** Groups walk like anything else, except that each side resolves its own hunks:
@@ -565,9 +693,15 @@ function walkGroups(
   curHunks: Map<string, { path: string; at: number }>,
   out: EntityDelta[],
 ): void {
-  const was = new Map(prior.map((g) => [g.id, g]));
+  const matches = entityMatches(
+    prior,
+    current,
+    (g) => groupFieldsWith(g, priorHunks),
+    (g) => groupFieldsWith(g, curHunks),
+  );
+  const priorToCurrent = new Map([...matches].map(([id, was]) => [was.id, id]));
   for (const g of current) {
-    const p = was.get(g.id);
+    const p = matches.get(g.id);
     if (!p) {
       out.push(born("group", g.id, groupFieldsWith(g, curHunks)));
       continue;
@@ -581,10 +715,12 @@ function walkGroups(
     );
     if (d) out.push(d);
   }
-  const now = new Set(current.map((g) => g.id));
-  for (const g of prior) {
-    if (!now.has(g.id)) out.push(gone("group", g.id, groupFieldsWith(g, priorHunks), g.kind));
-  }
+  prior.forEach((g, i) => {
+    if (priorToCurrent.has(g.id)) return;
+    const d = gone("group", g.id, groupFieldsWith(g, priorHunks), g.kind);
+    d.insertBefore = nextSurvivor(prior, i, priorToCurrent);
+    out.push(d);
+  });
 }
 
 /**
@@ -694,6 +830,12 @@ export class DeltaIndex {
   /** Entities of one kind that the base version had and this one does not. */
   removed(kind: DeltaEntityKind): EntityDelta[] {
     return this.delta.entities.filter((e) => e.kind === kind && e.status === "removed");
+  }
+
+  /** Removed sections that occupied the slot before one surviving section. `null`
+   *  is the tail after the last survivor. */
+  removedBefore(kind: DeltaEntityKind, currentId: string | null): EntityDelta[] {
+    return this.removed(kind).filter((e) => (e.insertBefore ?? null) === currentId);
   }
 
   counts(): {
