@@ -216,6 +216,8 @@ export function goldenBundleExists(slug: string, version: number | null): boolea
 export function goldenPayload(): PublishPayload {
   return {
     title: "Reviews get a private workspace and an api",
+    authorIntent:
+      "The pull request descriptions say reviews contain private source and need the same workspace boundary as the rest of Seer.",
     summary:
       "Reviews carry private source, so they move behind a workspace session and " +
       "stop being public by link.\n\n" +
@@ -445,6 +447,46 @@ export function goldenPayload(): PublishPayload {
         evidence: [],
       },
     ],
+    codeDesign: {
+      placement:
+        "The session policy lives in `src/auth.ts`, below both review routes, so a new route reuses one gate instead of recreating access rules.",
+      modules: [
+        {
+          id: "mod_gate",
+          title: "The workspace session boundary",
+          paths: ["src/auth.ts", "src/server.ts"],
+          body:
+            "`src/auth.ts` decides whether a request has a workspace session. `src/server.ts` adapts review requests into that decision before dispatching a route.",
+          refs: [
+            {
+              repo: GOLDEN_REPO,
+              sha: GOLDEN_HEAD_SHA_12,
+              path: "src/auth.ts",
+              startLine: 40,
+              endLine: 48,
+              highlight: [41, 42],
+            },
+          ],
+        },
+      ],
+      coverage: [
+        {
+          id: "cov_review_routes",
+          title: "Every review read route",
+          body:
+            "The page and API read paths reach the same session gate; neither carries a second access rule.",
+          refs: [
+            {
+              repo: GOLDEN_REPO,
+              sha: GOLDEN_HEAD_SHA_12,
+              path: "src/server.ts",
+              startLine: 120,
+              endLine: 126,
+            },
+          ],
+        },
+      ],
+    },
     groups: [
       {
         id: "gr_gate",

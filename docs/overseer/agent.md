@@ -18,7 +18,8 @@ stop.
 
 Overseer turns one or more pull requests into a page a human reads instead of the diff.
 It derives every fact itself (files, hunks, line numbers, SHAs) and a sub-agent supplies
-the judgment (summary, statements, notes, walkthrough). The service refuses anything
+the attributed author intent, verified witness account, statements, review focus, code
+design and implementation walkthrough. The service refuses anything
 that does not add up, so a published review cannot claim a line that is not there.
 
 ## The one rule that matters

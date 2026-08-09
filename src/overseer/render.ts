@@ -31,12 +31,14 @@ import {
   type ReviewDoc,
 } from "./db";
 import {
-  chip,
+  statusMark,
   computeDelta,
   DeltaIndex,
+  designPathsHtml,
+  entityEditControl,
   evidenceFieldNames,
   marked,
-  movedChip,
+  movedStatus,
   prBodyHtml,
   safeId,
   touched,
@@ -54,8 +56,8 @@ import {
 } from "./render-diff";
 import {
   icon,
-  refChip,
-  refChips,
+  refLink,
+  refLinks,
   refFold,
   renderEvidence,
   safeBlock,
@@ -66,6 +68,8 @@ import {
 import {
   prKey,
   type Annotation,
+  type DesignCoverage,
+  type DesignModule,
   type Evidence,
   type Freshness,
   type Hunk,
@@ -365,7 +369,7 @@ const STYLE = `  @font-face {
      which at 14px would draw 1.17px and sit heavier than this page's hairlines
      and mono. Each size below carries the width that resolves to ~1.05px, so
      the marks read as one weight with the rules and the type. No tile, no
-     circle, no chip behind any of them; each takes its colour from
+     circle, no decoration behind any of them; each takes its colour from
      currentColor. */
   .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
   .ic { flex: none; display: block; width: 14px; height: 14px; stroke-width: 1.8; }
@@ -374,6 +378,7 @@ const STYLE = `  @font-face {
   .k-change { color: hsl(var(--change)); }
   .k-remove { color: hsl(var(--remove)); }
   .k-keep { color: hsl(var(--muted)); }
+  .k-decision { color: hsl(var(--change)); }
   .k-risk { color: hsl(var(--risk)); }
   .k-note { color: hsl(var(--note)); }
 
@@ -447,7 +452,7 @@ const STYLE = `  @font-face {
   .title {
     margin-top: 15px;
     font-family: var(--font-body);
-    font-weight: 600;
+    font-weight: 550;
     font-size: 21px;
     line-height: 1.28;
     letter-spacing: -0.012em;
@@ -485,7 +490,7 @@ const STYLE = `  @font-face {
   section { margin-top: 30px; scroll-margin-top: 20px; }
   h2 {
     font-family: var(--font-body);
-    font-weight: 600;
+    font-weight: 550;
     font-size: 15px;
     line-height: 1.4;
     color: hsl(var(--ink));
@@ -505,48 +510,39 @@ const STYLE = `  @font-face {
   .contents a { display: inline-block; padding: 11px 0; }
 
   /* ---- inline resolved reference ----
-     A compact mono token carrying the same chevron as every other disclosure:
-     right means the snippet is folded, down means it is open.
-     Same object in a row, in a note and in an answer. 44px touch target.
-     It is a link, and it declines the underline because it already says three
-     other things: the chevron, the box, and a value step to full accent ink
-     against the softer ink of the sentence it sits in. */
+     A chevron and an underlined file location point to the code block below. There is
+     no badge around it: link ink says it is interactive, the chevron says it opens,
+     and a generated 44px hit area keeps the unboxed text usable on touch screens. */
   .ref {
-    --ref-wash: hsl(var(--ink) / 0);
     position: relative;
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-family: var(--font-mono);
     font-size: 11.5px;
     font-weight: 500;
     line-height: 1.45;
     color: hsl(var(--accent));
     white-space: nowrap;
-    padding: 2px 7px 2px 6px;
-    border: 1px solid hsl(var(--line));
-    border-radius: 5px;
-    background-color: hsl(var(--paper));
-    background-image: linear-gradient(var(--ref-wash), var(--ref-wash));
     cursor: pointer;
     text-decoration: none;
   }
-  .ref:hover, .ref:active { text-decoration: none; background-color: hsl(var(--paper)); }
+  .reftext { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  .ref:hover, .ref:active { text-decoration: none; background: none; }
+  .ref:active .reftext { text-decoration-thickness: 2px; }
   .rtick {
     display: inline-block;
+    flex: none;
     width: 10px; height: 10px;
-    margin: 0 3px 1px 0;
     stroke-width: 2.5;
     transform: rotate(0deg);
-    vertical-align: middle;
     transition: transform 150ms cubic-bezier(0.2, 0.9, 0.25, 1);
   }
-  .ref::after { content: ""; position: absolute; left: -2px; right: -2px; top: 50%; height: 44px; transform: translateY(-50%); }
-  .ref:active { --ref-wash: hsl(var(--ink) / 0.1); }
-  .ref.is-open { --ref-wash: hsl(var(--accent) / 0.12); border-color: hsl(var(--accent) / 0.4); }
+  .ref::after { content: ""; position: absolute; left: -6px; right: -6px; top: 50%; height: 44px; transform: translateY(-50%); }
+  .ref.is-open { color: hsl(var(--accent)); }
   .ref.is-open .rtick { transform: rotate(90deg); }
   @media (hover: hover) and (pointer: fine) {
-    .ref { transition: background-color 150ms ease, border-color 150ms ease; }
-    .ref:hover { --ref-wash: hsl(var(--ink) / 0.05); border-color: hsl(var(--accent) / 0.4); }
-    .ref.is-open:hover { --ref-wash: hsl(var(--accent) / 0.18); }
+    .ref:hover .reftext { text-decoration-thickness: 2px; }
   }
 
   /* ---- disclosure, one grammar for the whole page ---- */
@@ -571,13 +567,18 @@ const STYLE = `  @font-face {
   /* press feedback: tonal only, no lift */
   .note > summary:active,
   .row > summary:active,
+  .dmodule > summary:active,
+  .coverage-row > summary:active,
   .grp > summary:active,
   .frow > summary:active,
   .fold > summary:active { background-color: hsl(var(--ink) / 0.06); }
   @media (hover: hover) and (pointer: fine) {
-    .note > summary, .row > summary, .grp > summary, .frow > summary, .fold > summary { transition: background-color 150ms ease; }
+    .note > summary, .row > summary, .dmodule > summary, .coverage-row > summary,
+    .grp > summary, .frow > summary, .fold > summary { transition: background-color 150ms ease; }
     .note > summary:hover,
     .row > summary:hover,
+    .dmodule > summary:hover,
+    .coverage-row > summary:hover,
     .grp > summary:hover,
     .frow > summary:hover,
     .fold > summary:hover { background-color: hsl(var(--ink) / 0.035); }
@@ -588,6 +589,8 @@ const STYLE = `  @font-face {
     details[open] > .fold-body,
     details[open] > .note-body,
     details[open] > .row-body,
+    details[open] > .dmodule-body,
+    details[open] > .coverage-body,
     details[open] > .grp-body,
     details[open] > .frow-body { animation: unfold 200ms cubic-bezier(0.2, 0.9, 0.25, 1); }
   }
@@ -726,10 +729,9 @@ const STYLE = `  @font-face {
   .rrefs { grid-column: 3; grid-row: 2; display: flex; flex-wrap: wrap; gap: 7px; }
   .rrefs:empty { display: none; }
   /* a file cited at several lines: the name once, then each line as its own link */
-  .refset { display: inline-flex; align-items: center; gap: 0; }
-  .reffile { margin-right: 2px; }
-  .refline { margin-left: 6px; text-decoration: underline; text-underline-offset: 2px; }
-  .refline:first-of-type { margin-left: 5px; }
+  .refset { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; font-family: var(--font-mono); font-size: 11.5px; }
+  .reffile { color: hsl(var(--muted)); }
+  .refline { gap: 3px; }
   .row-body { padding: 4px 2px 18px calc(4px + 12px + 14px + var(--sgap) * 2); }
   .row-body > *:first-child { margin-top: 0; }
   .row-body p { font-size: 14.5px; line-height: 1.62; color: hsl(var(--ink-soft)); margin-bottom: 13px; }
@@ -743,7 +745,46 @@ const STYLE = `  @font-face {
     .rrefs { margin-top: 1px; }
   }
 
-  /* ---- review notes ---- */
+  /* ---- the two accounts and code design ---- */
+  .account { margin-top: 17px; }
+  .account-title {
+    display: flex; align-items: center; gap: 7px; margin: 0 0 7px;
+    font-family: var(--font-body); font-size: 13px; font-weight: 500;
+    line-height: 1.35; color: hsl(var(--muted));
+  }
+  .account-icon { display: block; flex: none; width: 14px; height: 14px; stroke-width: 1.7; }
+  .author-intent { border-left: 2px solid hsl(var(--line)); padding-left: 12px; color: hsl(var(--ink-soft)); }
+  .witness-account { color: hsl(var(--ink)); }
+  #design { margin-top: 38px; }
+  #design > h2 { margin-bottom: 7px; }
+  .placement { max-width: 760px; color: hsl(var(--ink-soft)); margin-bottom: 18px; }
+  .design-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .dmodule, .coverage-row { border: 1px solid hsl(var(--line)); background: hsl(var(--paper)); }
+  .dmodule > summary, .coverage-row > summary {
+    list-style: none; cursor: pointer; display: grid; align-items: start;
+    grid-template-columns: 14px minmax(0, 1fr); column-gap: 9px; padding: 13px 14px;
+  }
+  .dmodule > summary::-webkit-details-marker, .coverage-row > summary::-webkit-details-marker { display: none; }
+  .dmodule > summary .tick, .coverage-row > summary .tick { margin-top: 3px; }
+  .dmodule-head { min-width: 0; }
+  .dmodule-title, .coverage-title { display: block; font-size: 14px; font-weight: 500; color: hsl(var(--ink)); }
+  .dmodule > summary .rrefs, .coverage-row > summary .rrefs { grid-column: 2; margin-top: 6px; }
+  .dmodule-body, .coverage-body { padding: 0 14px 15px 37px; color: hsl(var(--ink-soft)); }
+  .dmodule-body > p:first-child, .coverage-body > p:first-child { margin-top: 0; }
+  .dpaths { display: flex; flex-wrap: wrap; gap: 3px 8px; margin: 10px 0; }
+  .dpath { display: inline-block; font: 400 10.5px/1.35 var(--font-mono); color: hsl(var(--muted)); overflow-wrap: anywhere; }
+  .dpath + .dpath::before { content: "·"; margin-right: 8px; color: hsl(var(--line)); }
+  .design-refs { display: flex; flex-wrap: wrap; gap: 7px; margin: 10px 0; }
+  .coverage-list { border-top: 1px solid hsl(var(--line)); }
+  .coverage-row { border-width: 0 0 1px; }
+  .design-heading {
+    display: flex; align-items: center; gap: 7px; margin: 25px 0 7px;
+    font: 500 14px/1.35 var(--font-body); color: hsl(var(--ink-soft));
+  }
+  .design-heading .ic { color: hsl(var(--muted)); }
+  @media (max-width: 720px) { .design-grid { grid-template-columns: 1fr; } }
+
+  /* ---- review focus ---- */
   /* the h2's own rule is this list's top edge; a second one would stutter */
   #notes h2, #walkthrough h2 { margin-bottom: 2px; }
   .notes { border-top: 0; }
@@ -866,8 +907,9 @@ const STYLE = `  @font-face {
   }
   .c-stat { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
   .stat { white-space: nowrap; }
-  .stat .s-add { color: hsl(var(--add)); }
-  .stat .s-del { color: hsl(var(--remove)); }
+  /* A count is not a change. The added and deleted lines carry the change hues where
+     they are, in the diff; the tallies read as the secondary text they are. */
+  .stat .s-add, .stat .s-del { color: hsl(var(--muted)); }
   /* what a tap adds: the marks and the gist, then the author's own account
      behind one more fold */
   .c-open { padding: 2px var(--spine) 12px; }
@@ -931,6 +973,9 @@ const STYLE = `  @font-face {
     padding: 13px 4px;
     min-height: 44px;
   }
+  /* a removed stub carries no kind icon, so its title is pinned to the title
+     column and the icon column is simply left empty. */
+  .grp.dgoneunit > summary > .gname { grid-column: 3; }
   .gname { font-size: 14.5px; line-height: 1.4; color: hsl(var(--ink)); min-width: 0; }
   .gcount { font-family: var(--font-mono); font-size: 12px; color: hsl(var(--muted)); }
   /* the open group grows a hairline dropped from under the icon: it is what
@@ -1120,11 +1165,16 @@ const STYLE = `  @font-face {
   }
 `;
 // Lucide, ISC licensed, at its published 24x24 geometry, copied from the prototype.
+// One exception, drawn here: `i-change` is a wave, because the pencil it used to be is
+// the edited control's glyph (`i-edit`) and a glyph may mean one thing on a page.
 const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
   <symbol id="i-add" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <path d="M5 12h14"/><path d="M12 5v14"/>
   </symbol>
   <symbol id="i-change" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 15c2.7-5 5.8-5 8 0s5.3 5 8 0"/>
+  </symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>
     <path d="m15 5 4 4"/>
   </symbol>
@@ -1133,6 +1183,9 @@ const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
   </symbol>
   <symbol id="i-keep" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <line x1="5" x2="19" y1="9" y2="9"/><line x1="5" x2="19" y1="15" y2="15"/>
+  </symbol>
+  <symbol id="i-decision" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m12 3 9 9-9 9-9-9z"/><path d="M9.7 9a2.5 2.5 0 0 1 4.8 1c0 1.7-2.5 2-2.5 3.5"/><path d="M12 17h.01"/>
   </symbol>
   <symbol id="i-risk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>
@@ -1187,6 +1240,9 @@ const EVIDENCE_STYLE = `
   .ev-was { margin: 6px 0 0; color: hsl(var(--muted)); font-size: 12px; }
   .gfiles { margin: 6px 0 0; color: hsl(var(--muted)); font-size: 12px; }
   .gfile { font-family: var(--font-mono); }
+  /* a stub carries its former file list without the .gfiles wrapper, so the paths
+     take that wrapper's size and ink here. */
+  .dpb .gfile { font-size: 12px; color: hsl(var(--muted)); margin-right: 8px; }
   .ev-figure { border: 1px solid hsl(var(--line)); border-radius: 6px; padding: 11px 13px; background: hsl(var(--paper-sunk)); }
   /* the drawing is laid out server-side, so the only thing left to say here is what
      its ink is: one weight of line, one type size, and a muted state that steps back
@@ -1289,40 +1345,62 @@ const PAGE_SCRIPT = `
 })();
 `;
 
-/** The delta's own ink. Every prior-text reveal is a checkbox and a label, so the
- *  marks open with no script at all; the checkbox itself is never seen. */
+/** The delta's own ink. Every field starts as clean current prose. Standalone fields
+ *  and expanded entities each have an explicit edited checkbox; opening a row alone
+ *  cannot reveal additions or deletions. */
 const DELTA_STYLE = `
   .dtog { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
   .dw { border-radius: 3px; background: var(--word-add); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
-  label.dw { cursor: pointer; padding: 0 2px; }
   .dw ins, ins.dw { text-decoration: none; }
-  .dtick { width: 10px; height: 10px; margin-left: 3px; vertical-align: baseline; color: hsl(var(--muted)); fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; transition: transform 120ms ease; }
-  .dtog:checked + .dw .dtick, .dtog:checked + .dw.dxo .dtick, .dtog:checked + .dw.dall .dtick { transform: rotate(90deg); }
-  .dw.dxo, .dw.dall { background: none; color: hsl(var(--muted)); }
-  .dp { display: none; color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
-  .dtog:checked + .dw + .dp { display: inline; }
-  .dp.dpb { margin-top: 6px; padding: 6px 8px; text-decoration: none; }
-  .dtog:checked + .dw + .dp.dpb { display: block; }
-  details.row[open] > summary .dp, details.note[open] > summary .dp, details.card[open] > summary .dp, details.grp[open] > summary .dp { display: inline; }
-  .dgoneunit { opacity: 0.85; }
-  .dgoneunit .dgone-body, .dgoneunit .grp-body, .dgoneunit .card-body { padding: 4px 0 8px; }
-  .dgoneunit > summary .dp { display: inline; text-decoration: none; }
-  .dgoneunit .dgone-body .dp, .dgoneunit .grp-body .dp, .dgoneunit .card-body .dp { display: block; text-decoration: none; }
-  ins.dnew { text-decoration: none; }
-  .dw.dcut { display: inline-block; width: 5px; height: 0.85em; margin: 0 1px; vertical-align: -0.13em; background: var(--word-rem); border-radius: 2px; }
-  .rev { display: inline-block; margin-right: 6px; padding: 1px 6px; border: 1px solid hsl(var(--line)); border-radius: 999px; font-size: 11px; letter-spacing: 0.02em; color: hsl(var(--muted)); background: hsl(var(--paper-sunk)); vertical-align: middle; }
-  .rev-moved { color: hsl(var(--change)); }
+  .dedited {
+    display: flex; align-items: center; gap: 5px; width: max-content; min-height: 40px;
+    color: hsl(var(--change)); cursor: pointer; font: italic 400 12.5px/1.35 var(--font-body);
+  }
+  .dedited span { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  .dedited:active span { text-decoration-thickness: 2px; }
+  .dediticon { width: 12px; height: 12px; color: currentColor; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .dtog:checked + .dedited .dediticon { color: hsl(var(--change)); }
+  @media (hover: hover) and (pointer: fine) { .dedited:hover span { text-decoration-thickness: 2px; } }
+  .dinline { display: none; }
+  .dchange:has(> .dtog:checked) > .dcurrent { display: none; }
+  .dchange:has(> .dtog:checked) > .dinline { display: block; }
+  .dchange-inline .dedited { display: inline-flex; min-height: 0; margin-left: 7px; font-size: 0.6em; vertical-align: middle; }
+  .dchange-inline:has(> .dtog:checked) > .dinline { display: inline; }
+  details:has(> .etog:checked) .dborrow > .dcurrent { display: none; }
+  details:has(> .etog:checked) .dborrow > .dinline { display: block; }
+  details:has(> .etog:checked) .dborrow.dchange-inline > .dinline { display: inline; }
+  .dold { color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
+  .dp { display: none; color: hsl(var(--ink-soft)); background: none; text-decoration: none; }
+  .dp.dpb { margin-top: 6px; padding: 6px 8px; }
+  .dgoneunit { opacity: 0.78; }
+  .dgoneunit .dgone-body { padding: 4px 0 8px; }
+  /* Group and card bodies already own the horizontal column under their titles.
+     Keep it when the entity is removed; zeroing all four sides put the group's
+     icon rail through its former prose. */
+  .dgoneunit .grp-body, .dgoneunit .card-body { padding-top: 4px; padding-bottom: 8px; }
+  .dgoneunit > summary .dp { display: inline; color: hsl(var(--muted)); }
+  .dgoneunit:not([open]) > summary .ic { color: hsl(var(--muted)); }
+  .dgoneunit .dgone-body .dp, .dgoneunit .grp-body .dp, .dgoneunit .card-body .dp { display: block; }
+  .rev { display: inline; margin-right: 7px; font: italic 400 11.5px/1.35 var(--font-body); letter-spacing: 0.01em; vertical-align: baseline; }
+  .rev-new { color: hsl(var(--add)); }
+  .rev-edited, .rev-moved { color: hsl(var(--change)); }
+  .rev-removed { color: hsl(var(--remove)); }
   .dbase { color: hsl(var(--muted)); }
   .revs { margin: 10px 0 2px; }
   .revs > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12.5px; color: hsl(var(--muted)); }
   .revs > summary::-webkit-details-marker { display: none; }
   .revs[open] > summary .tick { transform: rotate(90deg); }
   .revlist { margin: 8px 0 0; padding: 0; list-style: none; border-top: 1px solid hsl(var(--line)); }
-  .rv { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; padding: 5px 0; border-bottom: 1px solid hsl(var(--line)); font-size: 12.5px; color: hsl(var(--muted)); }
-  .rv-n { font-family: var(--font-mono); color: hsl(var(--ink-soft)); }
-  .rv.is-here .rv-n { font-weight: 600; color: hsl(var(--ink)); }
+  /* One line per revision: the version and its date at the start, the from link at
+     the end, and the counts taking whatever is left. Only the counts wrap, inside
+     themselves, so nothing else is pushed onto a ragged second line. */
+  .rv { display: flex; align-items: baseline; gap: 4px 10px; padding: 5px 0; border-bottom: 1px solid hsl(var(--line)); font-size: 12.5px; color: hsl(var(--muted)); }
+  .rv-n { flex: none; font-family: var(--font-mono); color: hsl(var(--ink-soft)); }
+  .rv-on { flex: none; white-space: nowrap; }
+  .rv-counts { flex: 1 1 auto; min-width: 0; }
+  .rv.is-here .rv-n { font-weight: 500; color: hsl(var(--ink)); }
   .rv.is-base { background: hsl(var(--paper-sunk)); }
-  .rv-from { margin-left: auto; }
+  .rv-from { flex: none; margin-left: auto; white-space: nowrap; }
 `;
 
 // The prototype's Q/A grammar. A question is one line marked Q, its answer one line
@@ -1348,9 +1426,9 @@ const SHARE_STYLE = `
     background: hsl(var(--paper-sunk));
   }
   .sharebox[hidden] { display: none; }
-  .sharebox .eyebrow {
-    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em;
-    text-transform: uppercase; color: hsl(var(--muted)); margin: 0 0 8px;
+  .sharebox .share-title {
+    font-family: var(--font-body); font-size: 13.5px; font-weight: 500;
+    color: hsl(var(--ink-soft)); margin: 0 0 8px;
   }
   .sharebox p { margin: 0; font-size: 13.5px; color: hsl(var(--muted)); }
   .share-list { list-style: none; margin: 0 0 10px; padding: 0; }
@@ -1493,7 +1571,7 @@ function sharePanel(canShare: boolean): string {
   if (!canShare) return "";
   return (
     `<div class="sharebox" data-sharebox hidden>` +
-    `<p class="eyebrow">Share this review</p>` +
+    `<p class="share-title">Share this review</p>` +
     `<ul class="share-list" data-share-list></ul>` +
     `<p data-share-empty>No link opens this review yet.</p>` +
     `<div class="share-fresh" data-share-fresh hidden>` +
@@ -1523,12 +1601,12 @@ const FAVICON =
 function prBody(ownerId: string, body: string, d: EntityDelta | null): string {
   // Marked first, then tested for emptiness: a description cleared between versions
   // renders as nothing at all, and dropping the fold there would leave the card's
-  // revised chip pointing at no mark.
+  // revised status label pointing at no mark.
   const inner = marked(prBodyHtml(body), d, "body", `${ownerId}-body`);
   if (inner === "") return "";
   return (
     `<details class="fold" id="${escapeHtml(ownerId)}-body">` +
-    `<summary>${icon("chev", "tick")}<span class="fh"><b>description</b></span></summary>` +
+    `<summary>${icon("chev", "tick")}<span class="fh"><b>author description</b></span></summary>` +
     `<div class="fold-body prbody-body">${inner}</div></details>`
   );
 }
@@ -1544,6 +1622,8 @@ function refsById(doc: ReviewDoc): Map<string, Ref> {
   };
   for (const s of doc.statements) take(s.refs, s.evidence);
   for (const n of doc.notes) take(n.refs, n.evidence);
+  for (const m of doc.codeDesign?.modules ?? []) take(m.refs, []);
+  for (const c of doc.codeDesign?.coverage ?? []) take(c.refs, []);
   return byId;
 }
 
@@ -1575,11 +1655,12 @@ function card(
   const detailRef = refs.get(pr.detailRef);
   const detailFold = detailRef ? refFold(owner, detailRef) : "";
   const d = ctx.delta ? ctx.delta.get("pr", prKey(pr.repo, pr.number)) : null;
+  const edit = entityEditControl(d, owner);
   const hasMore =
     pr.detail.trim() !== "" || detailFold !== "" || pr.body.trim() !== "";
   // Three readings, each earned by a tap. Closed is the title and what it cost,
-  // which is what a stack is scanned for. Open adds the marks and the one-line
-  // gist. The nested fold holds the author's own account, which is the longest
+  // which is what a stack is scanned for. Open adds the clean one-line gist and an
+  // explicit edit control when needed. The nested fold holds the author's own account, which is the longest
   // thing on the card and the least often wanted.
   const more = hasMore
     ? `<details class="c-more"><summary>${icon("chev", "tick")}` +
@@ -1602,9 +1683,10 @@ function card(
     `${icon("pr")}<span class="c-reftext">${escapeHtml(prLabel(pr))}</span></a>` +
     prStat(pr, hunks) +
     `</span>` +
-    `</summary>` +
+    `</summary>${edit.input}` +
     `<div class="c-open">` +
-    `<span class="c-kinds">${kinds}${chip(d)}</span>` +
+    `<span class="c-kinds">${kinds}${statusMark(d)}</span>` +
+    edit.label +
     `<span class="c-line">${marked(safeInline(pr.gist), d, "gist", owner)}</span>` +
     more +
     `</div></details>`
@@ -1692,7 +1774,7 @@ function evidenceMarks(
   return {
     // Evidence is drawn in a body rather than a summary, so a one-line field there
     // grows a control of its own: the row's chevron cannot reveal it.
-    mark: (field, html) => marked(html, d, field, owner, true),
+    mark: (field, html) => marked(html, d, field, owner),
     touched: (field) => touched(d, field),
     dropped: (current) => {
       const has = new Set(current);
@@ -1705,16 +1787,17 @@ function evidenceMarks(
 
 function statementRow(s: Statement, ctx: RenderCtx): string {
   const refs = uniqueRefs(s.refs);
-  const chips = refChips(s.id, refs);
+  const links = refLinks(s.id, refs);
   const folds = refs.map((r) => refFold(s.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("statement", s.id) : null;
+  const edit = entityEditControl(d, s.id);
   return (
     `<details class="row" id="${escapeHtml(s.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(s.kind, `ic k-${s.kind}`, KIND_LABEL[s.kind] ?? s.kind)}` +
     `<span class="rwhat">${marked(safeInline(s.text), d, "text", s.id)}</span>` +
-    `<span class="rrefs">${chip(d)}${chips}</span>` +
-    `</summary>` +
-    `<div class="row-body">${marked(safeBlock(s.body), d, "body", s.id)}${folds}` +
+    `<span class="rrefs">${statusMark(d)}${links}</span>` +
+    `</summary>${edit.input}` +
+    `<div class="row-body">${edit.label}${marked(safeBlock(s.body), d, "body", s.id)}${folds}` +
     questionsHere(ctx, "statement", s.id) +
     kindMark(d, s.id, s.kind) +
     renderEvidence(
@@ -1739,27 +1822,115 @@ function removedStub(e: EntityDelta, cls: string, headCls: string): string {
   const body = former.body
     .map((h) => `<div class="dp dpb">${h}</div>`)
     .join("");
-  // A removed row keeps the kind it was removed with, in its class and in its icon:
-  // a risk that left the review is not the same absence as a note that left it.
-  const kind = e.formerKind;
-  const mark =
-    kind === null ? "" : icon(kind, `ic k-${escapeHtml(kind)}`, kind);
+  // A removed row keeps the kind it was removed with in its class, but wears no kind
+  // icon: the add, change and remove glyphs say what a living row is, and an absence
+  // is not any of them. The italic status is the only change mark a stub needs.
   return (
     `<details class="${cls} dgoneunit" id="${escapeHtml(id)}">` +
-    `<summary>${icon("chev", "tick")}${mark}` +
+    `<summary>${icon("chev", "tick")}` +
     `<span class="${headCls}"><span class="dp dpstub">${former.head}</span></span>` +
-    `<span class="rrefs">${chip(e)}</span>` +
+    `<span class="rrefs">${statusMark(e)}</span>` +
     `</summary>` +
     `<div class="dgone-body">${body === "" ? `<div class="dp dpb"></div>` : body}</div>` +
     `</details>`
   );
 }
 
+function removedStubsBefore(
+  ctx: RenderCtx,
+  kind: "statement" | "note" | "module" | "coverage",
+  currentId: string | null,
+  cls: string,
+  headCls: string,
+): string {
+  return (ctx.delta?.removedBefore(kind, currentId) ?? [])
+    .map((e) => removedStub(e, cls, headCls))
+    .join("");
+}
+
+function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
+  const refs = uniqueRefs(m.refs);
+  const links = refLinks(m.id, refs);
+  const folds = refs.map((r) => refFold(m.id, r)).join("");
+  const d = ctx.delta ? ctx.delta.get("module", m.id) : null;
+  const edit = entityEditControl(d, m.id);
+  return (
+    `<details class="dmodule" id="${escapeHtml(m.id)}">` +
+    `<summary>${icon("chev", "tick")}<span class="dmodule-head">` +
+    `<span class="dmodule-title">${marked(safeInline(m.title), d, "title", m.id)}</span>` +
+    `</span><span class="rrefs">${statusMark(d)}</span></summary>${edit.input}` +
+    `<div class="dmodule-body">${edit.label}${marked(safeBlock(m.body), d, "body", m.id)}` +
+    `<div class="dpaths">${marked(designPathsHtml(m.paths), d, "paths", m.id)}</div>` +
+    (links === "" ? "" : `<div class="design-refs">${links}</div>`) +
+    folds + `</div></details>`
+  );
+}
+
+function designCoverageBlock(c: DesignCoverage, ctx: RenderCtx): string {
+  const refs = uniqueRefs(c.refs);
+  const links = refLinks(c.id, refs);
+  const folds = refs.map((r) => refFold(c.id, r)).join("");
+  const d = ctx.delta ? ctx.delta.get("coverage", c.id) : null;
+  const edit = entityEditControl(d, c.id);
+  return (
+    `<details class="coverage-row" id="${escapeHtml(c.id)}">` +
+    `<summary>${icon("chev", "tick")}<span class="coverage-title">` +
+    marked(safeInline(c.title), d, "title", c.id) +
+    `</span><span class="rrefs">${statusMark(d)}</span></summary>${edit.input}` +
+    `<div class="coverage-body">${edit.label}${marked(safeBlock(c.body), d, "body", c.id)}` +
+    (links === "" ? "" : `<div class="design-refs">${links}</div>`) +
+    folds + `</div></details>`
+  );
+}
+
+function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
+  const design = doc.codeDesign ?? { placement: "", modules: [], coverage: [] };
+  const d = ctx.delta ? ctx.delta.get("design", "design") : null;
+  const removedModules = ctx.delta?.removed("module") ?? [];
+  const removedCoverage = ctx.delta?.removed("coverage") ?? [];
+  const hasContent =
+    design.placement.trim() !== "" ||
+    design.modules.length > 0 ||
+    design.coverage.length > 0 ||
+    removedModules.length > 0 ||
+    removedCoverage.length > 0 ||
+    d !== null;
+  if (!hasContent) return "";
+  const modules =
+    design.modules
+      .map((m) =>
+        removedStubsBefore(ctx, "module", m.id, "dmodule", "dmodule-title") +
+        designModuleBlock(m, ctx),
+      )
+      .join("") +
+    removedStubsBefore(ctx, "module", null, "dmodule", "dmodule-title");
+  const coverage =
+    design.coverage
+      .map((c) =>
+        removedStubsBefore(ctx, "coverage", c.id, "coverage-row", "coverage-title") +
+        designCoverageBlock(c, ctx),
+      )
+      .join("") +
+    removedStubsBefore(ctx, "coverage", null, "coverage-row", "coverage-title");
+  const placement = marked(safeBlock(design.placement), d, "placement", "design", true);
+  return (
+    `<section id="design"><h2>Code design</h2>` +
+    (placement === "" ? "" : `<div class="placement">${placement}</div>`) +
+    (modules === "" ? "" : `<div class="design-grid">${modules}</div>`) +
+    (coverage === ""
+      ? ""
+      : `<h3 class="design-heading">${icon("branch")}<span>Coverage</span></h3>` +
+        `<div class="coverage-list">${coverage}</div>`) +
+    `</section>\n`
+  );
+}
+
 function noteRow(n: Note, ctx: RenderCtx): string {
   const refs = uniqueRefs(n.refs);
-  const chips = refChips(n.id, refs);
+  const links = refLinks(n.id, refs);
   const folds = refs.map((r) => refFold(n.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("note", n.id) : null;
+  const edit = entityEditControl(d, n.id);
   // A check the base version carried and this one dropped keeps its place in the
   // list, as an item holding only the prior words behind their disclosure. A list
   // that simply got shorter would be an absence a reader cannot see.
@@ -1782,9 +1953,9 @@ function noteRow(n: Note, ctx: RenderCtx): string {
     `<details class="note is-${escapeHtml(n.kind)}" id="${escapeHtml(n.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(n.kind, `ic k-${n.kind}`, n.kind)}` +
     `<span class="none">${marked(safeInline(n.text), d, "text", n.id)}</span>` +
-    `${chip(d) === "" ? "" : `<span class="rrefs">${chip(d)}</span>`}` +
-    `</summary>` +
-    `<div class="note-body">${marked(safeBlock(n.body), d, "body", n.id)}${checks}${chips === "" ? "" : `<p class="rrefs">${chips}</p>`}${folds}` +
+    `${statusMark(d) === "" ? "" : `<span class="rrefs">${statusMark(d)}</span>`}` +
+    `</summary>${edit.input}` +
+    `<div class="note-body">${edit.label}${marked(safeBlock(n.body), d, "body", n.id)}${checks}${links === "" ? "" : `<p class="rrefs">${links}</p>`}${folds}` +
     questionsHere(ctx, "note", n.id) +
     kindMark(d, n.id, n.kind) +
     renderEvidence(
@@ -1843,7 +2014,7 @@ function questionMeta(a: Annotation, version: number, at: string): string {
 
 /** One question, with its answer when it has one. Bodies are typed by people, so
  *  nothing here is parsed as markup: they are escaped text with their line breaks
- *  kept. The answer's refs are chips over the same folds a statement's refs use. */
+ *  kept. The answer's refs are links to the same folds a statement's refs use. */
 function questionBlock(a: Annotation, version: number): string {
   const quote =
     a.quote === null || a.quote === ""
@@ -1856,10 +2027,10 @@ function questionBlock(a: Annotation, version: number): string {
       ? `<span>${escapeHtml(where)}</span>`
       : `<a href="#${escapeHtml(anchor)}">${escapeHtml(where)}</a>`;
   const refs = a.answer ? uniqueRefs(a.answer.refs) : [];
-  const chips = refs.map((r) => ` ${refChip(a.id, r)}`).join("");
+  const links = refs.map((r) => ` ${refLink(a.id, r)}`).join("");
   const folds = refs.map((r) => refFold(a.id, r)).join("");
   const answer = a.answer
-    ? `<p class="aline"><span class="mk">A:</span><span>${plainText(a.answer.body)}${chips}</span></p>` +
+    ? `<p class="aline"><span class="mk">A:</span><span>${plainText(a.answer.body)}${links}</span></p>` +
       folds
     : "";
   return (
@@ -1939,12 +2110,13 @@ function questionsSection(
   return `<section id="questions"><h2>Questions</h2>${blocks}${form}</section>\n`;
 }
 
-/** Risks first, then notes, each keeping the order it was authored in. A risk is the
- *  thing a reader would miss, so it does not wait behind an observation. */
+/** Decisions first, then risks, then observations. The page exists to put a human
+ *  in a position to judge, so an explicit decision is the first review focus. */
 function notesInOrder(notes: Note[]): Note[] {
   return [
+    ...notes.filter((n) => n.kind === "decision"),
     ...notes.filter((n) => n.kind === "risk"),
-    ...notes.filter((n) => n.kind !== "risk"),
+    ...notes.filter((n) => n.kind === "note"),
   ];
 }
 
@@ -1977,8 +2149,8 @@ export interface TimelineEntry {
   revised: number;
   added: number;
   removed: number;
-  /** The unchipped fields that moved, named: "title", "summary", or both. They carry
-   *  marks rather than a chip, and the menu says so rather than saying nothing. */
+  /** Fields without a row status that moved, such as title, author intent or summary.
+   *  They carry marks, and the menu says so rather than saying nothing. */
   restated: string[];
   codeMoved: boolean;
 }
@@ -2030,9 +2202,9 @@ function revisionMenu(input: RenderInput, basePath: string): string {
       if (e.revised > 0) moved.push(`${e.revised} revised`);
       if (e.removed > 0) moved.push(`${e.removed} removed`);
       if (e.restated.length > 0)
-        moved.push(`${e.restated.join(" and ")} restated`);
+        moved.push(`${e.restated.join(", ")} restated`);
       // A row may not deny movement it is marking in the same breath: when the
-      // only thing that moved is a head SHA, the code-moved chip beside this is
+      // only thing that moved is a head SHA, the code-moved status label beside this is
       // the whole count.
       const counts =
         moved.length === 0
@@ -2050,8 +2222,13 @@ function revisionMenu(input: RenderInput, basePath: string): string {
         `<li class="rv${here ? " is-here" : ""}${isBase ? " is-base" : ""}">` +
         `<a class="rv-n" href="${escapeHtml(basePath)}/v/${e.version}">v${e.version}</a>` +
         `<span class="rv-on">${escapeHtml(on)}</span>` +
-        `<span class="rv-counts">${escapeHtml(counts)}</span>` +
-        (e.codeMoved ? movedChip() : "") +
+        // The moved label sits inside the counts, so it wraps with them rather than
+        // breaking onto a line of its own beside the from link. The space is part of
+        // the text, and only there when there is text to separate it from: a row whose
+        // only movement is the code starts where every other row's counts start.
+        `<span class="rv-counts">${counts === "" ? "" : `${escapeHtml(counts)} `}${
+          e.codeMoved ? movedStatus() : ""
+        }</span>` +
         // A base is a version below the one on screen. An entry at or above it has
         // no `from` link, because the page could not honour one: an inert control
         // that looks live is worse than no control.
@@ -2074,17 +2251,17 @@ function revisionMenu(input: RenderInput, basePath: string): string {
   );
 }
 
-/** The heads chip, as the page draws it and as the live push rewrites it. One
+/** The heads text, as the page draws it and as the live push rewrites it. One
  *  function so the two cannot drift into two different sentences. */
-function headsChip(behind: number, total: number): string {
-  return behind === 0 ? "heads current" : `${behind} of ${total} behind`;
+function headsText(behind: number, total: number): string {
+  return behind === 0 ? "up to date" : `${behind} of ${total} behind`;
 }
 
 /** The freshness enhancement: it subscribes to the review's channel and rewrites the
- *  heads chip when a push says a head moved. Nothing depends on it. Without a script
- *  the chip is as fresh as the render, which is what the stored rows say. */
+ *  heads text when a push says a head moved. Nothing depends on it. Without a script
+ *  the text is as fresh as the render, which is what the stored rows say. */
 function freshnessScript(wsId: string, slug: string): string {
-  const current = JSON.stringify(headsChip(0, 0));
+  const current = JSON.stringify(headsText(0, 0));
   return (
     `(()=>{const h=document.getElementById("heads");if(!h)return;` +
     `const c=()=>{const w=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+` +
@@ -2115,12 +2292,13 @@ export function renderReviewPage(input: RenderInput): string {
     annotations: byTarget,
   };
   const review = delta ? delta.get("review", "review") : null;
+  const intentDelta = delta ? delta.get("intent", "intent") : null;
   const summaryDelta = delta ? delta.get("summary", "summary") : null;
 
   const behind = doc.prs.filter(
     (pr) => input.freshness[prKey(pr.repo, pr.number)] === "behind",
   );
-  const heads = headsChip(behind.length, doc.prs.length);
+  const heads = headsText(behind.length, doc.prs.length);
   const count =
     doc.prs.length === 1 ? "1 pull request" : `${doc.prs.length} pull requests`;
   const marking = input.pinned
@@ -2128,34 +2306,41 @@ export function renderReviewPage(input: RenderInput): string {
     : `version ${input.version}`;
 
   const rows =
-    doc.statements.map((s) => statementRow(s, ctx)).join("") +
-    (delta
-      ? delta
-          .removed("statement")
-          .map((e) => removedStub(e, "row", "rwhat"))
-          .join("")
-      : "");
+    doc.statements
+      .map((s) => removedStubsBefore(ctx, "statement", s.id, "row", "rwhat") + statementRow(s, ctx))
+      .join("") +
+    removedStubsBefore(ctx, "statement", null, "row", "rwhat");
+  const removedNotesBefore = (id: string | null) =>
+    (delta?.removedBefore("note", id) ?? [])
+      .map((e) =>
+        removedStub(e, `note is-${escapeHtml(e.formerKind ?? "note")}`, "none"),
+      )
+      .join("");
   const notes =
     notesInOrder(doc.notes)
-      .map((n) => noteRow(n, ctx))
+      .map((n) => removedNotesBefore(n.id) + noteRow(n, ctx))
       .join("") +
-    (delta
-      ? delta
-          .removed("note")
-          .map((e) =>
-            removedStub(
-              e,
-              `note is-${escapeHtml(e.formerKind ?? "note")}`,
-              "none",
-            ),
-          )
-          .join("")
-      : "");
+    removedNotesBefore(null);
   // The page says what it is measuring against, once, next to what it is.
+  const hasCodeDesign = (() => {
+    const d = doc.codeDesign;
+    const current =
+      !!d && (d.placement.trim() !== "" || d.modules.length > 0 || d.coverage.length > 0);
+    const historical =
+      !!delta &&
+      (delta.get("design", "design") !== null ||
+        delta.removed("module").length > 0 ||
+        delta.removed("coverage").length > 0);
+    return current || historical;
+  })();
+  const designLink = hasCodeDesign
+    ? `<span class="nb"><a href="#design">code design</a> ·</span> `
+    : "";
+
   const baseMark =
     input.baseVersion == null
       ? ""
-      : `<span class="dbase">${escapeHtml(`marks since v${input.baseVersion}`)}</span>`;
+      : `<span class="dbase">${escapeHtml(`compared with v${input.baseVersion}`)}</span>`;
 
   return (
     `<!doctype html>\n<html lang="en">\n<head>\n` +
@@ -2185,7 +2370,9 @@ export function renderReviewPage(input: RenderInput): string {
     `${icon("contrast", "mark")}</button>` +
     `</div>` +
     `<h1 class="title">${marked(safeInline(doc.title), review, "title", "review", true)}</h1>` +
-    `<p class="meta"><span>${escapeHtml(doc.kind)}</span><span>${escapeHtml(count)}</span>` +
+    // A single-pull-request review is the ordinary case, and naming it says nothing
+    // the count beside it does not. Every other kind still announces itself.
+    `<p class="meta">${doc.kind === "single" ? "" : `<span>${escapeHtml(doc.kind)}</span>`}<span>${escapeHtml(count)}</span>` +
     `<span class="heads" id="heads">${escapeHtml(heads)}</span>${baseMark}</p>` +
     revisionMenu(input, ctx.basePath) +
     `</header>\n` +
@@ -2196,21 +2383,32 @@ export function renderReviewPage(input: RenderInput): string {
     // request links before the prose, which is the order they are wanted in.
     `<div class="lede">` +
     chain(doc, ctx) +
-    `<section id="summary"><h2>Summary</h2>` +
-    `${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary")}` +
+    `<section id="summary"><h2>Overview</h2>` +
+    (doc.authorIntent == null || doc.authorIntent.trim() === ""
+      ? ""
+      : `<div class="account"><p class="account-title">${icon("pr", "account-icon")}` +
+        `<span>Author intent</span></p>` +
+        `<div class="author-intent">${marked(safeBlock(doc.authorIntent), intentDelta, "authorIntent", "intent", true)}</div>` +
+        `</div>`) +
+    `<div class="account"><p class="account-title">${icon("eye", "account-icon")}` +
+    `<span>Witness account</span></p>` +
+    `<div class="witness-account">${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary", true)}</div>` +
+    `</div>` +
     questionsHere(ctx, "summary", "summary") +
     `<div class="rows">${rows}</div>` +
-    `<p class="contents"><span class="nb"><a href="#summary">summary</a> ·</span> ` +
-    `<span class="nb"><a href="#notes">review notes</a> ·</span> ` +
-    `<span class="nb"><a href="#walkthrough">walkthrough</a></span></p>` +
+    `<p class="contents"><span class="nb"><a href="#summary">overview</a> ·</span> ` +
+    designLink +
+    `<span class="nb"><a href="#notes">review focus</a> ·</span> ` +
+    `<span class="nb"><a href="#walkthrough">implementation walkthrough</a></span></p>` +
     `</section></div>\n` +
-    `<section id="notes"><h2>Review notes</h2><div class="notes">${notes}</div></section>\n` +
+    codeDesignSection(doc, ctx) +
+    `<section id="notes"><h2>Review focus</h2><div class="notes">${notes}</div></section>\n` +
     walkthroughSection(doc, delta, (type, id) => questionsHere(ctx, type, id)) +
     `\n` +
     questionsSection(input, annotations, ctx.basePath) +
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
-    )} · <a href="/overseer/agent.md">give your own agent this</a></p>\n` +
+    )} · <a href="/overseer/agent.md">agent instructions</a></p>\n` +
     `</main>\n<script>${PAGE_SCRIPT}</script>\n` +
     (input.canShare ? `<script>${shareScript(wsId, slug)}</script>\n` : "") +
     // A pinned version is a record of what was published, so it gets no live channel:

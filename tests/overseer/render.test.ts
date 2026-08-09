@@ -106,28 +106,77 @@ describe("the page itself", () => {
     expect(stripped).toContain(`<details class="row" id="st_a"`);
     expect(stripped).toContain("<summary>");
     // Every citation is a fragment link to a panel that exists on the page.
-    const chips = [...stripped.matchAll(/<a class="ref" href="#([^"]+)"/g)].map((m) => m[1]!);
-    expect(chips.length).toBeGreaterThan(0);
-    for (const id of chips) expect(stripped).toContain(`<details class="fold" id="${id}"`);
+    const links = [...stripped.matchAll(/<a class="ref" href="#([^"]+)"/g)].map((m) => m[1]!);
+    expect(links.length).toBeGreaterThan(0);
+    for (const id of links) expect(stripped).toContain(`<details class="fold" id="${id}"`);
     // The one control that needs a script is hidden until it has one.
     expect(stripped).toContain("data-theme-toggle hidden");
   });
 
-  test("risks precede notes whatever order they were published in", () => {
+  test("the page names the forest, design, focus, and implementation layers", () => {
+    const html = page(doc());
+    expect(html).toContain('<section id="summary"><h2>Overview</h2>');
+    expect(html).toContain('<section id="design"><h2>Code design</h2>');
+    expect(html).toContain('<section id="notes"><h2>Review focus</h2>');
+    expect(html).toContain('<section id="walkthrough"><h2>Implementation walkthrough</h2>');
+    expect(html).toContain('<a href="#summary">overview</a>');
+    expect(html).toContain('<a href="#design">code design</a>');
+    expect(html).toContain('<p class="account-title"><svg class="account-icon"');
+    expect(html).toContain("<span>Author intent</span>");
+    expect(html).toContain("<span>Witness account</span>");
+    expect(html).toContain(doc().authorIntent!);
+    expect(html).not.toContain("from pull request descriptions");
+    expect(html).not.toContain("verified against the code");
+    expect(html).not.toContain('class="provenance"');
+    expect(html).not.toContain('class="source-tag"');
+  });
+
+  test("code design renders responsibility areas, paths, coverage, and refs", () => {
+    const html = page(doc());
+    expect(html).toContain('class="dmodule" id="mod_gate"');
+    expect(html).toContain("The workspace session boundary");
+    expect(html).toContain('<span class="dpath">src/auth.ts</span>');
+    const moduleSummary = html.slice(
+      html.indexOf('<details class="dmodule" id="mod_gate"'),
+      html.indexOf("</summary>", html.indexOf('<details class="dmodule" id="mod_gate"')),
+    );
+    expect(moduleSummary).not.toContain("src/auth.ts");
+    expect(moduleSummary).not.toContain('class="ref"');
+    expect(html).toContain('class="design-refs"');
+    expect(html).toContain('class="coverage-row" id="cov_review_routes"');
+    expect(html).toContain('<h3 class="design-heading">');
+    expect(html).toContain("<span>Coverage</span>");
+    expect(html).toContain('href="#mod_gate-ref_mod_gate"');
+  });
+
+  test("a document published before the new overview fields still renders", () => {
+    const legacy = doc();
+    delete legacy.codeDesign;
+    delete legacy.authorIntent;
+    const html = page(legacy);
+    expect(html).not.toContain('<section id="design"');
+    expect(html).not.toContain('<a href="#design">');
+    expect(html).not.toContain("<span>Author intent</span>");
+    expect(html).toContain("Reviews carry private source");
+  });
+
+  test("decisions precede risks and notes whatever order they were published in", () => {
     const html = page(
       doc({
         notes: [
           note({ id: "no_one", kind: "note", text: "An observation" }),
           note({ id: "no_two", kind: "risk", text: "A risk" }),
+          note({ id: "no_five", kind: "decision", text: "A decision" }),
           note({ id: "no_three", kind: "note", text: "Another observation" }),
           note({ id: "no_four", kind: "risk", text: "A second risk" }),
         ],
       }),
     );
-    const order = [...html.matchAll(/<details class="note is-(risk|note)" id="(no_[a-z]+)"/g)].map(
+    const order = [...html.matchAll(/<details class="note is-(decision|risk|note)" id="(no_[a-z]+)"/g)].map(
       (m) => [m[1], m[2]],
     );
     expect(order).toEqual([
+      ["decision", "no_five"],
       ["risk", "no_two"],
       ["risk", "no_four"],
       ["note", "no_one"],
@@ -290,9 +339,15 @@ describe("the page itself", () => {
     expect((head.match(/responsive-dialog\.tsx/g) ?? []).length).toBe(1);
     expect(head).toContain('href="#st_m-ref_a"');
     expect(head).toContain('href="#st_m-ref_b"');
-    expect(head).toContain(">97</a>");
-    expect(head).toContain(">151</a>");
-    // A file cited once is still an ordinary chip carrying file and line.
+    expect(head).toContain('<span class="reftext">97</span></a>');
+    expect(head).toContain('<span class="reftext">151</span></a>');
+    expect(head).toContain('<span class="refset"><span class="reffile">responsive-dialog.tsx</span>');
+    expect(head).not.toContain('class="ref refset"');
+    const refRule = html.match(/\.ref \{([^}]*)\}/)?.[1] ?? "";
+    expect(refRule).not.toContain("border");
+    expect(refRule).not.toContain("background");
+    expect(html).toContain(".reftext { text-decoration: underline");
+    // A file cited once is still an ordinary link carrying file and line.
     expect(head).toContain("other.ts:12");
     for (const r of refs) expect(html).toContain(`<details class="fold" id="st_m-${r.id}"`);
   });
@@ -491,7 +546,7 @@ describe("the page itself", () => {
   test("the meta row says how fresh the heads are", () => {
     const d = doc();
     const current = page(d, { freshness: {} });
-    expect(current).toContain("heads current");
+    expect(current).toContain("up to date");
     const behind = page(d, {
       freshness: { [`${GOLDEN_REPO}#12`]: "behind", [`${GOLDEN_REPO}#13`]: "current" },
     });

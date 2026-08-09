@@ -3,8 +3,8 @@
 // Two halves, the same shape as the renderer's own tests. The first works on the
 // pure function: two documents in, one derived delta out, with no page anywhere
 // near it. The second renders and reads the HTML, because the law the page is
-// held to is about what a reader sees: every chip on the page came from the
-// delta, and every chip has something marked inside its own row. The third
+// held to is about what a reader sees: every status label comes from the delta, and
+// every edited entity has a redline behind an explicit control. The third
 // stretch drives the routes, because which version the marks are measured
 // against depends on what this reader last opened, which is a database fact.
 
@@ -25,13 +25,13 @@ import {
   textOf,
 } from "../../src/overseer/delta";
 import { baseVersion, renderReviewPage } from "../../src/overseer/render";
-import { safeInline } from "../../src/overseer/render-evidence";
+import { safeBlock, safeInline } from "../../src/overseer/render-evidence";
 import { prKey, type Annotation } from "../../src/overseer/types";
 import { GOLDEN_REPO } from "./fixtures/golden-review";
 import { goldenStoredDoc } from "./fixtures/stored-review";
 
 const DELTA_SOURCE = `${import.meta.dir}/../../src/overseer/delta.ts`;
-/** Every file this step's user-facing copy lives in: the delta's own chips, the
+/** Every file this step's user-facing copy lives in: the delta's own labels, the
  *  revision menu strings, and the kind marks. */
 const COPY_SOURCES = [
   DELTA_SOURCE,
@@ -95,7 +95,7 @@ function page(current: Doc, prev: Doc | null, annotations: Annotation[] = []): s
   });
 }
 
-/** The `details` element a chip sits inside, with its whole body. Walked rather
+/** The `details` element a status label sits inside, with its whole body. Walked rather
  *  than matched: rows nest folds, and a regex cannot say where one ends. */
 function unitAround(html: string, at: number): string {
   const start = html.lastIndexOf("<details", at);
@@ -108,7 +108,7 @@ function unitAround(html: string, at: number): string {
       if (--depth === 0) return html.slice(start, m.index + "</details>".length);
     } else depth++;
   }
-  throw new Error("unclosed details around a chip");
+  throw new Error("unclosed details around a status label");
 }
 
 describe("the delta itself", () => {
@@ -122,7 +122,6 @@ describe("the delta itself", () => {
     expect(e).toBeDefined();
     expect(e!.status).toBe("revised");
     const field = e!.fields.find((f) => f.field === "text")!;
-    expect(field.mode).toBe("words");
     expect(field.regions.length).toBe(1);
     expect(field.priorWords).toContain("session");
     expect(field.density).toBeLessThan(0.4);
@@ -169,11 +168,80 @@ describe("the delta itself", () => {
     const e = delta.entities.find((x) => x.id === "no_fresh")!;
     expect(e.status).toBe("new");
     expect(e.kind).toBe("note");
-    // A new entity still marks something, so its chip is never the only sign of it.
-    expect(e.fields.length).toBe(1);
+    // The whole-entity status is sufficient; its words are not painted green too.
+    expect(e.fields).toEqual([]);
   });
 
-  test("a body rewritten past the density threshold is shown whole", () => {
+  test("a renamed id with the same heading is revised rather than replaced", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.codeDesign!.modules[0]!.id = "mod_session_owner";
+      d.codeDesign!.modules[0]!.body += " The route remains an adapter.";
+    });
+    const modules = computeDelta(side(before), side(after)).entities.filter(
+      (e) => e.kind === "module",
+    );
+    expect(modules).toHaveLength(1);
+    expect(modules[0]!.id).toBe("mod_session_owner");
+    expect(modules[0]!.status).toBe("revised");
+  });
+
+  test("a partial heading match anchors an inline section diff", () => {
+    const before = doc();
+    const after = doc((d) => {
+      const module = d.codeDesign!.modules[0]!;
+      module.id = "mod_session_ownership";
+      module.title = "Workspace session ownership boundary";
+      module.body = "The workspace session boundary remains owned by auth and adapted by the server.";
+    });
+    const modules = computeDelta(side(before), side(after)).entities.filter(
+      (e) => e.kind === "module",
+    );
+    expect(modules).toHaveLength(1);
+    expect(modules[0]!.status).toBe("revised");
+    expect(modules[0]!.fields.map((f) => f.field)).toContain("title");
+  });
+
+  test("unrelated headings remain honestly new and removed", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.codeDesign!.modules = [{
+        id: "mod_mail",
+        title: "Outbound mail delivery",
+        body: "A queue sends notification messages.",
+        paths: ["src/mail.ts"],
+        refs: [],
+      }];
+    });
+    const statuses = computeDelta(side(before), side(after)).entities
+      .filter((e) => e.kind === "module")
+      .map((e) => e.status)
+      .sort();
+    expect(statuses).toEqual(["new", "removed"]);
+  });
+
+  test("rough anchors keep a removed middle section before the next survivor", () => {
+    const make = (id: string, title: string) => ({ id, title, body: `${title} responsibility`, paths: [], refs: [] });
+    const before = doc((d) => {
+      d.codeDesign!.modules = [
+        make("old-first", "First ownership boundary"),
+        make("old-middle", "Middle cache owner"),
+        make("old-last", "Last reader surface"),
+      ];
+    });
+    const after = doc((d) => {
+      d.codeDesign!.modules = [
+        make("new-first", "First owner boundary"),
+        make("new-last", "Last reading surface"),
+      ];
+    });
+    const delta = new DeltaIndex(computeDelta(side(before), side(after)));
+    expect(delta.removedBefore("module", "new-last").map((e) => e.id)).toEqual(["old-middle"]);
+    const html = page(after, before);
+    expect(html.indexOf("Middle cache owner")).toBeLessThan(html.indexOf('id="new-last"'));
+  });
+
+  test("a body keeps its aligned words regardless of density", () => {
     const before = doc((d) => {
       d.statements[0]!.body = "one two three four five six seven eight nine ten";
     });
@@ -183,13 +251,12 @@ describe("the delta itself", () => {
     const delta = computeDelta(side(before), side(after));
     const field = delta.entities[0]!.fields.find((f) => f.field === "body")!;
     expect(field.density).toBeGreaterThan(0.4);
-    expect(field.mode).toBe("whole");
     expect(field.priorWords.join(" ")).toContain("six seven eight");
   });
 
-  // The threshold itself, bracketed either side of 0.4 so the constant is what
-  // decides rather than some far-away score.
-  test("a body edited at the threshold stays in place, and one word more goes whole", () => {
+  // Density remains useful as a measurement, but cannot switch the page to a
+  // different visual grammar.
+  test("density does not change how prose diffs are disclosed", () => {
     const before = doc((d) => {
       d.statements[0]!.body = "one two three four five six seven eight nine ten";
     });
@@ -203,7 +270,6 @@ describe("the delta itself", () => {
       }),
     );
     expect(at.density).toBeCloseTo(0.4, 5);
-    expect(at.mode).toBe("words");
     // Three of ten, which is 0.6.
     const over = bodyField(
       doc((d) => {
@@ -211,10 +277,9 @@ describe("the delta itself", () => {
       }),
     );
     expect(over.density).toBeCloseTo(0.6, 5);
-    expect(over.mode).toBe("whole");
   });
 
-  test("a light edit to the same body stays in place", () => {
+  test("a light prose edit keeps the same aligned field shape", () => {
     const before = doc((d) => {
       d.statements[0]!.body = "one two three four five six seven eight nine ten";
     });
@@ -224,7 +289,6 @@ describe("the delta itself", () => {
     const field = computeDelta(side(before), side(after)).entities[0]!.fields.find(
       (f) => f.field === "body",
     )!;
-    expect(field.mode).toBe("words");
     expect(field.density).toBeLessThan(0.4);
   });
 
@@ -270,22 +334,23 @@ describe("the delta itself", () => {
     const d = diffField("text", true, "", html)!;
     const out = markField(html, d, "no_code");
     expect(out).toContain("<code>");
-    // Every word of the run carries a mark, on both sides of the tag.
-    expect([...out.matchAll(/<ins class="dw dnew">/g)].length).toBe(3);
+    // The clean copy is visible; every word of the hidden redline still carries a
+    // mark, split safely around the code tag.
+    expect(out).toContain('class="dborrow dchange-inline"');
+    expect([...out.matchAll(/<ins class="dw">/g)].length).toBe(3);
     for (const word of ["the", "gate", "helper now reads keys"]) {
-      expect(out).toContain(`<ins class="dw dnew">${word}</ins>`);
+      expect(out).toContain(`<ins class="dw">${word}</ins>`);
     }
   });
 
-  test("a pure deletion in a one-line field still draws a mark, with the row shut", () => {
+  test("a pure deletion stays in the hidden entity redline", () => {
     const prior = safeInline("Reviews move behind the workspace session gate");
     const html = safeInline("Reviews move behind the workspace gate");
     const d = diffField("text", true, prior, html)!;
     const out = markField(html, d, "st_gate");
-    // The prior words are hidden until the row opens, so the cut itself carries
-    // the ink the chip stands over.
-    expect(out).toContain('<span class="dw dcut" aria-hidden="true"></span>');
-    expect(out).toContain('<span class="dp">session </span>');
+    expect(out).toContain(`<span class="dcurrent">${html}</span>`);
+    expect(out).toContain('<span class="dinline">Reviews move behind the workspace <del class="dold">session</del> gate</span>');
+    expect(out).not.toContain("dcut");
   });
 
   test("the deletion caret is drawn, and drawn only where nothing was inserted", () => {
@@ -298,30 +363,45 @@ describe("the delta itself", () => {
     expect(out).not.toContain("dcut");
   });
 
-  test("a revised field whose insert straddles a tag keeps both the mark and the prior words", () => {
+  test("a revised field whose insert straddles a tag keeps every inline mark", () => {
     // A long field with a two-word insert, so density stays well under the
-    // threshold and the straddle is the only reason the field goes whole. The
-    // insert lands either side of the code span, which is what makes it straddle.
+    // threshold. The insert lands either side of the code span, which is what
+    // makes the renderer split its marks safely.
     const words = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
     const prior = safeInline(`${words} carries helper`);
     const html = safeInline(`${words} carries the \`slow\` helper`);
     const d = diffField("text", false, prior, html)!;
     expect(d.density).toBeLessThan(0.4);
-    expect(d.mode).toBe("whole");
-    const out = markField(html, d, "st_x");
+    const out = markField(html, d, "st_x", true);
     expect(/class="dw/.test(out)).toBe(true);
-    // The insert lands in two pieces around the code span, so the prior words cannot
-    // ride along inside one mark: they come out on their own, and the whole prior
-    // line is readable from what the field drew.
-    expect(out).toContain(`<span class="dp dpb">${textOf(prior)}</span>`);
-    expect(out).toMatch(/<input type="checkbox" class="dtog"[^>]*aria-label="prior text"/);
+    // The clean current copy stays unmarked. Opening Edited swaps in a second copy
+    // where both pieces around the code span are marked.
+    expect(out).toContain('class="dedited"');
+    expect(out).toContain("<span>edited</span>");
+    expect(out).toContain(`class="dcurrent">${html}</div>`);
+    expect(out).toContain('class="dinline"');
+    expect(out).toMatch(/<input type="checkbox" class="dtog"[^>]*aria-label="show edits"/);
+  });
+
+  test("a prose diff stays clean until Edited reveals its inline redline", () => {
+    const prior = safeBlock("one two three four five six seven eight nine ten");
+    const html = safeBlock("one two three four five alpha beta gamma delta epsilon");
+    const d = diffField("body", false, prior, html)!;
+    const out = markField(html, d, "summary", true);
+    expect([...out.matchAll(/class="dedited"/g)]).toHaveLength(1);
+    expect(out).toContain("<span>edited</span>");
+    // A block field leads with its control, above the prose the control opens.
+    expect(out.indexOf('class="dedited"')).toBeLessThan(out.indexOf('class="dcurrent"'));
+    expect(out).toContain('<div class="dcurrent"><p>one two three four five alpha beta gamma delta epsilon</p></div>');
+    expect(out).toContain('class="dinline"');
+    expect(out).toContain('<del class="dold">six seven eight nine ten</del>');
+    expect(out).not.toContain('<div class="dcurrent"><p>one two three four five <del');
   });
 
   test("a field past the word ceiling is republished whole rather than aligned", () => {
     const long = Array.from({ length: MAX_DIFF_WORDS + 40 }, (_, i) => `w${i}`).join(" ");
     const started = Date.now();
     const d = diffField("body", false, `<p>${long}</p>`, `<p>${long} tail</p>`)!;
-    expect(d.mode).toBe("whole");
     expect(d.density).toBe(1);
     expect(Date.now() - started).toBeLessThan(1000);
   });
@@ -339,7 +419,7 @@ describe("the delta itself", () => {
 });
 
 describe("the marks on the page", () => {
-  test("every chip on a rendered page has a mark inside its own row", () => {
+  test("edited statuses have an opt-in redline while new statuses stay clean", () => {
     const before = doc();
     const after = doc((d) => {
       d.statements[0]!.text = "Reviews move behind the workspace login gate";
@@ -380,15 +460,18 @@ describe("the marks on the page", () => {
     });
     const html = page(after, before);
 
-    const chips = [...html.matchAll(/<span class="rev">/g)];
-    expect(chips.length).toBeGreaterThan(3);
-    for (const m of chips) {
-      const unit = unitAround(html, m.index!);
-      const marked = /class="(dw|dp|dw dnew|dw dall|dw dxo|dp dpb|dp dpstub)/.test(unit);
-      expect(marked).toBe(true);
+    const edited = [...html.matchAll(/<span class="rev rev-edited">edited<\/span>/g)];
+    expect(edited.length).toBeGreaterThan(3);
+    for (const mark of edited) {
+      const unit = unitAround(html, mark.index!);
+      expect(unit).toContain('class="dtog etog"');
+      expect(unit).toContain('class="dinline"');
     }
+    const added = unitAround(html, html.indexOf('id="st_keys"') + 20);
+    expect(added).toContain('<span class="rev rev-new">new!</span>');
+    expect(added).not.toMatch(/class="(?:dw|dold|dp)/);
     // The page says what it is measuring against.
-    expect(html).toContain("marks since v1");
+    expect(html).toContain("compared with v1");
     // The summary is diffed like any other body. Bounded to the summary block
     // itself, which ends where the statement rows begin, so the assertion cannot
     // pass on some other section's ink.
@@ -397,11 +480,35 @@ describe("the marks on the page", () => {
       html.indexOf('<div class="rows">'),
     );
     expect(summaryBlock).toContain('class="dw');
-    expect(summaryBlock).toMatch(/<ins class="dw dnew">[^<]*grew/);
+    expect(summaryBlock).toMatch(/<ins class="dw">[^<]*grew/);
   });
 
-  // One mutation per compared field, on every entity that can carry a chip. A field
-  // the delta compares and the renderer never draws would mint a chip over an
+  test("change states are coloured inline text, never pills", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.statements[0]!.body += " The adapter stays thin.";
+      d.notes = [];
+      d.codeDesign!.modules.push({
+        id: "mod_new_owner",
+        title: "The new queue owner",
+        body: "The queue owns retries.",
+        paths: ["src/queue.ts"],
+        refs: [],
+      });
+    });
+    const html = page(after, before);
+    expect(html).toContain('<span class="rev rev-new">new!</span>');
+    expect(html).toContain('<span class="rev rev-edited">edited</span>');
+    expect(html).toContain('<span class="rev rev-removed">removed</span>');
+    const rule = html.match(/\.rev \{([^}]*)\}/)?.[1] ?? "";
+    expect(rule).toContain("display: inline");
+    expect(rule).not.toContain("border");
+    expect(rule).not.toContain("padding");
+    expect(rule).not.toContain("background");
+  });
+
+  // One mutation per compared field, on every entity that can carry a status label. A field
+  // the delta compares and the renderer never draws would mint a status label over an
   // unmarked row, which is the one thing the page may not do, so the sweep asks the
   // question field by field rather than trusting one fixture to touch them all.
   const singleFieldEdits: Array<[string, (d: Doc) => void]> = [
@@ -412,6 +519,11 @@ describe("the marks on the page", () => {
     ["note body", (d) => { d.notes[0]!.body = "A body the note now carries."; }],
     ["note check", (d) => { d.notes[0]!.checks = ["a check worded differently"]; }],
     ["note kind", (d) => { d.notes[0]!.kind = "note"; }],
+    ["module title", (d) => { d.codeDesign!.modules[0]!.title = "The shared session boundary"; }],
+    ["module body", (d) => { d.codeDesign!.modules[0]!.body = "The policy now has a revised responsibility split."; }],
+    ["module paths", (d) => { d.codeDesign!.modules[0]!.paths.push("src/read.ts"); }],
+    ["coverage title", (d) => { d.codeDesign!.coverage[0]!.title = "Every review read surface"; }],
+    ["coverage body", (d) => { d.codeDesign!.coverage[0]!.body = "Every read surface reaches the shared boundary."; }],
     ["group title", (d) => { d.groups[0]!.title = "The session gate"; }],
     ["group paragraph", (d) => { d.groups[0]!.paragraph = "A paragraph the group now carries."; }],
     ["group kind", (d) => { d.groups[0]!.kind = "remove"; }],
@@ -421,31 +533,84 @@ describe("the marks on the page", () => {
   ];
 
   for (const [name, edit] of singleFieldEdits) {
-    test(`a chip minted by a change to ${name} alone has a mark inside its own row`, () => {
+    test(`a status label minted by a change to ${name} alone has a mark inside its own row`, () => {
       const before = doc();
       const after = doc(edit);
       const html = page(after, before);
-      const chips = [...html.matchAll(/<span class="rev">/g)];
-      expect(chips.length).toBeGreaterThan(0);
-      for (const m of chips) {
+      const labels = [...html.matchAll(/<span class="rev rev-(?:new|edited|removed)">/g)];
+      expect(labels.length).toBeGreaterThan(0);
+      for (const m of labels) {
         const unit = unitAround(html, m.index!);
-        expect(/class="(dw|dp|dw dnew|dw dall|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
+        expect(/class="(dw|dp|dedited|dinline|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
       }
     });
   }
 
-  test("a chip on a card whose description was emptied still has a mark under it", () => {
+  test("a new check follows its note body's Edited control", () => {
+    const before = doc((d) => {
+      d.notes[0]!.checks = [];
+    });
+    const after = doc((d) => {
+      d.notes[0]!.body = "A revised body gives this decision more context.";
+      d.notes[0]!.checks = ["Decide whether the target needs a stable id"];
+    });
+    const html = page(after, before);
+    const note = unitAround(html, html.indexOf("Decide whether the target"));
+    expect(note).toContain('<ins class="dw">Decide whether the target needs a stable id</ins>');
+    expect(note).toContain('class="dtog etog"');
+    expect(html).toContain(
+      "details:has(> .etog:checked) .dborrow > .dcurrent { display: none; }",
+    );
+  });
+
+  test("a revised author-intent account is marked separately from the witness summary", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.authorIntent += " The author also names the private-source boundary.";
+    });
+    const html = page(after, before);
+    const overview = html.slice(html.indexOf('<section id="summary"'), html.indexOf('<div class="rows">'));
+    expect(overview).toContain("<span>Author intent</span>");
+    expect(overview).toContain('class="dw');
+    expect(computeDelta(side(before), side(after)).entities.some((e) => e.kind === "intent")).toBe(true);
+  });
+
+  test("a revised placement is marked and named in the revision menu", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.codeDesign!.placement += " The renderer stays downstream of the decision.";
+    });
+    const html = page(after, before);
+    const design = html.slice(html.indexOf('<section id="design"'), html.indexOf('<section id="notes"'));
+    expect(design).toContain('class="dw');
+    expect(computeDelta(side(before), side(after)).entities.some((e) => e.kind === "design")).toBe(true);
+  });
+
+  test("a removed design remains reachable in the delta view", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.codeDesign = { placement: "", modules: [], coverage: [] };
+    });
+    const html = page(after, before);
+    const design = html.slice(html.indexOf('<section id="design"'), html.indexOf('<section id="notes"'));
+    expect(html).toContain('<a href="#design">code design</a>');
+    expect(design).toContain("Code design");
+    expect(design).toContain("The workspace session boundary");
+    expect(design).toContain("Every review read route");
+  });
+
+  test("a status label on a card whose description was emptied still has a mark under it", () => {
     const before = doc();
     const after = doc((d) => {
       d.prs[0]!.body = "";
     });
     expect(before.prs[0]!.body).not.toBe("");
     const html = page(after, before);
-    const chips = [...html.matchAll(/<span class="rev">/g)];
-    expect(chips.length).toBe(1);
-    for (const m of chips) {
+    const labels = [...html.matchAll(/<span class="rev rev-(?:new|edited|removed)">/g)];
+    expect(labels.length).toBe(1);
+    for (const m of labels) {
       const unit = unitAround(html, m.index!);
-      expect(/class="(dw|dp|dw dnew|dw dall|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
+      expect(/class="(dw|dp|dedited|dinline|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
       // The prior description is in the page, behind its own disclosure.
       expect(unit).toContain(textOf(prBodyHtml(before.prs[0]!.body)).split(" ")[0]!);
     }
@@ -463,10 +628,7 @@ describe("the marks on the page", () => {
     expect(e).toBeDefined();
     expect(e.status).toBe("revised");
     expect(e.fields.map((f) => f.field).sort()).toEqual(["check-1", "check-2"]);
-    for (const f of e.fields) {
-      expect(f.mode).toBe("whole");
-      expect(f.density).toBe(1);
-    }
+    for (const f of e.fields) expect(f.density).toBe(1);
     expect(e.fields.find((f) => f.field === "check-1")!.priorWords.join(" ")).toBe("beta check");
 
     const html = page(after, before);
@@ -474,8 +636,8 @@ describe("the marks on the page", () => {
     const unit = unitAround(html, at + 20);
     expect(unit).toContain("beta check");
     expect(unit).toContain("gamma check");
-    expect(unit).toContain('class="dp dpb"');
-    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(unit).toContain('class="dinline"');
+    expect(unit).toContain('<span class="rev rev-edited">edited</span>');
   });
 
   test("two keys that differ anywhere still differ as ids", () => {
@@ -499,14 +661,14 @@ describe("the marks on the page", () => {
     const html = page(after, before);
     const unit = unitAround(html, html.indexOf(`id="${before.notes[0]!.id}"`) + 20);
     expect(unit).toContain("alpha check");
-    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(unit).toContain('<span class="rev rev-edited">edited</span>');
   });
 
-  test("a page with no base carries no chip and no mark at all", () => {
+  test("a page with no base carries no status label and no mark at all", () => {
     const html = page(doc(), null);
-    expect(html).not.toContain('<span class="rev">');
+    expect(html).not.toContain('<span class="rev ');
     expect(html).not.toContain('class="dtog"');
-    expect(html).not.toContain("marks since");
+    expect(html).not.toContain("compared with");
   });
 
   test("a removed statement comes back as a stub holding everything it said", () => {
@@ -529,7 +691,12 @@ describe("the marks on the page", () => {
     const stub = unitAround(html, at);
     expect(stub).toContain("Reviews move behind the workspace session gate");
     expect(stub).toContain("The gate is the helper bundles already use.");
-    expect(stub).toContain('<span class="rev">removed</span>');
+    expect(stub).toContain('<span class="rev rev-removed">removed</span>');
+    expect(html).toContain(
+      ".dgoneunit > summary .dp { display: inline; color: hsl(var(--muted)); }",
+    );
+    expect(html).not.toContain("details.row[open] > summary .dp");
+    expect(html).not.toContain("details:not([open]) > summary .dw");
   });
 
   test("a pull request the base version carried and this one does not stays as a stub", () => {
@@ -543,12 +710,12 @@ describe("the marks on the page", () => {
     const at = html.indexOf('class="card dgoneunit"');
     expect(at).toBeGreaterThan(-1);
     const stub = unitAround(html, at);
-    expect(stub).toContain('<span class="rev">removed</span>');
+    expect(stub).toContain('<span class="rev rev-removed">removed</span>');
     expect(stub).toContain(textOf(dropped.gist).split(" ")[0]!);
     // What the menu counts, the page accounts for.
     const counts = new DeltaIndex(computeDelta(side(before), side(after))).counts();
     expect(counts.removed).toBe(
-      [...html.matchAll(/<span class="rev">removed<\/span>/g)].length,
+      [...html.matchAll(/<span class="rev rev-removed">removed<\/span>/g)].length,
     );
   });
 
@@ -562,17 +729,47 @@ describe("the marks on the page", () => {
     // The title stands on its own, so its prior words grow a control of their own.
     const head = html.slice(html.indexOf('<h1 class="title">'), html.indexOf("</h1>"));
     expect(head).toContain('class="dtog"');
-    expect(head).toContain('class="dp"');
-    // A whole prior block is hidden until its own checkbox is checked.
-    expect(html).toContain(".dp.dpb { margin-top");
-    expect(html).toContain(".dtog:checked + .dw + .dp.dpb { display: block; }");
-    // The row reveal is scoped to the summary, so an open row does not print its
-    // whole prior body.
-    expect(html).toContain("details.row[open] > summary .dp");
-    expect(html).not.toContain("details.row[open] .dp,");
-    // The deletion caret is ink of its own rather than something a shut row hides.
-    expect(html).toContain(".dw.dcut {");
-    expect(html).not.toMatch(/\.dw\.dcut \{[^}]*display: none/);
+    expect(head).toContain('class="dchange dchange-inline"');
+    expect(head).toContain("<span>edited</span>");
+    expect(head).toContain('<use href="#i-edit"/>');
+    expect(head).not.toContain('<use href="#i-chev"/>');
+    // The control trails the title it belongs to, after both copies of the words.
+    expect(head.indexOf('class="dcurrent"')).toBeLessThan(head.indexOf('class="dinline"'));
+    expect(head.indexOf('class="dinline"')).toBeLessThan(head.indexOf('class="dedited"'));
+    // The clean copy is replaced in place only when Edited is checked.
+    expect(html).toContain(".dinline { display: none; }");
+    expect(html).toContain(".dchange:has(> .dtog:checked) > .dcurrent { display: none; }");
+    // Entity fields borrow one explicit checkbox; opening the row does nothing.
+    expect(html).toContain('class="dtog etog"');
+    expect(html).toContain("details:has(> .etog:checked) .dborrow > .dcurrent { display: none; }");
+    expect(html).not.toContain("details.row[open] > summary .dp");
+    expect(html).not.toContain(".dw.dcut {");
+  });
+
+  test("opening disclosures never opts into an inline diff", () => {
+    const before = doc();
+    const after = doc((d) => {
+      d.statements[0]!.body += " Revised statement.";
+      d.notes[0]!.text += " Revised note.";
+      d.codeDesign!.modules[0]!.body += " Revised module.";
+      d.codeDesign!.coverage[0]!.body += " Revised coverage.";
+      d.groups[0]!.paragraph += " Revised group.";
+      d.prs[0]!.gist += " Revised pull request.";
+    });
+    const html = page(after, before);
+    const style = html.slice(html.indexOf(".dtog {"), html.indexOf(".qmeta {"));
+    expect(style).not.toMatch(/\[open\][^{]*(?:\.dw|\.dold|\.dp)/);
+    expect(style).toContain(
+      "details:has(> .etog:checked) .dborrow > .dcurrent { display: none; }",
+    );
+    const statuses = [...html.matchAll(/<span class="rev rev-edited">edited<\/span>/g)];
+    expect(statuses.length).toBeGreaterThanOrEqual(6);
+    for (const status of statuses) {
+      const unit = unitAround(html, status.index!);
+      expect(unit).toContain('class="dtog etog"');
+      expect(unit).toContain('class="dborrow');
+      expect(unit).toContain('class="dinline"');
+    }
   });
 
   test("every checkbox the delta emits has a name a screen reader can read", () => {
@@ -581,9 +778,9 @@ describe("the marks on the page", () => {
       d.statements[0]!.body = "one two three four five alpha beta gamma delta epsilon";
     });
     const html = page(after, before);
-    const boxes = [...html.matchAll(/<input type="checkbox" class="dtog"[^>]*>/g)];
+    const boxes = [...html.matchAll(/<input type="checkbox" class="[^"]*\bdtog\b[^"]*"[^>]*>/g)];
     expect(boxes.length).toBeGreaterThan(0);
-    for (const b of boxes) expect(b[0]).toContain('aria-label="prior text"');
+    for (const b of boxes) expect(b[0]).toContain('aria-label="show edits"');
   });
 
   test("a head that moved marks the card without claiming a word changed", () => {
@@ -593,7 +790,7 @@ describe("the marks on the page", () => {
     });
     const html = page(after, before);
     expect(html).toContain("code moved");
-    expect(html).not.toContain('<span class="rev">revised</span>');
+    expect(html).not.toContain('<span class="rev rev-edited">edited</span>');
   });
 
   test("two renders of the same pair are byte-identical", () => {
@@ -673,7 +870,7 @@ describe("authored evidence, and the fields that are not prose", () => {
 
     const html = page(after, before);
     const unit = unitAround(html, html.indexOf('id="st_gate"'));
-    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(unit).toContain('<span class="rev rev-edited">edited</span>');
     expect(/class="(dw|dp)/.test(unit)).toBe(true);
     expect(unit).toContain("rewrite");
     // The words the caption used to say come back with it.
@@ -697,7 +894,7 @@ describe("authored evidence, and the fields that are not prose", () => {
     expect(unit).toContain('class="ev-was"');
     expect(unit).toContain("table");
     expect(unit).toContain("sequence");
-    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(unit).toContain('<span class="rev rev-edited">edited</span>');
   });
 
   test("a bundle caption and a figure label are authored too", () => {
@@ -746,7 +943,7 @@ describe("authored evidence, and the fields that are not prose", () => {
     // `1 ;`. Word-level is what the delta promises, so the words are what is checked.
     const text = unit.replace(/<[^>]*>/g, "");
     for (const word of ["const", "a", "=", "1"]) expect(text).toContain(word);
-    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(unit).toContain('<span class="rev rev-edited">edited</span>');
   });
 
   test("a risk quietly restated as a note is a movement the page shows", () => {
@@ -758,7 +955,7 @@ describe("authored evidence, and the fields that are not prose", () => {
     expect(e.fields.map((f) => f.field)).toEqual(["kind"]);
     const html = page(after, before);
     const unit = unitAround(html, html.indexOf('id="no_keys"'));
-    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(unit).toContain('<span class="rev rev-edited">edited</span>');
     expect(unit).toContain("risk");
     expect(/class="(dw|dp)/.test(unit)).toBe(true);
   });
@@ -776,11 +973,11 @@ describe("authored evidence, and the fields that are not prose", () => {
     const html = page(after, before);
     const unit = unitAround(html, html.indexOf('id="gr_gate"'));
     expect(unit).toContain('class="gfiles"');
-    expect(unit).toContain('<span class="rev">revised</span>');
+    expect(unit).toContain('<span class="rev rev-edited">edited</span>');
     expect(unit).toContain(dropped.path);
   });
 
-  test("a removed note keeps the kind it was removed with", () => {
+  test("a removed note keeps its kind in its class and wears no kind icon", () => {
     const before = doc();
     const after = doc((d) => {
       d.notes = [];
@@ -793,11 +990,13 @@ describe("authored evidence, and the fields that are not prose", () => {
     expect(at).toBeGreaterThan(-1);
     const stub = unitAround(html, at);
     expect(stub).toContain('class="note is-risk dgoneunit"');
-    expect(stub).toContain('href="#i-risk"');
-    expect(stub).toContain('<span class="rev">removed</span>');
+    // An absence is not a kind of change, so it leads with the chevron alone: the
+    // italic status is the only mark it carries.
+    expect(stub).not.toContain('href="#i-risk"');
+    expect(stub).toContain('<span class="rev rev-removed">removed</span>');
   });
 
-  test("a removed group keeps the kind it was removed with", () => {
+  test("a removed group opens to what it said and wears no kind icon", () => {
     const before = doc();
     const gone = before.groups[0]!;
     const after = doc((d) => {
@@ -813,10 +1012,20 @@ describe("authored evidence, and the fields that are not prose", () => {
     const at = html.indexOf(`dgone-${safeId(gone.id)}`);
     expect(at).toBeGreaterThan(-1);
     const stub = unitAround(html, at);
-    expect(stub).toContain(`<svg class="ic k-${gone.kind}"`);
-    expect(stub).toContain(`href="#i-${gone.kind}"`);
+    // The delta still knows the kind; the stub does not wear it as an icon, because
+    // an add, change or remove glyph says what a living row is.
+    expect(stub).not.toContain(`<svg class="ic k-${gone.kind}"`);
+    expect(stub).not.toContain(`href="#i-${gone.kind}"`);
     expect(stub).toContain(gone.title);
-    expect(stub).toContain('<span class="rev">removed</span>');
+    expect(stub).toContain('<span class="rev rev-removed">removed</span>');
+    // The open group's rail stays in the icon gutter; removal must not erase the
+    // normal horizontal body padding and let the rail cross the former prose.
+    expect(html).toContain(
+      ".dgoneunit .grp-body, .dgoneunit .card-body { padding-top: 4px; padding-bottom: 8px; }",
+    );
+    expect(html).not.toContain(
+      ".dgoneunit .dgone-body, .dgoneunit .grp-body, .dgoneunit .card-body",
+    );
   });
 
   test("a summary-only revision is movement the timeline names", () => {
@@ -909,15 +1118,15 @@ describe("the revision timeline over the routes", () => {
 
     const three = await fetch(`${host}/${ws}/r/${slug}`);
     const html = await three.text();
-    expect(html).toContain("marks since v1");
+    expect(html).toContain("compared with v1");
     // The statement moved in v2 and the note in v3, so both are marked against v1.
     expect(html).toContain("session");
-    expect((html.match(/<span class="rev">revised<\/span>/g) ?? []).length).toBeGreaterThan(1);
+    expect((html.match(/<span class="rev rev-edited">edited<\/span>/g) ?? []).length).toBeGreaterThan(1);
 
     const from = await (await fetch(`${host}/${ws}/r/${slug}?from=2`)).text();
-    expect(from).toContain("marks since v2");
+    expect(from).toContain("compared with v2");
     // Against v2 only the note moved.
-    expect((from.match(/<span class="rev">revised<\/span>/g) ?? []).length).toBe(1);
+    expect((from.match(/<span class="rev rev-edited">edited<\/span>/g) ?? []).length).toBe(1);
   });
 
   test("a reader who never opened a review reads the newest version against the one before it", async () => {
@@ -927,15 +1136,15 @@ describe("the revision timeline over the routes", () => {
       d.groups[0]!.title = "The gate, restated";
     });
     const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
-    expect(html).toContain("marks since v1");
+    expect(html).toContain("compared with v1");
   });
 
   test("the first version of a review renders no marks", async () => {
     const slug = "firstopen";
     publish(slug, () => {});
     const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
-    expect(html).not.toContain("marks since");
-    expect(html).not.toContain('<span class="rev">');
+    expect(html).not.toContain("compared with");
+    expect(html).not.toContain('<span class="rev ');
   });
 
   test("the revision menu lists every version with what moved in it", async () => {
@@ -966,8 +1175,8 @@ describe("the revision timeline over the routes", () => {
     const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
     // The page marks the summary, so the menu row for the version that moved it may
     // not deny it. Only v1, which has nothing before it, moved nothing.
-    expect(html).toContain("marks since v1");
-    expect(html).toContain("title and summary restated");
+    expect(html).toContain("compared with v1");
+    expect(html).toContain("title, summary restated");
     expect((html.match(/nothing moved/g) ?? []).length).toBe(1);
   });
 
@@ -978,7 +1187,7 @@ describe("the revision timeline over the routes", () => {
       d.prs[0]!.headSha = "9".repeat(40);
     });
     const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
-    // The row marks the move with its own chip, so it may not deny it in the same
+    // The row marks the move with its own status label, so it may not deny it in the same
     // breath. Only v1, which has nothing before it, moved nothing.
     expect(html).toContain("code moved");
     expect((html.match(/nothing moved/g) ?? []).length).toBe(1);
@@ -1017,11 +1226,11 @@ describe("the revision timeline over the routes", () => {
     });
     expect((await fetch(`${host}/${ws}/r/${slug}/v/1`)).status).toBe(200);
     const first = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
-    expect(first).toContain("marks since v1");
+    expect(first).toContain("compared with v1");
     // The read moved to v3 on that request, so the next one measures from v2. The
     // page says which base it used both times, so the change is never silent.
     const second = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
-    expect(second).toContain("marks since v2");
+    expect(second).toContain("compared with v2");
     // A named base is unaffected by any of it, and repeats byte for byte.
     const pinned = await (await fetch(`${host}/${ws}/r/${slug}?from=1`)).text();
     const again = await (await fetch(`${host}/${ws}/r/${slug}?from=1`)).text();

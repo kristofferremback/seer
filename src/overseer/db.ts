@@ -25,8 +25,8 @@ import type {
 export type ReviewDoc = Omit<Review, "annotations" | "freshness"> & {
   /** The attachments this version stores, in the order the document declared them.
    *  Evidence names the minted `att_` id, and only this list also keeps the handle the
-   *  skill authored: attachments share the id namespace with statements, notes and
-   *  groups, and that rule spans versions, so the next publish has to be able to see
+   *  skill authored: attachments share the id namespace with statements, notes,
+   *  design entities and groups, and that rule spans versions, so the next publish has to be able to see
    *  which handles the prior version spent. */
   attachments: StoredAttachment[];
 };
