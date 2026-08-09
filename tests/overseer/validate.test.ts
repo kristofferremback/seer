@@ -92,6 +92,7 @@ function synth(opts: {
   });
   const payload: PublishPayload = {
     title: "A synthetic review",
+    authorIntent: "The descriptions say this synthetic change exists to exercise review structure.",
     summary: "It exists to be counted.",
     prs: prs.map((n) => ({
       repo: GOLDEN_REPO,
@@ -119,6 +120,7 @@ function synth(opts: {
       refs: [],
       evidence: [],
     })),
+    codeDesign: { placement: "", modules: [], coverage: [] },
     groups: Array.from({ length: groupCount }, (_, g) => ({
       id: `gr_${g}`,
       title: `Group ${g}`,
@@ -507,6 +509,58 @@ describe("a risk has to point at something falsifiable", () => {
 
 // ---- rule: one repo, until multi-repo is actually built ----
 
+describe("code design", () => {
+  test("the golden responsibility map and sprawl check are valid", () => {
+    const result = run(golden());
+    expect(result.errors.filter((e) => e.field.startsWith("codeDesign"))).toEqual([]);
+  });
+
+  test("an empty design is valid and adds no dead prose", () => {
+    const payload = golden();
+    payload.codeDesign = { placement: "", modules: [], coverage: [] };
+    expect(run(payload).errors.filter((e) => e.field.startsWith("codeDesign"))).toEqual([]);
+  });
+
+  test("a responsibility area needs concrete paths and a ref", () => {
+    const payload = golden();
+    payload.codeDesign.modules[0]!.paths = [];
+    payload.codeDesign.modules[0]!.refs = [];
+    const errors = run(payload).errors;
+    expect(errors.some((e) => e.rule === "design_module_empty")).toBe(true);
+    expect(errors.some((e) => e.rule === "design_module_unreferenced")).toBe(true);
+  });
+
+  test("a coverage claim needs a ref", () => {
+    const payload = golden();
+    payload.codeDesign.coverage[0]!.refs = [];
+    expect(run(payload).errors.some((e) => e.rule === "design_coverage_unreferenced")).toBe(true);
+  });
+
+  test("design entity ids share the document namespace", () => {
+    const payload = golden();
+    payload.codeDesign.modules[0]!.id = payload.statements[0]!.id;
+    expect(run(payload).errors.some((e) => e.rule === "id_duplicated")).toBe(true);
+  });
+});
+
+describe("review decisions", () => {
+  test("decision is a note kind and needs a check or ref", () => {
+    const payload = golden();
+    payload.notes.push({
+      id: "nt_decide",
+      kind: "decision",
+      text: "Should the session gate answer with the same 404?",
+      body: "The choice trades debugging detail for repository privacy.",
+      checks: [],
+      refs: [],
+      evidence: [],
+    });
+    expect(run(payload).errors.some((e) => e.rule === "decision_unanchored")).toBe(true);
+    payload.notes.at(-1)!.checks = ["Compare the signed-out and missing-review responses"];
+    expect(run(payload).errors.some((e) => e.rule === "decision_unanchored")).toBe(false);
+  });
+});
+
 describe("a review spans one repo", () => {
   test("a second repo among the pull requests is rejected", () => {
     const payload = golden();
@@ -845,6 +899,13 @@ test("two attachments sharing an id is an error", () => {
 // ---- rule: authored bodies are not blank, and a group is not empty ----
 
 describe("authored prose is present", () => {
+  test("a blank author-intent account is rejected", () => {
+    const payload = golden();
+    payload.authorIntent = "";
+    const err = run(payload).errors.find((e) => e.field === "authorIntent");
+    expect(err?.rule).toBe("required");
+  });
+
   test("a blank statement body is rejected", () => {
     const payload = golden();
     payload.statements[0]!.body = "";
@@ -988,6 +1049,15 @@ describe("a body missing a list", () => {
     delete (payload as { notes?: unknown }).notes;
     const err = find(run(payload).errors, "required");
     expect(err.field).toBe("notes");
+  });
+
+  test("names an absent code-design object and its lists", () => {
+    const payload = golden();
+    delete (payload as { codeDesign?: unknown }).codeDesign;
+    const errors = run(payload).errors;
+    expect(errors.some((e) => e.rule === "required" && e.field === "codeDesign")).toBe(true);
+    expect(errors.some((e) => e.rule === "required" && e.field === "codeDesign.modules")).toBe(true);
+    expect(errors.some((e) => e.rule === "required" && e.field === "codeDesign.coverage")).toBe(true);
   });
 
   test("a null body is a named 422, not a crash", () => {
@@ -1560,6 +1630,9 @@ describe("what a publish spent", () => {
     expect(usage.statements.min).toBe(BUDGETS.statements.min);
     expect(usage.statements.max).toBe(BUDGETS.statements.base + BUDGETS.statements.perExtraPr);
     expect(usage.groups.min).toBe(BUDGETS.groups.min);
+    expect(usage.design.modules).toBe(two.codeDesign.modules.length);
+    expect(usage.design.coverage).toBe(two.codeDesign.coverage.length);
+    expect(usage.design.prose).toBeGreaterThan(0);
     expect(usage.hunks).toBe(5);
 
     // Four pull requests raise the ceiling and leave the floor exactly where it was.
@@ -1582,10 +1655,16 @@ describe("what a publish spent", () => {
     expect(afterBody.total).toBe(before.total + 1);
     expect(afterBody.bodies).toBe(before.bodies + 1);
 
+    payload.codeDesign.modules[0]!.body += "d";
+    const afterDesign = publishUsage(payload, 0);
+    expect(afterDesign.prose.total).toBe(afterBody.total + 1);
+    expect(afterDesign.prose.bodies).toBe(afterBody.bodies + 1);
+    expect(afterDesign.design.prose).toBe(publishUsage(golden(), 0).design.prose + 1);
+
     payload.groups[0]!.title += "y";
     const afterTitle = publishUsage(payload, 0).prose;
-    expect(afterTitle.total).toBe(afterBody.total + 1);
-    expect(afterTitle.bodies).toBe(afterBody.bodies);
+    expect(afterTitle.total).toBe(afterDesign.prose.total + 1);
+    expect(afterTitle.bodies).toBe(afterDesign.prose.bodies);
   });
 
   test("perPr divides by the pull requests, which is the figure to calibrate against", () => {

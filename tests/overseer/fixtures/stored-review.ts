@@ -40,6 +40,7 @@ export function goldenStoredDoc(): Omit<ReviewDoc, "id" | "slug" | "version"> {
   return {
     title: payload.title,
     kind: "stack",
+    authorIntent: payload.authorIntent,
     summary: payload.summary,
     prs: derived.prs.map((pr, i) => ({
       repo: pr.repo,
@@ -79,6 +80,21 @@ export function goldenStoredDoc(): Omit<ReviewDoc, "id" | "slug" | "version"> {
         evidence: [],
       },
     ],
+    codeDesign: {
+      placement: payload.codeDesign.placement,
+      modules: [
+        {
+          ...payload.codeDesign.modules[0]!,
+          refs: [ref("ref_mod_gate", "src/auth.ts", derived.prs[0]!.headSha)],
+        },
+      ],
+      coverage: [
+        {
+          ...payload.codeDesign.coverage[0]!,
+          refs: [ref("ref_cov_routes", "src/server.ts", derived.prs[0]!.headSha)],
+        },
+      ],
+    },
     groups: [
       {
         id: "gr_gate",

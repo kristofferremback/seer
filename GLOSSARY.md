@@ -30,23 +30,34 @@ A **version** is one publication of a review. Publishing to the same slug makes 
 version and the previous ones stay readable, which is how a review can be done in passes.
 
 The **delta** is what changed between two versions. It is computed, never authored: the
-witness may not write "revised" anywhere, because a chip that is typed rather than
-derived is a claim the page cannot check.
+witness may not write "edited" anywhere, because a status typed rather than derived
+is a claim the page cannot check.
 
 ## What a review is made of
 
-A **statement** is the atom of the overview: one line of what changed, of kind `add`,
-`change` or `remove`, backed by at least one ref, with prose behind it that says why.
-A statement may span several pull requests, which is the shape a per-pull-request
-reading hides.
+**Author intent** is the witness's attributed paraphrase of the problem and reason in
+the pull request descriptions. The **witness account** is the independently verified
+result, implication and high-level mechanism. Keeping both visible prevents verification
+from silently replacing the author's stated purpose.
 
-A **note** is only something a reviewer would otherwise miss, of kind `risk` or `note`.
-Contract changes and data flow are not notes; they are the change itself, so they are
-statements. A `risk` must be falsifiable: it carries checks, or a ref into changed code.
+A **statement** is the atom of the overview: one line naming a behavior, contract or
+architectural consequence, of kind `add`, `change` or `remove`, backed by at least one
+ref. Its prose explains the reason, implication and high-level mechanism. A statement
+may span several pull requests, which is the shape a per-pull-request reading hides.
 
-A **group** is a set of hunks that changed for one reason, and the walkthrough is the
-ordered list of them. Groups hold hunks rather than files, because one file can carry
-two unrelated changes, and a group may hold hunks from several pull requests.
+A **review-focus note** is something a reviewer would otherwise miss or must personally
+judge, of kind `decision`, `risk` or `note`. Contract changes and data flow are not
+notes; they are the change itself, so they are statements. A `decision` names a
+trade-off for the human; a `risk` must be falsifiable.
+
+**Code design** names the module that owns the central policy or state, the responsibility
+areas around it, and the conceptual paths a cross-cutting change must cover. Its coverage
+list is a sprawl check, not a changed-file inventory.
+
+A **group** is a set of hunks that implement one mechanism, and the walkthrough is the
+ordered list of them. Its paragraph explains how that implementation works. Groups hold
+hunks rather than files, because one file can carry two unrelated changes, and a group
+may hold hunks from several pull requests.
 
 **Evidence** is what a claim is shown with, in the order the witness chose: a ref, a
 payload, an example, a figure, an attachment, or a link to a Seer bundle.
@@ -64,8 +75,9 @@ which is what makes a ref into untouched code legible as such.
 
 **Derived** means Overseer computed it and the witness may not write it: titles, SHAs,
 hunks, line numbers, stats, origin, freshness, the review's `kind`. **Authored** means
-the witness wrote it and Overseer may not invent it: the summary, statements, notes,
-groups, and which evidence backs which claim. That split is the whole design.
+the witness wrote it and Overseer may not invent it: author intent, the witness summary,
+statements, review focus, code design, groups, and which evidence backs which claim. That
+split is the whole design.
 
 **Unaccounted** files are ones GitHub served no diff for and that could not be rebuilt
 from their contents either. The walkthrough names them, because it promises that absence

@@ -20,7 +20,8 @@
 import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
 import {
-  chip,
+  statusMark,
+  entityEditControl,
   groupFilesHtml,
   marked,
   safeId,
@@ -38,10 +39,10 @@ export type QuestionsHere = (type: string, id: string) => string;
 /** An entity's kind, on the page only when it moved. The kind draws the row's icon
  *  and nothing else, and a risk quietly restated as a note is exactly what a reader
  *  came back for, so when it moves it comes out as the word it is. Every entity the
- *  delta compares a kind on draws this, or its chip would stand over an unmarked row. */
+ *  delta compares a kind on draws this, or its status label would stand over an unmarked row. */
 export function kindMark(d: EntityDelta | null, owner: string, kind: string): string {
   if (!touched(d, "kind")) return "";
-  return `<p class="ev-was">${marked(safeInline(kind), d, "kind", owner, true)}</p>`;
+  return `<p class="ev-was">${marked(safeInline(kind), d, "kind", owner)}</p>`;
 }
 
 /** What a kind mark is called out loud. Shared with the chain and the statement rows,
@@ -336,9 +337,9 @@ function hunkBlock(
  *  pull request's share from the same hunks the walkthrough partitions: two places
  *  reading one source can disagree about presentation but never about the number. */
 /** What a set of hunks costs, in the one form the page says it everywhere: a card,
- *  a walkthrough group and a file row all read the same way, and each half carries
- *  the change hue its glyph carries in the diff below. U+2212, the minus sign: the
- *  count is a quantity, not a diff glyph. */
+ *  a walkthrough group and a file row all read the same way, in the muted ink of
+ *  secondary text — the change hues belong to the lines themselves, below. U+2212,
+ *  the minus sign: the count is a quantity, not a diff glyph. */
 export function statHtml(added: number, removed: number): string {
   return (
     `<span class="stat" role="img" aria-label="${added} added, ${removed} removed">` +
@@ -450,23 +451,25 @@ function groupBlock(
     .map((f, i) => fileRow(f, notes.get(f.path), `fd-${group.id}-${i}`, here))
     .join("");
   // Marked first, then tested for emptiness: a paragraph cleared between versions
-  // still owes the reader its prior words, and its chip owes them a mark.
+  // still owes the reader its prior words, and its status label owes them a mark.
   const gsum = marked(safeBlock(group.paragraph), d, "paragraph", group.id);
+  const edit = entityEditControl(d, group.id);
   // The file list is the partition of the diff this group claims. It is already on
   // the page as rows, but a row that left it leaves no trace there, so when the
   // membership moves the paths come out as the words they are.
   const gfiles = touched(d, "files")
-    ? `<p class="gfiles">${marked(groupFilesHtml(files.map((f) => f.path)), d, "files", group.id)}</p>`
+    ? `<div class="gfiles">${marked(groupFilesHtml(files.map((f) => f.path)), d, "files", group.id)}</div>`
     : "";
   return (
     `<details class="grp" id="${escapeHtml(group.id)}" data-kind="${escapeHtml(group.kind)}">` +
     `<summary>${icon("chev", "tick")}` +
     `${icon(group.kind, `ic ic-lg k-${group.kind}`, KIND_LABEL[group.kind])}` +
     `<span class="gname">${marked(safeInline(group.title), d, "title", group.id)}</span>` +
-    `${chip(d)}` +
+    `${statusMark(d)}` +
     `<span class="gcount">${statHtml(added, removed)}</span>` +
-    `</summary>` +
+    `</summary>${edit.input}` +
     `<div class="grp-body">` +
+    edit.label +
     // Block markdown, the way the data model defines it: a group paragraph may carry
     // emphasis, a link, a list or a fenced block.
     (gsum === "" ? "" : `<div class="gsum">${gsum}</div>`) +
@@ -487,38 +490,35 @@ export function walkthroughSection(
 ): string {
   const byId = new Map(doc.hunks.map((h) => [h.id, h] as const));
   const order = new Map(doc.hunks.map((h, i) => [h.id, i] as const));
-  const groups = groupsInOrder(doc.groups)
-    .map((g) => groupBlock(g, byId, order, delta ? delta.get("group", g.id) : null, here))
-    .join("");
   // A group the base version had and this one does not is a stub, like any other
   // removed entity: the walkthrough is a partition of the diff, and a partition
   // that quietly lost a part is a partition a reader cannot check.
-  const removed = delta
-    ? delta
-        .removed("group")
-        .map(
-          (e) =>
-            `<details class="grp dgoneunit" id="dgone-${safeId(e.id)}">` +
-            // A removed group keeps the kind it was removed with, in its icon, the
-            // way every other removed row does.
-            `<summary>${icon("chev", "tick")}${
-              e.formerKind === null
-                ? ""
-                : icon(e.formerKind, `ic k-${escapeHtml(e.formerKind)}`, e.formerKind)
-            }` +
-            `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
-            chip(e) +
-            `</summary>` +
-            `<div class="grp-body">${(e.former ? e.former.body : [])
-              .map((h) => `<div class="dp dpb">${h}</div>`)
-              .join("")}</div></details>`,
-        )
-        .join("")
-    : "";
+  const removedGroup = (e: EntityDelta) =>
+    `<details class="grp dgoneunit" id="dgone-${safeId(e.id)}">` +
+    // A removed group wears no kind icon: add, change and remove glyphs say what a
+    // living row is, and an absence is not any of them. The italic status is the
+    // only change mark a stub needs.
+    `<summary>${icon("chev", "tick")}` +
+    `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
+    statusMark(e) +
+    `</summary>` +
+    `<div class="grp-body">${(e.former ? e.former.body : [])
+      .map((h) => `<div class="dp dpb">${h}</div>`)
+      .join("")}</div></details>`;
+  const removedBefore = (id: string | null) =>
+    (delta?.removedBefore("group", id) ?? []).map(removedGroup).join("");
+  const groups =
+    groupsInOrder(doc.groups)
+      .map(
+        (g) =>
+          removedBefore(g.id) +
+          groupBlock(g, byId, order, delta ? delta.get("group", g.id) : null, here),
+      )
+      .join("") + removedBefore(null);
   return (
-    `<section id="walkthrough"><h2>Walkthrough</h2>` +
+    `<section id="walkthrough"><h2>Implementation walkthrough</h2>` +
     unaccountedBlock(doc.unaccounted ?? []) +
-    `<div class="walk">${groups}${removed}</div></section>`
+    `<div class="walk">${groups}</div></section>`
   );
 }
 

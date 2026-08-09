@@ -2,16 +2,17 @@
 //
 // Until now the page could only say "version 4" and leave a reader to find the
 // change themselves. This module computes it instead, at word level, over the
-// two stored documents. Nothing here is authored: the skill may not write a
-// "revised" chip, and no other code path may emit one, because a chip that is
-// typed rather than derived is a claim the page cannot check.
+// two stored documents. Nothing here is authored: the skill may not write an
+// `edited` status label, and no other code path may emit one, because a status
+// label typed rather than derived is a claim the page cannot check.
 //
 // WHAT IS DIFFED
 //
 // Every authored field, plus the one derived prose field the page shows whole:
-// the review title and summary, a statement's line and body, a note's line,
-// body and checks, a group's title and paragraph, a pull request's gist and
-// detail, and the pull request description GitHub holds. Authorship also reaches
+// the review title, attributed author intent and summary, code-design placement,
+// module and coverage prose, a statement's line and body, a note's line, body and
+// checks, a group's title and paragraph, a pull request's gist and detail, and the
+// pull request description GitHub holds. Authorship also reaches
 // into evidence, and it is diffed there too: an example's code and caption, an
 // attachment's alt text and caption, a bundle's caption, and a figure's node and
 // edge labels. Snippets, hunks, payload sides and every other quoted thing are
@@ -30,28 +31,26 @@
 //
 // MATCHING
 //
-// Entities match by id alone. Ids are the data model's handles and they are
-// stable across publishes, so a positional fallback would only ever pair two
-// things that are not the same thing. An id present in both sides is compared
-// field by field; an id only on the current side is new; an id only on the base
-// side is removed, and its former content is carried out whole so an absence
-// stays reviewable.
+// Stable ids match first. Witnesses can still rename an id while refining the same
+// section, so unmatched entities get a conservative second pass over their heading,
+// authored body, and code names. Exact or strong rough matches are compared
+// field by field; weak matches remain honestly new and removed. Reordering never
+// breaks an identity, and a true removal remembers the next surviving section so its
+// quiet stub stays near the place it left.
 //
 // TOKENS AND THE THRESHOLD
 //
 // A field is diffed as the HTML the page will actually show, scanned into tags,
 // whitespace runs and words, with only words compared, so a tag boundary never
-// shifts an alignment. Changed density is (words inserted + words deleted) /
-// max(base words, current words). Past 0.40, or when an inserted run straddles a
-// tag it cannot wrap, the field is republished whole behind one disclosure
-// rather than carrying a dozen little ones: at that density the prior sentence
-// is what a reader wants, not the prior clause.
+// shifts an alignment. Changed density is retained as a measurement for tests and
+// diagnostics, but it never changes the visual grammar: every redline appears only
+// after its explicit edited control is checked.
 //
 // Only words are compared, which is also the limit of what this can see: an edit
 // that moves markup without moving a word, a phrase that became code or emphasis,
 // or a link retargeted under unchanged link text, produces no field, no mark and no
-// chip. Nothing false is claimed, but nothing is claimed at all, and a reader who
-// came back for what moved will not learn it here.
+// status label. Nothing false is claimed, but nothing is claimed at all, and a reader
+// who came back for what moved will not learn it here.
 //
 // The word-level machinery is ported from the prototype's `_delta.ts`. What is
 // not ported is its scanner: that one recovered structure by reading HTML back,
@@ -62,9 +61,6 @@ import type { ReviewDoc } from "./db";
 import { exampleBodyHtml, safeBlock, safeInline } from "./render-evidence";
 import { prKey, type Annotation, type Evidence } from "./types";
 
-/** Past this share of moved words a field is shown whole rather than in place. */
-export const DENSE = 0.4;
-
 /** Past this many words on either side a field is not aligned at all. The
  *  alignment is quadratic in both time and memory, and the one field with no
  *  authored budget behind it is the pull request description GitHub holds, which
@@ -72,7 +68,17 @@ export const DENSE = 0.4;
  *  republished whole, which is what a reader of a rewritten essay wants anyway. */
 export const MAX_DIFF_WORDS = 2000;
 
-export type DeltaEntityKind = "review" | "summary" | "statement" | "note" | "group" | "pr";
+export type DeltaEntityKind =
+  | "review"
+  | "intent"
+  | "summary"
+  | "design"
+  | "module"
+  | "coverage"
+  | "statement"
+  | "note"
+  | "group"
+  | "pr";
 export type DeltaStatus = "new" | "revised" | "removed";
 
 /** A run of base words replaced by a run of current words. Indices are word
@@ -84,16 +90,12 @@ export interface Region {
   c1: number;
 }
 
-/** One authored field that moved. `mode` is how the renderer should show it:
- *  `words` marks each region in place, `whole` marks the insertions and hangs the
- *  entire base text behind one disclosure. */
+/** One authored field that moved, as aligned word regions on both sides. */
 export interface FieldDelta {
   /** Field name, unique within its entity. */
   field: string;
-  /** True for a one-line field drawn inside a summary, which carries no control
-   *  of its own because the row's own chevron is already the one tap. */
+  /** True when the rendered field must remain inline. */
   inline: boolean;
-  mode: "words" | "whole";
   regions: Region[];
   /** The base side's words, in order. */
   priorWords: string[];
@@ -115,6 +117,9 @@ export interface EntityDelta {
   formerKind: string | null;
   /** Set on a pull request whose head sha moved between the two versions. */
   codeMoved: boolean;
+  /** Current entity that followed this one in the base ordering. Removed entities
+   *  use it to keep their collapsed stub near the place it left. */
+  insertBefore?: string | null;
 }
 
 export interface Delta {
@@ -273,13 +278,11 @@ export function diffField(
   const cw = ix.words.map((t) => t.raw);
   if (pw.join(" ") === cw.join(" ")) return null;
 
-  // Too long to align. The field is republished whole: one region covering
-  // everything, which is what the whole-mode marker draws anyway.
+  // Too long to align. The field is republished whole as one region.
   if (pw.length > MAX_DIFF_WORDS || cw.length > MAX_DIFF_WORDS) {
     return {
       field,
       inline,
-      mode: "whole",
       regions: [{ d0: 0, d1: pw.length, c0: 0, c1: cw.length }],
       priorWords: pw,
       density: 1,
@@ -289,12 +292,7 @@ export function diffField(
   const regs = regions(lcsOps(pw, cw));
   const moved = regs.reduce((a, r) => a + (r.d1 - r.d0) + (r.c1 - r.c0), 0);
   const density = moved / Math.max(1, Math.max(pw.length, cw.length));
-  // An inserted run that straddles a tag cannot be wrapped where it stands. A
-  // one-line field is drawn inside a summary and has nowhere else to go, so it
-  // wraps what it can; a block hands the whole paragraph over instead.
-  const splits = regs.some((r) => r.c1 > r.c0 && !contiguous(ix, r.c0, r.c1));
-  const mode: FieldDelta["mode"] = !inline && (density > DENSE || splits) ? "whole" : "words";
-  return { field, inline, mode, regions: regs, priorWords: pw, density };
+  return { field, inline, regions: regs, priorWords: pw, density };
 }
 
 // ---- entities ----
@@ -374,6 +372,22 @@ function statementFields(s: ReviewDoc["statements"][number]): FieldSpec[] {
   ];
 }
 
+export function designPathsHtml(paths: string[]): string {
+  return paths.map((p) => `<span class="dpath">${escapeHtml(p)}</span>`).join(" ");
+}
+
+function moduleFields(m: NonNullable<ReviewDoc["codeDesign"]>["modules"][number]): FieldSpec[] {
+  return [
+    spec("title", true, safeInline(m.title)),
+    spec("body", false, safeBlock(m.body)),
+    spec("paths", false, designPathsHtml(m.paths)),
+  ];
+}
+
+function coverageFields(c: NonNullable<ReviewDoc["codeDesign"]>["coverage"][number]): FieldSpec[] {
+  return [spec("title", true, safeInline(c.title)), spec("body", false, safeBlock(c.body))];
+}
+
 function noteFields(n: ReviewDoc["notes"][number]): FieldSpec[] {
   return [
     spec("text", true, safeInline(n.text)),
@@ -432,11 +446,6 @@ function prFields(pr: ReviewDoc["prs"][number]): FieldSpec[] {
   ];
 }
 
-/** The head field of an entity: the line a stub or a new-entity mark hangs off. */
-function headField(specs: FieldSpec[]): FieldSpec {
-  return specs[0]!;
-}
-
 function compare(
   kind: DeltaEntityKind,
   id: string,
@@ -462,7 +471,6 @@ function compare(
     fields.push({
       field: spec.field,
       inline: false,
-      mode: "whole",
       regions: [{ d0: 0, d1: words.length, c0: 0, c1: 0 }],
       priorWords: words,
       density: 1,
@@ -472,17 +480,14 @@ function compare(
   return { kind, id, status: "revised", fields, former: null, formerKind: null, codeMoved };
 }
 
-function born(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelta {
-  // A new entity marks its own head line rather than every word it holds: the
-  // chip says the whole thing is new, and the line under it is what the reader
-  // reads first. Marking the body too would leave the row solid ink.
-  const head = headField(specs);
-  const d = diffField(head.field, head.inline, "", head.html);
+function born(kind: DeltaEntityKind, id: string): EntityDelta {
+  // `new!` identifies the whole entity. It needs no word-level insertion beneath it:
+  // painting every word green would restate the status as noise.
   return {
     kind,
     id,
     status: "new",
-    fields: d ? [d] : [],
+    fields: [],
     former: null,
     formerKind: null,
     codeMoved: false,
@@ -514,6 +519,149 @@ function gone(
   };
 }
 
+const MATCH_STOP = new Set([
+  "and", "are", "for", "from", "has", "have", "into", "one", "that", "the",
+  "their", "them", "they", "this", "under", "was", "were", "while", "with",
+]);
+
+/** Rough morphology is enough here: this is a conservative identity fallback, not a
+ *  prose search engine. The small concept folds catch the vocabulary review headings
+ *  naturally use while leaving ordinary technical nouns distinct. */
+function matchWord(raw: string): string {
+  let word = raw.toLowerCase().replace(/^&+|;+$/g, "");
+  if (/^(reader|reading|reads?)$/.test(word)) return "read";
+  if (/^(intent|provenance|purpose)$/.test(word)) return "purpose";
+  if (/^(decision|decisions|judgment|judgements|tradeoff|tradeoffs)$/.test(word)) return "decision";
+  if (word.includes("publish") || word.startsWith("publicat")) return "publish";
+  if (/^(revision|revisions|revised|version|versions|delta|deltas|redline|redlines)$/.test(word)) return "change";
+  if (word.length > 6 && word.endsWith("ing")) word = word.slice(0, -3);
+  else if (word.length > 5 && word.endsWith("ed")) word = word.slice(0, -2);
+  else if (word.length > 4 && word.endsWith("es")) word = word.slice(0, -2);
+  else if (word.length > 3 && word.endsWith("s")) word = word.slice(0, -1);
+  return word;
+}
+
+function matchWords(specs: FieldSpec[], headOnly: boolean): Set<string> {
+  const chosen = headOnly ? specs.slice(0, 1) : specs;
+  return new Set(
+    chosen
+      .flatMap((f) => wordToks(f.html).map((t) => matchWord(t.raw)))
+      .filter((w) => w.length > 2 && !MATCH_STOP.has(w)),
+  );
+}
+
+function matchCodes(specs: FieldSpec[]): Set<string> {
+  const out = new Set<string>();
+  for (const f of specs) {
+    for (const code of f.html.matchAll(/<code>(.*?)<\/code>/g)) {
+      for (const name of code[1]!.matchAll(/[A-Za-z_$][\w$]*/g)) out.add(name[0].toLowerCase());
+    }
+  }
+  return out;
+}
+
+function dice(a: Set<string>, b: Set<string>): number {
+  let shared = 0;
+  for (const word of a) if (b.has(word)) shared++;
+  return (2 * shared) / Math.max(1, a.size + b.size);
+}
+
+function matchStrength(prior: FieldSpec[], current: FieldSpec[]): { score: number; eligible: boolean } {
+  const pt = matchWords(prior, true);
+  const ct = matchWords(current, true);
+  const exact = [...pt].join(" ") === [...ct].join(" ") && pt.size > 0;
+  if (exact) return { score: 2, eligible: true };
+  const title = dice(pt, ct);
+  const body = dice(matchWords(prior, false), matchWords(current, false));
+  const code = dice(matchCodes(prior), matchCodes(current));
+  const score = title * 0.65 + body * 0.25 + code * 0.1;
+  return {
+    score,
+    eligible:
+      title >= 0.6 ||
+      score >= 0.26 ||
+      (title >= 0.1 && (body >= 0.18 || score >= 0.12)) ||
+      (code >= 0.5 && body >= 0.18),
+  };
+}
+
+/** Exact ids, then an order-preserving alignment of eligible authored resemblance.
+ *  Exact handles may move freely; rough matches act as heading anchors, so a removed
+ *  middle section remains a gap instead of making every later section look replaced. */
+function entityMatches<T extends { id: string }>(
+  prior: T[],
+  current: T[],
+  priorFields: (x: T) => FieldSpec[],
+  currentFields: (x: T) => FieldSpec[],
+): Map<string, T> {
+  const matches = new Map<string, T>();
+  const used = new Set<string>();
+  const byId = new Map(prior.map((x) => [x.id, x]));
+  for (const x of current) {
+    const exact = byId.get(x.id);
+    if (exact) {
+      matches.set(x.id, exact);
+      used.add(exact.id);
+    }
+  }
+  const loosePrior = prior.filter((x) => !used.has(x.id));
+  const looseCurrent = current.filter((x) => !matches.has(x.id));
+  const rows = looseCurrent.length + 1;
+  const cols = loosePrior.length + 1;
+  const score = Array.from({ length: rows }, () => new Float64Array(cols));
+  const step = Array.from(
+    { length: rows },
+    () => new Array<"current" | "prior" | "match" | null>(cols).fill(null),
+  );
+  for (let i = 1; i < rows; i++) {
+    for (let j = 1; j < cols; j++) {
+      let best = score[i - 1]![j]!;
+      let move: "current" | "prior" | "match" = "current";
+      if (score[i]![j - 1]! > best) {
+        best = score[i]![j - 1]!;
+        move = "prior";
+      }
+      const strength = matchStrength(
+        priorFields(loosePrior[j - 1]!),
+        currentFields(looseCurrent[i - 1]!),
+      );
+      // The small bonus prefers two credible anchors to one only marginally stronger
+      // pair, which is what preserves a three-to-two section edit as one removal.
+      const paired = score[i - 1]![j - 1]! + strength.score + 0.02;
+      if (strength.eligible && paired > best) {
+        best = paired;
+        move = "match";
+      }
+      score[i]![j] = best;
+      step[i]![j] = move;
+    }
+  }
+  let i = looseCurrent.length;
+  let j = loosePrior.length;
+  while (i > 0 && j > 0) {
+    const move = step[i]![j];
+    if (move === "match") {
+      matches.set(looseCurrent[i - 1]!.id, loosePrior[j - 1]!);
+      i--;
+      j--;
+    } else if (move === "prior") j--;
+    else i--;
+  }
+  return matches;
+}
+
+function nextSurvivor<T extends { id: string }>(
+  prior: T[],
+  at: number,
+  priorToCurrent: Map<string, string>,
+): string | null {
+  for (let i = at + 1; i < prior.length; i++) {
+    const id = priorToCurrent.get(prior[i]!.id);
+    if (id) return id;
+  }
+  return null;
+}
+
 function walk<T extends { id: string; kind?: string }>(
   kind: DeltaEntityKind,
   prior: T[],
@@ -521,18 +669,23 @@ function walk<T extends { id: string; kind?: string }>(
   fieldsOf: (x: T) => FieldSpec[],
   out: EntityDelta[],
 ): void {
-  const was = new Map(prior.map((x) => [x.id, x]));
+  const matches = entityMatches(prior, current, fieldsOf, fieldsOf);
+  const priorToCurrent = new Map([...matches].map(([id, was]) => [was.id, id]));
   for (const x of current) {
-    const p = was.get(x.id);
+    const p = matches.get(x.id);
     if (!p) {
-      out.push(born(kind, x.id, fieldsOf(x)));
+      out.push(born(kind, x.id));
       continue;
     }
     const d = compare(kind, x.id, fieldsOf(p), fieldsOf(x), false);
     if (d) out.push(d);
   }
-  const now = new Set(current.map((x) => x.id));
-  for (const x of prior) if (!now.has(x.id)) out.push(gone(kind, x.id, fieldsOf(x), x.kind ?? null));
+  prior.forEach((x, i) => {
+    if (priorToCurrent.has(x.id)) return;
+    const d = gone(kind, x.id, fieldsOf(x), x.kind ?? null);
+    d.insertBefore = nextSurvivor(prior, i, priorToCurrent);
+    out.push(d);
+  });
 }
 
 /** Groups walk like anything else, except that each side resolves its own hunks:
@@ -544,11 +697,17 @@ function walkGroups(
   curHunks: Map<string, { path: string; at: number }>,
   out: EntityDelta[],
 ): void {
-  const was = new Map(prior.map((g) => [g.id, g]));
+  const matches = entityMatches(
+    prior,
+    current,
+    (g) => groupFieldsWith(g, priorHunks),
+    (g) => groupFieldsWith(g, curHunks),
+  );
+  const priorToCurrent = new Map([...matches].map(([id, was]) => [was.id, id]));
   for (const g of current) {
-    const p = was.get(g.id);
+    const p = matches.get(g.id);
     if (!p) {
-      out.push(born("group", g.id, groupFieldsWith(g, curHunks)));
+      out.push(born("group", g.id));
       continue;
     }
     const d = compare(
@@ -560,10 +719,12 @@ function walkGroups(
     );
     if (d) out.push(d);
   }
-  const now = new Set(current.map((g) => g.id));
-  for (const g of prior) {
-    if (!now.has(g.id)) out.push(gone("group", g.id, groupFieldsWith(g, priorHunks), g.kind));
-  }
+  prior.forEach((g, i) => {
+    if (priorToCurrent.has(g.id)) return;
+    const d = gone("group", g.id, groupFieldsWith(g, priorHunks), g.kind);
+    d.insertBefore = nextSurvivor(prior, i, priorToCurrent);
+    out.push(d);
+  });
 }
 
 /**
@@ -582,6 +743,15 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
   );
   if (title) entities.push(title);
 
+  const intent = compare(
+    "intent",
+    "intent",
+    [spec("authorIntent", false, safeBlock(prev.doc.authorIntent ?? ""))],
+    [spec("authorIntent", false, safeBlock(cur.doc.authorIntent ?? ""))],
+    false,
+  );
+  if (intent) entities.push(intent);
+
   // The summary is a body like any other body, and it is diffed like one.
   const summary = compare(
     "summary",
@@ -599,7 +769,7 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
     const key = prKey(pr.repo, pr.number);
     const was = priorPrs.get(key);
     if (!was) {
-      entities.push(born("pr", key, prFields(pr)));
+      entities.push(born("pr", key));
       continue;
     }
     const d = compare("pr", key, prFields(was), prFields(pr), was.headSha !== pr.headSha);
@@ -609,6 +779,18 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
   for (const [key, pr] of priorPrs) if (!nowPrs.has(key)) entities.push(gone("pr", key, prFields(pr)));
 
   walk("statement", prev.doc.statements, cur.doc.statements, statementFields, entities);
+  const priorDesign = prev.doc.codeDesign ?? { placement: "", modules: [], coverage: [] };
+  const currentDesign = cur.doc.codeDesign ?? { placement: "", modules: [], coverage: [] };
+  const placement = compare(
+    "design",
+    "design",
+    [spec("placement", false, safeBlock(priorDesign.placement))],
+    [spec("placement", false, safeBlock(currentDesign.placement))],
+    false,
+  );
+  if (placement) entities.push(placement);
+  walk("module", priorDesign.modules, currentDesign.modules, moduleFields, entities);
+  walk("coverage", priorDesign.coverage, currentDesign.coverage, coverageFields, entities);
   walk("note", prev.doc.notes, cur.doc.notes, noteFields, entities);
   const hunksOf = (doc: ReviewDoc) =>
     new Map(doc.hunks.map((h, i) => [h.id, { path: h.path, at: i }] as const));
@@ -654,6 +836,12 @@ export class DeltaIndex {
     return this.delta.entities.filter((e) => e.kind === kind && e.status === "removed");
   }
 
+  /** Removed sections that occupied the slot before one surviving section. `null`
+   *  is the tail after the last survivor. */
+  removedBefore(kind: DeltaEntityKind, currentId: string | null): EntityDelta[] {
+    return this.removed(kind).filter((e) => (e.insertBefore ?? null) === currentId);
+  }
+
   counts(): {
     revised: number;
     added: number;
@@ -665,34 +853,44 @@ export class DeltaIndex {
     let added = 0;
     let removed = 0;
     let codeMoved = 0;
-    // The title and the summary carry marks rather than a chip, because neither
+    // The title and the summary carry marks rather than a status label, because neither
     // sits in a row that could hold one. They are still movement, and a menu that
     // said nothing moved about a version whose summary the same page marks would
     // be a denial the page contradicts, so they are named rather than counted.
     const restated: string[] = [];
     for (const e of this.delta.entities) {
-      const chips = e.kind !== "review" && e.kind !== "summary";
-      if (!chips && e.status === "revised" && e.fields.length > 0) {
-        restated.push(e.kind === "review" ? "title" : "summary");
+      const hasStatus =
+        e.kind !== "review" && e.kind !== "intent" && e.kind !== "summary" && e.kind !== "design";
+      if (!hasStatus && e.status === "revised" && e.fields.length > 0) {
+        restated.push(
+          e.kind === "review"
+            ? "title"
+            : e.kind === "intent"
+              ? "author intent"
+              : e.kind === "summary"
+                ? "summary"
+                : "code design",
+        );
       }
       // A pull request whose only movement is its head sha is code moved, not
       // revised: nothing it says on the page changed.
       if (e.status === "revised") {
-        if (e.fields.length > 0 && chips) revised++;
+        if (e.fields.length > 0 && hasStatus) revised++;
       }
       else if (e.status === "new") added++;
       else removed++;
       if (e.codeMoved) codeMoved++;
     }
-    // Title before summary, always, so two renders of one pair agree.
-    restated.sort((a, b) => (a === b ? 0 : a === "title" ? -1 : 1));
+    // Title, author intent, summary, code design, always.
+    const order = ["title", "author intent", "summary", "code design"];
+    restated.sort((a, b) => order.indexOf(a) - order.indexOf(b));
     return { revised, added, removed, codeMoved, restated };
   }
 }
 
 // ---- marking ----
 
-const CHEV = `<svg class="dtick" aria-hidden="true"><use href="#i-chev"/></svg>`;
+const EDIT_ICON = `<svg class="dediticon" aria-hidden="true"><use href="#i-edit"/></svg>`;
 
 /** An id fragment safe for an attribute, and injective: every character outside the
  *  safe set becomes its own escape, so two keys that differ anywhere still differ
@@ -710,12 +908,45 @@ function boxId(owner: string, field: string, k: number): string {
 
 type Edit = { at: number; del: number; ins: string };
 
+/** One in-place redline: prior words before their current replacements, additions in
+ *  the current structure. It is built beside the clean current copy and shown only
+ *  when the reader opens Edited. */
+function inlineDiffHtml(html: string, d: FieldDelta): string {
+  const ix = wordIndex(html);
+  const edits: Edit[] = [];
+  const add = (at: number, del: number, ins: string) => edits.push({ at, del, ins });
+  const markCurrent = (c0: number, c1: number) => {
+    let a = c0;
+    while (a < c1) {
+      let b = a + 1;
+      while (b < c1 && contiguous(ix, a, b + 1)) b++;
+      const first = ix.words[a]!;
+      const last = ix.words[b - 1]!;
+      add(first.s, last.e - first.s, `<ins class="dw">${html.slice(first.s, last.e)}</ins>`);
+      a = b;
+    }
+  };
+  for (const r of d.regions) {
+    const was = d.priorWords.slice(r.d0, r.d1).join(" ");
+    const at =
+      r.c0 < ix.words.length
+        ? ix.words[r.c0]!.s
+        : ix.words.length > 0
+          ? ix.words[ix.words.length - 1]!.e
+          : 0;
+    if (r.c1 > r.c0) markCurrent(r.c0, r.c1);
+    if (was !== "") add(at, 0, `<del class="dold">${was}</del> `);
+  }
+  edits.sort((a, b) => b.at - a.at || b.del - a.del);
+  let out = html;
+  for (const e of edits) out = out.slice(0, e.at) + e.ins + out.slice(e.at + e.del);
+  return out;
+}
+
 /**
- * The field's markup with the delta marked in it. Every prior-text reveal is a
- * checkbox and a label: the mark itself is the label, plus the chevron the rest
- * of the page opens things with. Inside a summary there is no control at all,
- * because one would fight the row's own; the prior words sit in place and the
- * row's chevron is the one tap. Nothing here needs JavaScript.
+ * The field's clean current markup and its hidden redline. Standalone prose carries
+ * its own edited control; fields inside an entity borrow that entity's explicit
+ * control. Opening the entity itself never reveals a diff. Nothing needs JavaScript.
  */
 export function markField(
   html: string,
@@ -723,114 +954,27 @@ export function markField(
   owner: string,
   control = false,
 ): string {
-  const ix = wordIndex(html);
-  const w = ix.words;
-  const edits: Edit[] = [];
-  const cut = (at: number, del: number, ins: string) => edits.push({ at, del, ins });
-  const prior = d.priorWords;
-  // A one-line field inside a summary carries no control of its own, because one
-  // would fight the row's own chevron. A one-line field standing on its own, like
-  // the review title, has no row to borrow and so grows one.
-  const own = !d.inline || control;
-  let k = 0;
-  const box = () => boxId(owner, d.field, ++k);
-
-  /** Every word of a run, wrapped where it stands. A run that straddles a tag is
-   *  wrapped piece by piece rather than dropped: the mark has to be there, because
-   *  the chip above it says it is. */
-  const insRuns = (c0: number, c1: number) => {
-    let a = c0;
-    while (a < c1) {
-      let b = a + 1;
-      while (b < c1 && contiguous(ix, a, b + 1)) b++;
-      cut(
-        w[a]!.s,
-        w[b - 1]!.e - w[a]!.s,
-        `<ins class="dw dnew">${html.slice(w[a]!.s, w[b - 1]!.e)}</ins>`,
-      );
-      a = b;
-    }
-  };
-
-  /** The prior words on their own, next to where they used to stand. */
-  const priorOnly = (at: number, was: string, cutOnly = false) => {
-    if (!own) {
-      if (!cutOnly) {
-        cut(at, 0, `<span class="dp">${was} </span>`);
-        return;
-      }
-      // A pure deletion inside a summary has no inserted word to carry the mark,
-      // and the prior words are hidden while the row is shut. Without a mark of
-      // its own the row's chip would stand over nothing, so the cut itself is
-      // drawn: a caret where the words used to be.
-      cut(at, 0, `<span class="dw dcut" aria-hidden="true"></span><span class="dp">${was} </span>`);
-      return;
-    }
-    const id = box();
-    cut(
-      at,
-      0,
-      `<input type="checkbox" class="dtog" id="${id}" aria-label="prior text">` +
-        `<label class="dw dxo" for="${id}">${CHEV}</label>` +
-        `<span class="dp">${was} </span>`,
+  const diff = inlineDiffHtml(html, d);
+  const tag = d.inline ? "span" : "div";
+  const inlineClass = d.inline ? " dchange-inline" : "";
+  if (!control) {
+    return (
+      `<${tag} class="dborrow${inlineClass}"><${tag} class="dcurrent">${html}</${tag}>` +
+      `<${tag} class="dinline">${diff}</${tag}></${tag}>`
     );
-  };
-
-  if (d.mode === "whole") {
-    for (const r of d.regions) {
-      if (r.c1 <= r.c0) continue;
-      insRuns(r.c0, r.c1);
-    }
-    // A field with no base text is new rather than rewritten, and there is no
-    // prior paragraph to open.
-    if (prior.length > 0) {
-      const id = box();
-      cut(
-        html.length,
-        0,
-        `<input type="checkbox" class="dtog" id="${id}" aria-label="prior text">` +
-          `<label class="dw dall" for="${id}">${CHEV}</label>` +
-          `<span class="dp dpb">${prior.join(" ")}</span>`,
-      );
-    }
-  } else {
-    for (const r of d.regions) {
-      const was = prior.slice(r.d0, r.d1).join(" ");
-      const hasIns = r.c1 > r.c0;
-      const inOne = hasIns && contiguous(ix, r.c0, r.c1);
-      const at = r.c0 < w.length ? w[r.c0]!.s : html.length;
-      if (inOne) {
-        const slice = html.slice(w[r.c0]!.s, w[r.c1 - 1]!.e);
-        const span = w[r.c1 - 1]!.e - w[r.c0]!.s;
-        if (was === "") {
-          cut(w[r.c0]!.s, span, `<ins class="dw dnew">${slice}</ins>`);
-        } else if (!own) {
-          cut(w[r.c0]!.s, span, `<ins class="dw">${slice}</ins><span class="dp"> ${was}</span>`);
-        } else {
-          const id = box();
-          cut(
-            w[r.c0]!.s,
-            span,
-            `<input type="checkbox" class="dtog" id="${id}" aria-label="prior text">` +
-              `<label class="dw" for="${id}"><ins>${slice}</ins>${CHEV}</label>` +
-              `<span class="dp"> ${was}</span>`,
-          );
-        }
-      } else if (hasIns) {
-        // The inserted run crosses a tag, so it cannot be one mark. It becomes one
-        // mark per piece, and the prior words hang off their own control beside it.
-        insRuns(r.c0, r.c1);
-        if (was !== "") priorOnly(at, was);
-      } else if (was !== "") {
-        priorOnly(at, was, true);
-      }
-    }
   }
-
-  edits.sort((a, b) => b.at - a.at || b.del - a.del);
-  let out = html;
-  for (const e of edits) out = out.slice(0, e.at) + e.ins + out.slice(e.at + e.del);
-  return out;
+  const id = boxId(owner, d.field, 1);
+  const input = `<input type="checkbox" class="dtog" id="${id}" aria-label="show edits">`;
+  const label = `<label class="dedited" for="${id}">${EDIT_ICON}<span>edited</span></label>`;
+  const content =
+    `<${tag} class="dcurrent">${html}</${tag}><${tag} class="dinline">${diff}</${tag}>`;
+  // An inline field is a line of running text — a title — so its control trails the
+  // words it belongs to. A block field leads with the control, above the prose it
+  // opens. The checked-state rules select by class, not by order, so both read the
+  // same to CSS.
+  return d.inline
+    ? `<${tag} class="dchange${inlineClass}">${input}${content}${label}</${tag}>`
+    : `<${tag} class="dchange${inlineClass}">${input}${label}${content}</${tag}>`;
 }
 
 /** The markup for one field, marked when the delta touched it and plain when it
@@ -850,25 +994,46 @@ export function marked(
   return d ? markField(html, d, owner, control) : html;
 }
 
+/** One explicit diff control shared by every changed field inside an entity. The
+ *  input is placed directly after its summary; the label sits at the start of the
+ *  expanded body. CSS ties both to every borrowed field in that details element. */
+export function entityEditControl(
+  entity: EntityDelta | null,
+  owner: string,
+): { input: string; label: string } {
+  if (!entity || entity.status !== "revised" || entity.fields.length === 0) {
+    return { input: "", label: "" };
+  }
+  const id = `de-${safeId(owner)}`;
+  return {
+    input: `<input type="checkbox" class="dtog etog" id="${id}" aria-label="show edits">`,
+    label: `<label class="dedited eedited" for="${id}">${EDIT_ICON}<span>edited</span></label>`,
+  };
+}
+
 /** Whether the delta touched one field of one entity. The renderer asks before it
  *  draws a field that is only on the page when it moved. */
 export function touched(entity: EntityDelta | null, field: string): boolean {
   return entity !== null && entity.fields.some((f) => f.field === field);
 }
 
-/** The code-moved chip. Minted here rather than at each site that shows one, so a
- *  chip on a card and the same chip in the revision menu cannot drift apart. */
-export function movedChip(): string {
+/** The code-moved status. Minted here rather than at each site that shows one, so
+ *  its wording cannot drift between surfaces. */
+export function movedStatus(): string {
   return `<span class="rev rev-moved">code moved</span>`;
 }
 
-/** The chip an entity carries, or nothing. Chips are minted here and in `movedChip`
- *  and nowhere else, and both take what they say from a delta, so every chip on the
- *  page is derived rather than authored. */
-export function chip(entity: EntityDelta | null): string {
+/** The small inline status an entity carries, or nothing. It is always derived from
+ *  the delta; witnesses cannot author their own change labels. */
+export function statusMark(entity: EntityDelta | null): string {
   if (!entity) return "";
-  const word = entity.status === "new" ? "new" : entity.status === "removed" ? "removed" : "revised";
-  const moved = entity.codeMoved ? movedChip() : "";
+  const status =
+    entity.status === "new"
+      ? { cls: "rev-new", word: "new!" }
+      : entity.status === "removed"
+        ? { cls: "rev-removed", word: "removed" }
+        : { cls: "rev-edited", word: "edited" };
+  const moved = entity.codeMoved ? movedStatus() : "";
   if (entity.status === "revised" && entity.fields.length === 0) return moved;
-  return `<span class="rev">${word}</span>${moved}`;
+  return `<span class="rev ${status.cls}">${status.word}</span>${moved}`;
 }

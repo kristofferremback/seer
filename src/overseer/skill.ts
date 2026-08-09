@@ -24,8 +24,10 @@ async function serveDoc(path: string, what: string, rewriteHost = false): Promis
   }
   const headers = { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-cache" };
   if (!rewriteHost) return new Response(file, { headers });
-  // The dispatch brief is a block the reader is told to copy exactly, so the host in
-  // it has to be this deployment's rather than the canonical one the repo copy names.
+  // Both documents name a host, and both are read as instructions rather than as prose:
+  // the agent document carries a dispatch brief the reader is told to copy exactly, and
+  // the witness document names the origin to publish to. So the host in each has to be
+  // this deployment's rather than the canonical one the repo copy is written against.
   // A document that is wrong for everyone but one instance is worse than no document.
   const text = (await file.text()).replaceAll(CANONICAL_BASE, config.baseUrl);
   return new Response(text, { headers });
@@ -35,9 +37,14 @@ async function serveDoc(path: string, what: string, rewriteHost = false): Promis
  *  its own substituted at serve time. */
 const CANONICAL_BASE = "https://seer.build";
 
-/** What the witness is told: what to write, and how. Fetched at review time. */
+/** What the witness is told: what to write, and how. Fetched at review time.
+ *
+ *  Host-substituted like the agent document, because this one now names the origin to
+ *  publish to. It did not, and a witness reading it had to infer the host from wherever
+ *  it happened to fetch the page — which works right up until someone runs their own
+ *  instance and the document sends their review to this one. */
 export async function handleOverseerSkill(): Promise<Response> {
-  return serveDoc(DOC_PATH, "skill document");
+  return serveDoc(DOC_PATH, "skill document", true);
 }
 
 /** What a person installs so their agent can dispatch a witness at all. Two audiences,

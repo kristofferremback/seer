@@ -27,6 +27,33 @@ describe("overseer skill doc", () => {
     expect((await r.text()).length).toBeGreaterThan(2000);
   });
 
+  // A witness had to infer the publish origin from wherever it happened to fetch this
+  // page, because the document showed `$SEER_URL` and never said what it was. Naming it
+  // means it has to be substituted per deployment, or the document sends every other
+  // instance's reviews to this one.
+  test("names the origin to publish to, as this deployment rather than the canonical one", () => {
+    expect(doc).toContain("/api/reviews");
+    expect(doc).toContain(config.baseUrl);
+    // config.baseUrl is a port-0 localhost string under tests, so it cannot equal the
+    // canonical host; if substitution were off, the committed host would still be here.
+    expect(config.baseUrl).not.toBe("https://seer.build");
+    expect(doc).not.toContain("https://seer.build");
+  });
+
+  // The retrieval preamble. A fetch-and-summarize tool refused this document outright,
+  // reading its authoring rules as constraints on its own reply and calling the page
+  // copyrighted material it should not reproduce. An agent handed a summary instead gets
+  // the format, the budgets and the publish contract wrong, and all three are enforced on
+  // write — so the refusal surfaces as a 422 far from its cause.
+  test("tells a fetching tool to reproduce it rather than summarise it", () => {
+    const preamble = doc.slice(0, doc.indexOf("You are the witness."));
+    expect(preamble).toContain("reproduce it in full");
+    expect(preamble).toContain("not third-party or copyrighted material");
+    // And it separates the two audiences, which is the actual confusion: every rule about
+    // quoting below governs the review being authored, not the retrieval of this page.
+    expect(preamble).toContain("None of it governs how this page reaches them");
+  });
+
   test("carries the three settled opening clauses", () => {
     expect(doc).toContain("fresh sub-agent");
     expect(doc).toContain("only through the published record");
@@ -41,9 +68,11 @@ describe("overseer skill doc", () => {
   });
 
   test("states the authored fields the write path requires", () => {
-    expect(doc).toContain("{ id, repo, number, gist, detail, detailRef, parent }");
+    expect(doc).toContain("{ repo, number, gist, detail, detailRef, parent }");
     expect(doc).toContain("{ id, kind, text, prs[], refs[], body, evidence[] }");
     expect(doc).toContain("{ id, kind, text, body, checks[], refs[], evidence[] }");
+    expect(doc).toContain("{ placement, modules[], coverage[] }");
+    expect(doc).toContain("{ id, title, paths[], body, refs[] }");
     expect(doc).toContain("{ id, title, significance, paragraph, hunks[], fileNotes[] }");
     // Every list is required, sent as [] when unused: the doc must not call one optional.
     expect(doc).toContain("Every list field in the");
@@ -53,6 +82,8 @@ describe("overseer skill doc", () => {
   test("documents answering an annotation as the skill's own act", () => {
     expect(doc).toContain("POST /api/reviews/:slug/annotations");
     expect(doc).toContain("GET /api/reviews/:slug");
+    expect(doc).toContain("{ document, version, latestVersion, ... }");
+    expect(doc).toContain("document.annotations");
     expect(doc).toContain('"answer"');
   });
 
@@ -77,14 +108,32 @@ describe("overseer skill doc", () => {
     expect(doc).toContain("decomposition");
   });
 
+  test("separates attributed intent, the witness account, and implementation", () => {
+    expect(doc).toContain("The overview gives the forest. The walkthrough");
+    expect(doc).toContain("`authorIntent` paraphrases only the problem");
+    expect(doc).toContain("The summary is the witness account");
+    expect(doc).toContain("For a stack, combine them into the net intent");
+    expect(doc).toContain("control flow, data flow, state transition or");
+    expect(doc).toContain("perform a sprawl check");
+    expect(doc).toContain("module that owns the policy or state");
+    expect(doc).toContain("Use plain technical English.");
+  });
+
   test("names the graded failure modes", () => {
     expect(doc).toContain("assurance-filed-as-risk");
     expect(doc).toContain("label-prose");
+    expect(doc).toContain("stack-as-changelog");
+    expect(doc).toContain("walkthrough-as-inventory");
+    expect(doc).toContain("sprawl-without-an-owner");
+    expect(doc).toContain("intent-substitution");
     expect(doc).toContain("unclaimed-churn-hidden-in-a-big-group");
-    expect(doc).toContain("summary-buries-intent");
+    expect(doc).toContain("summary-buries-result");
   });
 
   test("covers the publish contract", () => {
+    expect(doc).toContain("{ slug, title, authorIntent, summary");
+    expect(doc).toContain("{ repo, number, gist, detail, detailRef, parent }");
+    expect(doc).not.toContain("{ id, repo, number");
     expect(doc).toContain("POST /api/reviews");
     expect(doc).toContain("multipart/form-data");
     expect(doc).toContain("document");

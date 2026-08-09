@@ -8,7 +8,7 @@
 export const STATEMENT_KINDS = ["add", "change", "remove"] as const;
 export type StatementKind = (typeof STATEMENT_KINDS)[number];
 
-export const NOTE_KINDS = ["risk", "note"] as const;
+export const NOTE_KINDS = ["decision", "risk", "note"] as const;
 export type NoteKind = (typeof NOTE_KINDS)[number];
 
 /** Derived: one pr is `single`, a chain of bases is `stack`, anything else is `set`. */
@@ -89,7 +89,11 @@ export interface Review {
   title: string;
   /** Derived. */
   kind: ReviewKind;
-  /** Authored, <= 2 paragraphs, <= BUDGETS.chars.summary, constrained markdown. */
+  /** Authored paraphrase of the problem and reason stated in the PR descriptions.
+   *  Optional only for documents published before this field existed. */
+  authorIntent?: string;
+  /** Authored witness account: verified result, implication and high-level solution.
+   *  <= 2 paragraphs, <= BUDGETS.chars.summary, constrained markdown. */
   summary: string;
   /** 1..n. */
   prs: Pr[];
@@ -99,6 +103,9 @@ export interface Review {
   notes: Note[];
   /** BUDGETS.groups.min .. the scaled maximum. */
   groups: Group[];
+  /** Authored code organization and conceptual path coverage. Optional only for
+   *  documents published before this field existed. */
+  codeDesign?: CodeDesign;
   /** 0..n, written after publication. */
   annotations: Annotation[];
   /** Derived: every hunk of every pr, in pull request and file order. The groups
@@ -140,9 +147,10 @@ export interface Pr {
   coAuthors: string[];
   /** Derived: the pull request description, markdown as GitHub holds it. */
   body: string;
-  /** Authored, <= BUDGETS.chars.prGist, one line. */
+  /** Authored: this pull request's contribution to the whole change.
+   *  <= BUDGETS.chars.prGist, one line. */
   gist: string;
-  /** Authored, <= 2 sentences. */
+  /** Authored: the contribution's reason and high-level mechanism. <= 2 sentences. */
   detail: string;
   /** A ref id. */
   detailRef: string;
@@ -159,14 +167,47 @@ export interface Statement {
   prs: string[];
   /** Pointers backing the claim. At least one: a claim with nothing behind it does not belong on the page. */
   refs: Ref[];
-  /** Authored, <= BUDGETS.chars.statementBody, constrained markdown. */
+  /** Authored: reason, implication and high-level mechanism.
+   *  <= BUDGETS.chars.statementBody, constrained markdown. */
   body: string;
   /** Ordered. */
   evidence: Evidence[];
 }
 
+export interface CodeDesign {
+  /** Placement judgment: where the central policy or state lives and why. */
+  placement: string;
+  /** Responsibility areas, not a changed-file inventory. */
+  modules: DesignModule[];
+  /** Distinct conceptual paths that must participate in a cross-cutting change. */
+  coverage: DesignCoverage[];
+}
+
+export interface DesignModule {
+  id: string;
+  /** Plain responsibility name, e.g. "The trust boundary". */
+  title: string;
+  /** Paths that make up this responsibility area. */
+  paths: string[];
+  /** How the modules divide responsibility and interact. */
+  body: string;
+  /** At least one pointer backing the placement claim. */
+  refs: Ref[];
+}
+
+export interface DesignCoverage {
+  id: string;
+  /** Conceptual path, e.g. "Previously fetched source". */
+  title: string;
+  /** How this path reaches the central rule, or why it deliberately does not. */
+  body: string;
+  /** At least one pointer backing the coverage claim. */
+  refs: Ref[];
+}
+
 export interface Note {
   id: string;
+  /** Human judgment to make, risk to verify, or observation the reviewer could miss. */
   kind: NoteKind;
   /** Authored, <= BUDGETS.chars.noteText. */
   text: string;
@@ -184,7 +225,8 @@ export interface Group {
   title: string;
   /** Ascending, 1.0 = most significant. Ties broken by id. */
   significance: number;
-  /** Authored, <= BUDGETS.chars.groupParagraph, constrained markdown. */
+  /** Authored implementation explanation: control flow, data flow, state transition
+   *  or responsibility split. <= BUDGETS.chars.groupParagraph, constrained markdown. */
   paragraph: string;
   /** Hunk ids. Every hunk in every pr belongs to exactly one group. */
   hunks: string[];
@@ -349,9 +391,12 @@ export const BUDGETS = {
   statements: { min: 3, base: 6, perExtraPr: 2, ceiling: 12 },
   notes: { min: 0, max: 6 },
   groups: { min: 2, base: 8, perExtraPr: 4, ceiling: 16 },
+  designModules: { max: 6 },
+  designCoverage: { max: 8 },
   checks: { max: 5 },
   chars: {
     reviewTitle: 80, // review.title
+    authorIntent: 600, // review.authorIntent, also <= 2 paragraphs
     summary: 600, // review.summary, also <= BUDGETS.paragraphs.summary paragraphs
     prGist: 100, // pr.gist, one line
     // pr.detail is two sentences by rule, and this is the ceiling those two
@@ -364,6 +409,12 @@ export const BUDGETS = {
     noteText: 140, // note.text
     noteBody: 1600, // note.body
     check: 120, // each note.checks[] entry
+    designPlacement: 800, // codeDesign.placement
+    designModuleTitle: 60,
+    designModuleBody: 800,
+    designCoverageTitle: 80,
+    designCoverageBody: 600,
+    designPath: 180,
     groupTitle: 60, // group.title
     groupParagraph: 600, // group.paragraph
     fileNote: 120, // group.file_notes[].text
@@ -375,6 +426,7 @@ export const BUDGETS = {
     alt: 140, // attachment.alt
   },
   paragraphs: {
+    authorIntent: 2,
     summary: 2, // review.summary, <= 2 paragraphs
   },
 } as const;
