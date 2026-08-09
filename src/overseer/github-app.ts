@@ -346,6 +346,23 @@ export class GithubSuspendedError extends GithubAppRefusal {
   }
 }
 
+/**
+ * GitHub refused a credential that was presented, so it is gone at the far end.
+ *
+ * Deliberately not a GithubRoutingError: the workspace client falls through to the
+ * anonymous reader on routing errors, and papering a dead credential over with a public
+ * read hides the one fact only the person asking can act on. A routing error means "none
+ * of yours covers this"; this means "one of yours is broken", and it must reach them.
+ */
+export class GithubCredentialDeadError extends GithubAppRefusal {
+  readonly credentialId: string;
+  constructor(credentialId: string, message: string) {
+    super(message);
+    this.name = "GithubCredentialDeadError";
+    this.credentialId = credentialId;
+  }
+}
+
 /** The app JWT's rate limit, which is shared across every workspace on this instance. */
 export class GithubRateLimitError extends GithubAppRefusal {
   constructor(message: string) {

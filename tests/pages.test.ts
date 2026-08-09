@@ -119,6 +119,28 @@ describe("settings github panel", () => {
     expect(html).toContain("/github/connect");
     expect(html).toContain("https://github.com/apps/seer-overseer-test/installations/new");
   });
+
+  // A credential that stopped working is invisible unless the page says so, and the two
+  // ways it stops have different remedies, so one word for both would send half the
+  // readers to the wrong place.
+  test("each credential's state is named, and a working one is left alone", () => {
+    const base = { account: "alice", kind: "pat" as const, lastUsed: "3 minutes ago" };
+    const html = settingsPage(
+      settings({
+        credentials: [
+          { ...base, id: "guc_live", label: "work", isDead: false, isExpired: false },
+          { ...base, id: "guc_dead", label: "old laptop", isDead: true, isExpired: false },
+          { ...base, id: "guc_gone", label: "temporary", isDead: true, isExpired: true },
+        ],
+      }),
+    );
+    expect(html).toContain("revoked at GitHub — reconnect");
+    expect(html).toContain("expired");
+
+    const live = html.split("guc_live")[0]!.split("<tr>").pop()!;
+    expect(live).not.toContain("revoked at GitHub");
+    expect(live).not.toContain("expired");
+  });
 });
 
 // ---- the claim page ----

@@ -546,6 +546,7 @@ function styles(): string {
   .panel-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.7rem; }
   .panel-note { font-size: 0.9rem; color: hsl(var(--ink-soft)); max-width: 52ch; margin: 0.8rem 0 0; }
   .panel-note.dim { color: hsl(var(--muted)); }
+  .ledger td.state { color: hsl(var(--muted)); }
 
   /* one-time reveal — freshly minted key / invite link. Shown once, never again. */
   .reveal {
@@ -1939,6 +1940,11 @@ export interface SettingsCredential {
   account: string;
   kind: "oauth" | "pat";
   lastUsed: string;
+  /** GitHub refused this credential. What the person does about it depends on why, so
+   *  the two are separate facts rather than one word: an expired credential is replaced,
+   *  a revoked one is granted again at GitHub. */
+  isDead: boolean;
+  isExpired: boolean;
 }
 
 export interface SettingsInstallation {
@@ -2026,7 +2032,7 @@ export function settingsPage(d: SettingsData): string {
 
   const credentialRows =
     d.credentials.length === 0
-      ? `<tr><td colspan="5" class="empty">No personal GitHub credentials yet.</td></tr>`
+      ? `<tr><td colspan="6" class="empty">No personal GitHub credentials yet.</td></tr>`
       : d.credentials
           .map(
             (credential) => `<tr>
@@ -2034,6 +2040,9 @@ export function settingsPage(d: SettingsData): string {
         <td>${escapeHtml(credential.account)}</td>
         <td class="mono">${escapeHtml(credential.kind)}</td>
         <td class="mono">${escapeHtml(credential.lastUsed)}</td>
+        <td class="state">${
+          credential.isExpired ? "expired" : credential.isDead ? "revoked at GitHub — reconnect" : ""
+        }</td>
         <td class="act"><form method="post" action="${s(`/github/credentials/${credential.id}/revoke`)}"><button type="submit">revoke</button></form></td>
       </tr>`,
           )
@@ -2177,7 +2186,7 @@ ${head(`Settings · ${d.name} · Seer`, og)}
       <p class="eyebrow">Your GitHub credentials</p>
       <div class="ledger scroll-x">
         <table>
-          <tr><th>Label</th><th>Account</th><th>Kind</th><th>Last used</th><th></th></tr>
+          <tr><th>Label</th><th>Account</th><th>Kind</th><th>Last used</th><th></th><th></th></tr>
           ${credentialRows}
         </table>
       </div>

@@ -536,10 +536,22 @@ export function migrate(): void {
  * It does not get a version bump: the column earns none on its own terms. it is nullable, nothing reads it
  * that is not new, and an old container writing rows during a redeploy overlap simply
  * leaves it null — which reads as "no delivery recorded yet", which is true.
+ *
+ * `dead_at` is the same kind of column for a user credential: GitHub answered 401 through
+ * it, so it is revoked or expired at the far end and retrying it is retrying a corpse. It
+ * is distinct from `revoked_at`, which records the person deciding, and settings needs
+ * both — one is the reason it is gone, the other is what to do about it.
+ *
+ * It earns no version bump on the same terms: nullable, read only by code that is new,
+ * and left null by an old container during a redeploy overlap — which reads as "GitHub
+ * has not refused this yet", which is true.
  */
 function ensureAdditiveColumns(): void {
   if (tableExists("github_installations") && !hasColumn("github_installations", "last_delivery_at")) {
     db.run("ALTER TABLE github_installations ADD COLUMN last_delivery_at INTEGER");
+  }
+  if (tableExists("github_user_credentials") && !hasColumn("github_user_credentials", "dead_at")) {
+    db.run("ALTER TABLE github_user_credentials ADD COLUMN dead_at INTEGER");
   }
 }
 

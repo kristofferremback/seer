@@ -67,7 +67,10 @@ import {
 import { handleGithubWebhook } from "./overseer/webhook";
 import { handleConnectGithubAccount, handleGithubAccountCallback } from "./overseer/github-user-connect";
 import { handlePasteGithubToken } from "./overseer/github-user-pat";
-import { listGithubUserCredentials, revokeGithubUserCredential } from "./overseer/user-credentials";
+import {
+  listGithubUserCredentialsForSettings,
+  revokeGithubUserCredential,
+} from "./overseer/user-credentials";
 import { getReviewVersion, listReviewVersions, listReviews } from "./overseer/db";
 import {
   dbWorkspaceHoldings,
@@ -223,12 +226,14 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
       // What this workspace may derive through. Unclaimed and disconnected installations
       // are not in here: listWorkspaceInstallations answers the same question routing
       // asks, so the panel cannot claim a reach the client would refuse.
-      credentials: listGithubUserCredentials(user.id).map((credential) => ({
+      credentials: listGithubUserCredentialsForSettings(user.id).map((credential) => ({
         id: credential.id,
         label: credential.label,
         account: credential.account_login,
         kind: credential.kind,
-        lastUsed: credential.last_used_at ? fmtDateTime(credential.last_used_at) : "never",
+        lastUsed: credential.last_used_at ? agoWords(Date.now() - credential.last_used_at) : "never",
+        isDead: credential.dead_at !== null,
+        isExpired: credential.expires_at !== null && credential.expires_at <= Date.now(),
       })),
       installations: listWorkspaceInstallations(wsId).map((g) => ({
         id: g.id,

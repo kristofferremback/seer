@@ -16,6 +16,7 @@ export interface GithubUserCredential {
   created_at: number;
   last_used_at: number | null;
   revoked_at: number | null;
+  dead_at: number | null;
 }
 
 interface StoredCredential extends Omit<GithubUserCredential, "scopes"> {
@@ -34,14 +35,14 @@ interface StoredCredential extends Omit<GithubUserCredential, "scopes"> {
 // and openGithubUserCredential is the only thing that opens one.
 const COLUMNS =
   "id, user_id, kind, label, account_login, account_id, scopes, expires_at, " +
-  "created_at, last_used_at, revoked_at";
+  "created_at, last_used_at, revoked_at, dead_at";
 
 /** The write side, which is the only place the envelope belongs. Kept separate from
  *  COLUMNS rather than derived from it, so that widening one cannot silently widen the
  *  other -- they are different lists for a reason and the reason is one-directional. */
 const INSERT_COLUMNS =
   "id, user_id, kind, label, secret, account_login, account_id, scopes, expires_at, " +
-  "created_at, last_used_at, revoked_at";
+  "created_at, last_used_at, revoked_at, dead_at";
 
 function context(id: string, userId: string): string {
   return `github_cred:${id}:${userId}`;
@@ -65,7 +66,7 @@ export function createGithubUserCredential(input: {
   const id = tinyId("guc");
   const encrypted = seal(input.secret, context(id, input.userId));
   db.run(
-    `INSERT INTO github_user_credentials (${INSERT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+    `INSERT INTO github_user_credentials (${INSERT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
     [
       id,
       input.userId,
@@ -95,6 +96,20 @@ export function listGithubUserCredentials(userId: string): GithubUserCredential[
   return db
     .query<Omit<StoredCredential, "secret">, [string]>(
       `SELECT ${COLUMNS} FROM github_user_credentials WHERE user_id = ? AND revoked_at IS NULL ` +
+        "AND dead_at IS NULL " +
+        "ORDER BY created_at DESC, id DESC",
+    )
+    .all(userId)
+    .map(publicRow);
+}
+
+/** What settings shows: everything the person has not revoked themselves, including the
+ *  ones GitHub has since refused. A credential that stopped working is exactly what they
+ *  came to the page to find out about, so routing's live list is the wrong one here. */
+export function listGithubUserCredentialsForSettings(userId: string): GithubUserCredential[] {
+  return db
+    .query<Omit<StoredCredential, "secret">, [string]>(
+      `SELECT ${COLUMNS} FROM github_user_credentials WHERE user_id = ? AND revoked_at IS NULL ` +
         "ORDER BY created_at DESC, id DESC",
     )
     .all(userId)
@@ -118,6 +133,19 @@ export function touchGithubUserCredential(id: string, userId: string, usedAt = D
       "UPDATE github_user_credentials SET last_used_at = ? " +
         "WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
       [usedAt, id, userId],
+    ).changes === 1
+  );
+}
+
+/** GitHub answered 401 through this credential, so it is revoked or expired at the far
+ *  end. The row stays: settings shows it, with the state, so the person knows which of
+ *  their credentials stopped working and why. The live listing routing walks drops it;
+ *  the settings listing and the single-row read still return it. */
+export function markGithubUserCredentialDead(id: string, userId: string, at = Date.now()): boolean {
+  return (
+    db.run(
+      "UPDATE github_user_credentials SET dead_at = ? WHERE id = ? AND user_id = ? AND dead_at IS NULL",
+      [at, id, userId],
     ).changes === 1
   );
 }

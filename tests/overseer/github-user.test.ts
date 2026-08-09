@@ -2,8 +2,15 @@ import { beforeAll, expect, test } from "bun:test";
 import { generateKey, setKeyring } from "../../src/envelope";
 import { migrate } from "../../src/migrate";
 import { createUserGithubClient } from "../../src/overseer/github-user";
-import { createGithubUserCredential } from "../../src/overseer/user-credentials";
-import { GithubRoutingError } from "../../src/overseer/github-app";
+import {
+  createGithubUserCredential,
+  getGithubUserCredential,
+} from "../../src/overseer/user-credentials";
+import {
+  createWorkspaceGithubClient,
+  GithubCredentialDeadError,
+  GithubRoutingError,
+} from "../../src/overseer/github-app";
 
 beforeAll(() => {
   setKeyring({ activeId: "user-client", keys: new Map([["user-client", Buffer.from(generateKey(), "base64")]]) });
@@ -198,4 +205,113 @@ test("a refusal is cached briefly and a grant is cached long", async () => {
   expect(seen.filter((u) => u.endsWith("/repos/acme/later")).length).toBe(
     seen.slice(0, afterGrant).filter((u) => u.endsWith("/repos/acme/later")).length,
   );
+});
+
+// ---- a credential GitHub has stopped accepting ----
+//
+// The generic version of this said "GitHub 401 while checking credential guc_…" and left
+// the row untouched, so the same dead credential was probed again on every request and
+// nothing on the page ever said which one had died.
+
+function deadFixture(token: string) {
+  const seen: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const auth = new Headers(init?.headers).get("authorization") ?? "none";
+    seen.push(`${auth} ${url}`);
+    if (auth === `Bearer ${token}`) return new Response("Bad credentials", { status: 401 });
+    return new Response("not found", { status: 404 });
+  }) as typeof fetch;
+  return { seen, fetchImpl };
+}
+
+test("a 401 on the probe kills the credential, names it, and is not tried again", async () => {
+  const token = "github_pat_dead";
+  const id = createGithubUserCredential({
+    userId: "usr_dead", kind: "pat", label: "old laptop", secret: token,
+    accountLogin: "alice", accountId: 1, scopes: ["contents:read"],
+  });
+  const { seen, fetchImpl } = deadFixture(token);
+  const client = createUserGithubClient("usr_dead", { apiBase: "https://github.test", fetchImpl });
+
+  const err = await client.getPull("acme/private", 1).then(
+    () => null,
+    (e: unknown) => e,
+  );
+  expect(err).toBeInstanceOf(GithubCredentialDeadError);
+  expect((err as Error).message).toContain("alice");
+  expect(getGithubUserCredential(id, "usr_dead")!.dead_at).not.toBeNull();
+
+  // The second attempt does not reach GitHub with the dead token: the row is out of the
+  // live listing and the routing entry that pointed at it is gone.
+  const after = seen.length;
+  await expect(client.getPull("acme/private", 1)).rejects.toBeInstanceOf(GithubRoutingError);
+  expect(seen.slice(after).filter((e) => e.startsWith(`Bearer ${token}`))).toHaveLength(0);
+});
+
+test("expiry and revocation are told apart, because the fix differs", async () => {
+  const expiredToken = "github_pat_expired";
+  createGithubUserCredential({
+    userId: "usr_expired", kind: "pat", label: "temporary", secret: expiredToken,
+    accountLogin: "bob", accountId: 2, scopes: ["contents:read"],
+    expiresAt: Date.now() - 60_000,
+  });
+  const expired = createUserGithubClient("usr_expired", {
+    apiBase: "https://github.test", ...deadFixture(expiredToken),
+  });
+  await expect(expired.getPull("acme/private", 1)).rejects.toThrow(/expired/i);
+
+  const revokedToken = "github_pat_revoked";
+  createGithubUserCredential({
+    userId: "usr_revoked", kind: "pat", label: "work", secret: revokedToken,
+    accountLogin: "carol", accountId: 3, scopes: ["contents:read"],
+  });
+  const revoked = createUserGithubClient("usr_revoked", {
+    apiBase: "https://github.test", ...deadFixture(revokedToken),
+  });
+  await expect(revoked.getPull("acme/private", 1)).rejects.toThrow(/revoked at GitHub/i);
+});
+
+test("a dead credential is not papered over by the anonymous reader", async () => {
+  // The workspace client falls through to anonymity on a routing error, and a public
+  // repository would then answer -- quietly, with the broken credential still broken and
+  // nobody told. That is the whole reason the dead error is not a routing error.
+  const token = "github_pat_fallthrough";
+  createGithubUserCredential({
+    userId: "usr_fall", kind: "pat", label: "work", secret: token,
+    accountLogin: "dave", accountId: 4, scopes: ["contents:read"],
+  });
+
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const auth = new Headers(init?.headers).get("authorization");
+    if (auth === `Bearer ${token}`) return new Response("Bad credentials", { status: 401 });
+    if (/\/installation$/.test(url)) return new Response("{}", { status: 404 });
+    if (/\/pulls\/\d+$/.test(url)) {
+      return Response.json({
+        number: 1, title: "t", body: null, state: "open", user: { login: "x" },
+        head: { sha: "a".repeat(40), ref: "topic" },
+        base: { sha: "b".repeat(40), ref: "main", repo: { id: 7, full_name: "acme/public" } },
+        updated_at: "2025-01-01T00:00:00Z",
+      });
+    }
+    return Response.json({ id: 7 });
+  }) as typeof fetch;
+
+  const client = createWorkspaceGithubClient({
+    workspaceId: "ws_fall",
+    holdings: { installationIds: () => [] },
+    app: {
+      installationForRepo: async () => null,
+      installationToken: async () => { throw new Error("must not mint"); },
+      noteRepositoryId: () => {},
+      repositoryId: () => undefined,
+      invalidateRouting: () => {},
+    },
+    askingUserId: "usr_fall",
+    apiBase: "https://github.test",
+    fetchImpl,
+  });
+
+  await expect(client.getPull("acme/public", 1)).rejects.toBeInstanceOf(GithubCredentialDeadError);
 });
