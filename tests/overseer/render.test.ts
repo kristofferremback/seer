@@ -546,7 +546,7 @@ describe("the page itself", () => {
   test("the meta row says how fresh the heads are", () => {
     const d = doc();
     const current = page(d, { freshness: {} });
-    expect(current).toContain("heads current");
+    expect(current).toContain("up to date");
     const behind = page(d, {
       freshness: { [`${GOLDEN_REPO}#12`]: "behind", [`${GOLDEN_REPO}#13`]: "current" },
     });

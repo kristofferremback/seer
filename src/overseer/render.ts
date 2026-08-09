@@ -907,8 +907,9 @@ const STYLE = `  @font-face {
   }
   .c-stat { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
   .stat { white-space: nowrap; }
-  .stat .s-add { color: hsl(var(--add)); }
-  .stat .s-del { color: hsl(var(--remove)); }
+  /* A count is not a change. The added and deleted lines carry the change hues where
+     they are, in the diff; the tallies read as the secondary text they are. */
+  .stat .s-add, .stat .s-del { color: hsl(var(--muted)); }
   /* what a tap adds: the marks and the gist, then the author's own account
      behind one more fold */
   .c-open { padding: 2px var(--spine) 12px; }
@@ -972,6 +973,9 @@ const STYLE = `  @font-face {
     padding: 13px 4px;
     min-height: 44px;
   }
+  /* a removed stub carries no kind icon, so its title is pinned to the title
+     column and the icon column is simply left empty. */
+  .grp.dgoneunit > summary > .gname { grid-column: 3; }
   .gname { font-size: 14.5px; line-height: 1.4; color: hsl(var(--ink)); min-width: 0; }
   .gcount { font-family: var(--font-mono); font-size: 12px; color: hsl(var(--muted)); }
   /* the open group grows a hairline dropped from under the icon: it is what
@@ -1161,11 +1165,16 @@ const STYLE = `  @font-face {
   }
 `;
 // Lucide, ISC licensed, at its published 24x24 geometry, copied from the prototype.
+// One exception, drawn here: `i-change` is a wave, because the pencil it used to be is
+// the edited control's glyph (`i-edit`) and a glyph may mean one thing on a page.
 const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
   <symbol id="i-add" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <path d="M5 12h14"/><path d="M12 5v14"/>
   </symbol>
   <symbol id="i-change" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 15c2.7-5 5.8-5 8 0s5.3 5 8 0"/>
+  </symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>
     <path d="m15 5 4 4"/>
   </symbol>
@@ -1231,6 +1240,9 @@ const EVIDENCE_STYLE = `
   .ev-was { margin: 6px 0 0; color: hsl(var(--muted)); font-size: 12px; }
   .gfiles { margin: 6px 0 0; color: hsl(var(--muted)); font-size: 12px; }
   .gfile { font-family: var(--font-mono); }
+  /* a stub carries its former file list without the .gfiles wrapper, so the paths
+     take that wrapper's size and ink here. */
+  .dpb .gfile { font-size: 12px; color: hsl(var(--muted)); margin-right: 8px; }
   .ev-figure { border: 1px solid hsl(var(--line)); border-radius: 6px; padding: 11px 13px; background: hsl(var(--paper-sunk)); }
   /* the drawing is laid out server-side, so the only thing left to say here is what
      its ink is: one weight of line, one type size, and a muted state that steps back
@@ -1379,11 +1391,16 @@ const DELTA_STYLE = `
   .revs > summary::-webkit-details-marker { display: none; }
   .revs[open] > summary .tick { transform: rotate(90deg); }
   .revlist { margin: 8px 0 0; padding: 0; list-style: none; border-top: 1px solid hsl(var(--line)); }
-  .rv { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; padding: 5px 0; border-bottom: 1px solid hsl(var(--line)); font-size: 12.5px; color: hsl(var(--muted)); }
-  .rv-n { font-family: var(--font-mono); color: hsl(var(--ink-soft)); }
+  /* One line per revision: the version and its date at the start, the from link at
+     the end, and the counts taking whatever is left. Only the counts wrap, inside
+     themselves, so nothing else is pushed onto a ragged second line. */
+  .rv { display: flex; align-items: baseline; gap: 4px 10px; padding: 5px 0; border-bottom: 1px solid hsl(var(--line)); font-size: 12.5px; color: hsl(var(--muted)); }
+  .rv-n { flex: none; font-family: var(--font-mono); color: hsl(var(--ink-soft)); }
+  .rv-on { flex: none; white-space: nowrap; }
+  .rv-counts { flex: 1 1 auto; min-width: 0; }
   .rv.is-here .rv-n { font-weight: 500; color: hsl(var(--ink)); }
   .rv.is-base { background: hsl(var(--paper-sunk)); }
-  .rv-from { margin-left: auto; }
+  .rv-from { flex: none; margin-left: auto; white-space: nowrap; }
 `;
 
 // The prototype's Q/A grammar. A question is one line marked Q, its answer one line
@@ -1805,14 +1822,12 @@ function removedStub(e: EntityDelta, cls: string, headCls: string): string {
   const body = former.body
     .map((h) => `<div class="dp dpb">${h}</div>`)
     .join("");
-  // A removed row keeps the kind it was removed with, in its class and in its icon:
-  // a risk that left the review is not the same absence as a note that left it.
-  const kind = e.formerKind;
-  const mark =
-    kind === null ? "" : icon(kind, `ic k-${escapeHtml(kind)}`, kind);
+  // A removed row keeps the kind it was removed with in its class, but wears no kind
+  // icon: the add, change and remove glyphs say what a living row is, and an absence
+  // is not any of them. The italic status is the only change mark a stub needs.
   return (
     `<details class="${cls} dgoneunit" id="${escapeHtml(id)}">` +
-    `<summary>${icon("chev", "tick")}${mark}` +
+    `<summary>${icon("chev", "tick")}` +
     `<span class="${headCls}"><span class="dp dpstub">${former.head}</span></span>` +
     `<span class="rrefs">${statusMark(e)}</span>` +
     `</summary>` +
@@ -2187,7 +2202,7 @@ function revisionMenu(input: RenderInput, basePath: string): string {
       if (e.revised > 0) moved.push(`${e.revised} revised`);
       if (e.removed > 0) moved.push(`${e.removed} removed`);
       if (e.restated.length > 0)
-        moved.push(`${e.restated.join(" and ")} restated`);
+        moved.push(`${e.restated.join(", ")} restated`);
       // A row may not deny movement it is marking in the same breath: when the
       // only thing that moved is a head SHA, the code-moved status label beside this is
       // the whole count.
@@ -2207,8 +2222,13 @@ function revisionMenu(input: RenderInput, basePath: string): string {
         `<li class="rv${here ? " is-here" : ""}${isBase ? " is-base" : ""}">` +
         `<a class="rv-n" href="${escapeHtml(basePath)}/v/${e.version}">v${e.version}</a>` +
         `<span class="rv-on">${escapeHtml(on)}</span>` +
-        `<span class="rv-counts">${escapeHtml(counts)}</span>` +
-        (e.codeMoved ? movedStatus() : "") +
+        // The moved label sits inside the counts, so it wraps with them rather than
+        // breaking onto a line of its own beside the from link. The space is part of
+        // the text, and only there when there is text to separate it from: a row whose
+        // only movement is the code starts where every other row's counts start.
+        `<span class="rv-counts">${counts === "" ? "" : `${escapeHtml(counts)} `}${
+          e.codeMoved ? movedStatus() : ""
+        }</span>` +
         // A base is a version below the one on screen. An entry at or above it has
         // no `from` link, because the page could not honour one: an inert control
         // that looks live is worse than no control.
@@ -2234,7 +2254,7 @@ function revisionMenu(input: RenderInput, basePath: string): string {
 /** The heads text, as the page draws it and as the live push rewrites it. One
  *  function so the two cannot drift into two different sentences. */
 function headsText(behind: number, total: number): string {
-  return behind === 0 ? "heads current" : `${behind} of ${total} behind`;
+  return behind === 0 ? "up to date" : `${behind} of ${total} behind`;
 }
 
 /** The freshness enhancement: it subscribes to the review's channel and rewrites the
@@ -2320,7 +2340,7 @@ export function renderReviewPage(input: RenderInput): string {
   const baseMark =
     input.baseVersion == null
       ? ""
-      : `<span class="dbase">${escapeHtml(`marks since v${input.baseVersion}`)}</span>`;
+      : `<span class="dbase">${escapeHtml(`compared with v${input.baseVersion}`)}</span>`;
 
   return (
     `<!doctype html>\n<html lang="en">\n<head>\n` +
@@ -2350,7 +2370,9 @@ export function renderReviewPage(input: RenderInput): string {
     `${icon("contrast", "mark")}</button>` +
     `</div>` +
     `<h1 class="title">${marked(safeInline(doc.title), review, "title", "review", true)}</h1>` +
-    `<p class="meta"><span>${escapeHtml(doc.kind)}</span><span>${escapeHtml(count)}</span>` +
+    // A single-pull-request review is the ordinary case, and naming it says nothing
+    // the count beside it does not. Every other kind still announces itself.
+    `<p class="meta">${doc.kind === "single" ? "" : `<span>${escapeHtml(doc.kind)}</span>`}<span>${escapeHtml(count)}</span>` +
     `<span class="heads" id="heads">${escapeHtml(heads)}</span>${baseMark}</p>` +
     revisionMenu(input, ctx.basePath) +
     `</header>\n` +
@@ -2386,7 +2408,7 @@ export function renderReviewPage(input: RenderInput): string {
     questionsSection(input, annotations, ctx.basePath) +
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
-    )} · <a href="/overseer/agent.md">give your own agent this</a></p>\n` +
+    )} · <a href="/overseer/agent.md">agent instructions</a></p>\n` +
     `</main>\n<script>${PAGE_SCRIPT}</script>\n` +
     (input.canShare ? `<script>${shareScript(wsId, slug)}</script>\n` : "") +
     // A pinned version is a record of what was published, so it gets no live channel:

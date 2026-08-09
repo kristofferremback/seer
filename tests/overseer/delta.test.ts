@@ -390,6 +390,8 @@ describe("the delta itself", () => {
     const out = markField(html, d, "summary", true);
     expect([...out.matchAll(/class="dedited"/g)]).toHaveLength(1);
     expect(out).toContain("<span>edited</span>");
+    // A block field leads with its control, above the prose the control opens.
+    expect(out.indexOf('class="dedited"')).toBeLessThan(out.indexOf('class="dcurrent"'));
     expect(out).toContain('<div class="dcurrent"><p>one two three four five alpha beta gamma delta epsilon</p></div>');
     expect(out).toContain('class="dinline"');
     expect(out).toContain('<del class="dold">six seven eight nine ten</del>');
@@ -469,7 +471,7 @@ describe("the marks on the page", () => {
     expect(added).toContain('<span class="rev rev-new">new!</span>');
     expect(added).not.toMatch(/class="(?:dw|dold|dp)/);
     // The page says what it is measuring against.
-    expect(html).toContain("marks since v1");
+    expect(html).toContain("compared with v1");
     // The summary is diffed like any other body. Bounded to the summary block
     // itself, which ends where the statement rows begin, so the assertion cannot
     // pass on some other section's ink.
@@ -666,7 +668,7 @@ describe("the marks on the page", () => {
     const html = page(doc(), null);
     expect(html).not.toContain('<span class="rev ');
     expect(html).not.toContain('class="dtog"');
-    expect(html).not.toContain("marks since");
+    expect(html).not.toContain("compared with");
   });
 
   test("a removed statement comes back as a stub holding everything it said", () => {
@@ -729,8 +731,11 @@ describe("the marks on the page", () => {
     expect(head).toContain('class="dtog"');
     expect(head).toContain('class="dchange dchange-inline"');
     expect(head).toContain("<span>edited</span>");
-    expect(head).toContain('<use href="#i-change"/>');
+    expect(head).toContain('<use href="#i-edit"/>');
     expect(head).not.toContain('<use href="#i-chev"/>');
+    // The control trails the title it belongs to, after both copies of the words.
+    expect(head.indexOf('class="dcurrent"')).toBeLessThan(head.indexOf('class="dinline"'));
+    expect(head.indexOf('class="dinline"')).toBeLessThan(head.indexOf('class="dedited"'));
     // The clean copy is replaced in place only when Edited is checked.
     expect(html).toContain(".dinline { display: none; }");
     expect(html).toContain(".dchange:has(> .dtog:checked) > .dcurrent { display: none; }");
@@ -972,7 +977,7 @@ describe("authored evidence, and the fields that are not prose", () => {
     expect(unit).toContain(dropped.path);
   });
 
-  test("a removed note keeps the kind it was removed with", () => {
+  test("a removed note keeps its kind in its class and wears no kind icon", () => {
     const before = doc();
     const after = doc((d) => {
       d.notes = [];
@@ -985,11 +990,13 @@ describe("authored evidence, and the fields that are not prose", () => {
     expect(at).toBeGreaterThan(-1);
     const stub = unitAround(html, at);
     expect(stub).toContain('class="note is-risk dgoneunit"');
-    expect(stub).toContain('href="#i-risk"');
+    // An absence is not a kind of change, so it leads with the chevron alone: the
+    // italic status is the only mark it carries.
+    expect(stub).not.toContain('href="#i-risk"');
     expect(stub).toContain('<span class="rev rev-removed">removed</span>');
   });
 
-  test("a removed group keeps the kind it was removed with", () => {
+  test("a removed group opens to what it said and wears no kind icon", () => {
     const before = doc();
     const gone = before.groups[0]!;
     const after = doc((d) => {
@@ -1005,8 +1012,10 @@ describe("authored evidence, and the fields that are not prose", () => {
     const at = html.indexOf(`dgone-${safeId(gone.id)}`);
     expect(at).toBeGreaterThan(-1);
     const stub = unitAround(html, at);
-    expect(stub).toContain(`<svg class="ic k-${gone.kind}"`);
-    expect(stub).toContain(`href="#i-${gone.kind}"`);
+    // The delta still knows the kind; the stub does not wear it as an icon, because
+    // an add, change or remove glyph says what a living row is.
+    expect(stub).not.toContain(`<svg class="ic k-${gone.kind}"`);
+    expect(stub).not.toContain(`href="#i-${gone.kind}"`);
     expect(stub).toContain(gone.title);
     expect(stub).toContain('<span class="rev rev-removed">removed</span>');
     // The open group's rail stays in the icon gutter; removal must not erase the
@@ -1109,13 +1118,13 @@ describe("the revision timeline over the routes", () => {
 
     const three = await fetch(`${host}/${ws}/r/${slug}`);
     const html = await three.text();
-    expect(html).toContain("marks since v1");
+    expect(html).toContain("compared with v1");
     // The statement moved in v2 and the note in v3, so both are marked against v1.
     expect(html).toContain("session");
     expect((html.match(/<span class="rev rev-edited">edited<\/span>/g) ?? []).length).toBeGreaterThan(1);
 
     const from = await (await fetch(`${host}/${ws}/r/${slug}?from=2`)).text();
-    expect(from).toContain("marks since v2");
+    expect(from).toContain("compared with v2");
     // Against v2 only the note moved.
     expect((from.match(/<span class="rev rev-edited">edited<\/span>/g) ?? []).length).toBe(1);
   });
@@ -1127,14 +1136,14 @@ describe("the revision timeline over the routes", () => {
       d.groups[0]!.title = "The gate, restated";
     });
     const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
-    expect(html).toContain("marks since v1");
+    expect(html).toContain("compared with v1");
   });
 
   test("the first version of a review renders no marks", async () => {
     const slug = "firstopen";
     publish(slug, () => {});
     const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
-    expect(html).not.toContain("marks since");
+    expect(html).not.toContain("compared with");
     expect(html).not.toContain('<span class="rev ');
   });
 
@@ -1166,8 +1175,8 @@ describe("the revision timeline over the routes", () => {
     const html = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
     // The page marks the summary, so the menu row for the version that moved it may
     // not deny it. Only v1, which has nothing before it, moved nothing.
-    expect(html).toContain("marks since v1");
-    expect(html).toContain("title and summary restated");
+    expect(html).toContain("compared with v1");
+    expect(html).toContain("title, summary restated");
     expect((html.match(/nothing moved/g) ?? []).length).toBe(1);
   });
 
@@ -1217,11 +1226,11 @@ describe("the revision timeline over the routes", () => {
     });
     expect((await fetch(`${host}/${ws}/r/${slug}/v/1`)).status).toBe(200);
     const first = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
-    expect(first).toContain("marks since v1");
+    expect(first).toContain("compared with v1");
     // The read moved to v3 on that request, so the next one measures from v2. The
     // page says which base it used both times, so the change is never silent.
     const second = await (await fetch(`${host}/${ws}/r/${slug}`)).text();
-    expect(second).toContain("marks since v2");
+    expect(second).toContain("compared with v2");
     // A named base is unaffected by any of it, and repeats byte for byte.
     const pinned = await (await fetch(`${host}/${ws}/r/${slug}?from=1`)).text();
     const again = await (await fetch(`${host}/${ws}/r/${slug}?from=1`)).text();

@@ -139,7 +139,7 @@ describe("a head that moved", () => {
     const first = await fetch(`${base}/${wsA}/r/moved`);
     expect(first.status).toBe(200);
     // The page that triggered the check was rendered before it landed.
-    expect(await first.text()).toContain("heads current");
+    expect(await first.text()).toContain("up to date");
     await settle();
 
     const rows = listFreshness(wsA, "moved");
@@ -290,7 +290,7 @@ describe("the render is never blocked", () => {
     const started = Date.now();
     const res = await fetch(`${base}/${wsA}/r/hangs`);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("heads current");
+    expect(await res.text()).toContain("up to date");
     expect(Date.now() - started).toBeLessThan(2000);
   });
 });

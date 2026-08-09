@@ -890,7 +890,7 @@ export class DeltaIndex {
 
 // ---- marking ----
 
-const EDIT_ICON = `<svg class="dediticon" aria-hidden="true"><use href="#i-change"/></svg>`;
+const EDIT_ICON = `<svg class="dediticon" aria-hidden="true"><use href="#i-edit"/></svg>`;
 
 /** An id fragment safe for an attribute, and injective: every character outside the
  *  safe set becomes its own escape, so two keys that differ anywhere still differ
@@ -964,11 +964,17 @@ export function markField(
     );
   }
   const id = boxId(owner, d.field, 1);
-  return (
-    `<${tag} class="dchange${inlineClass}"><input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
-    `<label class="dedited" for="${id}">${EDIT_ICON}<span>edited</span></label>` +
-    `<${tag} class="dcurrent">${html}</${tag}><${tag} class="dinline">${diff}</${tag}></${tag}>`
-  );
+  const input = `<input type="checkbox" class="dtog" id="${id}" aria-label="show edits">`;
+  const label = `<label class="dedited" for="${id}">${EDIT_ICON}<span>edited</span></label>`;
+  const content =
+    `<${tag} class="dcurrent">${html}</${tag}><${tag} class="dinline">${diff}</${tag}>`;
+  // An inline field is a line of running text — a title — so its control trails the
+  // words it belongs to. A block field leads with the control, above the prose it
+  // opens. The checked-state rules select by class, not by order, so both read the
+  // same to CSS.
+  return d.inline
+    ? `<${tag} class="dchange${inlineClass}">${input}${content}${label}</${tag}>`
+    : `<${tag} class="dchange${inlineClass}">${input}${label}${content}</${tag}>`;
 }
 
 /** The markup for one field, marked when the delta touched it and plain when it

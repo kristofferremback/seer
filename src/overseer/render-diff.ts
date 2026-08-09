@@ -337,9 +337,9 @@ function hunkBlock(
  *  pull request's share from the same hunks the walkthrough partitions: two places
  *  reading one source can disagree about presentation but never about the number. */
 /** What a set of hunks costs, in the one form the page says it everywhere: a card,
- *  a walkthrough group and a file row all read the same way, and each half carries
- *  the change hue its glyph carries in the diff below. U+2212, the minus sign: the
- *  count is a quantity, not a diff glyph. */
+ *  a walkthrough group and a file row all read the same way, in the muted ink of
+ *  secondary text — the change hues belong to the lines themselves, below. U+2212,
+ *  the minus sign: the count is a quantity, not a diff glyph. */
 export function statHtml(added: number, removed: number): string {
   return (
     `<span class="stat" role="img" aria-label="${added} added, ${removed} removed">` +
@@ -458,7 +458,7 @@ function groupBlock(
   // the page as rows, but a row that left it leaves no trace there, so when the
   // membership moves the paths come out as the words they are.
   const gfiles = touched(d, "files")
-    ? `<p class="gfiles">${marked(groupFilesHtml(files.map((f) => f.path)), d, "files", group.id)}</p>`
+    ? `<div class="gfiles">${marked(groupFilesHtml(files.map((f) => f.path)), d, "files", group.id)}</div>`
     : "";
   return (
     `<details class="grp" id="${escapeHtml(group.id)}" data-kind="${escapeHtml(group.kind)}">` +
@@ -495,13 +495,10 @@ export function walkthroughSection(
   // that quietly lost a part is a partition a reader cannot check.
   const removedGroup = (e: EntityDelta) =>
     `<details class="grp dgoneunit" id="dgone-${safeId(e.id)}">` +
-    // A removed group keeps the kind it was removed with, in its icon, the
-    // way every other removed row does.
-    `<summary>${icon("chev", "tick")}${
-      e.formerKind === null
-        ? ""
-        : icon(e.formerKind, `ic k-${escapeHtml(e.formerKind)}`, e.formerKind)
-    }` +
+    // A removed group wears no kind icon: add, change and remove glyphs say what a
+    // living row is, and an absence is not any of them. The italic status is the
+    // only change mark a stub needs.
+    `<summary>${icon("chev", "tick")}` +
     `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
     statusMark(e) +
     `</summary>` +
