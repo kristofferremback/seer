@@ -256,7 +256,7 @@ describe("publish seeds the observation", () => {
     expect(html).toContain('href="#i-pr-open"');
     // Both heads are exactly what the review was published against, and both are
     // observed, so the chip says so without hedging.
-    expect(chip(html)).toBe("heads current");
+    expect(chip(html)).toBe("up to date");
   });
 
   test("a merged pull request renders merged, not closed", async () => {
@@ -313,7 +313,7 @@ describe("an absent observation is absence, on all three surfaces", () => {
     // The stylesheet names the class whether or not a card uses it, so the glyph is
     // looked for by its sprite reference, which only a drawn glyph emits.
     expect(html).not.toContain('href="#i-pr-');
-    // 2. the chip: it used to collapse to "heads current" on `behind === 0`, which is
+    // 2. the chip: it used to collapse to "up to date" on `behind === 0`, which is
     // the chip asserting a freshness the glyph beside it cannot show.
     expect(chip(html)).toBe("heads unchecked");
 
@@ -362,7 +362,7 @@ describe("an absent observation is absence, on all three surfaces", () => {
 
     const html = await pageOf(wsBlind, "then-seen");
     expect(html).toContain('href="#i-pr-open"');
-    expect(chip(html)).toBe("heads current");
+    expect(chip(html)).toBe("up to date");
 
     const read = await readJson(await fetch(`${base}/api/reviews/then-seen`, {
       headers: { authorization: `Bearer ${keyBlind}` },

@@ -183,7 +183,7 @@ describe("a review page dates an observation it can no longer vouch for", () => 
     observeGolden("fresh", Date.now());
 
     const html = await pageOf("fresh");
-    expect(chip(html)).toBe("heads current");
+    expect(chip(html)).toBe("up to date");
     // The success beside the refusal: the page can say "as of" and here it does not,
     // because there is nothing to disclaim.
     expect(asOf(html)).toBeNull();
@@ -197,7 +197,7 @@ describe("a review page dates an observation it can no longer vouch for", () => 
     const html = await pageOf("stale");
     // The reading is still there — this is a dateline on a status, not a replacement
     // for one.
-    expect(chip(html)).toBe("heads current");
+    expect(chip(html)).toBe("up to date");
     expect(asOf(html)).toBe("as of 3 hours ago");
   });
 

@@ -621,7 +621,7 @@ describe("attribution", () => {
     expect(page.status).toBe(200);
     const html = await page.text();
     expect(html).toContain("c-status s-merged");
-    expect(html).toContain(">heads current<");
+    expect(html).toContain(">up to date<");
 
     // The reviews index reads the same rows through its own query.
     expect(reviewStatusTally(wsA, "renamed-read")).toEqual({
@@ -663,7 +663,7 @@ describe("attribution", () => {
     });
     const afterHtml = await after.text();
     expect(afterHtml).toContain("c-status s-merged");
-    expect(afterHtml).toContain(">heads current<");
+    expect(afterHtml).toContain(">up to date<");
   });
 });
 

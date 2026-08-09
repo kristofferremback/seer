@@ -63,7 +63,7 @@ export function readableWorkspaces(req: Request): string[] {
  *
  * Absence is `unknown`, not `current`. Reading it as `current` was the old default and
  * it lies in exactly the case that matters: a review published before the App, or one
- * whose installation went away and took its rows with it, would assert "heads current"
+ * whose installation went away and took its rows with it, would assert "up to date"
  * on the chip while the glyph beside it — reading the same missing row — showed
  * nothing. The stored document is the last thing known true about the *code*; it is no
  * evidence at all about where the branch points now.
