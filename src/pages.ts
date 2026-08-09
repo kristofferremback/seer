@@ -546,6 +546,7 @@ function styles(): string {
   .panel-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.7rem; }
   .panel-note { font-size: 0.9rem; color: hsl(var(--ink-soft)); max-width: 52ch; margin: 0.8rem 0 0; }
   .panel-note.dim { color: hsl(var(--muted)); }
+  .ledger td.state { color: hsl(var(--muted)); }
 
   /* one-time reveal — freshly minted key / invite link. Shown once, never again. */
   .reveal {
@@ -1933,6 +1934,19 @@ export type SettingsReveal =
 
 /** One GitHub App installation this workspace holds. Nothing here is a secret: an
  *  installation id is a small public integer, and no token was ever stored to leak. */
+export interface SettingsCredential {
+  id: string;
+  label: string;
+  account: string;
+  kind: "oauth" | "pat";
+  lastUsed: string;
+  /** GitHub refused this credential. What the person does about it depends on why, so
+   *  the two are separate facts rather than one word: an expired credential is replaced,
+   *  a revoked one is granted again at GitHub. */
+  isDead: boolean;
+  isExpired: boolean;
+}
+
 export interface SettingsInstallation {
   id: string;
   installationId: number;
@@ -1958,10 +1972,14 @@ export interface SettingsData {
   members: SettingsMember[];
   keys: SettingsKey[];
   shares: SettingsShare[];
+  credentials: SettingsCredential[];
   installations: SettingsInstallation[];
   /** Where to install the app on a fresh account. Never absent: config.ts requires the
    *  App variables at boot, so there is no deployment without an app to install. */
   githubInstallUrl: string;
+  /** Whether the user OAuth application is configured. False on a deployment that never
+   *  registered one, where pasting a token is the only way to add a credential. */
+  githubUserOAuthEnabled: boolean;
   reveal?: SettingsReveal;
 }
 
@@ -2011,6 +2029,24 @@ export function settingsPage(d: SettingsData): string {
         <td class="act">
           <form method="post" action="${s(`/shares/${sh.id}/revoke`)}"><button type="submit">revoke</button></form>
         </td>
+      </tr>`,
+          )
+          .join("\n");
+
+  const credentialRows =
+    d.credentials.length === 0
+      ? `<tr><td colspan="6" class="empty">No personal GitHub credentials yet.</td></tr>`
+      : d.credentials
+          .map(
+            (credential) => `<tr>
+        <td>${escapeHtml(credential.label)}</td>
+        <td>${escapeHtml(credential.account)}</td>
+        <td class="mono">${escapeHtml(credential.kind)}</td>
+        <td class="mono">${escapeHtml(credential.lastUsed)}</td>
+        <td class="state">${
+          credential.isExpired ? "expired" : credential.isDead ? "revoked at GitHub — reconnect" : ""
+        }</td>
+        <td class="act"><form method="post" action="${s(`/github/credentials/${credential.id}/revoke`)}"><button type="submit">revoke</button></form></td>
       </tr>`,
           )
           .join("\n");
@@ -2147,6 +2183,29 @@ ${head(`Settings · ${d.name} · Seer`, og)}
       reviews have quietly stopped moving.</p>
       <p class="panel-note dim">Disconnecting keeps the record and releases the installation,
       so the same account can be connected again later — here or anywhere.</p>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">Your GitHub credentials</p>
+      <div class="ledger scroll-x">
+        <table>
+          <tr><th>Label</th><th>Account</th><th>Kind</th><th>Last used</th><th></th><th></th></tr>
+          ${credentialRows}
+        </table>
+      </div>
+      ${
+        d.githubUserOAuthEnabled
+          ? `<form class="panel-row" method="post" action="/github/account/connect">
+        <button class="btn" type="submit">Connect GitHub account</button>
+      </form>`
+          : ""
+      }
+      <form class="panel-row stack-gap" method="post" action="${s("/github/credentials")}">
+        <input class="input" type="text" name="label" placeholder="label (for example, work)" maxlength="80" aria-label="Credential label">
+        <input class="input" type="password" name="token" placeholder="github_pat_…" required aria-label="Fine-grained GitHub token" autocomplete="off">
+        <button class="btn primary" type="submit">Add fine-grained token</button>
+      </form>
+      <p class="panel-note dim">Personal credentials are yours alone. Classic <code>ghp_</code> tokens are refused; choose repository access and read-only permissions when creating a fine-grained token.</p>
     </div>
 
     <div class="panel">

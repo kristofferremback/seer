@@ -65,6 +65,12 @@ import {
   installUrl,
 } from "./overseer/github-claim";
 import { handleGithubWebhook } from "./overseer/webhook";
+import { handleConnectGithubAccount, handleGithubAccountCallback } from "./overseer/github-user-connect";
+import { handlePasteGithubToken } from "./overseer/github-user-pat";
+import {
+  listGithubUserCredentialsForSettings,
+  revokeGithubUserCredential,
+} from "./overseer/user-credentials";
 import { getReviewVersion, listReviewVersions, listReviews } from "./overseer/db";
 import {
   dbWorkspaceHoldings,
@@ -220,6 +226,15 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
       // What this workspace may derive through. Unclaimed and disconnected installations
       // are not in here: listWorkspaceInstallations answers the same question routing
       // asks, so the panel cannot claim a reach the client would refuse.
+      credentials: listGithubUserCredentialsForSettings(user.id).map((credential) => ({
+        id: credential.id,
+        label: credential.label,
+        account: credential.account_login,
+        kind: credential.kind,
+        lastUsed: credential.last_used_at ? agoWords(Date.now() - credential.last_used_at) : "never",
+        isDead: credential.dead_at !== null,
+        isExpired: credential.expires_at !== null && credential.expires_at <= Date.now(),
+      })),
       installations: listWorkspaceInstallations(wsId).map((g) => ({
         id: g.id,
         installationId: g.installation_id,
@@ -234,6 +249,7 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
         isQuiet: deliveryIsQuiet(g.last_delivery_at),
       })),
       githubInstallUrl: installUrl(),
+      githubUserOAuthEnabled: config.githubUserOAuth !== null,
       shares: listShares(wsId).map((sh) => ({
         id: sh.id,
         label: sh.label,
@@ -879,6 +895,34 @@ export async function startServer() {
 
       "/github/setup": {
         GET: (req) => handleGithubSetupCallback(req),
+      },
+      "/github/account/callback": {
+        GET: (req) => handleGithubAccountCallback(req),
+      },
+      "/github/account/connect": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const user = sessionUser(req);
+          if (!user) return new Response("Sign in first", { status: 403 });
+          return handleConnectGithubAccount(user.id);
+        },
+      },
+      "/settings/:ws/github/credentials": {
+        POST: async (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          return handlePasteGithubToken(req, gate.id, `/settings/${req.params.ws}`);
+        },
+      },
+      "/settings/:ws/github/credentials/:id/revoke": {
+        POST: (req) => {
+          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+          const gate = requireMember(req, req.params.ws);
+          if (gate instanceof Response) return gate;
+          if (!revokeGithubUserCredential(req.params.id, gate.id)) return new Response("Not found", { status: 404 });
+          return redirect(`/settings/${req.params.ws}`);
+        },
       },
       "/github/claim": {
         POST: (req) => {

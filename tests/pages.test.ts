@@ -36,7 +36,9 @@ function settings(over: Partial<SettingsData> = {}): SettingsData {
       { id: "key_bbbbbbbbbb", name: "imported from env", hint: "(pre-workspace key)", created: "2026-06-02", lastUsed: "2 days ago", isLegacy: true },
     ],
     installations: [],
+    credentials: [],
     githubInstallUrl: "https://github.com/apps/seer-overseer-test/installations/new",
+    githubUserOAuthEnabled: true,
     shares: [
       {
         id: "shr_2n7kq4xbvm",
@@ -51,6 +53,22 @@ function settings(over: Partial<SettingsData> = {}): SettingsData {
     ...over,
   };
 }
+
+// The connect button is the only thing the second GitHub application buys, so a
+// deployment without one must show the paste form standing alone rather than a button
+// leading to an authorize URL with no client_id.
+describe("settings personal credentials", () => {
+  test("with the OAuth application configured, the connect posts to the connect route", () => {
+    expect(settingsPage(settings())).toContain('action="/github/account/connect"');
+  });
+
+  test("without it, nothing offers the connect", () => {
+    const html = settingsPage(settings({ githubUserOAuthEnabled: false }));
+    expect(html).not.toContain("/github/account/connect");
+    expect(html).not.toContain("Connect GitHub account");
+    expect(html).toContain("Add fine-grained token");
+  });
+});
 
 // ---- settings: the GitHub panel ----
 
@@ -117,6 +135,28 @@ describe("settings github panel", () => {
     const html = settingsPage(settings({ installations: [] }));
     expect(html).toContain("/github/connect");
     expect(html).toContain("https://github.com/apps/seer-overseer-test/installations/new");
+  });
+
+  // A credential that stopped working is invisible unless the page says so, and the two
+  // ways it stops have different remedies, so one word for both would send half the
+  // readers to the wrong place.
+  test("each credential's state is named, and a working one is left alone", () => {
+    const base = { account: "alice", kind: "pat" as const, lastUsed: "3 minutes ago" };
+    const html = settingsPage(
+      settings({
+        credentials: [
+          { ...base, id: "guc_live", label: "work", isDead: false, isExpired: false },
+          { ...base, id: "guc_dead", label: "old laptop", isDead: true, isExpired: false },
+          { ...base, id: "guc_gone", label: "temporary", isDead: true, isExpired: true },
+        ],
+      }),
+    );
+    expect(html).toContain("revoked at GitHub — reconnect");
+    expect(html).toContain("expired");
+
+    const live = html.split("guc_live")[0]!.split("<tr>").pop()!;
+    expect(live).not.toContain("revoked at GitHub");
+    expect(live).not.toContain("expired");
   });
 });
 

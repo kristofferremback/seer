@@ -465,7 +465,11 @@ async function answerHere(
   if (pointers.length > 0) {
     let refErrors: ValidationError[];
     try {
-      ({ refs, errors: refErrors } = await resolveAnswerRefs(githubClientFor(ws), doc, pointers));
+      ({ refs, errors: refErrors } = await resolveAnswerRefs(
+        githubClientFor(ws, auth instanceof Response ? undefined : auth.userId),
+        doc,
+        pointers,
+      ));
     } catch (err) {
       if (err instanceof GithubAppRefusal) return json({ error: err.message }, 422);
       if (!(err instanceof UpstreamError)) throw err;

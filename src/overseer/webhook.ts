@@ -416,6 +416,11 @@ export async function reconcileInstallation(
   const install = getLiveInstallation(installationId);
   if (!install || install.workspace_id === null) return;
   const wsId = install.workspace_id;
+  // Deliberately no asking user. A delivery is GitHub telling us something happened,
+  // not a person asking for something, so there is nobody whose personal credential this
+  // is entitled to spend. It reaches installations only, and a repository reachable just
+  // through somebody's connected account gets no webhook-driven status at all -- which is
+  // a stated gap in the design rather than an oversight here.
   const client = githubClientFor(wsId);
 
   // Narrowed here rather than by `listWorkspacePrs`, which can only match on the name:

@@ -37,6 +37,8 @@ process.env.GITHUB_APP_PRIVATE_KEY = Buffer.from(
 ).toString("base64");
 process.env.GITHUB_APP_CLIENT_ID = "Iv1.testclientid";
 process.env.GITHUB_APP_CLIENT_SECRET = "test-client-secret";
+process.env.GITHUB_OAUTH_CLIENT_ID = "Ov23.testclientid";
+process.env.GITHUB_OAUTH_CLIENT_SECRET = "test-oauth-client-secret";
 process.env.GITHUB_WEBHOOK_SECRET = "test-webhook-secret";
 
 // ...and nothing else reaches it either. Every GitHub call in the suite is made by a
@@ -44,11 +46,22 @@ process.env.GITHUB_WEBHOOK_SECRET = "test-webhook-secret";
 // client which refuses, loudly and offline. A test that wants GitHub installs its own
 // with setGithubClientFactory().
 //
-// There are two seams to close, not one: the per-workspace client factory and the
-// OAuth transport, which is not a GithubClient. Leaving either open would let the
-// suite make a real request with the app credentials above.
+// There are four seams to close, and the count has been wrong twice already: the
+// per-workspace client factory, the App's OAuth transport and the user OAuth transport,
+// neither of which is a GithubClient, and the PAT identifier, which is a bare function
+// and would carry a pasted token to api.github.com. Leaving any open would let the suite
+// make a real request with a real credential.
 const { setGithubClientFactory } = await import("../src/overseer/github-app");
 const { setGithubOAuth } = await import("../src/overseer/github-oauth");
-const { offlineGithubClientFactory, offlineGithubOAuth } = await import("./offline-github");
+const { setGithubUserOAuth } = await import("../src/overseer/github-user-oauth");
+const { setGithubPatIdentifier } = await import("../src/overseer/github-user-pat");
+const {
+  offlineGithubClientFactory,
+  offlineGithubOAuth,
+  offlineGithubUserOAuth,
+  offlineGithubPatIdentifier,
+} = await import("./offline-github");
 setGithubClientFactory(offlineGithubClientFactory());
 setGithubOAuth(offlineGithubOAuth());
+setGithubUserOAuth(offlineGithubUserOAuth());
+setGithubPatIdentifier(offlineGithubPatIdentifier());

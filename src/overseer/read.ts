@@ -60,6 +60,24 @@ export function readableWorkspaces(req: Request): string[] {
 }
 
 /**
+ * Who is asking, when that matters as well as which workspaces they may read.
+ *
+ * A personal credential belongs to a person, so a path that may spend one has to name
+ * them. Sessions and api keys both identify a person; a request carrying neither is
+ * nobody, and nobody has no credentials to spend, which is the correct answer rather
+ * than an obstacle.
+ */
+export function askingUserId(req: Request): string | undefined {
+  const user = sessionUser(req);
+  if (user) return user.id;
+  if (req.headers.get("authorization")) {
+    const auth = requireApiKey(req);
+    if (!(auth instanceof Response)) return auth.userId;
+  }
+  return undefined;
+}
+
+/**
  * Freshness per pull request of the version being read, from the one observation.
  *
  * Absence is `unknown`, not `current`. Reading it as `current` was the old default and

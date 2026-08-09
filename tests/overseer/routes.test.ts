@@ -17,6 +17,7 @@ import {
   type GithubPull,
 } from "../../src/overseer/github";
 import {
+  createWorkspaceGithubClient,
   GithubRateLimitError,
   GithubRoutingError,
   GithubSuspendedError,
@@ -787,6 +788,41 @@ describe("a workspace that holds no installation", () => {
     });
     expect(zip.status).toBe(200);
     expect((await readJson(zip)).version).toBe(1);
+  });
+
+  test("a private repository nothing covers answers with every route out", async () => {
+    // The done-condition of the credentials work: no installation, no credential, and a
+    // repository GitHub will not serve anonymously. The answer has to be actionable
+    // without reading the source, so it is the real routing client's refusal rather than
+    // a stand-in -- and it names each of the three doors.
+    const priorFactory = (ws: string) => (ws === wsNone ? unheldClient() : fake);
+    const fetchImpl = (async () =>
+      new Response("Not Found", { status: 404 })) as unknown as typeof fetch;
+    setGithubClientFactory(() =>
+      createWorkspaceGithubClient({
+        workspaceId: wsNone,
+        holdings: { installationIds: () => [] },
+        app: {
+          installationForRepo: async () => null,
+          installationToken: async () => { throw new Error("must not mint"); },
+          noteRepositoryId: () => {},
+          repositoryId: () => undefined,
+          invalidateRouting: () => {},
+        },
+        apiBase: "https://github.test",
+        fetchImpl,
+      }),
+    );
+    try {
+      const res = await publish("nothing-covers-it", noAttachments(), keyNone);
+      expect(res.status).toBe(422);
+      const body = await readJson(res);
+      expect(body.error).toContain(GOLDEN_REPO);
+      expect(body.error.toLowerCase()).toContain("install the app");
+      expect(body.error.toLowerCase()).toContain("connect a github account");
+    } finally {
+      setGithubClientFactory(priorFactory);
+    }
   });
 
   test("the same payload publishes from a workspace that does hold it", async () => {
