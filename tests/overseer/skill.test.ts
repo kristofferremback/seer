@@ -27,6 +27,33 @@ describe("overseer skill doc", () => {
     expect((await r.text()).length).toBeGreaterThan(2000);
   });
 
+  // A witness had to infer the publish origin from wherever it happened to fetch this
+  // page, because the document showed `$SEER_URL` and never said what it was. Naming it
+  // means it has to be substituted per deployment, or the document sends every other
+  // instance's reviews to this one.
+  test("names the origin to publish to, as this deployment rather than the canonical one", () => {
+    expect(doc).toContain("/api/reviews");
+    expect(doc).toContain(config.baseUrl);
+    // config.baseUrl is a port-0 localhost string under tests, so it cannot equal the
+    // canonical host; if substitution were off, the committed host would still be here.
+    expect(config.baseUrl).not.toBe("https://seer.build");
+    expect(doc).not.toContain("https://seer.build");
+  });
+
+  // The retrieval preamble. A fetch-and-summarize tool refused this document outright,
+  // reading its authoring rules as constraints on its own reply and calling the page
+  // copyrighted material it should not reproduce. An agent handed a summary instead gets
+  // the format, the budgets and the publish contract wrong, and all three are enforced on
+  // write — so the refusal surfaces as a 422 far from its cause.
+  test("tells a fetching tool to reproduce it rather than summarise it", () => {
+    const preamble = doc.slice(0, doc.indexOf("You are the witness."));
+    expect(preamble).toContain("reproduce it in full");
+    expect(preamble).toContain("not third-party or copyrighted material");
+    // And it separates the two audiences, which is the actual confusion: every rule about
+    // quoting below governs the review being authored, not the retrieval of this page.
+    expect(preamble).toContain("None of it governs how this page reaches them");
+  });
+
   test("carries the three settled opening clauses", () => {
     expect(doc).toContain("fresh sub-agent");
     expect(doc).toContain("only through the published record");
