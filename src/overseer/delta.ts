@@ -43,8 +43,8 @@
 // A field is diffed as the HTML the page will actually show, scanned into tags,
 // whitespace runs and words, with only words compared, so a tag boundary never
 // shifts an alignment. Changed density is retained as a measurement for tests and
-// diagnostics, but it never changes the visual grammar: prose always gets one labelled
-// Edited control, and its word-level redline appears only when opened.
+// diagnostics, but it never changes the visual grammar: every redline appears only
+// after its explicit edited control is checked.
 //
 // Only words are compared, which is also the limit of what this can see: an edit
 // that moves markup without moving a word, a phrase that became code or emphasis,
@@ -90,16 +90,12 @@ export interface Region {
   c1: number;
 }
 
-/** One authored field that moved. `words` is a one-line field inside an existing
- *  disclosure. `whole` is prose with one field-level Edited control. Both modes
- *  mark the same word regions; the distinction is control placement, not diff semantics. */
+/** One authored field that moved, as aligned word regions on both sides. */
 export interface FieldDelta {
   /** Field name, unique within its entity. */
   field: string;
-  /** True for a one-line field drawn inside a summary, which carries no control
-   *  of its own because the row's own chevron is already the one tap. */
+  /** True when the rendered field must remain inline. */
   inline: boolean;
-  mode: "words" | "whole";
   regions: Region[];
   /** The base side's words, in order. */
   priorWords: string[];
@@ -282,13 +278,11 @@ export function diffField(
   const cw = ix.words.map((t) => t.raw);
   if (pw.join(" ") === cw.join(" ")) return null;
 
-  // Too long to align. The field is republished whole: one region covering
-  // everything, which is what the whole-mode marker draws anyway.
+  // Too long to align. The field is republished whole as one region.
   if (pw.length > MAX_DIFF_WORDS || cw.length > MAX_DIFF_WORDS) {
     return {
       field,
       inline,
-      mode: "whole",
       regions: [{ d0: 0, d1: pw.length, c0: 0, c1: cw.length }],
       priorWords: pw,
       density: 1,
@@ -298,11 +292,7 @@ export function diffField(
   const regs = regions(lcsOps(pw, cw));
   const moved = regs.reduce((a, r) => a + (r.d1 - r.d0) + (r.c1 - r.c0), 0);
   const density = moved / Math.max(1, Math.max(pw.length, cw.length));
-  // Prose gets one labelled field-level disclosure whether one word or the whole
-  // paragraph moved. One-line fields already sit in a disclosure row and keep their
-  // old words beside the exact replacement when that row opens.
-  const mode: FieldDelta["mode"] = inline ? "words" : "whole";
-  return { field, inline, mode, regions: regs, priorWords: pw, density };
+  return { field, inline, regions: regs, priorWords: pw, density };
 }
 
 // ---- entities ----
@@ -456,11 +446,6 @@ function prFields(pr: ReviewDoc["prs"][number]): FieldSpec[] {
   ];
 }
 
-/** The head field of an entity: the line a stub or a new-entity mark hangs off. */
-function headField(specs: FieldSpec[]): FieldSpec {
-  return specs[0]!;
-}
-
 function compare(
   kind: DeltaEntityKind,
   id: string,
@@ -486,7 +471,6 @@ function compare(
     fields.push({
       field: spec.field,
       inline: false,
-      mode: "whole",
       regions: [{ d0: 0, d1: words.length, c0: 0, c1: 0 }],
       priorWords: words,
       density: 1,
@@ -496,17 +480,14 @@ function compare(
   return { kind, id, status: "revised", fields, former: null, formerKind: null, codeMoved };
 }
 
-function born(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelta {
-  // A new entity marks its own head line rather than every word it holds: the
-  // status label says the whole thing is new, and the line under it is what the reader
-  // reads first. Marking the body too would leave the row solid ink.
-  const head = headField(specs);
-  const d = diffField(head.field, head.inline, "", head.html);
+function born(kind: DeltaEntityKind, id: string): EntityDelta {
+  // `new!` identifies the whole entity. It needs no word-level insertion beneath it:
+  // painting every word green would restate the status as noise.
   return {
     kind,
     id,
     status: "new",
-    fields: d ? [d] : [],
+    fields: [],
     former: null,
     formerKind: null,
     codeMoved: false,
@@ -693,7 +674,7 @@ function walk<T extends { id: string; kind?: string }>(
   for (const x of current) {
     const p = matches.get(x.id);
     if (!p) {
-      out.push(born(kind, x.id, fieldsOf(x)));
+      out.push(born(kind, x.id));
       continue;
     }
     const d = compare(kind, x.id, fieldsOf(p), fieldsOf(x), false);
@@ -726,7 +707,7 @@ function walkGroups(
   for (const g of current) {
     const p = matches.get(g.id);
     if (!p) {
-      out.push(born("group", g.id, groupFieldsWith(g, curHunks)));
+      out.push(born("group", g.id));
       continue;
     }
     const d = compare(
@@ -788,7 +769,7 @@ export function computeDelta(prev: DeltaSide, cur: DeltaSide): Delta {
     const key = prKey(pr.repo, pr.number);
     const was = priorPrs.get(key);
     if (!was) {
-      entities.push(born("pr", key, prFields(pr)));
+      entities.push(born("pr", key));
       continue;
     }
     const d = compare("pr", key, prFields(was), prFields(pr), was.headSha !== pr.headSha);
@@ -909,7 +890,6 @@ export class DeltaIndex {
 
 // ---- marking ----
 
-const CHEV = `<svg class="dtick" aria-hidden="true"><use href="#i-chev"/></svg>`;
 const EDIT_ICON = `<svg class="dediticon" aria-hidden="true"><use href="#i-change"/></svg>`;
 
 /** An id fragment safe for an attribute, and injective: every character outside the
@@ -964,9 +944,9 @@ function inlineDiffHtml(html: string, d: FieldDelta): string {
 }
 
 /**
- * The field's markup with the delta marked in it. Prose stays clean until its Edited
- * control swaps an inline redline into the same place. One-line fields inside an
- * existing disclosure borrow that row's chevron. Nothing here needs JavaScript.
+ * The field's clean current markup and its hidden redline. Standalone prose carries
+ * its own edited control; fields inside an entity borrow that entity's explicit
+ * control. Opening the entity itself never reveals a diff. Nothing needs JavaScript.
  */
 export function markField(
   html: string,
@@ -974,114 +954,21 @@ export function markField(
   owner: string,
   control = false,
 ): string {
-  const ix = wordIndex(html);
-  const w = ix.words;
-  const edits: Edit[] = [];
-  const cut = (at: number, del: number, ins: string) => edits.push({ at, del, ins });
-  const prior = d.priorWords;
-  // A one-line field inside a summary carries no control of its own, because one
-  // would fight the row's own chevron. A one-line field standing on its own, like
-  // the review title, has no row to borrow and so grows one.
-  const own = !d.inline || control;
-  let k = 0;
-  const box = () => boxId(owner, d.field, ++k);
-
-  /** Every word of a run, wrapped where it stands. A run that straddles a tag is
-   *  wrapped piece by piece rather than dropped: the mark has to be there, because
-   *  the status label above it says it is. */
-  const insRuns = (c0: number, c1: number) => {
-    let a = c0;
-    while (a < c1) {
-      let b = a + 1;
-      while (b < c1 && contiguous(ix, a, b + 1)) b++;
-      cut(
-        w[a]!.s,
-        w[b - 1]!.e - w[a]!.s,
-        `<ins class="dw dnew">${html.slice(w[a]!.s, w[b - 1]!.e)}</ins>`,
-      );
-      a = b;
-    }
-  };
-
-  /** The prior words on their own, next to where they used to stand. */
-  const priorOnly = (at: number, was: string, cutOnly = false) => {
-    if (!own) {
-      if (!cutOnly) {
-        cut(at, 0, `<span class="dp">${was} </span>`);
-        return;
-      }
-      // A pure deletion inside a summary has no inserted word to carry the mark,
-      // and the prior words are hidden while the row is shut. Without a mark of
-      // its own the row's status label would stand over nothing, so the cut itself is
-      // drawn: a caret where the words used to be.
-      cut(at, 0, `<span class="dw dcut" aria-hidden="true"></span><span class="dp">${was} </span>`);
-      return;
-    }
-    const id = box();
-    cut(
-      at,
-      0,
-      `<input type="checkbox" class="dtog" id="${id}" aria-label="prior text">` +
-        `<label class="dw dxo" for="${id}">${CHEV}</label>` +
-        `<span class="dp">${was} </span>`,
-    );
-  };
-
-  if (d.mode === "whole" || control) {
-    if (prior.length === 0) return inlineDiffHtml(html, d);
-    const id = box();
-    const diff = inlineDiffHtml(html, d);
-    if (d.inline) {
-      return (
-        `<span class="dchange dchange-inline"><span class="dcurrent">${html}</span>` +
-        `<input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
-        `<label class="dedited" for="${id}">${EDIT_ICON}<span>edited</span></label>` +
-        `<span class="dinline">${diff}</span></span>`
-      );
-    }
+  const diff = inlineDiffHtml(html, d);
+  const tag = d.inline ? "span" : "div";
+  const inlineClass = d.inline ? " dchange-inline" : "";
+  if (!control) {
     return (
-      `<div class="dchange"><input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
-      `<label class="dedited" for="${id}">${EDIT_ICON}<span>edited</span></label>` +
-      `<div class="dcurrent">${html}</div><div class="dinline">${diff}</div></div>`
+      `<${tag} class="dborrow${inlineClass}"><${tag} class="dcurrent">${html}</${tag}>` +
+      `<${tag} class="dinline">${diff}</${tag}></${tag}>`
     );
-  } else {
-    for (const r of d.regions) {
-      const was = prior.slice(r.d0, r.d1).join(" ");
-      const hasIns = r.c1 > r.c0;
-      const inOne = hasIns && contiguous(ix, r.c0, r.c1);
-      const at = r.c0 < w.length ? w[r.c0]!.s : html.length;
-      if (inOne) {
-        const slice = html.slice(w[r.c0]!.s, w[r.c1 - 1]!.e);
-        const span = w[r.c1 - 1]!.e - w[r.c0]!.s;
-        if (was === "") {
-          cut(w[r.c0]!.s, span, `<ins class="dw dnew">${slice}</ins>`);
-        } else if (!own) {
-          cut(w[r.c0]!.s, span, `<ins class="dw">${slice}</ins><span class="dp"> ${was}</span>`);
-        } else {
-          const id = box();
-          cut(
-            w[r.c0]!.s,
-            span,
-            `<input type="checkbox" class="dtog" id="${id}" aria-label="prior text">` +
-              `<label class="dw" for="${id}"><ins>${slice}</ins>${CHEV}</label>` +
-              `<span class="dp"> ${was}</span>`,
-          );
-        }
-      } else if (hasIns) {
-        // The inserted run crosses a tag, so it cannot be one mark. It becomes one
-        // mark per piece, and the prior words hang off their own control beside it.
-        insRuns(r.c0, r.c1);
-        if (was !== "") priorOnly(at, was);
-      } else if (was !== "") {
-        priorOnly(at, was, true);
-      }
-    }
   }
-
-  edits.sort((a, b) => b.at - a.at || b.del - a.del);
-  let out = html;
-  for (const e of edits) out = out.slice(0, e.at) + e.ins + out.slice(e.at + e.del);
-  return out;
+  const id = boxId(owner, d.field, 1);
+  return (
+    `<${tag} class="dchange${inlineClass}"><input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
+    `<label class="dedited" for="${id}">${EDIT_ICON}<span>edited</span></label>` +
+    `<${tag} class="dcurrent">${html}</${tag}><${tag} class="dinline">${diff}</${tag}></${tag}>`
+  );
 }
 
 /** The markup for one field, marked when the delta touched it and plain when it
@@ -1099,6 +986,23 @@ export function marked(
   if (!entity) return html;
   const d = entity.fields.find((f) => f.field === field);
   return d ? markField(html, d, owner, control) : html;
+}
+
+/** One explicit diff control shared by every changed field inside an entity. The
+ *  input is placed directly after its summary; the label sits at the start of the
+ *  expanded body. CSS ties both to every borrowed field in that details element. */
+export function entityEditControl(
+  entity: EntityDelta | null,
+  owner: string,
+): { input: string; label: string } {
+  if (!entity || entity.status !== "revised" || entity.fields.length === 0) {
+    return { input: "", label: "" };
+  }
+  const id = `de-${safeId(owner)}`;
+  return {
+    input: `<input type="checkbox" class="dtog etog" id="${id}" aria-label="show edits">`,
+    label: `<label class="dedited eedited" for="${id}">${EDIT_ICON}<span>edited</span></label>`,
+  };
 }
 
 /** Whether the delta touched one field of one entity. The renderer asks before it

@@ -35,6 +35,7 @@ import {
   computeDelta,
   DeltaIndex,
   designPathsHtml,
+  entityEditControl,
   evidenceFieldNames,
   marked,
   movedStatus,
@@ -1332,17 +1333,13 @@ const PAGE_SCRIPT = `
 })();
 `;
 
-/** The delta's own ink. Prose is clean until Edited swaps a word-level redline into
- *  the same place. Rows use the same marks only while their existing disclosure is
- *  open. The checkbox keeps standalone fields script-free. */
+/** The delta's own ink. Every field starts as clean current prose. Standalone fields
+ *  and expanded entities each have an explicit edited checkbox; opening a row alone
+ *  cannot reveal additions or deletions. */
 const DELTA_STYLE = `
   .dtog { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
   .dw { border-radius: 3px; background: var(--word-add); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
-  label.dw { cursor: pointer; padding: 0 2px; }
   .dw ins, ins.dw { text-decoration: none; }
-  .dtick { width: 10px; height: 10px; margin-left: 3px; vertical-align: baseline; color: hsl(var(--muted)); fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; transition: transform 120ms ease; }
-  .dtog:checked + .dw .dtick, .dtog:checked + .dw.dxo .dtick { transform: rotate(90deg); }
-  .dw.dxo { background: none; color: hsl(var(--muted)); }
   .dedited {
     display: flex; align-items: center; gap: 5px; width: max-content; min-height: 40px;
     color: hsl(var(--change)); cursor: pointer; font: italic 400 12.5px/1.35 var(--font-body);
@@ -1357,29 +1354,21 @@ const DELTA_STYLE = `
   .dchange:has(> .dtog:checked) > .dinline { display: block; }
   .dchange-inline .dedited { display: inline-flex; min-height: 0; margin-left: 7px; font-size: 0.6em; vertical-align: middle; }
   .dchange-inline:has(> .dtog:checked) > .dinline { display: inline; }
-  /* A newly added check has no prior text and therefore no control of its own. When
-     its note body does have Edited, it follows that control instead of leaking a
-     green addition into the clean view. */
-  .note-body:has(> .dchange > .dtog:not(:checked)) > .checks .dw { background: none; }
-  details:not([open]) > summary .dw { background: none; }
-  details:not([open]) > summary .dcut { visibility: hidden; }
-  .dold, .dp { color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
-  .dp { display: none; }
-  .dtog:checked + .dw + .dp { display: inline; }
-  .dp.dpb { margin-top: 6px; padding: 6px 8px; text-decoration: none; }
-  details.row[open] > summary .dp, details.note[open] > summary .dp, details.card[open] > summary .dp, details.grp[open] > summary .dp { display: inline; }
+  details:has(> .etog:checked) .dborrow > .dcurrent { display: none; }
+  details:has(> .etog:checked) .dborrow > .dinline { display: block; }
+  details:has(> .etog:checked) .dborrow.dchange-inline > .dinline { display: inline; }
+  .dold { color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
+  .dp { display: none; color: hsl(var(--ink-soft)); background: none; text-decoration: none; }
+  .dp.dpb { margin-top: 6px; padding: 6px 8px; }
   .dgoneunit { opacity: 0.78; }
   .dgoneunit .dgone-body { padding: 4px 0 8px; }
   /* Group and card bodies already own the horizontal column under their titles.
      Keep it when the entity is removed; zeroing all four sides put the group's
      icon rail through its former prose. */
   .dgoneunit .grp-body, .dgoneunit .card-body { padding-top: 4px; padding-bottom: 8px; }
-  .dgoneunit > summary .dp { display: inline; text-decoration: none; }
-  .dgoneunit:not([open]) > summary .dp { color: hsl(var(--muted)); background: none; }
+  .dgoneunit > summary .dp { display: inline; color: hsl(var(--muted)); }
   .dgoneunit:not([open]) > summary .ic { color: hsl(var(--muted)); }
-  .dgoneunit .dgone-body .dp, .dgoneunit .grp-body .dp, .dgoneunit .card-body .dp { display: block; text-decoration: none; }
-  ins.dnew { text-decoration: none; }
-  .dw.dcut { display: inline-block; width: 5px; height: 0.85em; margin: 0 1px; vertical-align: -0.13em; background: var(--word-rem); border-radius: 2px; }
+  .dgoneunit .dgone-body .dp, .dgoneunit .grp-body .dp, .dgoneunit .card-body .dp { display: block; }
   .rev { display: inline; margin-right: 7px; font: italic 400 11.5px/1.35 var(--font-body); letter-spacing: 0.01em; vertical-align: baseline; }
   .rev-new { color: hsl(var(--add)); }
   .rev-edited, .rev-moved { color: hsl(var(--change)); }
@@ -1649,11 +1638,12 @@ function card(
   const detailRef = refs.get(pr.detailRef);
   const detailFold = detailRef ? refFold(owner, detailRef) : "";
   const d = ctx.delta ? ctx.delta.get("pr", prKey(pr.repo, pr.number)) : null;
+  const edit = entityEditControl(d, owner);
   const hasMore =
     pr.detail.trim() !== "" || detailFold !== "" || pr.body.trim() !== "";
   // Three readings, each earned by a tap. Closed is the title and what it cost,
-  // which is what a stack is scanned for. Open adds the marks and the one-line
-  // gist. The nested fold holds the author's own account, which is the longest
+  // which is what a stack is scanned for. Open adds the clean one-line gist and an
+  // explicit edit control when needed. The nested fold holds the author's own account, which is the longest
   // thing on the card and the least often wanted.
   const more = hasMore
     ? `<details class="c-more"><summary>${icon("chev", "tick")}` +
@@ -1676,9 +1666,10 @@ function card(
     `${icon("pr")}<span class="c-reftext">${escapeHtml(prLabel(pr))}</span></a>` +
     prStat(pr, hunks) +
     `</span>` +
-    `</summary>` +
+    `</summary>${edit.input}` +
     `<div class="c-open">` +
     `<span class="c-kinds">${kinds}${statusMark(d)}</span>` +
+    edit.label +
     `<span class="c-line">${marked(safeInline(pr.gist), d, "gist", owner)}</span>` +
     more +
     `</div></details>`
@@ -1766,7 +1757,7 @@ function evidenceMarks(
   return {
     // Evidence is drawn in a body rather than a summary, so a one-line field there
     // grows a control of its own: the row's chevron cannot reveal it.
-    mark: (field, html) => marked(html, d, field, owner, true),
+    mark: (field, html) => marked(html, d, field, owner),
     touched: (field) => touched(d, field),
     dropped: (current) => {
       const has = new Set(current);
@@ -1782,13 +1773,14 @@ function statementRow(s: Statement, ctx: RenderCtx): string {
   const links = refLinks(s.id, refs);
   const folds = refs.map((r) => refFold(s.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("statement", s.id) : null;
+  const edit = entityEditControl(d, s.id);
   return (
     `<details class="row" id="${escapeHtml(s.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(s.kind, `ic k-${s.kind}`, KIND_LABEL[s.kind] ?? s.kind)}` +
     `<span class="rwhat">${marked(safeInline(s.text), d, "text", s.id)}</span>` +
     `<span class="rrefs">${statusMark(d)}${links}</span>` +
-    `</summary>` +
-    `<div class="row-body">${marked(safeBlock(s.body), d, "body", s.id)}${folds}` +
+    `</summary>${edit.input}` +
+    `<div class="row-body">${edit.label}${marked(safeBlock(s.body), d, "body", s.id)}${folds}` +
     questionsHere(ctx, "statement", s.id) +
     kindMark(d, s.id, s.kind) +
     renderEvidence(
@@ -1846,12 +1838,13 @@ function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
   const links = refLinks(m.id, refs);
   const folds = refs.map((r) => refFold(m.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("module", m.id) : null;
+  const edit = entityEditControl(d, m.id);
   return (
     `<details class="dmodule" id="${escapeHtml(m.id)}">` +
     `<summary>${icon("chev", "tick")}<span class="dmodule-head">` +
     `<span class="dmodule-title">${marked(safeInline(m.title), d, "title", m.id)}</span>` +
-    `</span><span class="rrefs">${statusMark(d)}</span></summary>` +
-    `<div class="dmodule-body">${marked(safeBlock(m.body), d, "body", m.id)}` +
+    `</span><span class="rrefs">${statusMark(d)}</span></summary>${edit.input}` +
+    `<div class="dmodule-body">${edit.label}${marked(safeBlock(m.body), d, "body", m.id)}` +
     `<div class="dpaths">${marked(designPathsHtml(m.paths), d, "paths", m.id)}</div>` +
     (links === "" ? "" : `<div class="design-refs">${links}</div>`) +
     folds + `</div></details>`
@@ -1863,12 +1856,13 @@ function designCoverageBlock(c: DesignCoverage, ctx: RenderCtx): string {
   const links = refLinks(c.id, refs);
   const folds = refs.map((r) => refFold(c.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("coverage", c.id) : null;
+  const edit = entityEditControl(d, c.id);
   return (
     `<details class="coverage-row" id="${escapeHtml(c.id)}">` +
     `<summary>${icon("chev", "tick")}<span class="coverage-title">` +
     marked(safeInline(c.title), d, "title", c.id) +
-    `</span><span class="rrefs">${statusMark(d)}</span></summary>` +
-    `<div class="coverage-body">${marked(safeBlock(c.body), d, "body", c.id)}` +
+    `</span><span class="rrefs">${statusMark(d)}</span></summary>${edit.input}` +
+    `<div class="coverage-body">${edit.label}${marked(safeBlock(c.body), d, "body", c.id)}` +
     (links === "" ? "" : `<div class="design-refs">${links}</div>`) +
     folds + `</div></details>`
   );
@@ -1903,7 +1897,7 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
       )
       .join("") +
     removedStubsBefore(ctx, "coverage", null, "coverage-row", "coverage-title");
-  const placement = marked(safeBlock(design.placement), d, "placement", "design");
+  const placement = marked(safeBlock(design.placement), d, "placement", "design", true);
   return (
     `<section id="design"><h2>Code design</h2>` +
     (placement === "" ? "" : `<div class="placement">${placement}</div>`) +
@@ -1921,6 +1915,7 @@ function noteRow(n: Note, ctx: RenderCtx): string {
   const links = refLinks(n.id, refs);
   const folds = refs.map((r) => refFold(n.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("note", n.id) : null;
+  const edit = entityEditControl(d, n.id);
   // A check the base version carried and this one dropped keeps its place in the
   // list, as an item holding only the prior words behind their disclosure. A list
   // that simply got shorter would be an absence a reader cannot see.
@@ -1944,8 +1939,8 @@ function noteRow(n: Note, ctx: RenderCtx): string {
     `<summary>${icon("chev", "tick")}${icon(n.kind, `ic k-${n.kind}`, n.kind)}` +
     `<span class="none">${marked(safeInline(n.text), d, "text", n.id)}</span>` +
     `${statusMark(d) === "" ? "" : `<span class="rrefs">${statusMark(d)}</span>`}` +
-    `</summary>` +
-    `<div class="note-body">${marked(safeBlock(n.body), d, "body", n.id)}${checks}${links === "" ? "" : `<p class="rrefs">${links}</p>`}${folds}` +
+    `</summary>${edit.input}` +
+    `<div class="note-body">${edit.label}${marked(safeBlock(n.body), d, "body", n.id)}${checks}${links === "" ? "" : `<p class="rrefs">${links}</p>`}${folds}` +
     questionsHere(ctx, "note", n.id) +
     kindMark(d, n.id, n.kind) +
     renderEvidence(
@@ -2371,11 +2366,11 @@ export function renderReviewPage(input: RenderInput): string {
       ? ""
       : `<div class="account"><p class="account-title">${icon("pr", "account-icon")}` +
         `<span>Author intent</span></p>` +
-        `<div class="author-intent">${marked(safeBlock(doc.authorIntent), intentDelta, "authorIntent", "intent")}</div>` +
+        `<div class="author-intent">${marked(safeBlock(doc.authorIntent), intentDelta, "authorIntent", "intent", true)}</div>` +
         `</div>`) +
     `<div class="account"><p class="account-title">${icon("eye", "account-icon")}` +
     `<span>Witness account</span></p>` +
-    `<div class="witness-account">${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary")}</div>` +
+    `<div class="witness-account">${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary", true)}</div>` +
     `</div>` +
     questionsHere(ctx, "summary", "summary") +
     `<div class="rows">${rows}</div>` +

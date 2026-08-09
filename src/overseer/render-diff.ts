@@ -21,6 +21,7 @@ import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
 import {
   statusMark,
+  entityEditControl,
   groupFilesHtml,
   marked,
   safeId,
@@ -41,7 +42,7 @@ export type QuestionsHere = (type: string, id: string) => string;
  *  delta compares a kind on draws this, or its status label would stand over an unmarked row. */
 export function kindMark(d: EntityDelta | null, owner: string, kind: string): string {
   if (!touched(d, "kind")) return "";
-  return `<p class="ev-was">${marked(safeInline(kind), d, "kind", owner, true)}</p>`;
+  return `<p class="ev-was">${marked(safeInline(kind), d, "kind", owner)}</p>`;
 }
 
 /** What a kind mark is called out loud. Shared with the chain and the statement rows,
@@ -452,6 +453,7 @@ function groupBlock(
   // Marked first, then tested for emptiness: a paragraph cleared between versions
   // still owes the reader its prior words, and its status label owes them a mark.
   const gsum = marked(safeBlock(group.paragraph), d, "paragraph", group.id);
+  const edit = entityEditControl(d, group.id);
   // The file list is the partition of the diff this group claims. It is already on
   // the page as rows, but a row that left it leaves no trace there, so when the
   // membership moves the paths come out as the words they are.
@@ -465,8 +467,9 @@ function groupBlock(
     `<span class="gname">${marked(safeInline(group.title), d, "title", group.id)}</span>` +
     `${statusMark(d)}` +
     `<span class="gcount">${statHtml(added, removed)}</span>` +
-    `</summary>` +
+    `</summary>${edit.input}` +
     `<div class="grp-body">` +
+    edit.label +
     // Block markdown, the way the data model defines it: a group paragraph may carry
     // emphasis, a link, a list or a fenced block.
     (gsum === "" ? "" : `<div class="gsum">${gsum}</div>`) +
