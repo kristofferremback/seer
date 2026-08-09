@@ -361,3 +361,65 @@ describe("delivery health per installation", () => {
     expect(deliveryIsQuiet(Date.now() - (DELIVERY_QUIET_MS + 60_000))).toBe(true);
   });
 });
+
+// ---- the observations the App inherited ----
+
+describe("a head recorded before the App still answers the chip", () => {
+  // `review_freshness` is what a review published before the App left behind: a head
+  // per pull request, per review, and nothing about state. The v5 migration could not
+  // turn that into a status row without inventing the state, so the reading has to
+  // come off the old table at read time or an upgrade silently forgets a warning a
+  // reader was already acting on.
+  let wsOld = "";
+
+  function record(slug: string, prNumber: number, sha: string): void {
+    db.run(
+      "INSERT OR REPLACE INTO review_freshness " +
+        "(workspace_id, slug, repo, pr_number, observed_head_sha, checked_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?)",
+      [wsOld, slug, GOLDEN_REPO, prNumber, sha, Date.now()],
+    );
+  }
+
+  async function oldPageOf(slug: string): Promise<string> {
+    const res = await fetch(`${base}/${wsOld}/r/${slug}`);
+    expect(res.status).toBe(200);
+    return res.text();
+  }
+
+  beforeAll(() => {
+    // Its own workspace: `github_pr_status` keys on the pull request rather than the
+    // review, so a workspace whose other reviews have been observed has no pre-App
+    // case left to test.
+    wsOld = createWorkspace("Before the App", owner);
+    for (let i = 0; i < GOLDEN_BUNDLE_VERSION; i++) createVersion(wsOld, GOLDEN_BUNDLE_SLUG, 10, 1);
+  });
+
+  test("a head that had moved still reads behind, with no glyph beside it", async () => {
+    storeGoldenReview(wsOld, "pre-app-behind");
+    const doc = getReviewVersion(wsOld, "pre-app-behind", 1)!.doc;
+    record("pre-app-behind", doc.prs[0]!.number, "9".repeat(40));
+    record("pre-app-behind", doc.prs[1]!.number, doc.prs[1]!.headSha);
+
+    const html = await oldPageOf("pre-app-behind");
+    expect(chip(html)).toBe("1 of 2 behind");
+    // The old table never knew open, merged, closed or draft, so the card draws no
+    // glyph: the fallback restores the recorded fact and not a status nobody observed.
+    expect(html).not.toContain('href="#i-pr-');
+  });
+
+  test("and a head that had not moved reads up to date", async () => {
+    storeGoldenReview(wsOld, "pre-app-current");
+    const doc = getReviewVersion(wsOld, "pre-app-current", 1)!.doc;
+    for (const pr of doc.prs) record("pre-app-current", pr.number, pr.headSha);
+
+    expect(chip(await oldPageOf("pre-app-current"))).toBe("up to date");
+  });
+
+  test("with neither row the chip is still unchecked", async () => {
+    // The refusal beside the two successes: the fallback answers from what was
+    // recorded and invents nothing when nothing was.
+    storeGoldenReview(wsOld, "pre-app-silent");
+    expect(chip(await oldPageOf("pre-app-silent"))).toBe("heads unchecked");
+  });
+});

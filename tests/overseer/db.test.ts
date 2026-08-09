@@ -249,8 +249,12 @@ describe("the freshness table the write path abandoned", () => {
       )
       .get("review_freshness");
     expect(row).not.toBeNull();
-    // Standing and readable, not just named in sqlite_master.
-    expect(db.query("SELECT * FROM review_freshness").all()).toEqual([]);
+    // Standing and readable, not just named in sqlite_master. Nothing writes it any
+    // more, so this workspace has no rows; other suites plant pre-App rows of their
+    // own in the shared database, which is why the count is asked per workspace.
+    expect(
+      db.query("SELECT * FROM review_freshness WHERE workspace_id = ?").all(WS_A),
+    ).toEqual([]);
   });
 
   test("the pull requests a review names are still recorded, per repo", () => {

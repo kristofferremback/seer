@@ -341,6 +341,41 @@ export function deleteAnnotation(wsId: string, slug: string, id: string): void {
   ]);
 }
 
+// ---- the pre-App freshness table ----
+
+/**
+ * The head a pre-App review recorded for one of its pull requests, or null.
+ *
+ * `review_freshness` is what freshness was before the App: a per-review observation of
+ * a head, with no state, no merged and no draft, which is why the v5 migration could
+ * carry it into `review_prs` but not into `github_pr_status` — a status row invented
+ * out of it would draw a glyph nobody observed. It is still the chip's question, so the
+ * read falls back to it, keyed per review as it was written.
+ *
+ * v6 drops the table, so a missing table is no rows rather than a throw: the operator
+ * running the drop must not turn a page into a 500.
+ */
+export function legacyObservedHead(
+  wsId: string,
+  slug: string,
+  repo: string,
+  prNumber: number,
+): string | null {
+  try {
+    return (
+      db
+        .query<{ observed_head_sha: string }, [string, string, string, number]>(
+          "SELECT observed_head_sha FROM review_freshness " +
+            "WHERE workspace_id = ? AND slug = ? AND lower(repo) = lower(?) AND pr_number = ?",
+        )
+        .get(wsId, slug, repo, prNumber)?.observed_head_sha ?? null
+    );
+  } catch (err) {
+    if (String((err as Error)?.message ?? err).includes("no such table")) return null;
+    throw err;
+  }
+}
+
 // ---- read state ----
 
 export interface ReadStateRow {

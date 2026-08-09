@@ -16,6 +16,7 @@ import { listUserWorkspaces } from "../db";
 import { requireApiKey, sessionUser } from "../auth";
 import {
   getReviewVersion,
+  legacyObservedHead,
   listAnnotations,
   resolveReview,
   type ReviewDoc,
@@ -62,26 +63,37 @@ export function readableWorkspaces(req: Request): string[] {
  * Freshness per pull request of the version being read, from the one observation.
  *
  * Absence is `unknown`, not `current`. Reading it as `current` was the old default and
- * it lies in exactly the case that matters: a review published before the App, or one
- * whose installation went away and took its rows with it, would assert "up to date"
- * on the chip while the glyph beside it — reading the same missing row — showed
- * nothing. The stored document is the last thing known true about the *code*; it is no
- * evidence at all about where the branch points now.
+ * it lies in exactly the case that matters: a review whose installation went away and
+ * took its rows with it would assert "up to date" on the chip while the glyph beside
+ * it — reading the same missing row — showed nothing. The stored document is the last
+ * thing known true about the *code*; it is no evidence at all about where the branch
+ * points now.
+ *
+ * With no observation there is one older place to ask: the pre-App `review_freshness`
+ * row for this review, which recorded a head and nothing else. It answers the chip's
+ * question exactly, so a page that read "behind" before the upgrade still does. It
+ * cannot answer the glyph's, and `statusesOf` below stays silent accordingly.
  */
 export function freshnessOf(
   wsId: string,
-  // The slug is no longer part of the key: an observation is of a pull request, not of
-  // a review, and one pull request may be named by two reviews in the same workspace.
-  // It stays in the signature because every caller has it and the day a review-scoped
-  // reading returns it will want it back.
-  _slug: string,
+  // The slug is not part of the observation's key: an observation is of a pull request,
+  // not of a review, and one pull request may be named by two reviews in the same
+  // workspace. It is here for the one reading that is review-scoped, the pre-App
+  // `review_freshness` row, which a review published before the App is the only
+  // evidence left of and which the v5 migration could not honestly carry across.
+  slug: string,
   doc: ReviewDoc,
 ): Record<string, Freshness> {
   const out: Record<string, Freshness> = {};
   for (const pr of doc.prs) {
     const row = lookupPrStatus(wsId, pr.repo, pr.number);
-    out[prKey(pr.repo, pr.number)] = row
-      ? row.head_sha === pr.headSha
+    if (row) {
+      out[prKey(pr.repo, pr.number)] = row.head_sha === pr.headSha ? "current" : "behind";
+      continue;
+    }
+    const legacy = legacyObservedHead(wsId, slug, pr.repo, pr.number);
+    out[prKey(pr.repo, pr.number)] = legacy
+      ? legacy === pr.headSha
         ? "current"
         : "behind"
       : "unknown";
