@@ -181,6 +181,51 @@ describe("POST /api/reviews/:slug/refresh", () => {
     ]);
   });
 
+  // The regression: this route called claimCheck and discarded the answer, so the
+  // one-check-per-minute bound the whole module is built around held for rendering and
+  // for nothing else. A caller posting in a loop spent one GitHub call per pull request
+  // per request, without limit.
+  test("a second refresh inside the window costs nothing and says so", async () => {
+    storeGoldenReview(wsA, "bounded");
+    const moved = "9".repeat(40);
+    const counter = countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : moved));
+    setGithubClient(counter.client);
+
+    const refresh = () =>
+      fetch(`${base}/api/reviews/bounded/refresh`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${keyA}` },
+      });
+
+    const first = (await (await refresh()).json()) as {
+      checked: boolean;
+      prs: { pr: string; freshness: string }[];
+    };
+    expect(first.checked).toBe(true);
+    const spent = counter.calls();
+    expect(spent).toBe(2); // one getPull per pull request
+
+    // Five more inside the same minute reach GitHub not once...
+    for (let i = 0; i < 5; i++) {
+      const again = (await (await refresh()).json()) as {
+        checked: boolean;
+        prs: { pr: string; freshness: string }[];
+      };
+      expect(again.checked).toBe(false);
+      // ...and the caller is still answered, from the observation already recorded,
+      // with the same readings the checked call returned. A refusal that answered
+      // nothing, or answered something different, would just move the problem.
+      expect(again.prs).toEqual(first.prs);
+    }
+    expect(counter.calls()).toBe(spent);
+
+    // And the bound is a window, not a latch: once it lapses, a refresh checks again.
+    resetChecks();
+    const after = (await (await refresh()).json()) as { checked: boolean };
+    expect(after.checked).toBe(true);
+    expect(counter.calls()).toBe(spent * 2);
+  });
+
   test("a review the caller may not read is the answer a missing one gets", async () => {
     storeGoldenReview(wsB, "sealed");
     setGithubClient(countingClient(() => GOLDEN_HEAD_SHA_12).client);
