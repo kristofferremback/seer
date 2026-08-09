@@ -92,9 +92,11 @@ interface WebhookPayload {
     id?: number;
     account?: { login?: string; id?: number; type?: string };
     repository_selection?: string;
-    repositories?: { id?: number; full_name?: string }[];
   };
   repository?: { id?: number; full_name?: string };
+  /** The `installation` event's repository list, which GitHub delivers at the top level
+   *  of the payload as a sibling of `installation` rather than inside it. */
+  repositories?: { id?: number; full_name?: string }[];
   repositories_added?: { id?: number; full_name?: string }[];
   repositories_removed?: { id?: number; full_name?: string }[];
   pull_request?: {
@@ -121,8 +123,18 @@ interface Effects {
   touched: string[];
   /** Repositories whose routing answer may have changed. */
   invalidate: string[];
-  /** An event meaning observations may have been missed: sweep and re-observe once. */
-  reconcile: { installationId: number; repos: string[] | null } | null;
+  /** An event meaning observations may have been missed: sweep and re-observe once.
+   *  `repos` null means sweep everything the workspace names. */
+  reconcile: { installationId: number; repos: ReconcileRepos | null } | null;
+}
+
+/** Both halves of what a payload says about a repository, because a review's rows are
+ *  matched by whichever one they carry: a backfilled row has no numeric id and matches
+ *  by name, and a row whose repository has been renamed since publication matches only
+ *  by id. */
+export interface ReconcileRepos {
+  ids: number[];
+  names: string[];
 }
 
 const NOTHING: Effects = { touched: [], invalidate: [], reconcile: null };
@@ -184,7 +196,7 @@ function applyInstallation(installationId: number, payload: WebhookPayload): Eff
         accountType: account?.type ?? "User",
         repositorySelection: payload.installation?.repository_selection ?? "selected",
       });
-      return { touched: [], invalidate: repoNames(payload.installation?.repositories), reconcile: null };
+      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null };
     case "deleted":
       // Its status rows go with it, found by installation_id — the glyph disappears
       // rather than showing the last thing that was true about a repository we can no
@@ -192,7 +204,7 @@ function applyInstallation(installationId: number, payload: WebhookPayload): Eff
       // observations with it.
       deletePrStatusForInstallation(installationId);
       markInstallationRemoved(installationId);
-      return { touched: [], invalidate: repoNames(payload.installation?.repositories), reconcile: null };
+      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null };
     case "suspend":
       setInstallationSuspended(installationId, true);
       return NOTHING;
@@ -210,7 +222,9 @@ function applyInstallation(installationId: number, payload: WebhookPayload): Eff
 }
 
 function applyInstallationRepositories(installationId: number, payload: WebhookPayload): Effects {
-  const added = repoNames(payload.repositories_added);
+  const addedRows = payload.repositories_added ?? [];
+  const added = repoNames(addedRows);
+  const addedIds = addedRows.map((r) => r.id).filter((id): id is number => typeof id === "number");
   const removed = payload.repositories_removed ?? [];
   for (const repo of removed) {
     if (typeof repo.full_name !== "string") continue;
@@ -223,7 +237,10 @@ function applyInstallationRepositories(installationId: number, payload: WebhookP
     // own, so every review naming that repository would render unchecked indefinitely
     // while delivery health reported perfect health — the one mechanism meant to make
     // the failure visible saying nothing is wrong.
-    reconcile: added.length > 0 ? { installationId, repos: added } : null,
+    reconcile:
+      added.length > 0 || addedIds.length > 0
+        ? { installationId, repos: { ids: addedIds, names: added } }
+        : null,
   };
 }
 
@@ -394,16 +411,32 @@ export async function handleGithubWebhook(req: Request): Promise<Response> {
  */
 export async function reconcileInstallation(
   installationId: number,
-  repos: string[] | null,
+  repos: ReconcileRepos | null,
 ): Promise<void> {
   const install = getLiveInstallation(installationId);
   if (!install || install.workspace_id === null) return;
   const wsId = install.workspace_id;
   const client = githubClientFor(wsId);
 
+  // Narrowed here rather than by `listWorkspacePrs`, which can only match on the name:
+  // `review_prs.repo` is frozen at publication on purpose, so a repository renamed since
+  // then is exactly the row the sweep exists to repair and exactly the row a name filter
+  // would drop. The numeric id joins across the rename; the name is what a backfilled row
+  // with no id has.
+  const wantedIds = repos ? new Set(repos.ids) : null;
+  const wantedNames = repos ? new Set(repos.names.map((n) => n.toLowerCase())) : null;
+
   const seen = new Set<string>();
   const touched = new Set<string>();
-  for (const row of listWorkspacePrs(wsId, repos)) {
+  for (const row of listWorkspacePrs(wsId, null)) {
+    if (
+      wantedIds &&
+      wantedNames &&
+      !(typeof row.repo_id === "number" && wantedIds.has(row.repo_id)) &&
+      !wantedNames.has(row.repo.toLowerCase())
+    ) {
+      continue;
+    }
     const key = `${row.repo.toLowerCase()}#${row.pr_number}`;
     // One review naming a pull request and a second naming the same one is one
     // observation, not two calls.

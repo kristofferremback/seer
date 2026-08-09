@@ -24,7 +24,7 @@ import {
   sweepOrphanPrStatus,
   upsertPrStatus,
 } from "../../src/overseer/installations";
-import { setGithubClientFactory } from "../../src/overseer/github-app";
+import { setAppApi, setGithubClientFactory, type AppApi } from "../../src/overseer/github-app";
 import { resetChecks } from "../../src/overseer/freshness";
 import { sweepDeliveries, verifyWebhookSignature, webhookSignature } from "../../src/overseer/webhook";
 import type { GithubClient, GithubPull } from "../../src/overseer/github";
@@ -677,8 +677,9 @@ describe("the installation lifecycle", () => {
         id,
         account: { login: "newcomer", id: 4242, type: "Organization" },
         repository_selection: "selected",
-        repositories: [{ id: 1, full_name: "newcomer/thing" }],
       },
+      // A sibling of `installation`, which is where GitHub puts it.
+      repositories: [{ id: 1, full_name: "newcomer/thing" }],
     });
     expect(res.status).toBe(202);
     const row = getLiveInstallation(id)!;
@@ -706,6 +707,40 @@ describe("the installation lifecycle", () => {
     expect(getPrStatus(wsB, REPO_ID, 12)).not.toBeNull();
 
     attach(wsA, INSTALL_A, "acme");
+  });
+
+  test("deleted drops the routing answer for the repositories the payload carries", async () => {
+    const id = 777002;
+    db.run("DELETE FROM github_installations WHERE installation_id = ?", [id]);
+    attach(wsA, id, "leaver");
+    const dropped: (string | undefined)[] = [];
+    setAppApi({
+      async installationForRepo() {
+        return null;
+      },
+      async installationToken() {
+        return "t";
+      },
+      noteRepositoryId() {},
+      repositoryId() {
+        return undefined;
+      },
+      invalidateRouting(repo) {
+        dropped.push(repo);
+      },
+    } as AppApi);
+
+    // The list rides at the top level of the payload, beside `installation`. Read from
+    // inside it, the invalidation never fires and every publish naming these keeps
+    // resolving to an installation that no longer exists until the long TTL expires.
+    const res = await deliver("installation", {
+      action: "deleted",
+      installation: { id },
+      repositories: [{ id: 1, full_name: "leaver/one" }, { id: 2, full_name: "leaver/two" }],
+    });
+    expect(res.status).toBe(202);
+    expect(dropped).toEqual(["leaver/one", "leaver/two"]);
+    setAppApi(null);
   });
 
   test("suspend sets the hint and any later delivery clears it", async () => {
@@ -819,6 +854,32 @@ describe("reconciliation", () => {
     });
     for (let i = 0; i < 20 && statusA(12) === null; i++) await new Promise((r) => setTimeout(r, 10));
     expect(statusA(12)!.head_sha).toBe("d".repeat(40));
+    setGithubClientFactory(offlineGithubClientFactory());
+  });
+
+  test("a repository renamed since publication is swept by its id", async () => {
+    // review_prs.repo is frozen at publication on purpose, so the name GitHub sends now
+    // matches nothing — and this row is precisely the one the sweep exists to repair.
+    // The frozen name is the only one any review in this workspace holds, so nothing but
+    // the id can bring the sweep to it.
+    db.run("DELETE FROM review_prs WHERE workspace_id = ?", [wsA]);
+    storeGoldenReview(wsA, "renamed-sweep");
+    setReviewPrs(wsA, "renamed-sweep", [{ repo: "acme/old-name", number: 12, repoId: REPO_ID }]);
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
+    const fake = countingClient(() => ({
+      head: { sha: "f".repeat(40), ref: "topic" },
+      updated_at: "2026-08-07T10:00:00Z",
+    }));
+    setGithubClientFactory(() => fake.client);
+
+    await deliver("installation_repositories", {
+      action: "added",
+      installation: { id: INSTALL_A },
+      repositories_added: [{ id: REPO_ID, full_name: GOLDEN_REPO }],
+    });
+    for (let i = 0; i < 20 && statusA(12) === null; i++) await new Promise((r) => setTimeout(r, 10));
+
+    expect(statusA(12)!.head_sha).toBe("f".repeat(40));
     setGithubClientFactory(offlineGithubClientFactory());
   });
 });
