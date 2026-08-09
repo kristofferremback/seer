@@ -44,7 +44,7 @@
 // whitespace runs and words, with only words compared, so a tag boundary never
 // shifts an alignment. Changed density is retained as a measurement for tests and
 // diagnostics, but it never changes the visual grammar: prose always gets one labelled
-// Previous disclosure, with only its changed prior words marked.
+// Edited control, and its word-level redline appears only when opened.
 //
 // Only words are compared, which is also the limit of what this can see: an edit
 // that moves markup without moving a word, a phrase that became code or emphasis,
@@ -91,7 +91,7 @@ export interface Region {
 }
 
 /** One authored field that moved. `words` is a one-line field inside an existing
- *  disclosure. `whole` is prose with one field-level Previous disclosure. Both modes
+ *  disclosure. `whole` is prose with one field-level Edited control. Both modes
  *  mark the same word regions; the distinction is control placement, not diff semantics. */
 export interface FieldDelta {
   /** Field name, unique within its entity. */
@@ -101,9 +101,7 @@ export interface FieldDelta {
   inline: boolean;
   mode: "words" | "whole";
   regions: Region[];
-  /** The base side as rendered and as words. The markup lets the Previous view keep
-   *  its paragraphs and mark only the words that actually left. */
-  priorHtml: string;
+  /** The base side's words, in order. */
   priorWords: string[];
   /** Share of words moved, 0..1. */
   density: number;
@@ -289,7 +287,6 @@ export function diffField(
       inline,
       mode: "whole",
       regions: [{ d0: 0, d1: pw.length, c0: 0, c1: cw.length }],
-      priorHtml,
       priorWords: pw,
       density: 1,
     };
@@ -302,7 +299,7 @@ export function diffField(
   // paragraph moved. One-line fields already sit in a disclosure row and keep their
   // old words beside the exact replacement when that row opens.
   const mode: FieldDelta["mode"] = inline ? "words" : "whole";
-  return { field, inline, mode, regions: regs, priorHtml, priorWords: pw, density };
+  return { field, inline, mode, regions: regs, priorWords: pw, density };
 }
 
 // ---- entities ----
@@ -488,7 +485,6 @@ function compare(
       inline: false,
       mode: "whole",
       regions: [{ d0: 0, d1: words.length, c0: 0, c1: 0 }],
-      priorHtml: spec.html,
       priorWords: words,
       density: 1,
     });
@@ -766,28 +762,34 @@ function boxId(owner: string, field: string, k: number): string {
 
 type Edit = { at: number; del: number; ins: string };
 
-/** The prior field in its original structure, with only words absent from the current
- *  version marked. Unchanged prior prose stays neutral, so opening Previous shows a
- *  redline rather than painting a mostly identical paragraph as removed. */
-function markedPrior(d: FieldDelta): string {
-  const html = d.priorHtml;
+/** One in-place redline: prior words before their current replacements, additions in
+ *  the current structure. It is built beside the clean current copy and shown only
+ *  when the reader opens Edited. */
+function inlineDiffHtml(html: string, d: FieldDelta): string {
   const ix = wordIndex(html);
   const edits: Edit[] = [];
-  for (const r of d.regions) {
-    if (r.d1 <= r.d0) continue;
-    let a = r.d0;
-    while (a < r.d1) {
+  const add = (at: number, del: number, ins: string) => edits.push({ at, del, ins });
+  const markCurrent = (c0: number, c1: number) => {
+    let a = c0;
+    while (a < c1) {
       let b = a + 1;
-      while (b < r.d1 && contiguous(ix, a, b + 1)) b++;
+      while (b < c1 && contiguous(ix, a, b + 1)) b++;
       const first = ix.words[a]!;
       const last = ix.words[b - 1]!;
-      edits.push({
-        at: first.s,
-        del: last.e - first.s,
-        ins: `<del class="dold">${html.slice(first.s, last.e)}</del>`,
-      });
+      add(first.s, last.e - first.s, `<ins class="dw">${html.slice(first.s, last.e)}</ins>`);
       a = b;
     }
+  };
+  for (const r of d.regions) {
+    const was = d.priorWords.slice(r.d0, r.d1).join(" ");
+    const at =
+      r.c0 < ix.words.length
+        ? ix.words[r.c0]!.s
+        : ix.words.length > 0
+          ? ix.words[ix.words.length - 1]!.e
+          : 0;
+    if (r.c1 > r.c0) markCurrent(r.c0, r.c1);
+    if (was !== "") add(at, 0, `<del class="dold">${was}</del> `);
   }
   edits.sort((a, b) => b.at - a.at || b.del - a.del);
   let out = html;
@@ -796,10 +798,9 @@ function markedPrior(d: FieldDelta): string {
 }
 
 /**
- * The field's markup with the delta marked in it. Prose has one labelled Previous
- * control after the current account. One-line fields inside an existing disclosure
- * borrow that row's chevron and reveal only the old words beside their replacements.
- * Nothing here needs JavaScript.
+ * The field's markup with the delta marked in it. Prose stays clean until its Edited
+ * control swaps an inline redline into the same place. One-line fields inside an
+ * existing disclosure borrow that row's chevron. Nothing here needs JavaScript.
  */
 export function markField(
   html: string,
@@ -861,32 +862,22 @@ export function markField(
   };
 
   if (d.mode === "whole" || control) {
-    for (const r of d.regions) {
-      if (r.c1 > r.c0) {
-        insRuns(r.c0, r.c1);
-        continue;
-      }
-      // A deletion has no current word to tint. Leave a quiet cut exactly where the
-      // words left, and show the deleted words in the Previous view below.
-      if (r.d1 > r.d0) {
-        const at =
-          r.c0 < w.length ? w[r.c0]!.s : w.length > 0 ? w[w.length - 1]!.e : 0;
-        cut(at, 0, `<span class="dw dcut" aria-hidden="true"></span>`);
-      }
-    }
-    // A field with no base text is new rather than rewritten, and there is no
-    // prior account to open.
-    if (prior.length > 0) {
-      const id = box();
-      const priorTag = d.inline ? "span" : "div";
-      cut(
-        html.length,
-        0,
-        `<input type="checkbox" class="dtog" id="${id}" aria-label="previous text">` +
-          `<label class="dprevious" for="${id}">${CHEV}<span>Previous</span></label>` +
-          `<${priorTag} class="dprior${d.inline ? " dprior-inline" : ""}">${markedPrior(d)}</${priorTag}>`,
+    if (prior.length === 0) return inlineDiffHtml(html, d);
+    const id = box();
+    const diff = inlineDiffHtml(html, d);
+    if (d.inline) {
+      return (
+        `<span class="dchange dchange-inline"><span class="dcurrent">${html}</span>` +
+        `<input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
+        `<label class="dedited" for="${id}">${CHEV}<span>(Edited)</span></label>` +
+        `<span class="dinline">${diff}</span></span>`
       );
     }
+    return (
+      `<div class="dchange"><input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
+      `<label class="dedited" for="${id}">${CHEV}<span>(Edited)</span></label>` +
+      `<div class="dcurrent">${html}</div><div class="dinline">${diff}</div></div>`
+    );
   } else {
     for (const r of d.regions) {
       const was = prior.slice(r.d0, r.d1).join(" ");

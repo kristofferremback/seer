@@ -1342,9 +1342,9 @@ const PAGE_SCRIPT = `
 })();
 `;
 
-/** The delta's own ink. Current insertions stay in place; prose has one labelled
- *  Previous disclosure whose unchanged words are neutral and whose deletions carry
- *  the same redline everywhere on the page. The checkbox keeps it script-free. */
+/** The delta's own ink. Prose is clean until Edited swaps a word-level redline into
+ *  the same place. Rows use the same marks only while their existing disclosure is
+ *  open. The checkbox keeps standalone fields script-free. */
 const DELTA_STYLE = `
   .dtog { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
   .dw { border-radius: 3px; background: var(--word-add); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
@@ -1353,20 +1353,19 @@ const DELTA_STYLE = `
   .dtick { width: 10px; height: 10px; margin-left: 3px; vertical-align: baseline; color: hsl(var(--muted)); fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; transition: transform 120ms ease; }
   .dtog:checked + .dw .dtick, .dtog:checked + .dw.dxo .dtick { transform: rotate(90deg); }
   .dw.dxo { background: none; color: hsl(var(--muted)); }
-  .dprevious {
-    display: flex; align-items: center; gap: 6px; width: max-content; min-height: 40px;
-    margin: 1px 0 0; color: hsl(var(--muted)); cursor: pointer;
-    font: 400 12.5px/1.35 var(--font-body);
+  .dedited {
+    display: flex; align-items: center; gap: 5px; width: max-content; min-height: 40px;
+    color: hsl(var(--muted)); cursor: pointer; font: 400 12.5px/1.35 var(--font-body);
   }
-  .dprevious .dtick { margin-left: 0; }
-  .dtog:checked + .dprevious .dtick { transform: rotate(90deg); }
-  .dprior {
-    display: none; margin: 0 0 10px; padding: 7px 0 7px 12px;
-    border-left: 1px solid hsl(var(--line)); color: hsl(var(--muted));
-  }
-  .dtog:checked + .dprevious + .dprior { display: block; }
-  .dprior.dprior-inline { margin-left: 8px; padding: 0 0 0 8px; }
-  .dtog:checked + .dprevious + .dprior-inline { display: inline; }
+  .dedited .dtick { margin-left: 0; }
+  .dtog:checked + .dedited .dtick { transform: rotate(90deg); }
+  .dinline { display: none; }
+  .dchange:has(> .dtog:checked) > .dcurrent { display: none; }
+  .dchange:has(> .dtog:checked) > .dinline { display: block; }
+  .dchange-inline .dedited { display: inline-flex; min-height: 0; margin-left: 7px; font-size: 0.6em; vertical-align: middle; }
+  .dchange-inline:has(> .dtog:checked) > .dinline { display: inline; }
+  details:not([open]) > summary .dw:not(.dnew) { background: none; }
+  details:not([open]) > summary .dcut { visibility: hidden; }
   .dold, .dp { color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
   .dp { display: none; }
   .dtog:checked + .dw + .dp { display: inline; }

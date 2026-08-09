@@ -173,7 +173,7 @@ describe("the delta itself", () => {
     expect(e.fields.length).toBe(1);
   });
 
-  test("a body gets one field-level Previous disclosure regardless of density", () => {
+  test("a body gets one field-level Edited control regardless of density", () => {
     const before = doc((d) => {
       d.statements[0]!.body = "one two three four five six seven eight nine ten";
     });
@@ -298,7 +298,7 @@ describe("the delta itself", () => {
     expect(out).not.toContain("dcut");
   });
 
-  test("a revised field whose insert straddles a tag keeps both the mark and the prior words", () => {
+  test("a revised field whose insert straddles a tag keeps every inline mark", () => {
     // A long field with a two-word insert, so density stays well under the
     // threshold and the straddle is the only reason the field goes whole. The
     // insert lands either side of the code span, which is what makes it straddle.
@@ -310,24 +310,26 @@ describe("the delta itself", () => {
     expect(d.mode).toBe("whole");
     const out = markField(html, d, "st_x");
     expect(/class="dw/.test(out)).toBe(true);
-    // The insert lands in two pieces around the code span. The current words are
-    // marked in place and one labelled control opens the structured prior field.
-    expect(out).toContain('class="dprevious"');
-    expect(out).toContain("<span>Previous</span>");
-    expect(out).toContain(`class="dprior">${prior}</div>`);
-    expect(out).toMatch(/<input type="checkbox" class="dtog"[^>]*aria-label="previous text"/);
+    // The clean current copy stays unmarked. Opening Edited swaps in a second copy
+    // where both pieces around the code span are marked.
+    expect(out).toContain('class="dedited"');
+    expect(out).toContain("<span>(Edited)</span>");
+    expect(out).toContain(`class="dcurrent">${html}</div>`);
+    expect(out).toContain('class="dinline"');
+    expect(out).toMatch(/<input type="checkbox" class="dtog"[^>]*aria-label="show edits"/);
   });
 
-  test("a prose diff labels its one control and marks only changed prior words", () => {
+  test("a prose diff stays clean until Edited reveals its inline redline", () => {
     const prior = safeBlock("one two three four five six seven eight nine ten");
     const html = safeBlock("one two three four five alpha beta gamma delta epsilon");
     const d = diffField("body", false, prior, html)!;
     const out = markField(html, d, "summary");
-    expect([...out.matchAll(/class="dprevious"/g)]).toHaveLength(1);
-    expect(out).toContain("<span>Previous</span>");
-    expect(out).toContain("<p>one two three four five ");
+    expect([...out.matchAll(/class="dedited"/g)]).toHaveLength(1);
+    expect(out).toContain("<span>(Edited)</span>");
+    expect(out).toContain('<div class="dcurrent"><p>one two three four five alpha beta gamma delta epsilon</p></div>');
+    expect(out).toContain('class="dinline"');
     expect(out).toContain('<del class="dold">six seven eight nine ten</del>');
-    expect(out).not.toContain('<del class="dold">one two three four five');
+    expect(out).not.toContain('<div class="dcurrent"><p>one two three four five <del');
   });
 
   test("a field past the word ceiling is republished whole rather than aligned", () => {
@@ -397,7 +399,7 @@ describe("the marks on the page", () => {
     expect(chips.length).toBeGreaterThan(3);
     for (const m of chips) {
       const unit = unitAround(html, m.index!);
-      const marked = /class="(dw|dp|dprevious|dprior|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit);
+      const marked = /class="(dw|dp|dedited|dinline|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit);
       expect(marked).toBe(true);
     }
     // The page says what it is measuring against.
@@ -410,7 +412,7 @@ describe("the marks on the page", () => {
       html.indexOf('<div class="rows">'),
     );
     expect(summaryBlock).toContain('class="dw');
-    expect(summaryBlock).toMatch(/<ins class="dw dnew">[^<]*grew/);
+    expect(summaryBlock).toMatch(/<ins class="dw">[^<]*grew/);
   });
 
   // One mutation per compared field, on every entity that can carry a chip. A field
@@ -447,7 +449,7 @@ describe("the marks on the page", () => {
       expect(chips.length).toBeGreaterThan(0);
       for (const m of chips) {
         const unit = unitAround(html, m.index!);
-        expect(/class="(dw|dp|dprevious|dprior|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
+        expect(/class="(dw|dp|dedited|dinline|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
       }
     });
   }
@@ -499,7 +501,7 @@ describe("the marks on the page", () => {
     expect(chips.length).toBe(1);
     for (const m of chips) {
       const unit = unitAround(html, m.index!);
-      expect(/class="(dw|dp|dprevious|dprior|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
+      expect(/class="(dw|dp|dedited|dinline|dold|dw dnew|dw dxo|dp dpb|dp dpstub)/.test(unit)).toBe(true);
       // The prior description is in the page, behind its own disclosure.
       expect(unit).toContain(textOf(prBodyHtml(before.prs[0]!.body)).split(" ")[0]!);
     }
@@ -528,7 +530,7 @@ describe("the marks on the page", () => {
     const unit = unitAround(html, at + 20);
     expect(unit).toContain("beta check");
     expect(unit).toContain("gamma check");
-    expect(unit).toContain('class="dprior"');
+    expect(unit).toContain('class="dinline"');
     expect(unit).toContain('<span class="rev">revised</span>');
   });
 
@@ -616,11 +618,11 @@ describe("the marks on the page", () => {
     // The title stands on its own, so its prior words grow a control of their own.
     const head = html.slice(html.indexOf('<h1 class="title">'), html.indexOf("</h1>"));
     expect(head).toContain('class="dtog"');
-    expect(head).toContain('class="dprior dprior-inline"');
-    expect(head).toContain("<span>Previous</span>");
-    // A prior block is hidden until its labelled checkbox is checked.
-    expect(html).toContain(".dprior {");
-    expect(html).toContain(".dtog:checked + .dprevious + .dprior { display: block; }");
+    expect(head).toContain('class="dchange dchange-inline"');
+    expect(head).toContain("<span>(Edited)</span>");
+    // The clean copy is replaced in place only when Edited is checked.
+    expect(html).toContain(".dinline { display: none; }");
+    expect(html).toContain(".dchange:has(> .dtog:checked) > .dcurrent { display: none; }");
     // Standalone and row-contained deletions share one redline treatment.
     expect(html).toContain(".dold, .dp {");
     // The row reveal is scoped to the summary, so an open row does not print its
@@ -640,7 +642,7 @@ describe("the marks on the page", () => {
     const html = page(after, before);
     const boxes = [...html.matchAll(/<input type="checkbox" class="dtog"[^>]*>/g)];
     expect(boxes.length).toBeGreaterThan(0);
-    for (const b of boxes) expect(b[0]).toContain('aria-label="previous text"');
+    for (const b of boxes) expect(b[0]).toContain('aria-label="show edits"');
   });
 
   test("a head that moved marks the card without claiming a word changed", () => {
