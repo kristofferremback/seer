@@ -310,8 +310,12 @@ let attachTokenA: string;
     base: { sha: "b".repeat(40), ref: "main", repo: { id: 55501, full_name: "acme/seer" } },
     updated_at: "2026-08-04T00:00:00Z",
   };
-  const fetchImpl = (async () =>
-    new Response(JSON.stringify(pull), { headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  // acme/seer is private, so only a credentialed read is answered — which is what makes
+  // B's refusal a refusal rather than a public read the App was never withholding.
+  const fetchImpl = (async (_url: string, init?: RequestInit) =>
+    new Headers(init?.headers).has("Authorization")
+      ? new Response(JSON.stringify(pull), { headers: { "content-type": "application/json" } })
+      : new Response("Not Found", { status: 404 })) as unknown as typeof fetch;
   const clientFor = (wsId: string) =>
     createWorkspaceGithubClient({ workspaceId: wsId, holdings: dbWorkspaceHoldings(), app, fetchImpl });
 
@@ -518,8 +522,13 @@ let attachTokenA: string;
     invalidateRouting() {},
   };
   let fetched = 0;
-  const fetchImpl = (async (url: string) => {
-    fetched++;
+  // FOREIGN is private, so GitHub answers an unauthenticated read with a 404 — which is
+  // what the anonymous fallback for an unheld repository will get, and the only reason
+  // that fallback is safe: no credential, no bytes.
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    const credentialed = new Headers(init?.headers).has("Authorization");
+    if (credentialed) fetched++;
+    if (!credentialed) return new Response("Not Found", { status: 404 });
     return new Response(url.includes("acme-labs") ? SECRET_BYTES : "a held line\n", {
       headers: { "content-type": "application/vnd.github.raw" },
     });
@@ -540,7 +549,7 @@ let attachTokenA: string;
     cause instanceof GithubRoutingError,
     `refused at the transport by routing, not by anything upstream: ${cause}`,
   );
-  assert(fetched === 0, `and no request was made for it at all, got ${fetched}`);
+  assert(fetched === 0, `and no request carrying a credential was made for it, got ${fetched}`);
   assert(
     !String((err as Error).message).includes("private source"),
     "the refusal does not carry the cached bytes",

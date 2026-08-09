@@ -100,6 +100,31 @@ export const ROUTING_TTL_MS = 6 * 60 * 60 * 1000;
  */
 export const NEGATIVE_ROUTING_TTL_MS = 60 * 1000;
 
+/**
+ * How many entries each in-memory cache may hold. A process lives for as long as the
+ * container does and can be asked about an unbounded number of distinct repository
+ * names — including names that pass `assertRepo` and exist nowhere — so every map here
+ * is swept of expired entries once it grows past its bound, and trimmed from its oldest
+ * insertion if the sweep was not enough.
+ */
+export const ROUTING_CACHE_MAX = 4096;
+export const TOKEN_CACHE_MAX = 1024;
+export const REPO_ID_CACHE_MAX = 16384;
+
+/**
+ * Drop what has expired, then the oldest-inserted, until the map is inside its bound.
+ * A Map iterates in insertion order, so deleting from the front is the whole of the
+ * eviction policy: nothing here is hot enough to be worth an LRU's bookkeeping.
+ */
+function bound<V>(map: Map<string, V>, max: number, expired: (value: V) => boolean): void {
+  if (map.size <= max) return;
+  for (const [key, value] of map) if (expired(value)) map.delete(key);
+  for (const key of map.keys()) {
+    if (map.size <= max) break;
+    map.delete(key);
+  }
+}
+
 interface CachedToken {
   token: string;
   /** Milliseconds, already pulled forward by TOKEN_REMINT_EARLY_MS. */
@@ -216,11 +241,13 @@ export function createAppApi(options: AppApiOptions): AppApi {
         // hardest), but at a minute it cannot outlive the asker's own next attempt, so
         // naming somebody else's repository buys nothing worth having.
         routing.set(key, { installationId: null, until: now() + NEGATIVE_ROUTING_TTL_MS });
+        bound(routing, ROUTING_CACHE_MAX, (entry) => entry.until <= now());
         return null;
       }
       if (!res.ok) await failed(res, `${base}${path}`);
       const body = (await res.json()) as InstallationResponse;
       routing.set(key, { installationId: body.id, until: now() + ROUTING_TTL_MS });
+      bound(routing, ROUTING_CACHE_MAX, (entry) => entry.until <= now());
       return body.id;
     },
 
@@ -228,8 +255,14 @@ export function createAppApi(options: AppApiOptions): AppApi {
       // The cache is keyed by installation *and* scope: a token minted for one
       // repository is not usable for another, so sharing one entry would hand a
       // caller a credential that 404s on everything it asks for.
-      const scopeKey =
-        scope.repositoryIds?.join(",") ?? scope.repositories?.join(",").toLowerCase() ?? "*";
+      // The two forms are prefixed because they share one keyspace otherwise, and a
+      // repository may be named after a number: a mint scoped to repository id 902441057
+      // must not be served to a caller asking for the repository called "902441057".
+      const scopeKey = scope.repositoryIds?.length
+        ? `id:${scope.repositoryIds.join(",")}`
+        : scope.repositories?.length
+          ? `name:${scope.repositories.join(",").toLowerCase()}`
+          : "*";
       const key = `${installationId}:${scopeKey}`;
       const hit = tokens.get(key);
       if (hit && hit.usableUntil > now()) return hit.token;
@@ -247,11 +280,16 @@ export function createAppApi(options: AppApiOptions): AppApi {
         usableUntil:
           (Number.isFinite(expiresAt) ? expiresAt : now() + 60 * 60 * 1000) - TOKEN_REMINT_EARLY_MS,
       });
+      bound(tokens, TOKEN_CACHE_MAX, (entry) => entry.usableUntil <= now());
       return minted.token;
     },
 
     noteRepositoryId(repo, id) {
-      if (Number.isInteger(id) && id > 0) repoIds.set(repo.toLowerCase(), id);
+      if (!Number.isInteger(id) || id <= 0) return;
+      repoIds.set(repo.toLowerCase(), id);
+      // Nothing here expires — these come from payloads GitHub sent, so they are true
+      // until a rename — which is why the bound is large and the eviction is by age.
+      bound(repoIds, REPO_ID_CACHE_MAX, () => false);
     },
 
     repositoryId(repo) {
@@ -344,9 +382,10 @@ export interface WorkspaceClientOptions {
 
 /**
  * A GithubClient bound to one workspace. Every method routes its own `repo` and mints
- * its own token, so the refusal is at the transport rather than in front of it: whatever
- * the validator allows later, a call for a repository this workspace does not hold never
- * acquires a credential to make it with.
+ * its own token, so the authorization is at the transport rather than in front of it:
+ * whatever the validator allows later, a call for a repository this workspace does not
+ * hold never acquires a credential to make it with — it falls back to an anonymous
+ * client, which by construction can read only what is already public.
  */
 /** The account half of `owner/name`: the thing a person has to install the App on. */
 function accountOf(repo: string): string {
@@ -356,22 +395,57 @@ function accountOf(repo: string): string {
 export function createWorkspaceGithubClient(options: WorkspaceClientOptions): GithubClient {
   const { workspaceId, holdings, app } = options;
 
+  /**
+   * The client for a repository no installation of this workspace's covers: no token at
+   * all, which is what makes the fallback safe rather than a hole. An unauthenticated
+   * request can only ever be answered with bytes GitHub already serves to the world, so
+   * no workspace reaches anything it could not have read from a browser — while a public
+   * repository stays reviewable, which it was before the App existed.
+   *
+   * The cost is the budget: GitHub allows roughly sixty unauthenticated requests an hour
+   * per IP, shared by everything on this host. A repository an installation does cover
+   * must therefore always be reached through that installation, never through here.
+   */
+  function anonymous(repo: string): GithubClient {
+    const client = createFetchGithubClient({
+      apiBase: options.apiBase,
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs,
+    });
+    // When the anonymous read fails the way a private repository fails, the refusal the
+    // routing check would have thrown is still the actionable half of the answer, so it
+    // is said here — with GitHub's own words kept as the cause.
+    async function guard<T>(call: () => Promise<T>): Promise<T> {
+      try {
+        return await call();
+      } catch (err) {
+        if (err instanceof GithubError && (err.status === 404 || err.status === 403)) {
+          throw new GithubRoutingError(
+            `${repo} is not reachable anonymously, and no GitHub App installation this workspace ` +
+              `holds covers it. If the repository is private, install the app on the ` +
+              `${accountOf(repo)} account and connect it in workspace settings. GitHub answered: ` +
+              err.message,
+          );
+        }
+        throw err;
+      }
+    }
+    return {
+      getPull: (r, n) => guard(() => client.getPull(r, n)),
+      listCommits: (r, n) => guard(() => client.listCommits(r, n)),
+      listFiles: (r, n) => guard(() => client.listFiles(r, n)),
+      listReviewComments: (r, n) => guard(() => client.listReviewComments(r, n)),
+      getFileAtSha: (r, p, sha) => guard(() => client.getFileAtSha(r, p, sha)),
+      getPullDiff: (r, n) => guard(() => client.getPullDiff(r, n)),
+    };
+  }
+
   async function authorize(repo: string): Promise<GithubClient> {
     assertRepo(repo);
     const installationId = await app.installationForRepo(repo);
-    if (installationId === null) {
-      throw new GithubRoutingError(
-        `No GitHub App installation covers ${repo}. Install the app on the ${accountOf(repo)} account, ` +
-          "then connect it to this workspace.",
-      );
-    }
+    if (installationId === null) return anonymous(repo);
     const held = await holdings.installationIds(workspaceId);
-    if (!held.includes(installationId)) {
-      throw new GithubRoutingError(
-        `This workspace does not hold the GitHub App installation that covers ${repo}. ` +
-          `Connect the ${accountOf(repo)} account in workspace settings.`,
-      );
-    }
+    if (!held.includes(installationId)) return anonymous(repo);
     const id = app.repositoryId(repo);
     let token: string;
     try {

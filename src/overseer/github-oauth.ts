@@ -11,7 +11,7 @@
 // written anywhere — see "Secrets, and what is stored" in docs/overseer/github-app.md.
 
 import { config } from "../config";
-import { GithubError } from "./github";
+import { GithubError, nextLink } from "./github";
 
 export interface GithubAccount {
   id: number;
@@ -45,6 +45,27 @@ export interface FetchGithubOAuthOptions {
 const API = "https://api.github.com";
 const LOGIN = "https://github.com";
 const TIMEOUT_MS = 20_000;
+const PER_PAGE = 100;
+/** A person on more installations than this is not a case the claim flow can serve. */
+const MAX_PAGES = 20;
+
+function assertSameOrigin(url: string, base: string): void {
+  let origin: string;
+  let expected: string;
+  try {
+    origin = new URL(url).origin;
+    expected = new URL(base).origin;
+  } catch {
+    throw new GithubError(`Unusable pagination link ${JSON.stringify(url)}.`, 0, url);
+  }
+  if (origin !== expected) {
+    throw new GithubError(
+      `Pagination link ${url} points at ${origin}, not ${expected}. Refusing to send the token.`,
+      0,
+      url,
+    );
+  }
+}
 
 export function createFetchGithubOAuth(options: FetchGithubOAuthOptions): GithubOAuth {
   const apiBase = (options.apiBase ?? API).replace(/\/$/, "");
@@ -82,21 +103,39 @@ export function createFetchGithubOAuth(options: FetchGithubOAuthOptions): Github
     },
 
     async listUserInstallations(userToken) {
-      const url = `${apiBase}/user/installations?per_page=100`;
-      const res = await doFetch(url, {
-        headers: {
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-          "User-Agent": "overseer",
-          Authorization: `Bearer ${userToken}`,
-        },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (!res.ok) {
-        throw new GithubError(`GitHub ${res.status} for ${url}.`, res.status, url);
+      // Paged, because this list is the whole proof: an installation past the first page
+      // would be one the claim flow tells the person they do not have.
+      const out: UserInstallation[] = [];
+      let next: string | null = `${apiBase}/user/installations?per_page=${PER_PAGE}`;
+      for (let page = 0; next && page < MAX_PAGES; page++) {
+        const url: string = next;
+        const res: Response = await doFetch(url, {
+          headers: {
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "overseer",
+            Authorization: `Bearer ${userToken}`,
+          },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!res.ok) {
+          throw new GithubError(`GitHub ${res.status} for ${url}.`, res.status, url);
+        }
+        const body = (await res.json()) as { installations?: UserInstallation[] };
+        out.push(...(body.installations ?? []));
+        next = nextLink(res.headers.get("Link"));
+        // The link comes out of a response body's headers, so it is checked against the
+        // configured API before the person's token is sent to it.
+        if (next) assertSameOrigin(next, apiBase);
       }
-      const body = (await res.json()) as { installations?: UserInstallation[] };
-      return body.installations ?? [];
+      if (next) {
+        throw new GithubError(
+          `More than ${MAX_PAGES} pages of installations (${PER_PAGE} per page).`,
+          0,
+          next,
+        );
+      }
+      return out;
     },
   };
 }

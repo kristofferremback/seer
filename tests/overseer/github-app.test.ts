@@ -14,11 +14,13 @@ import {
   appJwt,
   createAppApi,
   createWorkspaceGithubClient,
+  GithubAppRefusal,
   githubClientFor,
   GithubRateLimitError,
   GithubRoutingError,
   GithubSuspendedError,
   JWT_BACKDATE_SECONDS,
+  ROUTING_CACHE_MAX,
   setGithubClientFactory,
   setWorkspaceHoldings,
   TOKEN_REMINT_EARLY_MS,
@@ -55,6 +57,8 @@ interface Transport {
   installationFor: (repo: string) => number | null;
   /** Seconds from now that the next minted token expires. */
   tokenLifetimeMs: number;
+  /** Whether the repository is one GitHub serves to a request carrying no credential. */
+  publicRepo: boolean;
 }
 
 function pullPayload(): GithubPull {
@@ -76,6 +80,7 @@ function transport(): Transport {
     minted: [],
     installationFor: () => INSTALLATION,
     tokenLifetimeMs: 60 * 60 * 1000,
+    publicRepo: false,
     fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       const headers = new Headers(init?.headers);
@@ -100,7 +105,15 @@ function transport(): Transport {
           expires_at: new Date(Date.now() + t.tokenLifetimeMs).toISOString(),
         });
       }
+      // A repository read with no credential is answered only when the repository is
+      // public; a private one is GitHub's 404, which is what the anonymous fallback has
+      // to run into for its refusal to be reached.
+      if (url.includes("/repos/") && !headers.has("Authorization") && !t.publicRepo) {
+        return new Response("Not Found", { status: 404 });
+      }
       if (/\/pulls\/\d+$/.test(url)) return Response.json(pullPayload());
+      if (url.includes("/contents/")) return new Response("a line\n");
+      if (/\/pulls\/\d+\/files/.test(url)) return Response.json([]);
       return new Response("unexpected", { status: 500 });
     }) as unknown as typeof fetch,
   };
@@ -328,21 +341,64 @@ test("the client refuses a repository the workspace does not hold, and serves on
     fetchImpl: t.fetchImpl,
   });
   const before = t.minted.length;
+  const holds = /no GitHub App installation this workspace holds covers it/;
   await expect(b.getPull(REPO, 1723)).rejects.toThrow(GithubRoutingError);
-  await expect(b.listFiles(REPO, 1723)).rejects.toThrow(/does not hold/);
-  await expect(b.getFileAtSha(REPO, "src/index.ts", "c".repeat(40))).rejects.toThrow(/does not hold/);
-  // The refusal is at the transport: no credential was minted for the refused call.
+  await expect(b.listFiles(REPO, 1723)).rejects.toThrow(holds);
+  await expect(b.getFileAtSha(REPO, "src/index.ts", "c".repeat(40))).rejects.toThrow(holds);
+  // The refusal is at the transport: no credential was minted for the refused call, and
+  // the anonymous attempt behind it carried none either.
   expect(t.minted.length).toBe(before);
+  expect(t.seen.filter((s) => s.url.includes("/pulls/") && s.authorization !== null)).toHaveLength(1);
 });
 
-test("a repository no installation covers is refused, naming the repository", async () => {
+test("a private repository no installation covers is refused, naming the repository", async () => {
   const t = transport();
   t.installationFor = () => null;
   const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
   await expect(client.getPull(REPO, 1723)).rejects.toThrow(
-    new RegExp(`No GitHub App installation covers ${REPO}`),
+    new RegExp(`${REPO} is not reachable anonymously`),
   );
   expect(t.minted).toHaveLength(0);
+});
+
+// ---- the public repository, which was reviewable before the App and stays so ----
+
+test("a public repository no installation covers is read anonymously, with no credential", async () => {
+  const t = transport();
+  t.installationFor = () => null;
+  t.publicRepo = true;
+  const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
+
+  expect((await client.getPull(REPO, 1723)).number).toBe(1723);
+  const call = t.seen.find((s) => s.url.includes("/pulls/"))!;
+  expect(call.authorization).toBeNull();
+  expect(t.minted).toHaveLength(0);
+});
+
+test("a public repository the workspace does not hold is read anonymously too", async () => {
+  const t = transport();
+  t.publicRepo = true;
+  const { client } = clientFor(t, "ws_b", { ws_b: [999] });
+
+  expect((await client.getPull(REPO, 1723)).number).toBe(1723);
+  expect(t.seen.find((s) => s.url.includes("/pulls/"))!.authorization).toBeNull();
+  expect(t.minted).toHaveLength(0);
+});
+
+test("when the anonymous read fails, the refusal names both the failure and the remedy", async () => {
+  const t = transport();
+  t.installationFor = () => null;
+  const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
+
+  const err = await client.getPull(REPO, 1723).then(
+    () => null,
+    (e: unknown) => e as GithubAppRefusal,
+  );
+  expect(err).toBeInstanceOf(GithubAppRefusal);
+  expect(err!.message).toContain(`${REPO} is not reachable anonymously`);
+  expect(err!.message).toContain("install the app on the threahq account");
+  // GitHub's own answer survives, or an operator has nothing to look at.
+  expect(err!.message).toMatch(/GitHub answered: .*404/);
 });
 
 // ---- the two rows of the failure table that are not about holdings ----
@@ -403,11 +459,11 @@ test("a repository no installation covers names the account that needs the app",
   const t = transport();
   t.installationFor = () => null;
   const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
-  await expect(client.getPull(REPO, 1723)).rejects.toThrow(/Install the app on the threahq account/);
+  await expect(client.getPull(REPO, 1723)).rejects.toThrow(/install the app on the threahq account/);
   // And the held-by-somebody-else refusal names it too.
   const t2 = transport();
   const { client: other } = clientFor(t2, "ws_b", { ws_b: [999] });
-  await expect(other.getPull(REPO, 1723)).rejects.toThrow(/Connect the threahq account/);
+  await expect(other.getPull(REPO, 1723)).rejects.toThrow(/install the app on the threahq account/);
 });
 
 test("assertRepo runs before routing, so a malformed name never reaches the transport", async () => {
@@ -415,6 +471,34 @@ test("assertRepo runs before routing, so a malformed name never reaches the tran
   const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
   await expect(client.getPull("threahq/threa#x", 1723)).rejects.toThrow(GithubError);
   expect(t.seen).toHaveLength(0);
+});
+
+// ---- what the caches do not do, which is grow forever ----
+
+test("the routing cache is bounded, and the oldest entry is the one that goes", async () => {
+  const t = transport();
+  const api = createAppApi({ credentials: CREDENTIALS, apiBase: API, fetchImpl: t.fetchImpl });
+  const first = "threahq/r0";
+
+  for (let i = 0; i <= ROUTING_CACHE_MAX; i++) await api.installationForRepo(`threahq/r${i}`);
+  const lookups = () => t.seen.filter((s) => s.url.endsWith("/installation")).length;
+  expect(lookups()).toBe(ROUTING_CACHE_MAX + 1);
+
+  // The newest is still cached; the oldest was evicted to make room for it.
+  await api.installationForRepo(`threahq/r${ROUTING_CACHE_MAX}`);
+  expect(lookups()).toBe(ROUTING_CACHE_MAX + 1);
+  await api.installationForRepo(first);
+  expect(lookups()).toBe(ROUTING_CACHE_MAX + 2);
+}, 30_000);
+
+test("a token minted by repository id is not served to the repository named that number", async () => {
+  const t = transport();
+  const api = createAppApi({ credentials: CREDENTIALS, apiBase: API, fetchImpl: t.fetchImpl });
+
+  const byId = await api.installationToken(INSTALLATION, { repositoryIds: [42] });
+  const byName = await api.installationToken(INSTALLATION, { repositories: ["42"] });
+  expect(byName).not.toBe(byId);
+  expect(t.minted).toHaveLength(2);
 });
 
 // ---- the test seam successor ----
