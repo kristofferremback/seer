@@ -30,8 +30,8 @@ A **version** is one publication of a review. Publishing to the same slug makes 
 version and the previous ones stay readable, which is how a review can be done in passes.
 
 The **delta** is what changed between two versions. It is computed, never authored: the
-witness may not write "revised" anywhere, because a chip that is typed rather than
-derived is a claim the page cannot check.
+witness may not write "edited" anywhere, because a status typed rather than derived
+is a claim the page cannot check.
 
 ## What a review is made of
 

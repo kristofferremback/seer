@@ -2,9 +2,9 @@
 //
 // Until now the page could only say "version 4" and leave a reader to find the
 // change themselves. This module computes it instead, at word level, over the
-// two stored documents. Nothing here is authored: the skill may not write a
-// "revised" chip, and no other code path may emit one, because a chip that is
-// typed rather than derived is a claim the page cannot check.
+// two stored documents. Nothing here is authored: the skill may not write an
+// `edited` status label, and no other code path may emit one, because a status
+// label typed rather than derived is a claim the page cannot check.
 //
 // WHAT IS DIFFED
 //
@@ -49,8 +49,8 @@
 // Only words are compared, which is also the limit of what this can see: an edit
 // that moves markup without moving a word, a phrase that became code or emphasis,
 // or a link retargeted under unchanged link text, produces no field, no mark and no
-// chip. Nothing false is claimed, but nothing is claimed at all, and a reader who
-// came back for what moved will not learn it here.
+// status label. Nothing false is claimed, but nothing is claimed at all, and a reader
+// who came back for what moved will not learn it here.
 //
 // The word-level machinery is ported from the prototype's `_delta.ts`. What is
 // not ported is its scanner: that one recovered structure by reading HTML back,
@@ -498,7 +498,7 @@ function compare(
 
 function born(kind: DeltaEntityKind, id: string, specs: FieldSpec[]): EntityDelta {
   // A new entity marks its own head line rather than every word it holds: the
-  // chip says the whole thing is new, and the line under it is what the reader
+  // status label says the whole thing is new, and the line under it is what the reader
   // reads first. Marking the body too would leave the row solid ink.
   const head = headField(specs);
   const d = diffField(head.field, head.inline, "", head.html);
@@ -872,15 +872,15 @@ export class DeltaIndex {
     let added = 0;
     let removed = 0;
     let codeMoved = 0;
-    // The title and the summary carry marks rather than a chip, because neither
+    // The title and the summary carry marks rather than a status label, because neither
     // sits in a row that could hold one. They are still movement, and a menu that
     // said nothing moved about a version whose summary the same page marks would
     // be a denial the page contradicts, so they are named rather than counted.
     const restated: string[] = [];
     for (const e of this.delta.entities) {
-      const chips =
+      const hasStatus =
         e.kind !== "review" && e.kind !== "intent" && e.kind !== "summary" && e.kind !== "design";
-      if (!chips && e.status === "revised" && e.fields.length > 0) {
+      if (!hasStatus && e.status === "revised" && e.fields.length > 0) {
         restated.push(
           e.kind === "review"
             ? "title"
@@ -894,7 +894,7 @@ export class DeltaIndex {
       // A pull request whose only movement is its head sha is code moved, not
       // revised: nothing it says on the page changed.
       if (e.status === "revised") {
-        if (e.fields.length > 0 && chips) revised++;
+        if (e.fields.length > 0 && hasStatus) revised++;
       }
       else if (e.status === "new") added++;
       else removed++;
@@ -988,7 +988,7 @@ export function markField(
 
   /** Every word of a run, wrapped where it stands. A run that straddles a tag is
    *  wrapped piece by piece rather than dropped: the mark has to be there, because
-   *  the chip above it says it is. */
+   *  the status label above it says it is. */
   const insRuns = (c0: number, c1: number) => {
     let a = c0;
     while (a < c1) {
@@ -1012,7 +1012,7 @@ export function markField(
       }
       // A pure deletion inside a summary has no inserted word to carry the mark,
       // and the prior words are hidden while the row is shut. Without a mark of
-      // its own the row's chip would stand over nothing, so the cut itself is
+      // its own the row's status label would stand over nothing, so the cut itself is
       // drawn: a caret where the words used to be.
       cut(at, 0, `<span class="dw dcut" aria-hidden="true"></span><span class="dp">${was} </span>`);
       return;
@@ -1035,13 +1035,13 @@ export function markField(
       return (
         `<span class="dchange dchange-inline"><span class="dcurrent">${html}</span>` +
         `<input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
-        `<label class="dedited" for="${id}">${EDIT_ICON}<span>(Edited)</span></label>` +
+        `<label class="dedited" for="${id}">${EDIT_ICON}<span>edited</span></label>` +
         `<span class="dinline">${diff}</span></span>`
       );
     }
     return (
       `<div class="dchange"><input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
-      `<label class="dedited" for="${id}">${EDIT_ICON}<span>(Edited)</span></label>` +
+      `<label class="dedited" for="${id}">${EDIT_ICON}<span>edited</span></label>` +
       `<div class="dcurrent">${html}</div><div class="dinline">${diff}</div></div>`
     );
   } else {
@@ -1107,19 +1107,23 @@ export function touched(entity: EntityDelta | null, field: string): boolean {
   return entity !== null && entity.fields.some((f) => f.field === field);
 }
 
-/** The code-moved chip. Minted here rather than at each site that shows one, so a
- *  chip on a card and the same chip in the revision menu cannot drift apart. */
-export function movedChip(): string {
+/** The code-moved status. Minted here rather than at each site that shows one, so
+ *  its wording cannot drift between surfaces. */
+export function movedStatus(): string {
   return `<span class="rev rev-moved">code moved</span>`;
 }
 
-/** The chip an entity carries, or nothing. Chips are minted here and in `movedChip`
- *  and nowhere else, and both take what they say from a delta, so every chip on the
- *  page is derived rather than authored. */
-export function chip(entity: EntityDelta | null): string {
+/** The small inline status an entity carries, or nothing. It is always derived from
+ *  the delta; witnesses cannot author their own change labels. */
+export function statusMark(entity: EntityDelta | null): string {
   if (!entity) return "";
-  const word = entity.status === "new" ? "new" : entity.status === "removed" ? "removed" : "revised";
-  const moved = entity.codeMoved ? movedChip() : "";
+  const status =
+    entity.status === "new"
+      ? { cls: "rev-new", word: "new!" }
+      : entity.status === "removed"
+        ? { cls: "rev-removed", word: "removed" }
+        : { cls: "rev-edited", word: "edited" };
+  const moved = entity.codeMoved ? movedStatus() : "";
   if (entity.status === "revised" && entity.fields.length === 0) return moved;
-  return `<span class="rev">${word}</span>${moved}`;
+  return `<span class="rev ${status.cls}">${status.word}</span>${moved}`;
 }

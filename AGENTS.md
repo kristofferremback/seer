@@ -8,8 +8,8 @@
   copy. Do not write prose to explain the interface itself.
 - Use familiar icons when they reduce words, but keep a short text label when the icon
   alone would be ambiguous. Icons must have an accessible name when text is absent.
-- Pills are for compact state, taxonomy, or controls. Never put explanatory prose,
-  provenance sentences, or several clauses into pills.
+- Do not use pills. Render compact state as short inline text with restrained colour;
+  render actions as familiar icons, underlined links, or clearly shaped controls.
 - Avoid eyebrows and subheadings unless the content would otherwise be ambiguous. When
   a heading is necessary, use short sentence-case text in the normal typeface.
 - Do not style headings as forced lowercase or small uppercase text. Do not use mono,

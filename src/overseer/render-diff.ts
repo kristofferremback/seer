@@ -20,7 +20,7 @@
 import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
 import {
-  chip,
+  statusMark,
   groupFilesHtml,
   marked,
   safeId,
@@ -38,7 +38,7 @@ export type QuestionsHere = (type: string, id: string) => string;
 /** An entity's kind, on the page only when it moved. The kind draws the row's icon
  *  and nothing else, and a risk quietly restated as a note is exactly what a reader
  *  came back for, so when it moves it comes out as the word it is. Every entity the
- *  delta compares a kind on draws this, or its chip would stand over an unmarked row. */
+ *  delta compares a kind on draws this, or its status label would stand over an unmarked row. */
 export function kindMark(d: EntityDelta | null, owner: string, kind: string): string {
   if (!touched(d, "kind")) return "";
   return `<p class="ev-was">${marked(safeInline(kind), d, "kind", owner, true)}</p>`;
@@ -450,7 +450,7 @@ function groupBlock(
     .map((f, i) => fileRow(f, notes.get(f.path), `fd-${group.id}-${i}`, here))
     .join("");
   // Marked first, then tested for emptiness: a paragraph cleared between versions
-  // still owes the reader its prior words, and its chip owes them a mark.
+  // still owes the reader its prior words, and its status label owes them a mark.
   const gsum = marked(safeBlock(group.paragraph), d, "paragraph", group.id);
   // The file list is the partition of the diff this group claims. It is already on
   // the page as rows, but a row that left it leaves no trace there, so when the
@@ -463,7 +463,7 @@ function groupBlock(
     `<summary>${icon("chev", "tick")}` +
     `${icon(group.kind, `ic ic-lg k-${group.kind}`, KIND_LABEL[group.kind])}` +
     `<span class="gname">${marked(safeInline(group.title), d, "title", group.id)}</span>` +
-    `${chip(d)}` +
+    `${statusMark(d)}` +
     `<span class="gcount">${statHtml(added, removed)}</span>` +
     `</summary>` +
     `<div class="grp-body">` +
@@ -500,7 +500,7 @@ export function walkthroughSection(
         : icon(e.formerKind, `ic k-${escapeHtml(e.formerKind)}`, e.formerKind)
     }` +
     `<span class="gname"><span class="dp dpstub">${e.former ? e.former.head : ""}</span></span>` +
-    chip(e) +
+    statusMark(e) +
     `</summary>` +
     `<div class="grp-body">${(e.former ? e.former.body : [])
       .map((h) => `<div class="dp dpb">${h}</div>`)

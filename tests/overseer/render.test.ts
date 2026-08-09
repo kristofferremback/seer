@@ -106,9 +106,9 @@ describe("the page itself", () => {
     expect(stripped).toContain(`<details class="row" id="st_a"`);
     expect(stripped).toContain("<summary>");
     // Every citation is a fragment link to a panel that exists on the page.
-    const chips = [...stripped.matchAll(/<a class="ref" href="#([^"]+)"/g)].map((m) => m[1]!);
-    expect(chips.length).toBeGreaterThan(0);
-    for (const id of chips) expect(stripped).toContain(`<details class="fold" id="${id}"`);
+    const links = [...stripped.matchAll(/<a class="ref" href="#([^"]+)"/g)].map((m) => m[1]!);
+    expect(links.length).toBeGreaterThan(0);
+    for (const id of links) expect(stripped).toContain(`<details class="fold" id="${id}"`);
     // The one control that needs a script is hidden until it has one.
     expect(stripped).toContain("data-theme-toggle hidden");
   });
@@ -339,9 +339,15 @@ describe("the page itself", () => {
     expect((head.match(/responsive-dialog\.tsx/g) ?? []).length).toBe(1);
     expect(head).toContain('href="#st_m-ref_a"');
     expect(head).toContain('href="#st_m-ref_b"');
-    expect(head).toContain(">97</a>");
-    expect(head).toContain(">151</a>");
-    // A file cited once is still an ordinary chip carrying file and line.
+    expect(head).toContain('<span class="reftext">97</span></a>');
+    expect(head).toContain('<span class="reftext">151</span></a>');
+    expect(head).toContain('<span class="refset"><span class="reffile">responsive-dialog.tsx</span>');
+    expect(head).not.toContain('class="ref refset"');
+    const refRule = html.match(/\.ref \{([^}]*)\}/)?.[1] ?? "";
+    expect(refRule).not.toContain("border");
+    expect(refRule).not.toContain("background");
+    expect(html).toContain(".reftext { text-decoration: underline");
+    // A file cited once is still an ordinary link carrying file and line.
     expect(head).toContain("other.ts:12");
     for (const r of refs) expect(html).toContain(`<details class="fold" id="st_m-${r.id}"`);
   });

@@ -78,14 +78,14 @@ export function foldId(ownerId: string, ref: Ref, suffix = ""): string {
   return `${ownerId}-${suffix}${ref.id}`;
 }
 
-/** A chip in a row's head, pointing at the panel below it. Without scripting this is a
- *  fragment jump and the panel's `:target` rules open it; with scripting the panel is
- *  opened in place. Either way the anchor is the whole mechanism. */
-export function refChip(ownerId: string, ref: Ref, suffix = ""): string {
+/** An inline file reference pointing at the panel below it. Without scripting this is
+ *  a fragment jump and the panel's `:target` rules open it; with scripting the panel
+ *  is opened in place. Either way the anchor is the whole mechanism. */
+export function refLink(ownerId: string, ref: Ref, suffix = ""): string {
   const label = `${baseName(ref.path)}:${ref.startLine}`;
   return (
     `<a class="ref" href="#${escapeHtml(foldId(ownerId, ref, suffix))}">` +
-    `${icon("chev", "rtick")}${escapeHtml(label)}</a>`
+    `${icon("chev", "rtick")}<span class="reftext">${escapeHtml(label)}</span></a>`
   );
 }
 
@@ -94,7 +94,7 @@ export function refChip(ownerId: string, ref: Ref, suffix = ""): string {
  *  thing on the row and the least informative repetition on the page. The name
  *  becomes a label and each line keeps its own link, so nothing is lost but the
  *  repetition. */
-export function refChips(ownerId: string, refs: Ref[], suffix = ""): string {
+export function refLinks(ownerId: string, refs: Ref[], suffix = ""): string {
   const byPath = new Map<string, Ref[]>();
   for (const r of refs) {
     const at = byPath.get(r.path);
@@ -103,17 +103,16 @@ export function refChips(ownerId: string, refs: Ref[], suffix = ""): string {
   }
   return [...byPath.entries()]
     .map(([path, group]) => {
-      if (group.length === 1) return refChip(ownerId, group[0]!, suffix);
+      if (group.length === 1) return refLink(ownerId, group[0]!, suffix);
       const lines = group
         .map(
           (r) =>
-            `<a class="refline" href="#${escapeHtml(foldId(ownerId, r, suffix))}">` +
-            `${escapeHtml(String(r.startLine))}</a>`,
+            `<a class="ref refline" href="#${escapeHtml(foldId(ownerId, r, suffix))}">` +
+            `${icon("chev", "rtick")}<span class="reftext">${escapeHtml(String(r.startLine))}</span></a>`,
         )
         .join("");
       return (
-        `<span class="ref refset">${icon("chev", "rtick")}` +
-        `<span class="reffile">${escapeHtml(baseName(path))}</span>${lines}</span>`
+        `<span class="refset"><span class="reffile">${escapeHtml(baseName(path))}</span>${lines}</span>`
       );
     })
     .join("");

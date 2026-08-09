@@ -31,13 +31,13 @@ import {
   type ReviewDoc,
 } from "./db";
 import {
-  chip,
+  statusMark,
   computeDelta,
   DeltaIndex,
   designPathsHtml,
   evidenceFieldNames,
   marked,
-  movedChip,
+  movedStatus,
   prBodyHtml,
   safeId,
   touched,
@@ -55,8 +55,8 @@ import {
 } from "./render-diff";
 import {
   icon,
-  refChip,
-  refChips,
+  refLink,
+  refLinks,
   refFold,
   renderEvidence,
   safeBlock,
@@ -368,7 +368,7 @@ const STYLE = `  @font-face {
      which at 14px would draw 1.17px and sit heavier than this page's hairlines
      and mono. Each size below carries the width that resolves to ~1.05px, so
      the marks read as one weight with the rules and the type. No tile, no
-     circle, no chip behind any of them; each takes its colour from
+     circle, no decoration behind any of them; each takes its colour from
      currentColor. */
   .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
   .ic { flex: none; display: block; width: 14px; height: 14px; stroke-width: 1.8; }
@@ -509,48 +509,39 @@ const STYLE = `  @font-face {
   .contents a { display: inline-block; padding: 11px 0; }
 
   /* ---- inline resolved reference ----
-     A compact mono token carrying the same chevron as every other disclosure:
-     right means the snippet is folded, down means it is open.
-     Same object in a row, in a note and in an answer. 44px touch target.
-     It is a link, and it declines the underline because it already says three
-     other things: the chevron, the box, and a value step to full accent ink
-     against the softer ink of the sentence it sits in. */
+     A chevron and an underlined file location point to the code block below. There is
+     no badge around it: link ink says it is interactive, the chevron says it opens,
+     and a generated 44px hit area keeps the unboxed text usable on touch screens. */
   .ref {
-    --ref-wash: hsl(var(--ink) / 0);
     position: relative;
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-family: var(--font-mono);
     font-size: 11.5px;
     font-weight: 500;
     line-height: 1.45;
     color: hsl(var(--accent));
     white-space: nowrap;
-    padding: 2px 7px 2px 6px;
-    border: 1px solid hsl(var(--line));
-    border-radius: 5px;
-    background-color: hsl(var(--paper));
-    background-image: linear-gradient(var(--ref-wash), var(--ref-wash));
     cursor: pointer;
     text-decoration: none;
   }
-  .ref:hover, .ref:active { text-decoration: none; background-color: hsl(var(--paper)); }
+  .reftext { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  .ref:hover, .ref:active { text-decoration: none; background: none; }
+  .ref:active .reftext { text-decoration-thickness: 2px; }
   .rtick {
     display: inline-block;
+    flex: none;
     width: 10px; height: 10px;
-    margin: 0 3px 1px 0;
     stroke-width: 2.5;
     transform: rotate(0deg);
-    vertical-align: middle;
     transition: transform 150ms cubic-bezier(0.2, 0.9, 0.25, 1);
   }
-  .ref::after { content: ""; position: absolute; left: -2px; right: -2px; top: 50%; height: 44px; transform: translateY(-50%); }
-  .ref:active { --ref-wash: hsl(var(--ink) / 0.1); }
-  .ref.is-open { --ref-wash: hsl(var(--accent) / 0.12); border-color: hsl(var(--accent) / 0.4); }
+  .ref::after { content: ""; position: absolute; left: -6px; right: -6px; top: 50%; height: 44px; transform: translateY(-50%); }
+  .ref.is-open { color: hsl(var(--accent)); }
   .ref.is-open .rtick { transform: rotate(90deg); }
   @media (hover: hover) and (pointer: fine) {
-    .ref { transition: background-color 150ms ease, border-color 150ms ease; }
-    .ref:hover { --ref-wash: hsl(var(--ink) / 0.05); border-color: hsl(var(--accent) / 0.4); }
-    .ref.is-open:hover { --ref-wash: hsl(var(--accent) / 0.18); }
+    .ref:hover .reftext { text-decoration-thickness: 2px; }
   }
 
   /* ---- disclosure, one grammar for the whole page ---- */
@@ -737,10 +728,9 @@ const STYLE = `  @font-face {
   .rrefs { grid-column: 3; grid-row: 2; display: flex; flex-wrap: wrap; gap: 7px; }
   .rrefs:empty { display: none; }
   /* a file cited at several lines: the name once, then each line as its own link */
-  .refset { display: inline-flex; align-items: center; gap: 0; }
-  .reffile { margin-right: 2px; }
-  .refline { margin-left: 6px; text-decoration: underline; text-underline-offset: 2px; }
-  .refline:first-of-type { margin-left: 5px; }
+  .refset { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; font-family: var(--font-mono); font-size: 11.5px; }
+  .reffile { color: hsl(var(--muted)); }
+  .refline { gap: 3px; }
   .row-body { padding: 4px 2px 18px calc(4px + 12px + 14px + var(--sgap) * 2); }
   .row-body > *:first-child { margin-top: 0; }
   .row-body p { font-size: 14.5px; line-height: 1.62; color: hsl(var(--ink-soft)); margin-bottom: 13px; }
@@ -1355,10 +1345,13 @@ const DELTA_STYLE = `
   .dw.dxo { background: none; color: hsl(var(--muted)); }
   .dedited {
     display: flex; align-items: center; gap: 5px; width: max-content; min-height: 40px;
-    color: hsl(var(--muted)); cursor: pointer; font: 400 12.5px/1.35 var(--font-body);
+    color: hsl(var(--change)); cursor: pointer; font: italic 400 12.5px/1.35 var(--font-body);
   }
+  .dedited span { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  .dedited:active span { text-decoration-thickness: 2px; }
   .dediticon { width: 12px; height: 12px; color: currentColor; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   .dtog:checked + .dedited .dediticon { color: hsl(var(--change)); }
+  @media (hover: hover) and (pointer: fine) { .dedited:hover span { text-decoration-thickness: 2px; } }
   .dinline { display: none; }
   .dchange:has(> .dtog:checked) > .dcurrent { display: none; }
   .dchange:has(> .dtog:checked) > .dinline { display: block; }
@@ -1387,8 +1380,10 @@ const DELTA_STYLE = `
   .dgoneunit .dgone-body .dp, .dgoneunit .grp-body .dp, .dgoneunit .card-body .dp { display: block; text-decoration: none; }
   ins.dnew { text-decoration: none; }
   .dw.dcut { display: inline-block; width: 5px; height: 0.85em; margin: 0 1px; vertical-align: -0.13em; background: var(--word-rem); border-radius: 2px; }
-  .rev { display: inline-block; margin-right: 6px; padding: 1px 6px; border: 1px solid hsl(var(--line)); border-radius: 999px; font-size: 11px; letter-spacing: 0.02em; color: hsl(var(--muted)); background: hsl(var(--paper-sunk)); vertical-align: middle; }
-  .rev-moved { color: hsl(var(--change)); }
+  .rev { display: inline; margin-right: 7px; font: italic 400 11.5px/1.35 var(--font-body); letter-spacing: 0.01em; vertical-align: baseline; }
+  .rev-new { color: hsl(var(--add)); }
+  .rev-edited, .rev-moved { color: hsl(var(--change)); }
+  .rev-removed { color: hsl(var(--remove)); }
   .dbase { color: hsl(var(--muted)); }
   .revs { margin: 10px 0 2px; }
   .revs > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; font-size: 12.5px; color: hsl(var(--muted)); }
@@ -1600,7 +1595,7 @@ const FAVICON =
 function prBody(ownerId: string, body: string, d: EntityDelta | null): string {
   // Marked first, then tested for emptiness: a description cleared between versions
   // renders as nothing at all, and dropping the fold there would leave the card's
-  // revised chip pointing at no mark.
+  // revised status label pointing at no mark.
   const inner = marked(prBodyHtml(body), d, "body", `${ownerId}-body`);
   if (inner === "") return "";
   return (
@@ -1683,7 +1678,7 @@ function card(
     `</span>` +
     `</summary>` +
     `<div class="c-open">` +
-    `<span class="c-kinds">${kinds}${chip(d)}</span>` +
+    `<span class="c-kinds">${kinds}${statusMark(d)}</span>` +
     `<span class="c-line">${marked(safeInline(pr.gist), d, "gist", owner)}</span>` +
     more +
     `</div></details>`
@@ -1784,14 +1779,14 @@ function evidenceMarks(
 
 function statementRow(s: Statement, ctx: RenderCtx): string {
   const refs = uniqueRefs(s.refs);
-  const chips = refChips(s.id, refs);
+  const links = refLinks(s.id, refs);
   const folds = refs.map((r) => refFold(s.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("statement", s.id) : null;
   return (
     `<details class="row" id="${escapeHtml(s.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(s.kind, `ic k-${s.kind}`, KIND_LABEL[s.kind] ?? s.kind)}` +
     `<span class="rwhat">${marked(safeInline(s.text), d, "text", s.id)}</span>` +
-    `<span class="rrefs">${chip(d)}${chips}</span>` +
+    `<span class="rrefs">${statusMark(d)}${links}</span>` +
     `</summary>` +
     `<div class="row-body">${marked(safeBlock(s.body), d, "body", s.id)}${folds}` +
     questionsHere(ctx, "statement", s.id) +
@@ -1827,7 +1822,7 @@ function removedStub(e: EntityDelta, cls: string, headCls: string): string {
     `<details class="${cls} dgoneunit" id="${escapeHtml(id)}">` +
     `<summary>${icon("chev", "tick")}${mark}` +
     `<span class="${headCls}"><span class="dp dpstub">${former.head}</span></span>` +
-    `<span class="rrefs">${chip(e)}</span>` +
+    `<span class="rrefs">${statusMark(e)}</span>` +
     `</summary>` +
     `<div class="dgone-body">${body === "" ? `<div class="dp dpb"></div>` : body}</div>` +
     `</details>`
@@ -1848,33 +1843,33 @@ function removedStubsBefore(
 
 function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
   const refs = uniqueRefs(m.refs);
-  const chips = refChips(m.id, refs);
+  const links = refLinks(m.id, refs);
   const folds = refs.map((r) => refFold(m.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("module", m.id) : null;
   return (
     `<details class="dmodule" id="${escapeHtml(m.id)}">` +
     `<summary>${icon("chev", "tick")}<span class="dmodule-head">` +
     `<span class="dmodule-title">${marked(safeInline(m.title), d, "title", m.id)}</span>` +
-    `</span><span class="rrefs">${chip(d)}</span></summary>` +
+    `</span><span class="rrefs">${statusMark(d)}</span></summary>` +
     `<div class="dmodule-body">${marked(safeBlock(m.body), d, "body", m.id)}` +
     `<div class="dpaths">${marked(designPathsHtml(m.paths), d, "paths", m.id)}</div>` +
-    (chips === "" ? "" : `<div class="design-refs">${chips}</div>`) +
+    (links === "" ? "" : `<div class="design-refs">${links}</div>`) +
     folds + `</div></details>`
   );
 }
 
 function designCoverageBlock(c: DesignCoverage, ctx: RenderCtx): string {
   const refs = uniqueRefs(c.refs);
-  const chips = refChips(c.id, refs);
+  const links = refLinks(c.id, refs);
   const folds = refs.map((r) => refFold(c.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("coverage", c.id) : null;
   return (
     `<details class="coverage-row" id="${escapeHtml(c.id)}">` +
     `<summary>${icon("chev", "tick")}<span class="coverage-title">` +
     marked(safeInline(c.title), d, "title", c.id) +
-    `</span><span class="rrefs">${chip(d)}</span></summary>` +
+    `</span><span class="rrefs">${statusMark(d)}</span></summary>` +
     `<div class="coverage-body">${marked(safeBlock(c.body), d, "body", c.id)}` +
-    (chips === "" ? "" : `<div class="design-refs">${chips}</div>`) +
+    (links === "" ? "" : `<div class="design-refs">${links}</div>`) +
     folds + `</div></details>`
   );
 }
@@ -1923,7 +1918,7 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
 
 function noteRow(n: Note, ctx: RenderCtx): string {
   const refs = uniqueRefs(n.refs);
-  const chips = refChips(n.id, refs);
+  const links = refLinks(n.id, refs);
   const folds = refs.map((r) => refFold(n.id, r)).join("");
   const d = ctx.delta ? ctx.delta.get("note", n.id) : null;
   // A check the base version carried and this one dropped keeps its place in the
@@ -1948,9 +1943,9 @@ function noteRow(n: Note, ctx: RenderCtx): string {
     `<details class="note is-${escapeHtml(n.kind)}" id="${escapeHtml(n.id)}">` +
     `<summary>${icon("chev", "tick")}${icon(n.kind, `ic k-${n.kind}`, n.kind)}` +
     `<span class="none">${marked(safeInline(n.text), d, "text", n.id)}</span>` +
-    `${chip(d) === "" ? "" : `<span class="rrefs">${chip(d)}</span>`}` +
+    `${statusMark(d) === "" ? "" : `<span class="rrefs">${statusMark(d)}</span>`}` +
     `</summary>` +
-    `<div class="note-body">${marked(safeBlock(n.body), d, "body", n.id)}${checks}${chips === "" ? "" : `<p class="rrefs">${chips}</p>`}${folds}` +
+    `<div class="note-body">${marked(safeBlock(n.body), d, "body", n.id)}${checks}${links === "" ? "" : `<p class="rrefs">${links}</p>`}${folds}` +
     questionsHere(ctx, "note", n.id) +
     kindMark(d, n.id, n.kind) +
     renderEvidence(
@@ -2009,7 +2004,7 @@ function questionMeta(a: Annotation, version: number, at: string): string {
 
 /** One question, with its answer when it has one. Bodies are typed by people, so
  *  nothing here is parsed as markup: they are escaped text with their line breaks
- *  kept. The answer's refs are chips over the same folds a statement's refs use. */
+ *  kept. The answer's refs are links to the same folds a statement's refs use. */
 function questionBlock(a: Annotation, version: number): string {
   const quote =
     a.quote === null || a.quote === ""
@@ -2022,10 +2017,10 @@ function questionBlock(a: Annotation, version: number): string {
       ? `<span>${escapeHtml(where)}</span>`
       : `<a href="#${escapeHtml(anchor)}">${escapeHtml(where)}</a>`;
   const refs = a.answer ? uniqueRefs(a.answer.refs) : [];
-  const chips = refs.map((r) => ` ${refChip(a.id, r)}`).join("");
+  const links = refs.map((r) => ` ${refLink(a.id, r)}`).join("");
   const folds = refs.map((r) => refFold(a.id, r)).join("");
   const answer = a.answer
-    ? `<p class="aline"><span class="mk">A:</span><span>${plainText(a.answer.body)}${chips}</span></p>` +
+    ? `<p class="aline"><span class="mk">A:</span><span>${plainText(a.answer.body)}${links}</span></p>` +
       folds
     : "";
   return (
@@ -2144,8 +2139,8 @@ export interface TimelineEntry {
   revised: number;
   added: number;
   removed: number;
-  /** The unchipped fields that moved, such as title, author intent or summary. They carry
-   *  marks rather than a chip, and the menu says so rather than saying nothing. */
+  /** Fields without a row status that moved, such as title, author intent or summary.
+   *  They carry marks, and the menu says so rather than saying nothing. */
   restated: string[];
   codeMoved: boolean;
 }
@@ -2199,7 +2194,7 @@ function revisionMenu(input: RenderInput, basePath: string): string {
       if (e.restated.length > 0)
         moved.push(`${e.restated.join(" and ")} restated`);
       // A row may not deny movement it is marking in the same breath: when the
-      // only thing that moved is a head SHA, the code-moved chip beside this is
+      // only thing that moved is a head SHA, the code-moved status label beside this is
       // the whole count.
       const counts =
         moved.length === 0
@@ -2218,7 +2213,7 @@ function revisionMenu(input: RenderInput, basePath: string): string {
         `<a class="rv-n" href="${escapeHtml(basePath)}/v/${e.version}">v${e.version}</a>` +
         `<span class="rv-on">${escapeHtml(on)}</span>` +
         `<span class="rv-counts">${escapeHtml(counts)}</span>` +
-        (e.codeMoved ? movedChip() : "") +
+        (e.codeMoved ? movedStatus() : "") +
         // A base is a version below the one on screen. An entry at or above it has
         // no `from` link, because the page could not honour one: an inert control
         // that looks live is worse than no control.
@@ -2241,17 +2236,17 @@ function revisionMenu(input: RenderInput, basePath: string): string {
   );
 }
 
-/** The heads chip, as the page draws it and as the live push rewrites it. One
+/** The heads text, as the page draws it and as the live push rewrites it. One
  *  function so the two cannot drift into two different sentences. */
-function headsChip(behind: number, total: number): string {
+function headsText(behind: number, total: number): string {
   return behind === 0 ? "heads current" : `${behind} of ${total} behind`;
 }
 
 /** The freshness enhancement: it subscribes to the review's channel and rewrites the
- *  heads chip when a push says a head moved. Nothing depends on it. Without a script
- *  the chip is as fresh as the render, which is what the stored rows say. */
+ *  heads text when a push says a head moved. Nothing depends on it. Without a script
+ *  the text is as fresh as the render, which is what the stored rows say. */
 function freshnessScript(wsId: string, slug: string): string {
-  const current = JSON.stringify(headsChip(0, 0));
+  const current = JSON.stringify(headsText(0, 0));
   return (
     `(()=>{const h=document.getElementById("heads");if(!h)return;` +
     `const c=()=>{const w=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+` +
@@ -2288,7 +2283,7 @@ export function renderReviewPage(input: RenderInput): string {
   const behind = doc.prs.filter(
     (pr) => input.freshness[prKey(pr.repo, pr.number)] === "behind",
   );
-  const heads = headsChip(behind.length, doc.prs.length);
+  const heads = headsText(behind.length, doc.prs.length);
   const count =
     doc.prs.length === 1 ? "1 pull request" : `${doc.prs.length} pull requests`;
   const marking = input.pinned
