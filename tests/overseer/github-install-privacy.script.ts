@@ -108,7 +108,10 @@ function assert(cond: boolean, msg: string) {
 // A code is exchanged for a token and a token lists installations. Both maps are this
 // script's, so "what GitHub says this person can reach" is something the test states
 // rather than something the implementation gets to decide.
-const A_INSTALLATION = 111; // claimed by workspace A during this script
+// Deliberately long and unlike anything else the page generates: the whole-body
+// assertion below is only worth making if a match means the id and not a run of digits
+// that happened to appear inside a generated id.
+const A_INSTALLATION = 987000111222; // claimed by workspace A during this script
 const A_SECOND = 222; // A's account, installed on GitHub, claimed by nobody
 const B_INSTALLATION = 333; // B's own
 const NOBODYS = 999; // exists nowhere; nothing may ever attach it
@@ -555,15 +558,20 @@ let attachTokenA: string;
   const page = await callback(`code=code-b-in-acme&state=${state}&setup_action=install`, cookieB);
   const body = await page.text();
   assert(page.status === 200, "the callback renders");
-  // Scoped to the form values the picker actually submits, not the whole page. The bare
-  // `!body.includes("111")` this replaces flaked roughly one run in twenty: the page is
-  // full of generated ids drawn from an alphabet that includes digits, so any of them
-  // containing "111" turned a security assertion red for no reason. A privacy script that
-  // cries wolf is worse than one test fewer, because the next red gets waved through.
+  // Two assertions, because they fail for different reasons. The picker's form values are
+  // what B could submit; the whole body is where the id could still leak through some
+  // other rendering. The bare `!body.includes("111")` that once covered the second flaked
+  // roughly one run in twenty — the page is full of generated ids drawn from an alphabet
+  // with digits in it — so the fixture id is now long enough that a substring match is the
+  // id itself, and the whole-body watch is back.
   const offered = [...body.matchAll(/name="installation_id"[^>]*value="(\d+)"/g)].map((m) => m[1]);
   assert(
     !offered.includes(String(A_INSTALLATION)),
     `an installation another workspace holds is not offered; picker offered ${offered.join(", ") || "none"}`,
+  );
+  assert(
+    !body.includes(String(A_INSTALLATION)),
+    "and it appears nowhere else in the page workspace B is shown either",
   );
   const token = attachTokenOf(body)!;
 

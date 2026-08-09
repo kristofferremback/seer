@@ -779,6 +779,58 @@ if (SCENARIO === "v5drop") {
   process.exit(0);
 }
 
+// ---- the ambiguous user_version 6, and the repair that heals it ----
+//
+// The previous image stamped 6 for two different shapes: one that created
+// github_user_credentials, and one whose gated freshness drop reached 6 without it. A
+// database stamped by the second is at a number the ladder will never revisit, so the
+// table it lacks can only come back from a repair that runs outside the ladder. The seed
+// emulates exactly that: walk a real database up, then take the user-credential tables
+// away and put the stamp back to 6.
+if (SCENARIO === "v6ambiguous") {
+  process.env.AUTH_DISABLED = "true";
+  delete process.env.ALLOWED_EMAILS;
+  delete process.env.SEER_DROP_FRESHNESS;
+  seedV5();
+
+  const { migrate } = await import("../src/migrate");
+  const { db } = await import("../src/db");
+
+  migrate();
+  db.exec(`
+    DROP TABLE IF EXISTS github_user_credentials;
+    DROP TABLE IF EXISTS github_user_oauth_claims;
+    DROP TABLE IF EXISTS review_freshness;
+    PRAGMA user_version = 6;
+  `);
+  const stamped = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(stamped === 6, `the emulated database starts at 6, got ${stamped}`);
+  const missing = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'github_user_credentials'")
+    .get();
+  assert(!missing, "and really is missing the table its stamp claims it has");
+
+  migrate();
+
+  const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(uv === 7, `user_version should be 7, got ${uv}`);
+  for (const table of ["github_user_credentials", "github_user_oauth_claims"]) {
+    const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    assert(!!row, `${table} exists after the repair`);
+  }
+
+  migrate();
+  const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  assert(uv2 === 7, `user_version stays 7 after re-run, got ${uv2}`);
+  for (const table of ["github_user_credentials", "github_user_oauth_claims"]) {
+    const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    assert(!!row, `${table} survives the second run`);
+  }
+
+  console.log("migrate v6ambiguous: all assertions passed");
+  process.exit(0);
+}
+
 if (SCENARIO === "noemail") {
   // Auth enabled, no ALLOWED_EMAILS: v0 data present but migration must fail loudly.
   delete process.env.AUTH_DISABLED;

@@ -9,6 +9,7 @@ import type { GithubClient } from "../src/overseer/github";
 import type { GithubClientFactory } from "../src/overseer/github-app";
 import type { GithubOAuth } from "../src/overseer/github-oauth";
 import type { GithubUserOAuth } from "../src/overseer/github-user-oauth";
+import type { GithubPatIdentity } from "../src/overseer/github-user-pat";
 
 function refuse(method: string): never {
   throw new Error(
@@ -52,6 +53,18 @@ export function offlineGithubUserOAuth(): GithubUserOAuth {
           "fake installed. Install one with setGithubUserOAuth().",
       );
     },
+  };
+}
+
+/** The fourth seam, and the one carrying the most dangerous payload: identify() takes a
+ *  pasted fine-grained token, so an uninstalled fake would send a real person's
+ *  credential to api.github.com from a test run. */
+export function offlineGithubPatIdentifier(): (token: string) => Promise<GithubPatIdentity> {
+  return async () => {
+    throw new Error(
+      "[tests] GitHub is offline in tests: identify was called with no fake installed. " +
+        "Install one with setGithubPatIdentifier().",
+    );
   };
 }
 

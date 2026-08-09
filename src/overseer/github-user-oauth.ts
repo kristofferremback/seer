@@ -51,7 +51,14 @@ let injected: GithubUserOAuth | null = null;
 let defaultTransport: GithubUserOAuth | null = null;
 export function githubUserOAuth(): GithubUserOAuth {
   if (injected) return injected;
-  defaultTransport ??= createFetchGithubUserOAuth(config.githubOAuth);
+  // Routes answer 422 before reaching here when the pair is absent, so this throw is a
+  // guard against a new caller rather than a state a request can produce.
+  if (!config.githubUserOAuth) {
+    throw new Error(
+      "GitHub user OAuth is not configured: set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET.",
+    );
+  }
+  defaultTransport ??= createFetchGithubUserOAuth(config.githubUserOAuth);
   return defaultTransport;
 }
 export function setGithubUserOAuth(value: GithubUserOAuth | null): void { injected = value; }

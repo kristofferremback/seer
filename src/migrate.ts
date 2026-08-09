@@ -522,6 +522,7 @@ export function migrate(): void {
   // back. A version says what shape a database has reached; an opt-in says what its
   // operator has chosen. Those are different facts and only the first one belongs here.
   dropFreshnessIfOptedIn();
+  ensureUserCredentialTables();
   ensureAdditiveColumns();
 }
 
@@ -555,21 +556,47 @@ function ensureAdditiveColumns(): void {
   }
 }
 
+const V7_GITHUB_USER_OAUTH_CLAIMS = `
+  CREATE TABLE IF NOT EXISTS github_user_oauth_claims (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    nonce_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    consumed_at INTEGER
+  );
+`;
+
 function migrateToV7(): void {
   db.transaction(() => {
-    db.exec(`
-      CREATE TABLE github_user_oauth_claims (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        nonce_hash TEXT NOT NULL UNIQUE,
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL,
-        consumed_at INTEGER
-      );
-    `);
+    db.exec(V7_GITHUB_USER_OAUTH_CLAIMS);
     db.run("PRAGMA user_version = 7");
   })();
   console.log("[seer] migrated to schema v7 (GitHub user OAuth claims).");
+}
+
+/**
+ * The number 6 is ambiguous, and this is the repair for it.
+ *
+ * The App release that shipped before this one still carried the freshness drop as a
+ * GATED v6: a database whose operator set SEER_DROP_FRESHNESS under that image sits at
+ * user_version 6 today with no github_user_credentials table. This release reads 6 as
+ * "the credentials table exists", so the ladder walks straight past the only step that
+ * creates it and stamps 7 over the gap — permanently, since no later step will ever
+ * revisit it. A version says what shape a database has reached, but a number two images
+ * used for two different facts says nothing; the shape is asserted directly instead.
+ * Both blocks are IF NOT EXISTS, so a database that took the ordinary walk pays a
+ * table lookup and nothing else.
+ */
+function ensureUserCredentialTables(): void {
+  if (userVersion() >= 6 && !tableExists("github_user_credentials")) {
+    db.exec(V6_GITHUB_USER_CREDENTIALS);
+    console.log("[seer] repaired schema: github_user_credentials was missing at user_version >= 6.");
+  }
+  if (userVersion() >= 7 && !tableExists("github_user_oauth_claims")) {
+    db.exec(V7_GITHUB_USER_OAUTH_CLAIMS);
+    console.log("[seer] repaired schema: github_user_oauth_claims was missing at user_version >= 7.");
+  }
 }
 
 function migrateToV6(): void {

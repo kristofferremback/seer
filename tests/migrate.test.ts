@@ -91,6 +91,15 @@ test("opting into the drop after an ordinary boot still drops it", async () => {
   expect(out).toContain("all assertions passed");
 });
 
+// user_version 6 does not say which shape is on disk: the previous image stamped it both
+// with and without the user-credential tables. The repair is what makes the ambiguous one
+// bootable, and only a database stamped 6 without them can prove it.
+test("a db the previous image stamped 6 without the user tables is repaired", async () => {
+  const { code, out } = await runScenario("v6ambiguous");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("no resolvable root email with auth enabled fails loudly", async () => {
   const { code, out } = await runScenario("noemail");
   expect(code).toBe(0);

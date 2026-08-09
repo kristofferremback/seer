@@ -11,13 +11,29 @@ export const USER_OAUTH_CALLBACK_PATH = "/github/account/callback";
 
 function secret(): string { return `seer_gua_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`; }
 
+/** Both legs answer this when the pair is absent, rather than minting a claim that could
+ *  never be exchanged, or sending a person to an authorize URL with no client_id. */
+function notConfigured(): Response {
+  return Response.json(
+    {
+      error: "github_user_oauth_not_configured",
+      message:
+        "Connecting a GitHub account with OAuth needs GITHUB_OAUTH_CLIENT_ID and " +
+        "GITHUB_OAUTH_CLIENT_SECRET. Paste a fine-grained token instead.",
+    },
+    { status: 422, headers: { "cache-control": "no-store" } },
+  );
+}
+
 export function handleConnectGithubAccount(userId: string): Response {
+  const oauth = config.githubUserOAuth;
+  if (!oauth) return notConfigured();
   const state = secret();
   const now = Date.now();
   db.run("DELETE FROM github_user_oauth_claims WHERE expires_at < ?", [now - TTL]);
   db.run("INSERT INTO github_user_oauth_claims (id,user_id,nonce_hash,created_at,expires_at) VALUES (?,?,?,?,?)", [tinyId("guo"), userId, hashKey(state), now, now + TTL]);
   const url = new URL("https://github.com/login/oauth/authorize");
-  url.searchParams.set("client_id", config.githubOAuth.clientId);
+  url.searchParams.set("client_id", oauth.clientId);
   url.searchParams.set("scope", "repo");
   url.searchParams.set("state", state);
   url.searchParams.set("redirect_uri", `${config.baseUrl}${USER_OAUTH_CALLBACK_PATH}`);
@@ -27,6 +43,7 @@ export function handleConnectGithubAccount(userId: string): Response {
 function answer(message: string, status: number): Response { return new Response(message, { status, headers: { "cache-control": "no-store" } }); }
 
 export async function handleGithubAccountCallback(req: Request): Promise<Response> {
+  if (!config.githubUserOAuth) return notConfigured();
   const user = sessionUser(req);
   if (!user) return answer("Sign in and start again from settings.", 403);
   const url = new URL(req.url);

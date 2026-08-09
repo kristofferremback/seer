@@ -38,6 +38,7 @@ function settings(over: Partial<SettingsData> = {}): SettingsData {
     installations: [],
     credentials: [],
     githubInstallUrl: "https://github.com/apps/seer-overseer-test/installations/new",
+    githubUserOAuthEnabled: true,
     shares: [
       {
         id: "shr_2n7kq4xbvm",
@@ -52,6 +53,22 @@ function settings(over: Partial<SettingsData> = {}): SettingsData {
     ...over,
   };
 }
+
+// The connect button is the only thing the second GitHub application buys, so a
+// deployment without one must show the paste form standing alone rather than a button
+// leading to an authorize URL with no client_id.
+describe("settings personal credentials", () => {
+  test("with the OAuth application configured, the connect posts to the connect route", () => {
+    expect(settingsPage(settings())).toContain('action="/github/account/connect"');
+  });
+
+  test("without it, nothing offers the connect", () => {
+    const html = settingsPage(settings({ githubUserOAuthEnabled: false }));
+    expect(html).not.toContain("/github/account/connect");
+    expect(html).not.toContain("Connect GitHub account");
+    expect(html).toContain("Add fine-grained token");
+  });
+});
 
 // ---- settings: the GitHub panel ----
 

@@ -74,6 +74,38 @@ function githubAppConfig() {
   };
 }
 
+export interface GithubUserOAuthConfig {
+  clientId: string;
+  clientSecret: string;
+}
+
+/**
+ * The user OAuth application, optional as a pair.
+ *
+ * It is a SECOND GitHub application beside the App above, and it buys one thing: the
+ * connect button in settings. Pasting a fine-grained token does the same job without it,
+ * so requiring it at boot would mean every existing deployment refuses to start on
+ * upgrade until its operator registers another application — a cost paid by everyone for
+ * a path some will never use.
+ *
+ * Half of it is still a mistake rather than a choice, and one that would only surface at
+ * the token exchange, so exactly one variable set throws here and names both.
+ */
+export function githubUserOAuthConfig(
+  env: Record<string, string | undefined> = process.env,
+): GithubUserOAuthConfig | null {
+  const clientId = env.GITHUB_OAUTH_CLIENT_ID;
+  const clientSecret = env.GITHUB_OAUTH_CLIENT_SECRET;
+  if (!clientId && !clientSecret) return null;
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      "GitHub user OAuth is half configured: GITHUB_OAUTH_CLIENT_ID and " +
+        "GITHUB_OAUTH_CLIENT_SECRET must be set together, or neither.",
+    );
+  }
+  return { clientId, clientSecret };
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   baseUrl: (process.env.BASE_URL ?? `http://localhost:${process.env.PORT ?? 3000}`).replace(/\/$/, ""),
@@ -88,10 +120,9 @@ export const config = {
   // GITHUB_TOKEN is gone: every GitHub call is made with a credential minted for the
   // installation a workspace holds, so there is no server-wide token to fall back to.
   githubApp: githubAppConfig(),
-  githubOAuth: {
-    clientId: required("GITHUB_OAUTH_CLIENT_ID"),
-    clientSecret: required("GITHUB_OAUTH_CLIENT_SECRET"),
-  },
+  // Null when the pair is absent: the connect button disappears and the paste path
+  // stands alone.
+  githubUserOAuth: githubUserOAuthConfig(),
 
   // Viewer auth (Google OIDC). AUTH_DISABLED=true skips it entirely — local dev only.
   authDisabled,

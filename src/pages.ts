@@ -1977,6 +1977,9 @@ export interface SettingsData {
   /** Where to install the app on a fresh account. Never absent: config.ts requires the
    *  App variables at boot, so there is no deployment without an app to install. */
   githubInstallUrl: string;
+  /** Whether the user OAuth application is configured. False on a deployment that never
+   *  registered one, where pasting a token is the only way to add a credential. */
+  githubUserOAuthEnabled: boolean;
   reveal?: SettingsReveal;
 }
 
@@ -2190,6 +2193,13 @@ ${head(`Settings · ${d.name} · Seer`, og)}
           ${credentialRows}
         </table>
       </div>
+      ${
+        d.githubUserOAuthEnabled
+          ? `<form class="panel-row" method="post" action="/github/account/connect">
+        <button class="btn" type="submit">Connect GitHub account</button>
+      </form>`
+          : ""
+      }
       <form class="panel-row stack-gap" method="post" action="${s("/github/credentials")}">
         <input class="input" type="text" name="label" placeholder="label (for example, work)" maxlength="80" aria-label="Credential label">
         <input class="input" type="password" name="token" placeholder="github_pat_…" required aria-label="Fine-grained GitHub token" autocomplete="off">

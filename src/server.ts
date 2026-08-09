@@ -249,6 +249,7 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
         isQuiet: deliveryIsQuiet(g.last_delivery_at),
       })),
       githubInstallUrl: installUrl(),
+      githubUserOAuthEnabled: config.githubUserOAuth !== null,
       shares: listShares(wsId).map((sh) => ({
         id: sh.id,
         label: sh.label,

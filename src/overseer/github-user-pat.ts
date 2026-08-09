@@ -9,7 +9,9 @@ export interface GithubPatIdentity {
 
 let identifyImpl: ((token: string) => Promise<GithubPatIdentity>) | null = null;
 
-async function identify(token: string): Promise<GithubPatIdentity> {
+/** Exported so the seam can be exercised directly, including by the test that proves it
+ *  is closed. Every other caller is inside this file. */
+export async function identify(token: string): Promise<GithubPatIdentity> {
   if (identifyImpl) return identifyImpl(token);
   const response = await fetch("https://api.github.com/user", {
     headers: {
@@ -30,7 +32,8 @@ async function identify(token: string): Promise<GithubPatIdentity> {
   };
 }
 
-/** Test seam: verification remains a real /user request unless explicitly replaced. */
+/** Test seam: verification remains a real /user request unless explicitly replaced. The
+ *  suite replaces it at preload, because the request would carry a pasted token. */
 export function setGithubPatIdentifier(value: ((token: string) => Promise<GithubPatIdentity>) | null): void {
   identifyImpl = value;
 }
