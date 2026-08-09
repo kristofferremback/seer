@@ -620,6 +620,8 @@ describe("the marks on the page", () => {
     expect(head).toContain('class="dtog"');
     expect(head).toContain('class="dchange dchange-inline"');
     expect(head).toContain("<span>(Edited)</span>");
+    expect(head).toContain('<use href="#i-change"/>');
+    expect(head).not.toContain('<use href="#i-chev"/>');
     // The clean copy is replaced in place only when Edited is checked.
     expect(html).toContain(".dinline { display: none; }");
     expect(html).toContain(".dchange:has(> .dtog:checked) > .dcurrent { display: none; }");

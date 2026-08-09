@@ -745,6 +745,7 @@ export class DeltaIndex {
 // ---- marking ----
 
 const CHEV = `<svg class="dtick" aria-hidden="true"><use href="#i-chev"/></svg>`;
+const EDIT_ICON = `<svg class="dediticon" aria-hidden="true"><use href="#i-change"/></svg>`;
 
 /** An id fragment safe for an attribute, and injective: every character outside the
  *  safe set becomes its own escape, so two keys that differ anywhere still differ
@@ -869,13 +870,13 @@ export function markField(
       return (
         `<span class="dchange dchange-inline"><span class="dcurrent">${html}</span>` +
         `<input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
-        `<label class="dedited" for="${id}">${CHEV}<span>(Edited)</span></label>` +
+        `<label class="dedited" for="${id}">${EDIT_ICON}<span>(Edited)</span></label>` +
         `<span class="dinline">${diff}</span></span>`
       );
     }
     return (
       `<div class="dchange"><input type="checkbox" class="dtog" id="${id}" aria-label="show edits">` +
-      `<label class="dedited" for="${id}">${CHEV}<span>(Edited)</span></label>` +
+      `<label class="dedited" for="${id}">${EDIT_ICON}<span>(Edited)</span></label>` +
       `<div class="dcurrent">${html}</div><div class="dinline">${diff}</div></div>`
     );
   } else {

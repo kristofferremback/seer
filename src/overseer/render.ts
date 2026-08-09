@@ -1357,8 +1357,8 @@ const DELTA_STYLE = `
     display: flex; align-items: center; gap: 5px; width: max-content; min-height: 40px;
     color: hsl(var(--muted)); cursor: pointer; font: 400 12.5px/1.35 var(--font-body);
   }
-  .dedited .dtick { margin-left: 0; }
-  .dtog:checked + .dedited .dtick { transform: rotate(90deg); }
+  .dediticon { width: 12px; height: 12px; color: currentColor; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .dtog:checked + .dedited .dediticon { color: hsl(var(--change)); }
   .dinline { display: none; }
   .dchange:has(> .dtog:checked) > .dcurrent { display: none; }
   .dchange:has(> .dtog:checked) > .dinline { display: block; }
