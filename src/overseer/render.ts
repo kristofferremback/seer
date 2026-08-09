@@ -1376,7 +1376,11 @@ const DELTA_STYLE = `
   .dp.dpb { margin-top: 6px; padding: 6px 8px; text-decoration: none; }
   details.row[open] > summary .dp, details.note[open] > summary .dp, details.card[open] > summary .dp, details.grp[open] > summary .dp { display: inline; }
   .dgoneunit { opacity: 0.78; }
-  .dgoneunit .dgone-body, .dgoneunit .grp-body, .dgoneunit .card-body { padding: 4px 0 8px; }
+  .dgoneunit .dgone-body { padding: 4px 0 8px; }
+  /* Group and card bodies already own the horizontal column under their titles.
+     Keep it when the entity is removed; zeroing all four sides put the group's
+     icon rail through its former prose. */
+  .dgoneunit .grp-body, .dgoneunit .card-body { padding-top: 4px; padding-bottom: 8px; }
   .dgoneunit > summary .dp { display: inline; text-decoration: none; }
   .dgoneunit:not([open]) > summary .dp { color: hsl(var(--muted)); background: none; }
   .dgoneunit:not([open]) > summary .ic { color: hsl(var(--muted)); }

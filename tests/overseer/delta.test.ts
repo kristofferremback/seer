@@ -968,6 +968,14 @@ describe("authored evidence, and the fields that are not prose", () => {
     expect(stub).toContain(`href="#i-${gone.kind}"`);
     expect(stub).toContain(gone.title);
     expect(stub).toContain('<span class="rev">removed</span>');
+    // The open group's rail stays in the icon gutter; removal must not erase the
+    // normal horizontal body padding and let the rail cross the former prose.
+    expect(html).toContain(
+      ".dgoneunit .grp-body, .dgoneunit .card-body { padding-top: 4px; padding-bottom: 8px; }",
+    );
+    expect(html).not.toContain(
+      ".dgoneunit .dgone-body, .dgoneunit .grp-body, .dgoneunit .card-body",
+    );
   });
 
   test("a summary-only revision is movement the timeline names", () => {
