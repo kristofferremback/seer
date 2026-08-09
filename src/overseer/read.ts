@@ -93,7 +93,7 @@ export function freshnessOf(
     }
     const legacy = legacyObservedHead(wsId, slug, pr.repo, pr.number);
     out[prKey(pr.repo, pr.number)] = legacy
-      ? legacy === pr.headSha
+      ? legacy.observedHeadSha === pr.headSha
         ? "current"
         : "behind"
       : "unknown";
@@ -120,13 +120,19 @@ export function statusesOf(wsId: string, doc: ReviewDoc): Record<string, PrStatu
  * and taking the newest would let one busy pull request vouch for four nobody has heard
  * about since last week. Pull requests with no row at all contribute nothing here —
  * they are already saying `unknown`, and an absence has no age.
+ *
+ * A pull request answered by the pre-App fallback contributes its `checked_at` for the
+ * same reason `freshnessOf` consults it at all: the chip is about to state a reading
+ * taken then, and a reading that old shown undated would be trusted as though somebody
+ * had just confirmed it. The dateline is the hedge.
  */
-export function observedAtOf(wsId: string, doc: ReviewDoc): number | null {
+export function observedAtOf(wsId: string, slug: string, doc: ReviewDoc): number | null {
   let oldest: number | null = null;
   for (const pr of doc.prs) {
     const row = lookupPrStatus(wsId, pr.repo, pr.number);
-    if (!row) continue;
-    if (oldest === null || row.observed_at < oldest) oldest = row.observed_at;
+    const at = row?.observed_at ?? legacyObservedHead(wsId, slug, pr.repo, pr.number)?.checkedAt;
+    if (at === undefined) continue;
+    if (oldest === null || at < oldest) oldest = at;
   }
   return oldest;
 }

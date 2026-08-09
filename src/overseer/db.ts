@@ -344,13 +344,17 @@ export function deleteAnnotation(wsId: string, slug: string, id: string): void {
 // ---- the pre-App freshness table ----
 
 /**
- * The head a pre-App review recorded for one of its pull requests, or null.
+ * The head a pre-App review recorded for one of its pull requests, with the moment it
+ * was recorded, or null.
  *
  * `review_freshness` is what freshness was before the App: a per-review observation of
  * a head, with no state, no merged and no draft, which is why the v5 migration could
  * carry it into `review_prs` but not into `github_pr_status` — a status row invented
  * out of it would draw a glyph nobody observed. It is still the chip's question, so the
- * read falls back to it, keyed per review as it was written.
+ * read falls back to it, keyed per review as it was written. `checked_at` rides along
+ * because a reading this old must arrive dated: the "as of" mark is the only hedge the
+ * page has, and a months-old head rendered bare would be trusted as though somebody had
+ * just confirmed it.
  *
  * v6 drops the table, so a missing table is no rows rather than a throw: the operator
  * running the drop must not turn a page into a 500.
@@ -360,16 +364,15 @@ export function legacyObservedHead(
   slug: string,
   repo: string,
   prNumber: number,
-): string | null {
+): { observedHeadSha: string; checkedAt: number } | null {
   try {
-    return (
-      db
-        .query<{ observed_head_sha: string }, [string, string, string, number]>(
-          "SELECT observed_head_sha FROM review_freshness " +
-            "WHERE workspace_id = ? AND slug = ? AND lower(repo) = lower(?) AND pr_number = ?",
-        )
-        .get(wsId, slug, repo, prNumber)?.observed_head_sha ?? null
-    );
+    const row = db
+      .query<{ observed_head_sha: string; checked_at: number }, [string, string, string, number]>(
+        "SELECT observed_head_sha, checked_at FROM review_freshness " +
+          "WHERE workspace_id = ? AND slug = ? AND lower(repo) = lower(?) AND pr_number = ?",
+      )
+      .get(wsId, slug, repo, prNumber);
+    return row ? { observedHeadSha: row.observed_head_sha, checkedAt: row.checked_at } : null;
   } catch (err) {
     if (String((err as Error)?.message ?? err).includes("no such table")) return null;
     throw err;

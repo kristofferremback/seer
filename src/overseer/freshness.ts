@@ -28,7 +28,8 @@ import { parseUpdatedAt } from "./derive";
 import type { GithubClient } from "./github";
 import { githubClientFor } from "./github-app";
 import {
-  healReviewPrRepoIdBySlug,
+  ANONYMOUS_OBSERVER,
+  healReviewPrRepoId,
   lookupPrStatus,
   reviewsNaming,
   statusOf,
@@ -145,13 +146,20 @@ export async function checkReview(
     let freshness = was;
     try {
       const pull = await client.getPull(pr.repo, pr.number);
-      const installationId = (await client.installationFor?.(pr.repo)) ?? null;
+      // "Nobody's" from a routing client is not "don't know": the pull above was read
+      // anonymously, and a repair that observed the truth and recorded nothing would
+      // leave this page answering "unchecked" after every successful press of the one
+      // button that exists to fix that. Only a client with no routing at all leaves the
+      // row unwritten.
+      const installationId = client.installationFor
+        ? ((await client.installationFor(pr.repo)) ?? ANONYMOUS_OBSERVER)
+        : null;
       const repoId = pull.base?.repo?.id ?? known?.repo_id ?? null;
       // A review published before the App knows its pull requests only by name. This
       // observation is the first thing to learn their numeric ids, and a repair that
       // did not record them would leave the row as blind to a rename afterwards as it
       // was before — a refresh that succeeded and healed nothing.
-      if (repoId !== null) healReviewPrRepoIdBySlug(wsId, slug, pr.repo, pr.number, repoId);
+      if (repoId !== null) healReviewPrRepoId(wsId, slug, pr.repo, pr.number, repoId);
       // One row, one writer, one precondition: a refresh goes through the same upsert a
       // publish and a delivery do, so a slow refresh cannot roll back a newer fact.
       if (installationId !== null && repoId !== null) {

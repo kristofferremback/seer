@@ -104,22 +104,27 @@ export const NEGATIVE_ROUTING_TTL_MS = 60 * 1000;
  * How many entries each in-memory cache may hold. A process lives for as long as the
  * container does and can be asked about an unbounded number of distinct repository
  * names — including names that pass `assertRepo` and exist nowhere — so every map here
- * is swept of expired entries once it grows past its bound, and trimmed from its oldest
- * insertion if the sweep was not enough.
+ * is swept of expired entries once it grows past its bound, and trimmed from whatever
+ * expires soonest if the sweep was not enough.
  */
 export const ROUTING_CACHE_MAX = 4096;
 export const TOKEN_CACHE_MAX = 1024;
 export const REPO_ID_CACHE_MAX = 16384;
 
 /**
- * Drop what has expired, then the oldest-inserted, until the map is inside its bound.
- * A Map iterates in insertion order, so deleting from the front is the whole of the
- * eviction policy: nothing here is hot enough to be worth an LRU's bookkeeping.
+ * Drop what has expired, then whatever expires soonest, until the map is inside its
+ * bound. Eviction is by time-to-live rather than by insertion order, and that is the
+ * point of the sort: a flood of short-lived entries (a caller naming thousands of
+ * repositories that exist nowhere buys sixty-second negatives) must consume itself, not
+ * the six-hour positive answers every real workspace depends on — which insertion-order
+ * eviction would throw out first, since the oldest entries are the longest-lived ones.
  */
-function bound<V>(map: Map<string, V>, max: number, expired: (value: V) => boolean): void {
+function bound<V>(map: Map<string, V>, max: number, until: (value: V) => number, cutoff: number): void {
   if (map.size <= max) return;
-  for (const [key, value] of map) if (expired(value)) map.delete(key);
-  for (const key of map.keys()) {
+  for (const [key, value] of map) if (until(value) <= cutoff) map.delete(key);
+  if (map.size <= max) return;
+  const byExpiry = [...map.entries()].sort((a, b) => until(a[1]) - until(b[1]));
+  for (const [key] of byExpiry) {
     if (map.size <= max) break;
     map.delete(key);
   }
@@ -241,13 +246,13 @@ export function createAppApi(options: AppApiOptions): AppApi {
         // hardest), but at a minute it cannot outlive the asker's own next attempt, so
         // naming somebody else's repository buys nothing worth having.
         routing.set(key, { installationId: null, until: now() + NEGATIVE_ROUTING_TTL_MS });
-        bound(routing, ROUTING_CACHE_MAX, (entry) => entry.until <= now());
+        bound(routing, ROUTING_CACHE_MAX, (entry) => entry.until, now());
         return null;
       }
       if (!res.ok) await failed(res, `${base}${path}`);
       const body = (await res.json()) as InstallationResponse;
       routing.set(key, { installationId: body.id, until: now() + ROUTING_TTL_MS });
-      bound(routing, ROUTING_CACHE_MAX, (entry) => entry.until <= now());
+      bound(routing, ROUTING_CACHE_MAX, (entry) => entry.until, now());
       return body.id;
     },
 
@@ -280,7 +285,7 @@ export function createAppApi(options: AppApiOptions): AppApi {
         usableUntil:
           (Number.isFinite(expiresAt) ? expiresAt : now() + 60 * 60 * 1000) - TOKEN_REMINT_EARLY_MS,
       });
-      bound(tokens, TOKEN_CACHE_MAX, (entry) => entry.usableUntil <= now());
+      bound(tokens, TOKEN_CACHE_MAX, (entry) => entry.usableUntil, now());
       return minted.token;
     },
 
@@ -289,7 +294,7 @@ export function createAppApi(options: AppApiOptions): AppApi {
       repoIds.set(repo.toLowerCase(), id);
       // Nothing here expires — these come from payloads GitHub sent, so they are true
       // until a rename — which is why the bound is large and the eviction is by age.
-      bound(repoIds, REPO_ID_CACHE_MAX, () => false);
+      bound(repoIds, REPO_ID_CACHE_MAX, () => Infinity, now());
     },
 
     repositoryId(repo) {
@@ -392,6 +397,26 @@ function accountOf(repo: string): string {
   return repo.split("/")[0] ?? repo;
 }
 
+/**
+ * Repositories the anonymous fallback has recently learned it cannot read, each with
+ * the moment the lesson expires. Process-wide on purpose: whether GitHub serves a
+ * repository to the world is not a per-workspace fact.
+ *
+ * This is what keeps the fallback from spending the budget it runs on. The refusal it
+ * replaced cost zero requests, so without this memory a retry loop naming one private
+ * repository would drain the host's ~60 unauthenticated requests an hour and take every
+ * public-repository review on the instance down with it. A rate-limited answer is
+ * deliberately NOT recorded here: it says nothing about the repository, and an hour
+ * later the read may work.
+ */
+const anonymousUnreachable = new Map<string, number>();
+export const ANONYMOUS_NEGATIVE_TTL_MS = 15 * 60 * 1000;
+
+/** Test seam: the unreachable memory is process-wide and must not leak between tests. */
+export function resetAnonymousReachability(): void {
+  anonymousUnreachable.clear();
+}
+
 export function createWorkspaceGithubClient(options: WorkspaceClientOptions): GithubClient {
   const { workspaceId, holdings, app } = options;
 
@@ -412,20 +437,35 @@ export function createWorkspaceGithubClient(options: WorkspaceClientOptions): Gi
       fetchImpl: options.fetchImpl,
       timeoutMs: options.timeoutMs,
     });
+    const refusal = () =>
+      new GithubRoutingError(
+        `${repo} is not reachable anonymously, and no GitHub App installation this workspace ` +
+          `holds covers it. If the repository is private, install the app on the ` +
+          `${accountOf(repo)} account and connect it in workspace settings.`,
+      );
     // When the anonymous read fails the way a private repository fails, the refusal the
     // routing check would have thrown is still the actionable half of the answer, so it
-    // is said here — with GitHub's own words kept as the cause.
+    // is said here — with GitHub's own words kept as the cause. GitHub also answers 403
+    // when the unauthenticated budget itself is spent, and that is a different sentence
+    // with a different remedy: the repository is not at fault and must not be remembered
+    // as unreadable.
     async function guard<T>(call: () => Promise<T>): Promise<T> {
+      const barred = anonymousUnreachable.get(repo.toLowerCase());
+      if (barred !== undefined && barred > Date.now()) throw refusal();
       try {
         return await call();
       } catch (err) {
-        if (err instanceof GithubError && (err.status === 404 || err.status === 403)) {
-          throw new GithubRoutingError(
-            `${repo} is not reachable anonymously, and no GitHub App installation this workspace ` +
-              `holds covers it. If the repository is private, install the app on the ` +
-              `${accountOf(repo)} account and connect it in workspace settings. GitHub answered: ` +
-              err.message,
+        if (err instanceof GithubError && err.status === 403 && /rate limit/i.test(err.message)) {
+          throw new GithubRateLimitError(
+            "GitHub's anonymous request budget for this host is exhausted. It is shared by " +
+              "everything here that reads public repositories without an installation, and it " +
+              "resets on GitHub's own schedule. Nothing was read, and no repository is at fault.",
           );
+        }
+        if (err instanceof GithubError && (err.status === 404 || err.status === 403)) {
+          anonymousUnreachable.set(repo.toLowerCase(), Date.now() + ANONYMOUS_NEGATIVE_TTL_MS);
+          bound(anonymousUnreachable, ROUTING_CACHE_MAX, (until) => until, Date.now());
+          throw new GithubRoutingError(`${refusal().message} GitHub answered: ${err.message}`);
         }
         throw err;
       }

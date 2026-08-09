@@ -20,6 +20,7 @@ import {
   GithubRoutingError,
   GithubSuspendedError,
   JWT_BACKDATE_SECONDS,
+  resetAnonymousReachability,
   ROUTING_CACHE_MAX,
   setGithubClientFactory,
   setWorkspaceHoldings,
@@ -138,6 +139,10 @@ function clientFor(t: Transport, workspaceId: string, held: Record<string, numbe
     }),
   };
 }
+
+// The anonymous-unreachable memory is process-wide and most tests here name the same
+// repository, so one test's deliberate 404 must not fail-fast the next test's read.
+beforeEach(() => resetAnonymousReachability());
 
 // No beforeEach installing the offline factory here, deliberately. There used to be one,
 // and it made the "cannot reach the network through either seam" test below verify the
@@ -490,6 +495,60 @@ test("the routing cache is bounded, and the oldest entry is the one that goes", 
   await api.installationForRepo(first);
   expect(lookups()).toBe(ROUTING_CACHE_MAX + 2);
 }, 30_000);
+
+test("a hot positive routing answer survives a flood of negatives", async () => {
+  const t = transport();
+  t.installationFor = (repo) => (repo === REPO ? INSTALLATION : null);
+  const api = createAppApi({ credentials: CREDENTIALS, apiBase: API, fetchImpl: t.fetchImpl });
+
+  await api.installationForRepo(REPO);
+  const repoLookups = () =>
+    t.seen.filter((s) => s.url.includes(`/repos/${REPO}/installation`)).length;
+  expect(repoLookups()).toBe(1);
+
+  // Sixty-second negatives must consume themselves, not the six-hour positive every
+  // real workspace depends on — which insertion-order eviction would throw out first,
+  // it being the oldest entry in the map.
+  for (let i = 0; i <= ROUTING_CACHE_MAX; i++) await api.installationForRepo(`junk/r${i}`);
+  await api.installationForRepo(REPO);
+  expect(repoLookups()).toBe(1);
+}, 30_000);
+
+test("an anonymous refusal is remembered, and the retry does not spend the budget", async () => {
+  const t = transport();
+  t.installationFor = () => null;
+  const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
+  const reads = () => t.seen.filter((s) => s.url.includes("/pulls/")).length;
+
+  await expect(client.getPull(REPO, 1723)).rejects.toThrow(GithubRoutingError);
+  expect(reads()).toBe(1);
+  // The refusal it replaced cost zero requests; without this memory a retry loop
+  // naming one private repository drains the host's whole anonymous budget.
+  await expect(client.getPull(REPO, 1723)).rejects.toThrow(GithubRoutingError);
+  expect(reads()).toBe(1);
+});
+
+test("an exhausted anonymous budget is a rate limit, not a verdict on the repository", async () => {
+  const t = transport();
+  t.installationFor = () => null;
+  const inner = t.fetchImpl;
+  let limited = 0;
+  t.fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/pulls/") && !new Headers(init?.headers).has("Authorization")) {
+      limited++;
+      return new Response("API rate limit exceeded for 203.0.113.9", { status: 403 });
+    }
+    return inner(input, init);
+  }) as unknown as typeof fetch;
+  const { client } = clientFor(t, "ws_a", { ws_a: [INSTALLATION] });
+
+  await expect(client.getPull(REPO, 1723)).rejects.toThrow(GithubRateLimitError);
+  // Not remembered as unreachable: the limit says nothing about the repository, and an
+  // hour later the same read may work. A second attempt is allowed to try.
+  await expect(client.getPull(REPO, 1723)).rejects.toThrow(GithubRateLimitError);
+  expect(limited).toBe(2);
+});
 
 test("a token minted by repository id is not served to the repository named that number", async () => {
   const t = transport();

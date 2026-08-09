@@ -13,6 +13,7 @@
 import { getSnippet, putSnippet, sweepSnippets } from "./db";
 import { collectPullDiff, type FileDiff } from "./diff";
 import { GithubError, type GithubClient } from "./github";
+import { ANONYMOUS_OBSERVER } from "./installations";
 import {
   prKey,
   type Hunk,
@@ -264,7 +265,13 @@ export async function derivePrs(
       repo: pointer.repo,
       number: pointer.number,
       repoId: pull.base?.repo?.id ?? null,
-      installationId: (await client.installationFor?.(pointer.repo)) ?? null,
+      // Null means this client cannot answer the routing question at all (a bare-token
+      // client has no notion of installations) and the seed stays away. A routing client
+      // answering "nobody's" is different: the read that produced this pull succeeded
+      // anonymously, and an observation made is an observation worth keeping.
+      installationId: client.installationFor
+        ? ((await client.installationFor(pointer.repo)) ?? ANONYMOUS_OBSERVER)
+        : null,
       state: pull.state,
       merged: pull.merged === true,
       draft: pull.draft === true,

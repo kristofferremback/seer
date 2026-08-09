@@ -519,51 +519,35 @@ export function matchReviewPrs(
 /** Every pull request any review in this workspace names, optionally narrowed to a set
  *  of repositories. What reconciliation walks: bounded by the reviews that exist, not
  *  by a clock, and it stops when it has been round them once. */
-export function listWorkspacePrs(wsId: string, repos: string[] | null = null): ReviewPrRow[] {
-  const rows = db
+/** Every pull request any review in the workspace names. Deliberately unfiltered: the
+ *  stored `repo` is frozen at publication, so any narrowing done here by name would
+ *  silently drop the renamed rows — callers that narrow must match by numeric id too. */
+export function listWorkspacePrs(wsId: string): ReviewPrRow[] {
+  return db
     .query<ReviewPrRow, [string]>("SELECT * FROM review_prs WHERE workspace_id = ?")
     .all(wsId);
-  if (repos === null) return rows;
-  const wanted = new Set(repos.map((r) => r.toLowerCase()));
-  return rows.filter((r) => wanted.has(r.repo.toLowerCase()));
-}
-
-/** Heal a backfilled row the first time an observation names its numeric id. */
-export function healReviewPrRepoId(
-  wsId: string,
-  slug: string,
-  repoFullName: string,
-  prNumber: number,
-  repoId: number,
-): void {
-  db.run(
-    "UPDATE review_prs SET repo_id = ?, repo = ? " +
-      "WHERE workspace_id = ? AND slug = ? AND pr_number = ? AND repo_id IS NULL AND lower(repo) = ?",
-    [repoId, repoFullName, wsId, slug, prNumber, repoFullName.toLowerCase()],
-  );
 }
 
 /**
- * Heal a backfilled row from an observation the review itself asked for.
+ * Heal a backfilled row the first time an observation names its numeric id.
  *
- * The match is the name the document froze at publication, not the name GitHub uses
- * now — after a rename those differ, and the document's is the only one this row can
- * be found by. The name is left exactly as it stands: `review_prs.repo` is what the
- * page says, and it is never rewritten underneath the document. Only the numeric id
- * is filled in, which is what every reader keyed off the name needs to stop being
- * blind to the rename.
+ * The match is a name the row already carries, whether the caller learned it from a
+ * webhook payload or from the document itself. Only the numeric id is filled in:
+ * `review_prs.repo` is the name the document froze at publication and it is never
+ * rewritten underneath the document — the id is exactly the thing that lets every
+ * reader keyed off that frozen name survive a rename.
  */
-export function healReviewPrRepoIdBySlug(
+export function healReviewPrRepoId(
   wsId: string,
   slug: string,
-  documentRepoName: string,
+  matchedRepoName: string,
   prNumber: number,
   repoId: number,
 ): void {
   db.run(
     "UPDATE review_prs SET repo_id = ? " +
       "WHERE workspace_id = ? AND slug = ? AND pr_number = ? AND repo_id IS NULL AND lower(repo) = ?",
-    [repoId, wsId, slug, prNumber, documentRepoName.toLowerCase()],
+    [repoId, wsId, slug, prNumber, matchedRepoName.toLowerCase()],
   );
 }
 
@@ -663,6 +647,15 @@ export function lookupPrStatus(wsId: string, repo: string, prNumber: number): Pr
   if (repoId !== null) return getPrStatus(wsId, repoId, prNumber);
   return findPrStatus(wsId, repo, prNumber);
 }
+
+/**
+ * The observer stamped on a row whose observation was made with no installation at all:
+ * an anonymous read of a public repository. Zero is an id GitHub never issues, so
+ * `installation.deleted` can never sweep these rows and nothing ever attributes a
+ * delivery to them — they are maintained by publish and refresh alone, which is the
+ * whole of what anonymous coverage can honestly promise (no installation, no webhooks).
+ */
+export const ANONYMOUS_OBSERVER = 0;
 
 /**
  * The conditional upsert. Newer wins; equal timestamps let the write through, because

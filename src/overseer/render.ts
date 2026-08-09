@@ -2908,7 +2908,7 @@ function reviewPage(args: {
     status: statusesOf(ws, row.doc),
     // Off the same rows again: the age the page reports is the age of the readings it
     // is showing, not of some other query.
-    observedAt: observedAtOf(ws, row.doc),
+    observedAt: observedAtOf(ws, slug, row.doc),
     // The refresh route answers a reader who may read the review, and it refreshes the
     // review's *current* version — so the button is drawn for a member on the page that
     // asked for the current version, and for nobody else. A share holder pressing it

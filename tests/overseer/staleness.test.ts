@@ -211,7 +211,7 @@ describe("a review page dates an observation it can no longer vouch for", () => 
       "UPDATE github_pr_status SET observed_at = ? WHERE workspace_id = ? AND pr_number = ?",
       [Date.now(), ws, doc.prs[0]!.number],
     );
-    expect(observedAtOf(ws, doc)).toBe(old);
+    expect(observedAtOf(ws, "mixed", doc)).toBe(old);
   });
 
   test("a review nothing has observed reports no age", () => {
@@ -222,7 +222,7 @@ describe("a review page dates an observation it can no longer vouch for", () => 
     for (let i = 0; i < GOLDEN_BUNDLE_VERSION; i++) createVersion(blind, GOLDEN_BUNDLE_SLUG, 10, 1);
     storeGoldenReview(blind, "blind");
     const doc = getReviewVersion(blind, "blind", 1)!.doc;
-    expect(observedAtOf(blind, doc)).toBeNull();
+    expect(observedAtOf(blind, "blind", doc)).toBeNull();
   });
 });
 
@@ -269,7 +269,7 @@ describe("the refresh control", () => {
       expect(body.prs.length).toBe(2);
 
       const doc = getReviewVersion(ws, "repairable", 1)!.doc;
-      expect(Date.now() - observedAtOf(ws, doc)!).toBeLessThan(OBSERVATION_STALE_MS);
+      expect(Date.now() - observedAtOf(ws, "repairable", doc)!).toBeLessThan(OBSERVATION_STALE_MS);
       expect(asOf(await pageOf("repairable"))).toBeNull();
     } finally {
       setGithubClientFactory(offlineGithubClientFactory());
@@ -372,12 +372,12 @@ describe("a head recorded before the App still answers the chip", () => {
   // reader was already acting on.
   let wsOld = "";
 
-  function record(slug: string, prNumber: number, sha: string): void {
+  function record(slug: string, prNumber: number, sha: string, checkedAt: number = Date.now()): void {
     db.run(
       "INSERT OR REPLACE INTO review_freshness " +
         "(workspace_id, slug, repo, pr_number, observed_head_sha, checked_at) " +
         "VALUES (?, ?, ?, ?, ?, ?)",
-      [wsOld, slug, GOLDEN_REPO, prNumber, sha, Date.now()],
+      [wsOld, slug, GOLDEN_REPO, prNumber, sha, checkedAt],
     );
   }
 
@@ -406,6 +406,21 @@ describe("a head recorded before the App still answers the chip", () => {
     // The old table never knew open, merged, closed or draft, so the card draws no
     // glyph: the fallback restores the recorded fact and not a status nobody observed.
     expect(html).not.toContain('href="#i-pr-');
+  });
+
+  test("and the reading arrives dated, because nobody has confirmed it since", async () => {
+    storeGoldenReview(wsOld, "pre-app-dated");
+    const doc = getReviewVersion(wsOld, "pre-app-dated", 1)!.doc;
+    // Recorded long before the migration. The chip is about to assert this reading,
+    // and undated it would be trusted as though somebody had just confirmed it — the
+    // "as of" mark is the only hedge a reading this old gets.
+    const months = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    record("pre-app-dated", doc.prs[0]!.number, doc.prs[0]!.headSha, months);
+    record("pre-app-dated", doc.prs[1]!.number, doc.prs[1]!.headSha, months);
+
+    const html = await oldPageOf("pre-app-dated");
+    expect(chip(html)).toBe("up to date");
+    expect(asOf(html)).not.toBeNull();
   });
 
   test("and a head that had not moved reads up to date", async () => {

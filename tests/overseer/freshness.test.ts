@@ -470,6 +470,35 @@ describe("the repair heals what it observed", () => {
     expect(lookupPrStatus(wsA, GOLDEN_REPO, 12)?.head_sha).toBe(GOLDEN_HEAD_SHA_12);
     expect(lookupPrStatus(wsA, GOLDEN_REPO, 13)?.head_sha).toBe(GOLDEN_HEAD_SHA_13);
   });
+
+  test("a refresh through the anonymous fallback still records what it saw", async () => {
+    storeGoldenReview(wsA, "anon-observed");
+    db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
+    // Only this review may name the pull requests: the heal test above left rows for
+    // the same named pull requests under a different fabricated numeric id, and the
+    // name-to-id bridge answers for the workspace, not the slug.
+    db.run("DELETE FROM review_prs WHERE workspace_id = ? AND slug != ?", [wsA, "anon-observed"]);
+    const counting = countingClient((_repo, n) => (n === 12 ? GOLDEN_HEAD_SHA_12 : GOLDEN_HEAD_SHA_13));
+    // A routing client answering "nobody's": the reads above it succeeded anonymously.
+    // "Nobody's" is not "don't know" — a repair that observed the truth and recorded
+    // nothing would leave the page saying "unchecked" after every successful press.
+    setGithubClientFactory(
+      () => ({ ...counting.client, installationFor: async () => null }) as GithubClient,
+    );
+
+    const res = await fetch(`${base}/api/reviews/anon-observed/refresh`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${keyA}` },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { checked: boolean }).checked).toBe(true);
+
+    // Stamped with the observer no installation ever is, so `installation.deleted` can
+    // never sweep a row no installation produced.
+    const row = lookupPrStatus(wsA, GOLDEN_REPO, 12);
+    expect(row?.head_sha).toBe(GOLDEN_HEAD_SHA_12);
+    expect(row?.installation_id).toBe(0);
+  });
 });
 
 describe("a refresh publishes to every review it rewrote", () => {

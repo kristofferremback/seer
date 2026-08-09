@@ -428,7 +428,7 @@ export async function reconcileInstallation(
 
   const seen = new Set<string>();
   const touched = new Set<string>();
-  for (const row of listWorkspacePrs(wsId, null)) {
+  for (const row of listWorkspacePrs(wsId)) {
     if (
       wantedIds &&
       wantedNames &&
@@ -456,7 +456,9 @@ export async function reconcileInstallation(
       if (attributed === null) continue;
       const applied = observePullRequest(attributed, {
         repoId,
-        repo: row.repo,
+        // The row's name is display and must be current; the review_prs name stays
+        // frozen. GitHub's answer carries the current one for exactly this write.
+        repo: pull.base?.repo?.full_name ?? row.repo,
         prNumber: row.pr_number,
         state: pull.state,
         merged: pull.merged === true,
