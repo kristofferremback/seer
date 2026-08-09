@@ -17,8 +17,8 @@ import {
   lookupPrStatus,
   setReviewPrs,
 } from "../../src/overseer/installations";
-import type { GithubClient, GithubPull } from "../../src/overseer/github";
-import { setGithubClientFactory } from "../../src/overseer/github-app";
+import { GithubError, type GithubClient, type GithubPull } from "../../src/overseer/github";
+import { GithubCredentialDeadError, setGithubClientFactory } from "../../src/overseer/github-app";
 import {
   CHECK_INTERVAL_MS,
   claimCheck,
@@ -563,5 +563,59 @@ describe("the render is never blocked", () => {
     // the chip says so rather than claiming the heads are current.
     expect(await res.text()).toContain("heads unchecked");
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe("a credential that died", () => {
+  // The refresh button is the one path a person can press when they suspect the page is
+  // stale, and the per-pull-request catch below it swallowed everything. A dead
+  // credential therefore answered 200 with the rows it failed to update: the reader
+  // pressed the repair, watched it succeed, and learned nothing.
+  test("the refresh says 422 and names the credential", async () => {
+    storeGoldenReview(wsA, "dead-credential");
+    setGithubClientFactory(
+      () =>
+        ({
+          async getPull(): Promise<GithubPull> {
+            throw new GithubCredentialDeadError(
+              "guc_dead",
+              'Your GitHub credential for alice ("work") was revoked at GitHub, so GitHub refused it. ' +
+                "Reconnect the account in settings.",
+            );
+          },
+        }) as unknown as GithubClient,
+    );
+
+    const res = await fetch(`${base}/api/reviews/dead-credential/refresh`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${keyA}` },
+    });
+    expect(res.status).toBe(422);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(JSON.parse(await res.text()).error).toContain('alice ("work")');
+  });
+
+  test("an unreachable GitHub still answers with the last observation", async () => {
+    // The other half of the split, pinned: only the credential's death climbs out of the
+    // per-pull-request catch. A transport fault is not the reader's to fix.
+    storeGoldenReview(wsA, "transport-fault");
+    setGithubClientFactory(
+      () =>
+        ({
+          async getPull(): Promise<GithubPull> {
+            throw new GithubError("GitHub 502", 502, "https://api.github.test/x");
+          },
+        }) as unknown as GithubClient,
+    );
+
+    const before = findPrStatus(wsA, GOLDEN_REPO, 12)?.head_sha ?? null;
+    const res = await fetch(`${base}/api/reviews/transport-fault/refresh`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${keyA}` },
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(await res.text()).checked).toBe(true);
+    // Nothing was observed, so nothing was written over.
+    expect(findPrStatus(wsA, GOLDEN_REPO, 12)?.head_sha ?? null).toBe(before);
   });
 });

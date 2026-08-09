@@ -1,7 +1,8 @@
-import { beforeAll, expect, test } from "bun:test";
+import { beforeAll, beforeEach, expect, test } from "bun:test";
 import { generateKey, setKeyring } from "../../src/envelope";
+import { db } from "../../src/db";
 import { migrate } from "../../src/migrate";
-import { createUserGithubClient } from "../../src/overseer/github-user";
+import { createUserGithubClient, resetUserRouting } from "../../src/overseer/github-user";
 import {
   createGithubUserCredential,
   getGithubUserCredential,
@@ -11,6 +12,10 @@ import {
   GithubCredentialDeadError,
   GithubRoutingError,
 } from "../../src/overseer/github-app";
+
+beforeEach(() => {
+  resetUserRouting();
+});
 
 beforeAll(() => {
   setKeyring({ activeId: "user-client", keys: new Map([["user-client", Buffer.from(generateKey(), "base64")]]) });
@@ -314,4 +319,132 @@ test("a dead credential is not papered over by the anonymous reader", async () =
   });
 
   await expect(client.getPull("acme/public", 1)).rejects.toBeInstanceOf(GithubCredentialDeadError);
+});
+
+// ---- the walk past a casualty ----
+//
+// A person's credentials are listed most-recent first, and the loop threw on the first
+// 401. Somebody who reconnected an account and left the old token in place was refused
+// for a credential they were not using, while the one that reads the repository sat
+// untried in the same list.
+
+test("a dead credential does not end the walk, and the next one answers", async () => {
+  const deadToken = "github_pat_walk_dead";
+  const liveToken = "github_pat_walk_live";
+  createGithubUserCredential({
+    userId: "usr_walk", kind: "pat", label: "work", secret: liveToken,
+    accountLogin: "alice", accountId: 1, scopes: ["contents:read"],
+  });
+  const deadId = createGithubUserCredential({
+    userId: "usr_walk", kind: "pat", label: "old laptop", secret: deadToken,
+    accountLogin: "alice", accountId: 1, scopes: ["contents:read"],
+  });
+  // The list is most-recent first, and both rows were written in the same millisecond.
+  // The dead one has to be in front or the walk never reaches the casualty under test.
+  db.run("UPDATE github_user_credentials SET created_at = ? WHERE id = ?", [Date.now() + 1000, deadId]);
+
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const auth = new Headers(init?.headers).get("authorization");
+    if (auth === `Bearer ${deadToken}`) return new Response("Bad credentials", { status: 401 });
+    if (auth !== `Bearer ${liveToken}`) return new Response("not found", { status: 404 });
+    if (/\/pulls\/\d+$/.test(url)) {
+      return Response.json({
+        number: 4, title: "t", body: null, state: "open", user: { login: "x" },
+        head: { sha: "a".repeat(40), ref: "topic" },
+        base: { sha: "b".repeat(40), ref: "main", repo: { id: 7, full_name: "acme/walk" } },
+        updated_at: "2025-01-01T00:00:00Z",
+      });
+    }
+    return Response.json({ id: 7 });
+  }) as typeof fetch;
+
+  const client = createUserGithubClient("usr_walk", { apiBase: "https://github.test", fetchImpl });
+  expect((await client.getPull("acme/walk", 4)).number).toBe(4);
+  // The death still happened and is still recorded; it simply did not take the read down.
+  expect(getGithubUserCredential(deadId, "usr_walk")!.dead_at).not.toBeNull();
+});
+
+test("when nothing else answers, the death is what is thrown", async () => {
+  // Not the routing refusal: that sentence talks about installations and connected
+  // accounts and would never mention the credential the person has to reconnect.
+  const deadToken = "github_pat_walk_all_dead";
+  createGithubUserCredential({
+    userId: "usr_walk_dead", kind: "pat", label: "old", secret: deadToken,
+    accountLogin: "erin", accountId: 5, scopes: ["contents:read"],
+  });
+  createGithubUserCredential({
+    userId: "usr_walk_dead", kind: "pat", label: "other", secret: "github_pat_walk_useless",
+    accountLogin: "erin", accountId: 5, scopes: ["contents:read"],
+  });
+
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const auth = new Headers(init?.headers).get("authorization");
+    if (auth === `Bearer ${deadToken}`) return new Response("Bad credentials", { status: 401 });
+    return new Response("not found", { status: 404 });
+  }) as typeof fetch;
+
+  const client = createUserGithubClient("usr_walk_dead", { apiBase: "https://github.test", fetchImpl });
+  await expect(client.getPull("acme/nope", 1)).rejects.toBeInstanceOf(GithubCredentialDeadError);
+});
+
+test("a probe refused for a third reason leaves the anonymous fallback reachable", async () => {
+  // 403 is a personal rate limit or an organisation's SAML page: it says nothing about
+  // the credential and nothing about the repository. Throwing it here made a PUBLIC
+  // repository unreadable for that person, because only a routing error falls through.
+  createGithubUserCredential({
+    userId: "usr_403", kind: "pat", label: "work", secret: "github_pat_403",
+    accountLogin: "frank", accountId: 6, scopes: ["contents:read"],
+  });
+
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const auth = new Headers(init?.headers).get("authorization");
+    if (auth === "Bearer github_pat_403") {
+      return new Response("API rate limit exceeded for user", { status: 403 });
+    }
+    if (/\/installation$/.test(url)) return new Response("{}", { status: 404 });
+    if (/\/pulls\/\d+$/.test(url)) {
+      return Response.json({
+        number: 2, title: "t", body: null, state: "open", user: { login: "x" },
+        head: { sha: "a".repeat(40), ref: "topic" },
+        base: { sha: "b".repeat(40), ref: "main", repo: { id: 7, full_name: "acme/public" } },
+        updated_at: "2025-01-01T00:00:00Z",
+      });
+    }
+    return Response.json({ id: 7 });
+  }) as typeof fetch;
+
+  const client = createWorkspaceGithubClient({
+    workspaceId: "ws_403",
+    holdings: { installationIds: () => [] },
+    app: {
+      installationForRepo: async () => null,
+      installationToken: async () => { throw new Error("must not mint"); },
+      noteRepositoryId: () => {},
+      repositoryId: () => undefined,
+      invalidateRouting: () => {},
+    },
+    askingUserId: "usr_403",
+    apiBase: "https://github.test",
+    fetchImpl,
+  });
+
+  expect((await client.getPull("acme/public", 2)).number).toBe(2);
+});
+
+test("the routing a request learns is still there for the next one", async () => {
+  // The cache used to live on the client, and the client is built per request, so the
+  // six-hour positive meant "until this response is written" and every request re-probed
+  // every credential.
+  credentialFor("usr_cache", "github_pat_cache");
+  const { seen, fetchImpl } = repoFixture({ "acme/cached": "github_pat_cache" });
+  const opts = { apiBase: "https://github.test", fetchImpl };
+  const probes = () => seen.filter((e) => e.endsWith("/repos/acme/cached")).length;
+
+  expect((await createUserGithubClient("usr_cache", opts).getPull("acme/cached", 1)).number).toBe(1);
+  expect(probes()).toBe(1);
+
+  expect((await createUserGithubClient("usr_cache", opts).getPull("acme/cached", 2)).number).toBe(2);
+  expect(probes()).toBe(1);
 });

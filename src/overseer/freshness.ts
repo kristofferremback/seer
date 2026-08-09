@@ -26,7 +26,7 @@
 import { getReviewVersion, resolveReview, type ReviewDoc } from "./db";
 import { parseUpdatedAt } from "./derive";
 import type { GithubClient } from "./github";
-import { githubClientFor } from "./github-app";
+import { GithubCredentialDeadError, githubClientFor } from "./github-app";
 import {
   ANONYMOUS_OBSERVER,
   healReviewPrRepoId,
@@ -185,6 +185,10 @@ export async function checkReview(
       }
       freshness = pull.head.sha === pr.headSha ? "current" : "behind";
     } catch (err) {
+      // Except for the one failure this class exists to surface. A dead credential is
+      // not GitHub being unreachable: it is a thing the person can fix, and swallowing
+      // it here would answer 200 with stale rows on the only path they can press.
+      if (err instanceof GithubCredentialDeadError) throw err;
       // A review is not wrong because GitHub was unreachable. The last observation
       // stands, and the failure is said out loud rather than swallowed.
       console.error(`[seer] freshness check failed for ${key} in ${wsId}/${slug}: ${String(err)}`);
@@ -305,7 +309,22 @@ export async function handleRefreshReview(req: Request, slug: string): Promise<R
     );
   }
 
-  const result = await checkReview(ws, slug, row.doc, askingUserId(req));
+  // The claim above is already spent, and stays spent: a refresh that reached a dead
+  // credential cost the same minute a refresh that reached GitHub would have.
+  let result: CheckResult;
+  try {
+    result = await checkReview(ws, slug, row.doc, askingUserId(req));
+  } catch (err) {
+    // The same 422 the publish path answers a refusal with: nothing to retry, and the
+    // message names the credential and the fix.
+    if (err instanceof GithubCredentialDeadError) {
+      return new Response(JSON.stringify({ error: err.message }, null, 2), {
+        status: 422,
+        headers: { "content-type": "application/json", "cache-control": "no-store" },
+      });
+    }
+    throw err;
+  }
   if (result.changed) {
     // The rows this wrote are the workspace's, not this review's: every review naming
     // the same pull request renders from them, so a refresh that published only the

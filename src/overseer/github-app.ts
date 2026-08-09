@@ -120,7 +120,7 @@ export const REPO_ID_CACHE_MAX = 16384;
  * the six-hour positive answers every real workspace depends on — which insertion-order
  * eviction would throw out first, since the oldest entries are the longest-lived ones.
  */
-function bound<V>(map: Map<string, V>, max: number, until: (value: V) => number, cutoff: number): void {
+export function bound<V>(map: Map<string, V>, max: number, until: (value: V) => number, cutoff: number): void {
   if (map.size <= max) return;
   for (const [key, value] of map) if (until(value) <= cutoff) map.delete(key);
   if (map.size <= max) return;

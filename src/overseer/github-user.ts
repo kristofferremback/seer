@@ -12,9 +12,11 @@ import {
   touchGithubUserCredential,
 } from "./user-credentials";
 import {
+  bound,
   GithubCredentialDeadError,
   GithubRoutingError,
   NEGATIVE_ROUTING_TTL_MS,
+  ROUTING_CACHE_MAX,
   ROUTING_TTL_MS,
 } from "./github-app";
 
@@ -24,6 +26,25 @@ export { GithubCredentialDeadError } from "./github-app";
 
 const API = "https://api.github.com";
 const DEFAULT_TIMEOUT_MS = 20_000;
+
+/**
+ * Which credential of which person opens which repository, keyed by user and repository.
+ *
+ * Module-level rather than per-client because the client is built per request: a cache
+ * living inside it expires with the request that made it, so the six-hour positive and
+ * the sixty-second negative described in github-app.ts would both have meant "once",
+ * and every request would re-probe every credential the person holds.
+ */
+const userRouting = new Map<string, { credentialId: string | null; until: number }>();
+
+function routingKey(userId: string, repo: string): string {
+  return `${userId}\u0000${repo.toLowerCase()}`;
+}
+
+/** Test seam: the routing memory now outlives a client and must not leak between tests. */
+export function resetUserRouting(): void {
+  userRouting.clear();
+}
 
 export interface UserGithubClientOptions {
   apiBase?: string;
@@ -44,15 +65,15 @@ export function createUserGithubClient(
   const doFetch = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const now = options.now ?? Date.now;
-  const routing = new Map<string, { credentialId: string | null; until: number }>();
 
   /** Records the death, drops every route pointing at it, and says which credential and
    *  which fix. Expiry and revocation are told apart by the stored `expires_at` because
    *  the remedies differ: one is reconnected here, the other is granted again at GitHub. */
   function dead(credentialId: string): GithubCredentialDeadError {
     markGithubUserCredentialDead(credentialId, userId, now());
-    for (const [key, entry] of routing) {
-      if (entry.credentialId === credentialId) routing.delete(key);
+    const prefix = `${userId}\u0000`;
+    for (const [key, entry] of userRouting) {
+      if (key.startsWith(prefix) && entry.credentialId === credentialId) userRouting.delete(key);
     }
     const row = getGithubUserCredential(credentialId, userId);
     const who = row ? `${row.account_login} ("${row.label}")` : credentialId;
@@ -120,8 +141,8 @@ export function createUserGithubClient(
 
   async function authorize(repo: string): Promise<GithubClient | null> {
     assertRepo(repo);
-    const key = repo.toLowerCase();
-    const hit = routing.get(key);
+    const key = routingKey(userId, repo);
+    const hit = userRouting.get(key);
     if (hit && hit.until > now()) {
       if (hit.credentialId === null) return null;
       const token = openGithubUserCredential(hit.credentialId, userId);
@@ -129,19 +150,54 @@ export function createUserGithubClient(
         touchGithubUserCredential(hit.credentialId, userId, now());
         return guarded(hit.credentialId, token);
       }
-      routing.delete(key);
+      userRouting.delete(key);
     }
 
+    // The walk continues past a credential GitHub has stopped accepting. A person whose
+    // most recent connection died still holds the older one that reads this repository,
+    // and aborting on the first casualty refused them for a credential they were not
+    // using. The death is remembered rather than dropped: if nothing else answers it is
+    // the actionable fact, and a routing refusal in its place would never mention it.
+    let died: GithubCredentialDeadError | null = null;
+    // A probe refused for some third reason -- a personal rate limit, an organisation's
+    // SAML enforcement page -- says nothing about this credential and nothing about the
+    // repository, so the walk skips it and the answer is not cached either way.
+    let unanswered = false;
     for (const credential of listGithubUserCredentials(userId)) {
       const token = openGithubUserCredential(credential.id, userId);
       if (!token) continue;
-      if (await probe(repo, credential.id, token)) {
-        routing.set(key, { credentialId: credential.id, until: now() + ROUTING_TTL_MS });
+      let opens: boolean;
+      try {
+        opens = await probe(repo, credential.id, token);
+      } catch (err) {
+        if (err instanceof GithubCredentialDeadError) {
+          died ??= err;
+          continue;
+        }
+        if (err instanceof GithubError) {
+          unanswered = true;
+          console.error(
+            `[seer] GitHub ${err.status} probing credential ${credential.id} for ${repo}; skipping it`,
+          );
+          continue;
+        }
+        throw err;
+      }
+      if (opens) {
+        userRouting.set(key, { credentialId: credential.id, until: now() + ROUTING_TTL_MS });
+        bound(userRouting, ROUTING_CACHE_MAX, (entry) => entry.until, now());
         touchGithubUserCredential(credential.id, userId, now());
         return guarded(credential.id, token);
       }
     }
-    routing.set(key, { credentialId: null, until: now() + NEGATIVE_ROUTING_TTL_MS });
+    if (died) throw died;
+    // Nothing covered it. Returning null lets `required` refuse, which is what the
+    // workspace client turns into an anonymous attempt -- so a public repository still
+    // resolves for a person whose rate limit is spent.
+    if (!unanswered) {
+      userRouting.set(key, { credentialId: null, until: now() + NEGATIVE_ROUTING_TTL_MS });
+      bound(userRouting, ROUTING_CACHE_MAX, (entry) => entry.until, now());
+    }
     return null;
   }
 
