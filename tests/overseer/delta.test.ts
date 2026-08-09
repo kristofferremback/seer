@@ -454,6 +454,22 @@ describe("the marks on the page", () => {
     });
   }
 
+  test("a new check follows its note body's Edited control", () => {
+    const before = doc((d) => {
+      d.notes[0]!.checks = [];
+    });
+    const after = doc((d) => {
+      d.notes[0]!.body = "A revised body gives this decision more context.";
+      d.notes[0]!.checks = ["Decide whether the target needs a stable id"];
+    });
+    const html = page(after, before);
+    const note = unitAround(html, html.indexOf("Decide whether the target"));
+    expect(note).toContain('<ins class="dw">Decide whether the target needs a stable id</ins>');
+    expect(html).toContain(
+      ".note-body:has(> .dchange > .dtog:not(:checked)) > .checks .dw { background: none; }",
+    );
+  });
+
   test("a revised author-intent account is marked separately from the witness summary", () => {
     const before = doc();
     const after = doc((d) => {

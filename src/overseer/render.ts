@@ -1364,6 +1364,10 @@ const DELTA_STYLE = `
   .dchange:has(> .dtog:checked) > .dinline { display: block; }
   .dchange-inline .dedited { display: inline-flex; min-height: 0; margin-left: 7px; font-size: 0.6em; vertical-align: middle; }
   .dchange-inline:has(> .dtog:checked) > .dinline { display: inline; }
+  /* A newly added check has no prior text and therefore no control of its own. When
+     its note body does have Edited, it follows that control instead of leaking a
+     green addition into the clean view. */
+  .note-body:has(> .dchange > .dtog:not(:checked)) > .checks .dw { background: none; }
   details:not([open]) > summary .dw:not(.dnew) { background: none; }
   details:not([open]) > summary .dcut { visibility: hidden; }
   .dold, .dp { color: hsl(var(--remove) / 0.95); background: var(--word-rem); border-radius: 3px; text-decoration: line-through; text-decoration-thickness: 1px; }
