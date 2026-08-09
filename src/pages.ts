@@ -139,12 +139,14 @@ function styles(): string {
     color-scheme: light;
     --paper: 40 22% 98%;
     --paper-warm: 38 16% 94%;
-    --paper-sunk: 40 14% 93%;
+    /* A step deeper than it was: sunk surfaces and rules earn their name, so a card
+       sits ON the page instead of dissolving into it. */
+    --paper-sunk: 40 14% 90%;
     --ink: 30 10% 12%;
     --ink-soft: 30 9% 26%;
-    --line: 35 15% 88%;
+    --line: 35 14% 84%;
     --muted: 30 8% 45%;
-    --night: 26 16% 10%;
+    --night: 356 26% 9%;
     /* Oxblood — Seer's accent, in place of Threa's gold. */
     --accent: 356 55% 27%;
     --accent-soft: 356 40% 42%;
@@ -157,17 +159,20 @@ function styles(): string {
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --paper: 26 12% 13%;
-    --paper-warm: 26 14% 11%;
-    --paper-sunk: 26 15% 9%;
-    --ink: 38 16% 90%;
-    --ink-soft: 35 11% 74%;
-    --line: 26 8% 24%;
-    --muted: 32 7% 57%;
-    --night: 26 16% 7%;
-    /* Lifted so oxblood reads on espresso. */
-    --accent: 356 45% 62%;
-    --accent-soft: 356 38% 52%;
+    /* The substrate is oxblood-black, not espresso: the paper itself carries a trace
+       of the accent's hue, which is the surface the review pages already sit on. One
+       dark, shared, instead of two that almost match. */
+    --paper: 356 24% 11%;
+    --paper-warm: 356 28% 8.5%;
+    --paper-sunk: 356 32% 6.5%;
+    --ink: 20 20% 91%;
+    --ink-soft: 16 14% 77%;
+    --line: 356 14% 23%;
+    --muted: 8 9% 62%;
+    --night: 356 30% 5%;
+    /* Lifted so oxblood reads on its own black. */
+    --accent: 356 48% 64%;
+    --accent-soft: 356 38% 54%;
   }
   @media (max-width: 880px) {
     :root { --pad-x: 28px; }
@@ -215,7 +220,7 @@ function styles(): string {
      footer always pins to the bottom, even on a short page. */
   .frame.grow { flex: 1 0 auto; }
   .frame.warm { background: hsl(var(--paper-warm)); }
-  .frame.night { background: hsl(var(--night)); color: hsl(38 14% 80%); }
+  .frame.night { background: hsl(var(--night)); color: hsl(18 16% 82%); }
 
   .shell {
     max-width: 52rem;
@@ -331,7 +336,9 @@ function styles(): string {
     font-size: 11px;
     letter-spacing: 0.15em;
     text-transform: uppercase;
-    color: hsl(var(--muted));
+    /* Eyebrows are where the page's structure lives, so they carry the accent: it is
+       the cheapest place to spend it, read before anything else and never body text. */
+    color: hsl(var(--accent-soft));
     margin: 0 0 0.9rem;
   }
   .email-tag { font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.02em; color: hsl(var(--muted)); }
@@ -342,7 +349,9 @@ function styles(): string {
   .prose p { max-width: 48ch; }
   .aside { color: hsl(var(--muted)); font-size: 0.95rem; }
 
-  a { color: inherit; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; text-decoration-color: hsl(var(--line)); }
+  /* The underline is the accent's first job: ink text, oxblood line. A link that only
+     reveals itself on hover is a link nobody without a mouse ever finds. */
+  a { color: inherit; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; text-decoration-color: hsl(var(--accent) / 0.45); }
   @media (hover: hover) and (pointer: fine) {
     a { transition: color 150ms ease, text-decoration-color 150ms ease; }
     a:hover { color: hsl(var(--accent)); text-decoration-color: hsl(var(--accent)); }
@@ -373,6 +382,7 @@ function styles(): string {
     border: 1px solid hsl(var(--line));
     border-radius: 14px;
     padding: 1.1rem 1.2rem 1.2rem;
+    box-shadow: 0 1px 2px hsl(var(--night) / 0.05), 0 6px 20px hsl(var(--night) / 0.04);
   }
   .frame.warm .specimen { background: hsl(var(--paper)); }
   pre.cmd {
@@ -397,7 +407,10 @@ function styles(): string {
     border-radius: 14px;
     overflow: hidden;
     margin-top: 0.6rem;
+    box-shadow: 0 1px 2px hsl(var(--night) / 0.05), 0 6px 20px hsl(var(--night) / 0.04);
   }
+  /* On the dark substrate the border does the separating; a shadow only muddies. */
+  :root[data-theme="dark"] .ledger, :root[data-theme="dark"] .panel, :root[data-theme="dark"] .specimen { box-shadow: none; }
   .frame.warm .ledger { background: hsl(var(--paper)); }
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: 0.7rem 1rem; vertical-align: baseline; text-align: left; }
@@ -432,7 +445,7 @@ function styles(): string {
     text-transform: uppercase;
     color: hsl(38 12% 62%);
   }
-  .frame.night .footer { color: hsl(38 12% 62%); }
+  .frame.night .footer { color: hsl(12 10% 66%); }
   .footer .brand { color: hsl(38 14% 80%); }
   .footer .brand .wordmark { color: hsl(38 14% 80%); }
   .footer .brand .mark { width: 18px; height: 22px; }
@@ -472,9 +485,18 @@ function styles(): string {
     cursor: pointer;
     text-decoration: none;
   }
-  .btn.primary { color: hsl(var(--accent)); border-color: hsl(var(--accent) / 0.45); }
+  /* The one filled control on any page. Primary means the action the page exists for,
+     and it wears the accent as a surface rather than borrowing it as a tint. */
+  .btn.primary {
+    color: hsl(var(--paper));
+    background: hsl(var(--accent));
+    border-color: hsl(var(--accent));
+  }
+  :root[data-theme="dark"] .btn.primary { color: hsl(var(--night)); }
   @media (hover: hover) and (pointer: fine) {
     .btn:hover { color: hsl(var(--accent)); border-color: hsl(var(--accent) / 0.6); }
+    .btn.primary:hover { color: hsl(var(--paper)); background: hsl(var(--accent-soft)); border-color: hsl(var(--accent-soft)); }
+    :root[data-theme="dark"] .btn.primary:hover { color: hsl(var(--night)); }
   }
 
   /* pills — state markers in the reference register; .public lights the accent */
@@ -540,6 +562,7 @@ function styles(): string {
     border-radius: 14px;
     padding: 1.15rem 1.25rem 1.3rem;
     margin-top: 1.1rem;
+    box-shadow: 0 1px 2px hsl(var(--night) / 0.05), 0 6px 20px hsl(var(--night) / 0.04);
   }
   .frame.warm .panel { background: hsl(var(--paper)); }
   .panel .eyebrow { margin-bottom: 0.7rem; }
