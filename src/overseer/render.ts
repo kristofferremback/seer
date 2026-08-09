@@ -16,6 +16,7 @@
 // review that does not exist all answer with the same bytes.
 
 import { escapeHtml } from "../escape";
+import { agoWords } from "../relative-time";
 import { getWorkspace, listUserWorkspaces } from "../db";
 import { sessionUser, type SessionUser } from "../auth";
 import { openAttachment, attachmentLocation } from "../store";
@@ -44,8 +45,8 @@ import {
   touched,
   type EntityDelta,
 } from "./delta";
-import { freshnessOf, readableWorkspaces } from "./read";
-import { refreshOnView } from "./freshness";
+import type { PrStatusWord } from "./installations";
+import { freshnessOf, observedAtOf, readableWorkspaces, statusesOf } from "./read";
 import {
   KIND_LABEL,
   hunkAnchorId,
@@ -66,6 +67,7 @@ import {
   type EvidenceMarks,
 } from "./render-evidence";
 import {
+  OBSERVATION_STALE_MS,
   prKey,
   type Annotation,
   type DesignCoverage,
@@ -485,6 +487,26 @@ const STYLE = `  @font-face {
     .meta { font-size: 11.5px; column-gap: 8px; }
     .meta > span { gap: 8px; }
   }
+  /* "as of <time>" only appears when the observation behind the chip is old, so it is
+     not decoration to be quieted: it is the page admitting the chip beside it is a
+     memory. It sits at the weight of the row rather than below it. */
+  .meta .asof { color: hsl(var(--muted)); font-variant-numeric: tabular-nums; }
+  /* the repair, beside the thing it repairs. With the automatic check deleted this is
+     the only control on the page that reaches GitHub, and it does so because a human
+     asked it to. */
+  .refresh {
+    font: inherit;
+    color: hsl(var(--muted));
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: hsl(var(--muted) / 0.4);
+  }
+  .refresh:hover { color: hsl(var(--ink)); }
+  .refresh[disabled] { cursor: default; opacity: 0.55; text-decoration: none; }
 
   /* ---- sections ---- */
   section { margin-top: 30px; scroll-margin-top: 20px; }
@@ -905,6 +927,33 @@ const STYLE = `  @font-face {
   @media (hover: hover) and (pointer: fine) {
     .c-ref:hover .c-reftext { text-decoration-thickness: 2px; }
   }
+  /* ---- the one place GitHub's palette is allowed on this page ----
+     Green, purple and red are none of Seer's mark families, and they are admitted on
+     one ground: these colours are quoted, not authored. They express GitHub's encoding
+     rather than Seer's judgment, and a reader who has seen ten thousand of them reads
+     the card without being taught anything.
+
+     The exception is bounded and the bound is the rule: this glyph only. Never a wash,
+     a border, text or a chip; one glyph per card, at the size of the marks beside it;
+     colour is never the only channel (four shapes, and the word in the accessible
+     name); and dark theme uses GitHub's own dark variants rather than lightened light
+     ones. If it spreads past the glyph the rule has been broken, and the exception
+     does not widen. */
+  .c-status { flex: none; align-self: center; }
+  .c-status.s-open { color: #1a7f37; }
+  .c-status.s-merged { color: #8250df; }
+  .c-status.s-closed { color: #cf222e; }
+  .c-status.s-draft { color: #6e7781; }
+  :root[data-theme="dark"] .c-status.s-open { color: #3fb950; }
+  :root[data-theme="dark"] .c-status.s-merged { color: #a371f7; }
+  :root[data-theme="dark"] .c-status.s-closed { color: #f85149; }
+  :root[data-theme="dark"] .c-status.s-draft { color: #8b949e; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .c-status.s-open { color: #3fb950; }
+    :root:not([data-theme="light"]) .c-status.s-merged { color: #a371f7; }
+    :root:not([data-theme="light"]) .c-status.s-closed { color: #f85149; }
+    :root:not([data-theme="light"]) .c-status.s-draft { color: #8b949e; }
+  }
   .c-stat { font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; }
   .stat { white-space: nowrap; }
   /* A count is not a change. The added and deleted lines carry the change hues where
@@ -1206,6 +1255,25 @@ const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
   <symbol id="i-pr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
     <path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>
+  </symbol>
+  <!-- the four status glyphs, from GitHub's own vocabulary. Four distinct shapes, so
+       the reading survives colour being removed: an open pull request, a merge, a
+       cross, and the open shape drawn broken for a draft. -->
+  <symbol id="i-pr-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
+    <path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>
+  </symbol>
+  <symbol id="i-pr-merged" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
+    <path d="M6 21V9a9 9 0 0 0 9 9"/>
+  </symbol>
+  <symbol id="i-pr-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="6" cy="6" r="3"/><line x1="6" x2="6" y1="9" y2="21"/>
+    <path d="m21 3-6 6"/><path d="m15 3 6 6"/>
+  </symbol>
+  <symbol id="i-pr-draft" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/>
+    <path d="M18 6v1"/><path d="M18 11v1"/><line x1="6" x2="6" y1="9" y2="21"/>
   </symbol>
   <symbol id="i-branch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
@@ -1642,6 +1710,21 @@ function prStat(pr: Pr, hunks: Hunk[]): string {
   return `<span class="c-stat">${statHtml(added, removed)}</span>`;
 }
 
+/**
+ * What GitHub says this pull request is, in GitHub's own vocabulary.
+ *
+ * No observation draws nothing. A fourth glyph meaning "we have not looked" would be
+ * Seer inventing a state GitHub does not have; the chip above the chain is where
+ * absence is said, once, rather than on every card.
+ *
+ * Colour is never the only channel: four distinct shapes, and the word itself in the
+ * accessible name, so the four are told apart with colour removed.
+ */
+function statusGlyph(status: PrStatusWord | undefined): string {
+  if (status === undefined) return "";
+  return icon(`pr-${status}`, `ic c-status s-${status}`, status);
+}
+
 function card(
   pr: Pr,
   refs: Map<string, Ref>,
@@ -1678,7 +1761,10 @@ function card(
     `<span class="c-title">${escapeHtml(pr.title)}</span>` +
     `${icon("chev", "tick")}` +
     `</span>` +
-    `<span class="c-id">` +
+    // Named with the same key the live message uses, so a push can find this card's
+    // glyph without the script holding any per-pull-request state of its own.
+    `<span class="c-id" data-pr="${escapeHtml(prKey(pr.repo, pr.number))}">` +
+    statusGlyph(ctx.status[prKey(pr.repo, pr.number)]) +
     `<a class="c-ref" href="https://github.com/${escapeHtml(pr.repo)}/pull/${pr.number}">` +
     `${icon("pr")}<span class="c-reftext">${escapeHtml(prLabel(pr))}</span></a>` +
     prStat(pr, hunks) +
@@ -2138,6 +2224,9 @@ interface RenderCtx {
    *  belong to the review rather than to a version, so this is the same map whichever
    *  version is being read. */
   annotations: Map<string, Annotation[]>;
+  /** The status word per pull request, for the glyph on its card. Empty for a review
+   *  nothing has observed. */
+  status: Record<string, PrStatusWord>;
 }
 
 /** One row of the revision menu. Counts are derived from the delta between a
@@ -2172,6 +2261,21 @@ export interface RenderInput {
   /** True when the URL pinned a version rather than asking for the current one. */
   pinned: boolean;
   freshness: Record<string, Freshness>;
+  /** What GitHub last said each pull request was, keyed by `${repo}#${number}`. A key
+   *  with no entry has no observation, and its card draws no glyph. */
+  status?: Record<string, PrStatusWord>;
+  /** When the oldest observation behind those readings was made, or null when nothing
+   *  has been observed. Past `OBSERVATION_STALE_MS` the page says so; below it the
+   *  readings stand on their own, because a status confirmed minutes ago does not need
+   *  a disclaimer. */
+  observedAt?: number | null;
+  /** Whether to draw the refresh control. The route it posts to answers only a reader
+   *  who may read the review, so a page with no such reader gets no button rather than
+   *  one that could only 404. */
+  canRefresh?: boolean;
+  /** Now, for the staleness comparison. A parameter so a test can age an observation
+   *  without sleeping through the threshold. */
+  now?: number;
   /** The version the marks are measured against, or null for a page with none. */
   baseVersion?: number | null;
   /** The delta from that base. Null and baseVersion null move together. */
@@ -2253,23 +2357,96 @@ function revisionMenu(input: RenderInput, basePath: string): string {
 
 /** The heads text, as the page draws it and as the live push rewrites it. One
  *  function so the two cannot drift into two different sentences. */
-function headsText(behind: number, total: number): string {
-  return behind === 0 ? "up to date" : `${behind} of ${total} behind`;
+function headsText(behind: number, unknown: number, total: number): string {
+  // Three counts, not one. A `behind === 0` test collapsed every unobserved review to
+  // "up to date", which is the chip asserting a freshness the glyphs beside it
+  // cannot show: absence has to be sayable here or the chip lies where the glyph is
+  // honest. A pull request that moved is the more urgent of the two, so it wins.
+  if (behind > 0) return `${behind} of ${total} behind`;
+  if (unknown > 0) return unknown === total ? "heads unchecked" : `${unknown} of ${total} unchecked`;
+  return "up to date";
+}
+
+/**
+ * "as of <time>", or nothing at all.
+ *
+ * Exported for the test that pins the threshold: an observation a minute old renders
+ * bare and one three hours old renders dated, and both halves matter — a page that
+ * always says "as of" is a page whose reader learns nothing from it saying so.
+ */
+export function asOfMark(observedAt: number | null, now: number): string {
+  if (observedAt === null) return "";
+  const age = now - observedAt;
+  if (age < OBSERVATION_STALE_MS) return "";
+  return `<span class="asof" id="asof">${escapeHtml(`as of ${agoWords(age)}`)}</span>`;
+}
+
+/**
+ * The refresh control: the only thing left on this page that reaches GitHub, and it
+ * does so because a human pressed it.
+ *
+ * It reloads on success rather than waiting for the live channel. The channel carries
+ * an observation and publishes only when a reading *changed*, so a refresh that
+ * confirms everything would leave the page silent — and silent is exactly wrong here,
+ * because the thing the reader asked for was a newer `observed_at`, which no message
+ * carries. A reload renders the answer they actually wanted: the same readings, newly
+ * dated, with the "as of" gone.
+ *
+ * It reloads on an observation, though, and not on any 200: a refusal inside the
+ * window is answered with the recorded reading, and the button says so rather than
+ * reloading the page it was pressed on.
+ */
+function refreshScript(slug: string): string {
+  return (
+    `(()=>{const b=document.getElementById("refresh");if(!b)return;` +
+    `b.addEventListener("click",()=>{b.disabled=true;b.textContent="checking\\u2026";` +
+    `fetch("/api/reviews/"+encodeURIComponent(${JSON.stringify(slug)})+"/refresh",` +
+    `{method:"POST",headers:{"accept":"application/json"}})` +
+    `.then((r)=>{if(!r.ok)throw new Error(String(r.status));return r.json()})` +
+    // The route answers 200 with `checked:false` when the window refused a fresh
+    // fetch, and reloading on that would hand the reader the same stale page dressed
+    // as a new observation — which is the one thing this button must not do.
+    `.then((d)=>{if(d&&d.checked===false){b.disabled=false;` +
+    `b.textContent="checked moments ago \\u2014 try again shortly";return}location.reload()})` +
+    // A failed repair says so and stays pressable. Swallowing it would leave a page
+    // that looks refreshed and is not, which is the failure this control exists for.
+    `.catch(()=>{b.disabled=false;b.textContent="refresh failed \\u2014 try again"})})})();`
+  );
 }
 
 /** The freshness enhancement: it subscribes to the review's channel and rewrites the
  *  heads text when a push says a head moved. Nothing depends on it. Without a script
  *  the text is as fresh as the render, which is what the stored rows say. */
 function freshnessScript(wsId: string, slug: string): string {
-  const current = JSON.stringify(headsText(0, 0));
+  const current = JSON.stringify(headsText(0, 0, 0));
+  const allUnchecked = JSON.stringify(headsText(0, 1, 1));
   return (
     `(()=>{const h=document.getElementById("heads");if(!h)return;` +
     `const c=()=>{const w=new WebSocket((location.protocol==="https:"?"wss":"ws")+"://"+location.host+` +
     `"/ws/livereload?kind=review&ws="+encodeURIComponent(${JSON.stringify(wsId)})+` +
     `"&slug="+encodeURIComponent(${JSON.stringify(slug)}));` +
     `w.onmessage=(e)=>{let m=null;try{m=JSON.parse(e.data)}catch(x){return}` +
-    `if(!m||m.type!=="freshness")return;` +
-    `h.textContent=m.behind===0?${current}:m.behind+" of "+m.total+" behind"};` +
+    // One message, carrying the whole observation: the glyphs and the chip are two
+    // readings of one row, so they are rewritten from one message or they can disagree
+    // on screen — which is the failure the single row exists to prevent.
+    `if(!m||m.type!=="review")return;` +
+    `const N="http://www.w3.org/2000/svg";` +
+    `(m.prs||[]).forEach((p)=>{` +
+    `const el=document.querySelector('[data-pr="'+(window.CSS&&CSS.escape?CSS.escape(p.pr):p.pr)+'"]');` +
+    `if(!el)return;let g=el.querySelector(".c-status");` +
+    // No status is no glyph, not a fourth shape: an observation that went away has to
+    // be able to take its glyph with it.
+    `if(!p.status){if(g)g.remove();return}` +
+    `if(!g){g=document.createElementNS(N,"svg");g.appendChild(document.createElementNS(N,"use"));` +
+    `el.insertBefore(g,el.firstChild)}` +
+    `g.setAttribute("class","ic c-status s-"+p.status);g.setAttribute("role","img");` +
+    `g.setAttribute("aria-label",p.status);` +
+    `g.querySelector("use").setAttribute("href","#i-pr-"+p.status)});` +
+    // The same three-count sentence headsText draws, because the two must not drift
+    // into two different readings of one message.
+    `const u=m.unknown||0;` +
+    `h.textContent=m.behind>0?m.behind+" of "+m.total+" behind":` +
+    `u>0?(u===m.total?${allUnchecked}:u+" of "+m.total+" unchecked"):${current}};` +
     `w.onclose=()=>setTimeout(c,2000)};c()})();`
   );
 }
@@ -2290,6 +2467,7 @@ export function renderReviewPage(input: RenderInput): string {
     basePath: input.basePath ?? `/${wsId}/r/${slug}`,
     delta,
     annotations: byTarget,
+    status: input.status ?? {},
   };
   const review = delta ? delta.get("review", "review") : null;
   const intentDelta = delta ? delta.get("intent", "intent") : null;
@@ -2298,7 +2476,17 @@ export function renderReviewPage(input: RenderInput): string {
   const behind = doc.prs.filter(
     (pr) => input.freshness[prKey(pr.repo, pr.number)] === "behind",
   );
-  const heads = headsText(behind.length, doc.prs.length);
+  // Absent counts as unchecked, not as checked: a document read with no freshness map
+  // at all knows nothing about its heads and says so.
+  const unchecked = doc.prs.filter(
+    (pr) => (input.freshness[prKey(pr.repo, pr.number)] ?? "unknown") === "unknown",
+  );
+  const heads = headsText(behind.length, unchecked.length, doc.prs.length);
+  // The chip states what was observed; this states when, and only once "when" is old
+  // enough to change how the chip should be read. Below the threshold the reading
+  // stands bare, which is the whole distinction: a disclaimer on every page would be
+  // read by nobody and would say nothing about the page that has actually gone quiet.
+  const asOf = asOfMark(input.observedAt ?? null, input.now ?? Date.now());
   const count =
     doc.prs.length === 1 ? "1 pull request" : `${doc.prs.length} pull requests`;
   const marking = input.pinned
@@ -2373,7 +2561,15 @@ export function renderReviewPage(input: RenderInput): string {
     // A single-pull-request review is the ordinary case, and naming it says nothing
     // the count beside it does not. Every other kind still announces itself.
     `<p class="meta">${doc.kind === "single" ? "" : `<span>${escapeHtml(doc.kind)}</span>`}<span>${escapeHtml(count)}</span>` +
-    `<span class="heads" id="heads">${escapeHtml(heads)}</span>${baseMark}</p>` +
+    `<span class="heads" id="heads">${escapeHtml(heads)}</span>${asOf}` +
+    // Beside the chip, because the chip is the thing it repairs.
+    (input.canRefresh
+      ? // Wrapped in a span so the row's separator rule treats it like every other
+        // fact in the line: the "·" between items comes from `.meta > span`.
+        `<span><button type="button" class="refresh" id="refresh" ` +
+        `aria-label="Ask GitHub for the current state of these pull requests">refresh</button></span>`
+      : "") +
+    `${baseMark}</p>` +
     revisionMenu(input, ctx.basePath) +
     `</header>\n` +
     sharePanel(input.canShare === true) +
@@ -2417,6 +2613,7 @@ export function renderReviewPage(input: RenderInput): string {
     (input.pinned || input.live === false
       ? ""
       : `<script>${freshnessScript(wsId, slug)}</script>\n`) +
+    (input.canRefresh ? `<script>${refreshScript(slug)}</script>\n` : "") +
     `</body>\n</html>\n`
   );
 }
@@ -2706,6 +2903,23 @@ function reviewPage(args: {
     latestVersion: review.latest_version,
     pinned: version !== null,
     freshness: freshnessOf(ws, slug, row.doc),
+    // Both readings come off the same rows, so the chip and the glyphs cannot disagree
+    // about a pull request nothing has observed.
+    status: statusesOf(ws, row.doc),
+    // Off the same rows again: the age the page reports is the age of the readings it
+    // is showing, not of some other query.
+    observedAt: observedAtOf(ws, slug, row.doc),
+    // The refresh route answers a reader who may read the review, and it refreshes the
+    // review's *current* version — so the button is drawn for a member on the page that
+    // asked for the current version, and for nobody else. A share holder pressing it
+    // would get a 404; a pinned page is a record of what was published, and repairing
+    // it would mean repairing something other than what it shows, even when the pinned
+    // number happens to be the latest one.
+    canRefresh:
+      !shared &&
+      version === null &&
+      reader !== null &&
+      listUserWorkspaces(reader.id).some((w) => w.id === ws),
     baseVersion: delta ? base : null,
     delta,
     timeline,
@@ -2733,13 +2947,10 @@ function reviewPage(args: {
       reader !== null &&
       listUserWorkspaces(reader.id).some((w) => w.id === ws),
   });
-  // Looking at a review is what checks it. This is fired after the page is built and
-  // never awaited, so a slow GitHub cannot hold a render: the reader gets the stored
-  // document now, and a head that moved arrives on the live channel or on the next load.
-  // A share holder's look does not count: it is not a member's attention, and a link
-  // that anyone can open must not be a way to spend the deployment's GitHub budget.
-  if (!shared && asked === review.latest_version)
-    refreshOnView(ws, slug, row.doc);
+  // Nothing here reaches GitHub. Looking at a review used to check it; that automatic
+  // check is deleted, not merely unused, so there is no path from a render to the
+  // network to forget about later. Publish seeded these rows, deliveries maintain them,
+  // and the refresh control repairs them when a delivery never came.
 
   return new Response(html, {
     status: 200,

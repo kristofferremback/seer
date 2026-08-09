@@ -10,12 +10,12 @@ import { test, expect, beforeAll, afterAll, describe } from "bun:test";
 import { join } from "node:path";
 
 import { startServer } from "../../src/server";
-import { config } from "../../src/config";
 import { createWorkspace, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
 import { listAnnotations } from "../../src/overseer/db";
-import { setGithubClient, type GithubClient } from "../../src/overseer/github";
-import { offlineGithubClient } from "../offline-github";
-import { GOLDEN_HEAD_SHA_12 } from "./fixtures/golden-review";
+import { type GithubClient } from "../../src/overseer/github";
+import { GithubRoutingError, setGithubClientFactory } from "../../src/overseer/github-app";
+import { offlineGithubClient, offlineGithubClientFactory } from "../offline-github";
+import { GOLDEN_HEAD_SHA_12, GOLDEN_REPO } from "./fixtures/golden-review";
 import { storeGoldenReview } from "./fixtures/stored-review";
 
 let server: Awaited<ReturnType<typeof startServer>>;
@@ -23,7 +23,6 @@ let base: string;
 let ws = "";
 let key = "";
 let otherKey = "";
-let priorToken: string | undefined;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function readJson(res: Response): Promise<any> {
@@ -68,9 +67,9 @@ function page(slug: string): Promise<Response> {
 beforeAll(async () => {
   server = await startServer();
   base = `http://localhost:${server.port}`;
-  setGithubClient(fake);
-  priorToken = config.githubToken;
-  config.githubToken = "fake-token";
+  // Answering an annotation resolves its refs through a client built for the
+  // answering workspace, so the seam is a factory here too.
+  setGithubClientFactory(() => fake);
 
   const owner = listMembers(legacyWorkspaceId()!)[0]!.id;
   ws = createWorkspace("Annotations", owner);
@@ -80,8 +79,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  config.githubToken = priorToken;
-  setGithubClient(offlineGithubClient());
+  setGithubClientFactory(offlineGithubClientFactory());
   server.stop(true);
 });
 
@@ -327,20 +325,72 @@ describe("answering", () => {
     expect(html).not.toContain(`class="is-answered"`);
   });
 
-  test("an answer with no refs needs nothing from GitHub", async () => {
+  test("an answer with no refs needs no installation, and one with refs is refused without one", async () => {
+    // What this replaces: the same pair asked of GITHUB_TOKEN, answered 503. The
+    // token is gone, so the thing that can be missing is an installation covering the
+    // repository the ref names — and an answer citing nothing still needs none.
     storeGoldenReview(ws, "norefs");
     const filed = await readJson(
       await file("norefs", { target: { type: "summary", id: "summary" }, body: "Why one shot?" }),
     );
-    const token = config.githubToken;
-    config.githubToken = "";
+    const unheld: GithubClient = {
+      ...fake,
+      getFileAtSha: (repo) => {
+        throw new GithubRoutingError(
+          `This workspace does not hold the GitHub App installation that covers ${repo}. Connect that account in workspace settings.`,
+        );
+      },
+    };
+    const ref = {
+      repo: GOLDEN_REPO,
+      sha: GOLDEN_HEAD_SHA_12,
+      path: "src/auth.ts",
+      startLine: 40,
+      endLine: 48,
+    };
+
+    setGithubClientFactory(() => unheld);
+    let refused: Response;
+    let none: Response;
     try {
-      const res = await answer("norefs", { id: filed.id, answer: { body: "Because a pass is." } });
-      expect(res.status).toBe(200);
+      refused = await answer("norefs", { id: filed.id, answer: { body: "Here.", refs: [ref] } });
+      none = await answer("norefs", { id: filed.id, answer: { body: "Because a pass is." } });
     } finally {
-      config.githubToken = token;
+      setGithubClientFactory(() => fake);
     }
+    expect(refused.status).toBe(422);
+    expect((await readJson(refused)).error).toContain("does not hold");
+    // Refused before anything was written: the annotation is still open for the answer
+    // below to land on.
+    expect(none.status).toBe(200);
     expect(listAnnotations(ws, "norefs")[0]!.status).toBe("answered");
+    expect(listAnnotations(ws, "norefs")[0]!.answer!.refs).toHaveLength(0);
+  });
+
+  test("the same ref resolves for a workspace that does hold the repository", async () => {
+    // The success beside the refusal: identical ref, identical review, the only
+    // difference being the client the workspace's holdings produce.
+    storeGoldenReview(ws, "held-ref");
+    const filed = await readJson(
+      await file("held-ref", { target: { type: "summary", id: "summary" }, body: "Where?" }),
+    );
+    const res = await answer("held-ref", {
+      id: filed.id,
+      answer: {
+        body: "Here.",
+        refs: [
+          {
+            repo: GOLDEN_REPO,
+            sha: GOLDEN_HEAD_SHA_12,
+            path: "src/auth.ts",
+            startLine: 40,
+            endLine: 48,
+          },
+        ],
+      },
+    });
+    expect(res.status).toBe(200);
+    expect((await readJson(res)).annotation.answer.refs).toHaveLength(1);
   });
 
   test("an already answered annotation is a 422, not a silent overwrite", async () => {

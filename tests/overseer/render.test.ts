@@ -113,6 +113,18 @@ describe("the page itself", () => {
     expect(stripped).toContain("data-theme-toggle hidden");
   });
 
+  test("the refresh button tells a fresh observation from the recorded one", () => {
+    const html = page(doc(), { canRefresh: true });
+    // The route answers 200 with `checked:false` when the window refused the fetch, so
+    // a 200 alone is not grounds to reload: that would show the reader the same stale
+    // page and call it new.
+    expect(html).not.toContain("String(r.status));location.reload()");
+    expect(html).toContain("d.checked===false");
+    expect(html).toContain("checked moments ago \\u2014 try again shortly");
+    // A transport failure still says so and leaves the button pressable.
+    expect(html).toContain("refresh failed \\u2014 try again");
+  });
+
   test("the page names the forest, design, focus, and implementation layers", () => {
     const html = page(doc());
     expect(html).toContain('<section id="summary"><h2>Overview</h2>');

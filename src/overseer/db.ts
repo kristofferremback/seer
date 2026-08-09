@@ -341,6 +341,44 @@ export function deleteAnnotation(wsId: string, slug: string, id: string): void {
   ]);
 }
 
+// ---- the pre-App freshness table ----
+
+/**
+ * The head a pre-App review recorded for one of its pull requests, with the moment it
+ * was recorded, or null.
+ *
+ * `review_freshness` is what freshness was before the App: a per-review observation of
+ * a head, with no state, no merged and no draft, which is why the v5 migration could
+ * carry it into `review_prs` but not into `github_pr_status` — a status row invented
+ * out of it would draw a glyph nobody observed. It is still the chip's question, so the
+ * read falls back to it, keyed per review as it was written. `checked_at` rides along
+ * because a reading this old must arrive dated: the "as of" mark is the only hedge the
+ * page has, and a months-old head rendered bare would be trusted as though somebody had
+ * just confirmed it.
+ *
+ * v6 drops the table, so a missing table is no rows rather than a throw: the operator
+ * running the drop must not turn a page into a 500.
+ */
+export function legacyObservedHead(
+  wsId: string,
+  slug: string,
+  repo: string,
+  prNumber: number,
+): { observedHeadSha: string; checkedAt: number } | null {
+  try {
+    const row = db
+      .query<{ observed_head_sha: string; checked_at: number }, [string, string, string, number]>(
+        "SELECT observed_head_sha, checked_at FROM review_freshness " +
+          "WHERE workspace_id = ? AND slug = ? AND lower(repo) = lower(?) AND pr_number = ?",
+      )
+      .get(wsId, slug, repo, prNumber);
+    return row ? { observedHeadSha: row.observed_head_sha, checkedAt: row.checked_at } : null;
+  } catch (err) {
+    if (String((err as Error)?.message ?? err).includes("no such table")) return null;
+    throw err;
+  }
+}
+
 // ---- read state ----
 
 export interface ReadStateRow {
@@ -370,57 +408,6 @@ export function setReviewRead(
     "INSERT OR REPLACE INTO review_reads (workspace_id, slug, user_id, version, opened_at) " +
       "VALUES (?, ?, ?, ?, ?)",
     [wsId, slug, userId, version, Date.now()],
-  );
-}
-
-// ---- freshness ----
-
-export interface FreshnessRow {
-  workspace_id: string;
-  slug: string;
-  repo: string;
-  pr_number: number;
-  observed_head_sha: string;
-  checked_at: number;
-}
-
-/** The head SHA last seen on GitHub for one pull request in this review. Keyed by
- *  repo as well as number: pull request 12 exists in every repository. */
-export function getFreshness(
-  wsId: string,
-  slug: string,
-  repo: string,
-  prNumber: number,
-): FreshnessRow | null {
-  return db
-    .query<FreshnessRow, [string, string, string, number]>(
-      "SELECT * FROM review_freshness " +
-        "WHERE workspace_id = ? AND slug = ? AND repo = ? AND pr_number = ?",
-    )
-    .get(wsId, slug, repo, prNumber);
-}
-
-export function listFreshness(wsId: string, slug: string): FreshnessRow[] {
-  return db
-    .query<FreshnessRow, [string, string]>(
-      "SELECT * FROM review_freshness WHERE workspace_id = ? AND slug = ? " +
-        "ORDER BY repo ASC, pr_number ASC",
-    )
-    .all(wsId, slug);
-}
-
-export function setFreshness(
-  wsId: string,
-  slug: string,
-  repo: string,
-  prNumber: number,
-  observedHeadSha: string,
-): void {
-  db.run(
-    "INSERT OR REPLACE INTO review_freshness " +
-      "(workspace_id, slug, repo, pr_number, observed_head_sha, checked_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?)",
-    [wsId, slug, repo, prNumber, observedHeadSha, Date.now()],
   );
 }
 

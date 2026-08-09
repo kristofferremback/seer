@@ -1,5 +1,6 @@
 import { test, expect, beforeAll, describe } from "bun:test";
 // Env is set by tests/setup.ts before these app modules import.
+import { db } from "../../src/db";
 import { migrate } from "../../src/migrate";
 import {
   answerAnnotation,
@@ -9,22 +10,20 @@ import {
   deleteAnnotation,
   getAnnotation,
   getAttachment,
-  getFreshness,
   getReview,
   getReviewRead,
   getReviewVersion,
   getSnippet,
   listAnnotations,
   listAttachments,
-  listFreshness,
   listReviewVersions,
   listReviews,
   putSnippet,
   reopenAnnotation,
-  setFreshness,
   setReviewRead,
   type ReviewDoc,
 } from "../../src/overseer/db";
+import { listReviewPrs, setReviewPrs } from "../../src/overseer/installations";
 import {
   attachmentKey,
   attachmentLocation,
@@ -238,27 +237,37 @@ describe("read state", () => {
   });
 });
 
-describe("freshness", () => {
-  test("the observed head sha is per pull request and updates in place", () => {
-    expect(getFreshness(WS_A, "fresh", "owner/name", 12)).toBeNull();
-
-    setFreshness(WS_A, "fresh", "owner/name", 12, "aaa111");
-    setFreshness(WS_A, "fresh", "owner/name", 13, "bbb222");
-    expect(getFreshness(WS_A, "fresh", "owner/name", 12)?.observed_head_sha).toBe("aaa111");
-    expect(listFreshness(WS_A, "fresh").map((f) => f.pr_number)).toEqual([12, 13]);
-
-    setFreshness(WS_A, "fresh", "owner/name", 12, "ccc333");
-    expect(getFreshness(WS_A, "fresh", "owner/name", 12)?.observed_head_sha).toBe("ccc333");
-    expect(listFreshness(WS_A, "fresh")).toHaveLength(2);
+// This release stops writing `review_freshness` and leaves it standing; v6 drops it a
+// release later, so the previous image keeps finding what it reads through a redeploy.
+// The observation it used to hold lives in `review_prs` joined to `github_pr_status`,
+// so the survivor is asserted beside the table rather than on its own.
+describe("the freshness table the write path abandoned", () => {
+  test("review_freshness still exists after migration in this release", () => {
+    const row = db
+      .query<{ name: string }, [string]>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .get("review_freshness");
+    expect(row).not.toBeNull();
+    // Standing and readable, not just named in sqlite_master. Nothing writes it any
+    // more, so this workspace has no rows; other suites plant pre-App rows of their
+    // own in the shared database, which is why the count is asked per workspace.
+    expect(
+      db.query("SELECT * FROM review_freshness WHERE workspace_id = ?").all(WS_A),
+    ).toEqual([]);
   });
 
-  test("the same pull request number in two repos stays two rows", () => {
-    setFreshness(WS_A, "multi", "owner/one", 12, "aaa111");
-    setFreshness(WS_A, "multi", "owner/two", 12, "bbb222");
-
-    expect(getFreshness(WS_A, "multi", "owner/one", 12)?.observed_head_sha).toBe("aaa111");
-    expect(getFreshness(WS_A, "multi", "owner/two", 12)?.observed_head_sha).toBe("bbb222");
-    expect(listFreshness(WS_A, "multi")).toHaveLength(2);
+  test("the pull requests a review names are still recorded, per repo", () => {
+    setReviewPrs(WS_A, "fresh", [
+      { repo: "owner/one", number: 12, repoId: 1 },
+      { repo: "owner/two", number: 12, repoId: 2 },
+      { repo: "owner/one", number: 13, repoId: 1 },
+    ]);
+    expect(listReviewPrs(WS_A, "fresh").map((r) => `${r.repo}#${r.pr_number}`)).toEqual([
+      "owner/one#12",
+      "owner/one#13",
+      "owner/two#12",
+    ]);
   });
 });
 

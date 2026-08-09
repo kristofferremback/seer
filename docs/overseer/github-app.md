@@ -110,7 +110,12 @@ github_pr_status
 
 review_prs
   workspace_id, slug, repo_id, pr_number   PRIMARY KEY
-  repo              display only
+  repo              the name the document was published with. It is never rewritten
+                    underneath the document that named it, not even when the repository
+                    is renamed: it is the bridge from a stored document's frozen name to
+                    the numeric id (repoIdForNamedPr), which is how the read side finds
+                    the observation after a rename. review_pr_status.repo is the display
+                    name, and that one does follow the rename.
   (replaced wholesale on every publish, in the publish transaction)
 
 github_deliveries

@@ -17,6 +17,7 @@ import { saveAttachment } from "../store";
 import { tinyId } from "../ids";
 import { requireApiKey } from "../auth";
 import { createAttachment, createReviewVersion, getReview, getReviewVersion, type ReviewDoc } from "./db";
+import { setReviewPrs, sweepOrphanPrStatus, upsertPrStatus } from "./installations";
 import {
   derivePrs,
   PrPointerError,
@@ -28,7 +29,8 @@ import {
   type DerivedReview,
   type PrPointer,
 } from "./derive";
-import { GithubError, githubClient } from "./github";
+import { GithubError, type GithubClient } from "./github";
+import { GithubAppRefusal, githubClientFor } from "./github-app";
 import {
   publishUsage,
   validatePublish,
@@ -247,10 +249,11 @@ class UpstreamError extends Error {}
 /** Resolve every pointer once. Returns the resolved refs by pointer key, or the 422
  *  errors when one or more pointers do not resolve. */
 async function resolveRefs(
+  client: GithubClient,
   review: DerivedReview,
   payload: PublishPayload,
 ): Promise<{ refs: Map<string, Ref>; errors: ValidationError[] }> {
-  const resolver = refResolver(githubClient(), review);
+  const resolver = refResolver(client, review);
   const refs = new Map<string, Ref>();
   const errors: ValidationError[] = [];
   for (const site of pointerSites(payload)) {
@@ -267,6 +270,10 @@ async function resolveRefs(
       // transport failure (DNS, a reset connection, `fetch failed`) also arrives as a
       // plain Error carried as the cause. So the cause decides: a failure the client
       // threw that is not a GithubError never reached GitHub, and is upstream.
+      // A repository this workspace holds no installation for is neither the skill's
+      // ref to rewrite nor GitHub failing: it is a refusal by our own transport, and it
+      // travels as itself so the route can answer 422 naming the repository.
+      if (err.cause instanceof GithubAppRefusal) throw err.cause;
       const upstreamCause = err.cause !== undefined && !(err.cause instanceof GithubError);
       if (upstreamCause || (err.status !== null && err.status !== 0 && err.status !== 404)) {
         throw new UpstreamError(err.message);
@@ -631,19 +638,10 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > config.maxUploadBytes) return tooBig();
 
-  // Every fact half of a review comes off the GitHub API, so publishing without a
-  // token is a misconfiguration and not a smaller review. Bundles and images are
-  // untouched by it, which is why this refuses here rather than at boot.
-  if (!config.githubToken) {
-    return json(
-      {
-        error:
-          "GITHUB_TOKEN is not set, and Overseer derives every review from the GitHub API. " +
-          "Set GITHUB_TOKEN and publish again.",
-      },
-      503,
-    );
-  }
+  // Every GitHub call this publish makes is made as the workspace, through an
+  // installation the workspace has connected. There is no server-wide token behind
+  // this: a repository no held installation covers is refused by the client itself.
+  const github = githubClientFor(ws);
 
   let body: PublishBody;
   try {
@@ -696,7 +694,7 @@ export async function handlePublishReview(req: Request): Promise<Response> {
 
   let review: DerivedReview;
   try {
-    review = await derivePrs(githubClient(), pointers);
+    review = await derivePrs(github, pointers);
   } catch (err) {
     // Only the pointers themselves are the skill's to fix. GitHub answering badly, or
     // not answering at all, is Overseer's: telling the skill its pull requests are
@@ -704,6 +702,12 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     if (err instanceof PrPointerError) {
       return unprocessable([{ field: "prs", rule: "pr_not_derivable", message: err.message }]);
     }
+    // Routing refused before any request went out: the workspace holds no installation
+    // covering this repository. Naming it is the actionable answer; a 502 would have
+    // the skill retry an access problem as though GitHub had faltered.
+    // Routing refused, the installation is suspended, or the App's shared rate limit is
+    // spent: all three are 422, and none of them is a fault to retry.
+    if (err instanceof GithubAppRefusal) return json({ error: err.message }, 422);
     // The same status rule the ref path reads: a 404 is a pointer at a pull request
     // that is not there, and a 0 is a pointer the client refused before any request
     // went out, a malformed repo or a number that is not one. Both are the skill's to
@@ -770,8 +774,11 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   let refs: Map<string, Ref>;
   let refErrors: ValidationError[];
   try {
-    ({ refs, errors: refErrors } = await resolveRefs(review, payload));
+    ({ refs, errors: refErrors } = await resolveRefs(github, review, payload));
   } catch (err) {
+    // Routing refused, the installation is suspended, or the App's shared rate limit is
+    // spent: all three are 422, and none of them is a fault to retry.
+    if (err instanceof GithubAppRefusal) return json({ error: err.message }, 422);
     if (!(err instanceof UpstreamError)) throw err;
     return json({ error: `Overseer could not read a ref from GitHub: ${err.message}` }, 502);
   }
@@ -796,6 +803,46 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   // corruption on read; a blob without its row is garbage nothing points at.
   const version = db.transaction(() => {
     const v = createReviewVersion(ws, slug, doc);
+    // The pull request set this review names, replaced wholesale in the same
+    // transaction: a republish that drops #4 and adds #9 must delete #4's row, or an
+    // observation keeps landing on a review that no longer mentions it. The numeric
+    // repository id comes off the same `getPull` the derivation made, so a document
+    // published through the App never needs the backfill's name fallback.
+    const repoIds = new Map(
+      review.observations.map((o) => [prKey(o.repo, o.number), o.repoId] as const),
+    );
+    setReviewPrs(
+      ws,
+      slug,
+      doc.prs.map((p) => ({
+        repo: p.repo,
+        number: p.number,
+        repoId: repoIds.get(prKey(p.repo, p.number)) ?? null,
+      })),
+    );
+    // The counterpart to the delivery filter. A republish that drops a pull request has
+    // just deleted its review_prs row above; its status row is keyed per workspace and
+    // may still be named by a second review, so it goes only when nothing names it.
+    // Same transaction as the set that changed the answer.
+    sweepOrphanPrStatus(ws);
+    // The seed, and it is load-bearing rather than an optimisation: with no polling
+    // anywhere this is the only thing that gives a new review a glyph, and for a pull
+    // request that is already merged or closed there may never be a webhook. It runs
+    // through the same conditional upsert as every other writer, so a publish that
+    // started before a merge cannot roll the merge back.
+    for (const o of review.observations) {
+      if (o.installationId === null || o.repoId === null) continue;
+      upsertPrStatus(ws, o.installationId, {
+        repoId: o.repoId,
+        repo: o.repo,
+        prNumber: o.number,
+        state: o.state,
+        merged: o.merged,
+        draft: o.draft,
+        headSha: o.headSha,
+        updatedAt: o.updatedAt,
+      });
+    }
     for (const a of resolved.attachments) {
       createAttachment(ws, slug, v, a.mediaType, a.bytes.length, a.alt, a.caption, a.id);
     }

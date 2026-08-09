@@ -1,25 +1,41 @@
 // Freshness: whether the branches a review is about still point where the review says.
 //
-// Looking at a review is what checks it. A render answers from the stored document
-// immediately and, at most once a minute per review, kicks a detached comparison of
-// the stored head SHAs against GitHub. Nothing on the read path waits for GitHub: a
-// slow or broken client costs the reader nothing, and a head that moved lands in
-// `review_freshness`, which the next render reads and, for a reader with a script,
-// arrives over the live channel as a push.
+// Nothing here runs by itself any more. Looking at a review used to check it; that
+// automatic check is deleted, and no timer replaced it. Publish seeds `github_pr_status`
+// from the `getPull` the derivation already makes, deliveries maintain it, and a human
+// pressing refresh repairs it — one automatic write path after creation rather than two
+// sources of one fact. A render reaches GitHub on no path at all, which is now a
+// property of the architecture rather than a rule each page has to remember.
+//
+// What that costs is a change nobody could tell us about: a delivery GitHub gave up on,
+// a rotated secret, the minutes of a redeploy. Those used to heal silently on the next
+// render and now persist until someone repairs them, which is why the repair is visible
+// (`observed_at` on every row, delivery health in settings) rather than automatic.
+//
+// The freshness table this module used to write is still on disk, and nothing here
+// writes it any more. It held a second recording of one fact beside the status row, and
+// two writers of one fact is the drift this design exists to remove — so this release
+// stops the write and leaves the table standing. The drop is v6, a release later
+// (src/migrate.ts), so an old container still reading it during a redeploy finds it
+// there and a rollback still recognises the database.
 //
 // The rate limit is process-local on purpose. It is a courtesy to the GitHub API, not
 // a correctness rule: two processes checking the same review a second apart write the
 // same rows and reach the same answer.
 
+import { getReviewVersion, resolveReview, type ReviewDoc } from "./db";
+import { parseUpdatedAt } from "./derive";
+import type { GithubClient } from "./github";
+import { githubClientFor } from "./github-app";
 import {
-  getReviewVersion,
-  listFreshness,
-  resolveReview,
-  setFreshness,
-  type ReviewDoc,
-} from "./db";
-import { githubClient, type GithubClient } from "./github";
-import { freshnessOf, readableWorkspaces } from "./read";
+  ANONYMOUS_OBSERVER,
+  healReviewPrRepoId,
+  lookupPrStatus,
+  reviewsNaming,
+  statusOf,
+  upsertPrStatus,
+} from "./installations";
+import { freshnessOf, readableWorkspaces, statusesOf } from "./read";
 import { prKey, type Freshness } from "./types";
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -112,60 +128,119 @@ export async function checkReview(
   wsId: string,
   slug: string,
   doc: ReviewDoc,
-  client: GithubClient = githubClient(),
+  // The observation is made as the workspace whose review it is, through an
+  // installation that workspace holds. A repository it no longer holds fails the same
+  // way an unreachable GitHub does: the last observation stands.
+  client: GithubClient = githubClientFor(wsId),
 ): Promise<CheckResult> {
-  const observed = new Map(
-    listFreshness(wsId, slug).map((f) => [prKey(f.repo, f.pr_number), f.observed_head_sha]),
-  );
   const prs: PrFreshness[] = [];
   let changed = false;
   for (const pr of doc.prs) {
     const key = prKey(pr.repo, pr.number);
-    const before = observed.get(key) ?? pr.headSha;
-    let head = before;
+    const known = lookupPrStatus(wsId, pr.repo, pr.number);
+    const was: Freshness = known ? (known.head_sha === pr.headSha ? "current" : "behind") : "unknown";
+    // One observation, two derivations — so a check has changed something when *either*
+    // derivation moved. A pull request merged with its head unmoved changes status and
+    // not freshness, and the message this decides whether to send carries both.
+    const wasStatus = known ? statusOf(known) : null;
+    let freshness = was;
     try {
       const pull = await client.getPull(pr.repo, pr.number);
-      head = pull.head.sha;
-      setFreshness(wsId, slug, pr.repo, pr.number, head);
+      // "Nobody's" from a routing client is not "don't know": the pull above was read
+      // anonymously, and a repair that observed the truth and recorded nothing would
+      // leave this page answering "unchecked" after every successful press of the one
+      // button that exists to fix that. Only a client with no routing at all leaves the
+      // row unwritten.
+      const installationId = client.installationFor
+        ? ((await client.installationFor(pr.repo)) ?? ANONYMOUS_OBSERVER)
+        : null;
+      const repoId = pull.base?.repo?.id ?? known?.repo_id ?? null;
+      // A review published before the App knows its pull requests only by name. This
+      // observation is the first thing to learn their numeric ids, and a repair that
+      // did not record them would leave the row as blind to a rename afterwards as it
+      // was before — a refresh that succeeded and healed nothing.
+      if (repoId !== null) healReviewPrRepoId(wsId, slug, pr.repo, pr.number, repoId);
+      // One row, one writer, one precondition: a refresh goes through the same upsert a
+      // publish and a delivery do, so a slow refresh cannot roll back a newer fact.
+      if (installationId !== null && repoId !== null) {
+        upsertPrStatus(wsId, installationId, {
+          repoId,
+          // GitHub's answer names the repository as it is called now; the document
+          // names it as it was called at publication. The row's name is display only
+          // and must be the current one.
+          repo: pull.base?.repo?.full_name ?? known?.repo ?? pr.repo,
+          prNumber: pr.number,
+          state: pull.state,
+          merged: pull.merged === true,
+          draft: pull.draft === true,
+          headSha: pull.head.sha,
+          updatedAt: parseUpdatedAt(pull.updated_at),
+        });
+      }
+      freshness = pull.head.sha === pr.headSha ? "current" : "behind";
     } catch (err) {
       // A review is not wrong because GitHub was unreachable. The last observation
       // stands, and the failure is said out loud rather than swallowed.
       console.error(`[seer] freshness check failed for ${key} in ${wsId}/${slug}: ${String(err)}`);
     }
-    const freshness: Freshness = head !== pr.headSha ? "behind" : "current";
-    const was: Freshness = before !== pr.headSha ? "behind" : "current";
     if (freshness !== was) changed = true;
+    const nowRow = lookupPrStatus(wsId, pr.repo, pr.number);
+    if ((nowRow ? statusOf(nowRow) : null) !== wasStatus) changed = true;
     prs.push({ pr: key, repo: pr.repo, number: pr.number, freshness });
   }
   return { prs, changed };
 }
 
-/** What a page pushes when a head has moved under it. One shape, so the script on the
- *  page reads a message rather than guessing at one. */
-export function freshnessMessage(result: CheckResult): string {
-  const behind = result.prs.filter((p) => p.freshness === "behind").length;
-  return JSON.stringify({ type: "freshness", behind, total: result.prs.length });
+/**
+ * The whole observation, in one message.
+ *
+ * One message and not two. A `{"type":"pr"}` beside a `{"type":"freshness"}` would be
+ * two descriptions of one observation on the wire: they can arrive out of order and
+ * leave the chip disagreeing with the glyphs on the same screen, which is the failure
+ * the one-row design exists to prevent, reintroduced at the transport. It also could
+ * not have worked — given one pull request's head the script cannot recompute `behind`,
+ * because the page emits no per-pull-request head SHA and the script holds no state.
+ *
+ * So the counts and the per-pull-request readings are computed here, from the rows,
+ * and whatever caused the observation — a delivery or a human pressing refresh — the
+ * wire shape is identical.
+ */
+export function reviewMessage(wsId: string, slug: string, doc: ReviewDoc): string {
+  const fresh = freshnessOf(wsId, slug, doc);
+  const status = statusesOf(wsId, doc);
+  const prs = doc.prs.map((pr) => {
+    const key = prKey(pr.repo, pr.number);
+    return {
+      pr: key,
+      // Null rather than absent: a page that had a glyph and should not have one any
+      // more has to be told, and a missing field is indistinguishable from "unchanged".
+      status: status[key] ?? null,
+      freshness: fresh[key] ?? "unknown",
+    };
+  });
+  return JSON.stringify({
+    type: "review",
+    prs,
+    behind: prs.filter((p) => p.freshness === "behind").length,
+    unknown: prs.filter((p) => p.freshness === "unknown").length,
+    total: prs.length,
+  });
 }
 
 /**
- * The refresh a render triggers. Returns immediately, always.
+ * Push the current observation of a review to the pages open on it.
  *
- * The check runs detached: the caller has already answered, so there is nothing to
- * await it for and every failure inside it is logged rather than thrown. When a head
- * has moved, the pages open on this review hear about it on the live channel; the ones
- * without a script see it on their next load, out of the rows this wrote.
+ * Read from the rows rather than handed the result of whatever wrote them, so a
+ * delivery and a refresh cannot describe the same review two different ways. A review
+ * that no longer resolves is silence: the page will find out on its next load.
  */
-export function refreshOnView(wsId: string, slug: string, doc: ReviewDoc): void {
-  if (!claimCheck(wsId, slug)) return;
-  // Deliberately not awaited. The `void` is the point of this function.
-  void (async () => {
-    try {
-      const result = await checkReview(wsId, slug, doc);
-      if (result.changed) publisher?.(reviewTopic(wsId, slug), freshnessMessage(result));
-    } catch (err) {
-      console.error(`[seer] freshness refresh failed for ${wsId}/${slug}: ${String(err)}`);
-    }
-  })();
+export function publishReview(wsId: string, slug: string): void {
+  if (!publisher) return;
+  const review = resolveReview([wsId], slug);
+  if (!review) return;
+  const row = getReviewVersion(wsId, slug, review.latest_version);
+  if (!row) return;
+  publisher(reviewTopic(wsId, slug), reviewMessage(wsId, slug, row.doc));
 }
 
 // ---- the route ----
@@ -216,13 +291,30 @@ export async function handleRefreshReview(req: Request, slug: string): Promise<R
       false,
       row.doc.prs.map((pr) => {
         const key = prKey(pr.repo, pr.number);
-        return { pr: key, freshness: known[key] ?? "current" };
+        // No default. This route is the repair path — the one thing a reader reaches
+        // for when they already suspect something is stale — so it is the last place
+        // that may answer "current" about a pull request nothing has observed.
+        return { pr: key, freshness: known[key] ?? "unknown" };
       }),
     );
   }
 
   const result = await checkReview(ws, slug, row.doc);
-  if (result.changed) publisher?.(reviewTopic(ws, slug), freshnessMessage(result));
+  if (result.changed) {
+    // The rows this wrote are the workspace's, not this review's: every review naming
+    // the same pull request renders from them, so a refresh that published only the
+    // page whose button was pressed would leave its siblings showing what the check
+    // just disproved. The webhook path fans out through the same join; so does this.
+    const slugs = new Set<string>([slug]);
+    for (const pr of row.doc.prs) {
+      const status = lookupPrStatus(ws, pr.repo, pr.number);
+      if (!status) continue;
+      // A status row the backfill left without a numeric id matches by name only, and
+      // an id no repository has is how that is said to a join that takes both.
+      for (const s of reviewsNaming(ws, status.repo_id ?? -1, pr.repo, pr.number)) slugs.add(s);
+    }
+    for (const s of slugs) publishReview(ws, s);
+  }
   return answer(
     true,
     result.prs.map((p) => ({ pr: p.pr, freshness: p.freshness })),
