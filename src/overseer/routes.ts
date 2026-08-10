@@ -23,6 +23,7 @@ import {
   PrPointerError,
   hunksOf,
   kindsForPr,
+  prChanging,
   refResolver,
   RefResolveError,
   type DerivedPr,
@@ -260,7 +261,28 @@ async function resolveRefs(
     const key = pointerKey(site.pointer);
     if (refs.has(key)) continue;
     try {
-      refs.set(key, await resolver.resolve(site.pointer));
+      const ref = await resolver.resolve(site.pointer);
+      // `outside` on a file this review changes is the one label that can be wrong
+      // while every other rule passes, and it is wrong in the direction that matters:
+      // the page tells the reader a changed file is not part of the change. It happens
+      // when the sha is not one the review carries — the witness read the code at some
+      // other commit, or the branch moved between reading and publishing — so the ref
+      // is refused with the sha to use, rather than published as a quiet lie.
+      const changed = ref.origin === "outside" ? prChanging(review.prs, ref.repo, ref.path) : null;
+      if (changed) {
+        errors.push({
+          field: site.field,
+          rule: "ref_sha_outside_review",
+          message:
+            `${site.field} quotes ${ref.path} at ${ref.sha}, a commit this review does not ` +
+            `carry, so it would render as outside this stack — but ` +
+            `${prKey(changed.repo, changed.number)} changes that file. Pin it at that pull ` +
+            `request's head sha (${changed.headSha}), or at its base sha (${changed.baseSha}) ` +
+            `to quote the file as it was before the change.`,
+        });
+        continue;
+      }
+      refs.set(key, ref);
     } catch (err) {
       if (!(err instanceof RefResolveError)) throw err;
       // Per RefResolveError.status: a 404 and a client-side refusal (0) are the skill's
@@ -519,6 +541,7 @@ function buildDocument(args: {
       parent: derived.parent,
       author: derived.author,
       coAuthors: derived.coAuthors,
+      commitShas: derived.commitShas,
       body: derived.body,
       gist: pr.gist,
       detail: pr.detail,

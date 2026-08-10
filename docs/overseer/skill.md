@@ -388,8 +388,14 @@ refs are enough sends `evidence: []`.
   authored field, with optional `highlight[]`. Overseer resolves the snippet and derives whether the ref
   is `in_stack` or `outside`. A ref into untouched code is often the most useful thing
   on the page, because it shows what the change reuses.
+  Pin a ref into changed code at the head sha of the pull request that changes it; its
+  base sha shows the file as it was, and any commit inside it counts too. Code the
+  review does not touch is yours to pin wherever you read it.
   What a ref is checked for: the file exists at that sha, and the range lies inside it,
-  so a range past the end of the file is a 422. What cannot be checked is whether those
+  so a range past the end of the file is a 422; and a file some pull request in the
+  review changes, quoted at a commit the review does not carry, is a 422 naming the sha
+  to use, because that ref would otherwise render "outside this stack" over a file this
+  very change edits. What cannot be checked is whether those
   are the *right* lines, because that is the judgment you were sent to supply. A ref
   aimed a few lines off renders a real snippet under a claim it does not support and
   nothing will say so, which is the one place the page can be wrong while passing every

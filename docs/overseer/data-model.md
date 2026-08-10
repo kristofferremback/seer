@@ -195,7 +195,9 @@ ref
   snippet       derived, cached
 ```
 
-`origin` is derived by checking whether that path at that SHA is touched by any pull request in the review. The prototype's most useful single ref was one pointing at `src/auth.ts`, untouched by the stack, to show what the new gate reuses. Getting that label wrong would be a lie about the shape of the change, so the skill does not get to write it.
+`origin` is `in_stack` when the review carries that SHA and changes that path, in that repo. The SHAs it carries are every pull request's base, head and commits; the paths it changes are every changed file, under both names when it is a rename. The two sets are unioned across the review rather than paired per pull request, because a stack's child contains its parent's work and a witness may pin a whole review's refs at one commit. The prototype's most useful single ref was one pointing at `src/auth.ts`, untouched by the stack, to show what the new gate reuses. Getting that label wrong would be a lie about the shape of the change, so the skill does not get to write it.
+
+The remaining way to be wrong is to quote a changed file at a SHA the review does not carry: the page would tell the reader that a file this very change edits is outside it. That is refused at publish, with the head SHA to use, rather than rendered.
 
 Refs are SHA-pinned, so a force push cannot rot them.
 

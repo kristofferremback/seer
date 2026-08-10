@@ -441,6 +441,38 @@ describe("publish refusals", () => {
     expect(counts()).toEqual(before);
   });
 
+  test("a changed file quoted at a sha the review does not carry -> 422", async () => {
+    const before = counts();
+    const payload = noAttachments();
+    // The same file the review changes, pinned at a commit belonging to neither pull
+    // request. It resolves — the bytes are there — and would publish as "outside this
+    // stack" over a file this very review edits.
+    const ref = payload.statements.flatMap((s) => s.refs).find((r) => r.path === "src/auth.ts")!;
+    ref.sha = "0".repeat(40);
+    const res = await publish("stray-sha", payload);
+    expect(res.status).toBe(422);
+    const json = await readJson(res);
+    const err = json.errors.find((e: { rule: string }) => e.rule === "ref_sha_outside_review");
+    expect(err.message).toContain("src/auth.ts");
+    expect(err.message).toContain(GOLDEN_HEAD_SHA_12);
+    expect(err.field).toContain("refs");
+    expect(counts()).toEqual(before);
+  });
+
+  test("an untouched file at any sha the repo answers for stays publishable", async () => {
+    // The counterpart to the rule above, so it is a rule about changed files and not a
+    // rule about shas: the most useful ref on a page is often one into code the stack
+    // does not touch, and it is pinned wherever the witness read it.
+    const payload = noAttachments();
+    const ref = payload.statements.flatMap((s) => s.refs).find((r) => r.path === "src/session.ts")!;
+    ref.sha = "0".repeat(40);
+    const res = await publish("untouched-sha", payload);
+    expect(res.status).toBe(200);
+    const doc = getReviewVersion(wsA, "untouched-sha", 1)!.doc;
+    const stored = doc.statements.flatMap((s) => s.refs).find((r) => r.path === "src/session.ts")!;
+    expect(stored.origin).toBe("outside");
+  });
+
   test("a slug that is not a slug -> 400", async () => {
     const res = await publish("", JSON.stringify({ slug: "Not A Slug", ...noAttachments() }));
     expect(res.status).toBe(400);

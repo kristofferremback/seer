@@ -218,10 +218,12 @@ function text(
 /** The stored document read back as derived facts, so an answer's refs resolve through
  *  the same resolver a publish uses: the same origin rule, the same snippet cache, the
  *  same errors. The files are rebuilt from the document's hunks, which is everything
- *  the resolver reads them for. One thing does not survive the round trip: a renamed
+ *  the resolver reads them for. Two things do not survive the round trip: a renamed
  *  file's previous path is not on a hunk, so a ref pinned to the old path of a file
- *  this review renames resolves as `outside` rather than `in_stack`. That is a mark on
- *  a snippet, not a gate, and no answer is refused for it. */
+ *  this review renames resolves as `outside` rather than `in_stack`; and a document
+ *  published before `commitShas` was stored has only its head and base to offer, so a
+ *  ref pinned at a commit inside one of its pull requests resolves `outside` too. Both
+ *  are a mark on a snippet, not a gate, and no answer is refused for either. */
 export function derivedFromDoc(doc: ReviewDoc): DerivedReview {
   const prs: DerivedPr[] = doc.prs.map((pr) => {
     const byPath = new Map<string, FileDiff>();
@@ -253,6 +255,7 @@ export function derivedFromDoc(doc: ReviewDoc): DerivedReview {
       parent: pr.parent,
       author: pr.author,
       coAuthors: pr.coAuthors,
+      commitShas: pr.commitShas ?? [],
       body: pr.body,
       files: [...byPath.values()],
     };
