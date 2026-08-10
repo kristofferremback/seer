@@ -140,8 +140,10 @@ describe("the documents an agent discovers", () => {
     const res = await fetch(`${base}/`, { headers: { accept: "text/markdown" } });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toStartWith("text/markdown");
-    // Vary, or a cache serves one representation to everyone who asks for the other.
-    expect(res.headers.get("vary")).toBe("Accept");
+    // Accept, or a cache serves one representation to everyone who asks for the other.
+    // Cookie, because the page's action link reads the session and a cache keyed on
+    // Accept alone would hand a signed-in reader's page to a stranger.
+    expect(res.headers.get("vary")).toBe("Accept, Cookie");
     const body = await res.text();
     expect(body).toStartWith("# Seer");
     expect(body).toContain(`${config.baseUrl}/skill.md`);
@@ -170,6 +172,19 @@ describe("the documents an agent discovers", () => {
   test("a weighted preference for markdown wins over a weighted one for HTML", async () => {
     const res = await fetch(`${base}/`, { headers: { accept: "text/html;q=0.3, text/markdown;q=0.9" } });
     expect(res.headers.get("content-type")).toStartWith("text/markdown");
+  });
+
+  test("q=0 is a refusal, not a low score", async () => {
+    // Comparing the two weights was not enough on its own. An unmentioned type scores
+    // below zero, so `text/markdown;q=0` — a caller saying markdown is the one thing it
+    // cannot read — beat an HTML it never named, and got markdown.
+    for (const accept of ["text/markdown;q=0", "text/markdown;q=0, */*;q=0.1"]) {
+      const res = await fetch(`${base}/`, { headers: { accept } });
+      expect({ accept, type: res.headers.get("content-type") }).toEqual({
+        accept,
+        type: "text/html;charset=utf-8",
+      });
+    }
   });
 
   // ---- API catalog ----

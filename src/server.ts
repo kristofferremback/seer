@@ -169,28 +169,39 @@ function text(body: string, contentType: string): Response {
  * leads with `text/html` at 1 and reaches markdown only through its trailing wildcard
  * at 0.8, so it gets the page. A tie goes to HTML, because HTML is what the URL has
  * always meant, and a caller that named neither gets the page too.
+ *
+ * `q=0` is a refusal rather than a low score (RFC 9110 §12.4.2), so it is checked
+ * separately from the comparison. Comparing alone was not enough: an absent type scores
+ * -1, so `text/markdown;q=0` — a caller saying markdown is the one thing it cannot read
+ * — beat an unmentioned HTML and was served markdown.
  */
 function prefersMarkdown(req: Request): boolean {
   const accept = req.headers.get("accept");
   if (!accept) return false;
   const best = (type: string): number => {
-    let q = -1;
+    // A more specific range overrides a broader one rather than competing with it
+    // (RFC 9110 §12.5.1), so the three specificities are collected apart: `*/*;q=0.1`
+    // beside `text/markdown;q=0` does not lift the refusal, it is overridden by it.
+    const ranges = [type, `${type.split("/")[0]}/*`, "*/*"];
+    const q: (number | undefined)[] = [undefined, undefined, undefined];
     for (const part of accept.split(",")) {
       const [raw, ...params] = part.split(";");
-      const candidate = raw!.trim().toLowerCase();
-      const matches =
-        candidate === type || candidate === `${type.split("/")[0]}/*` || candidate === "*/*";
-      if (!matches) continue;
+      const rank = ranges.indexOf(raw!.trim().toLowerCase());
+      if (rank < 0) continue;
       const weight = params
         .map((p) => p.trim().toLowerCase())
         .find((p) => p.startsWith("q="));
       const value = weight === undefined ? 1 : Number(weight.slice(2));
       // A malformed q is not a preference; treat it as absent rather than as zero.
-      q = Math.max(q, Number.isFinite(value) ? value : 1);
+      const parsed = Number.isFinite(value) ? value : 1;
+      q[rank] = q[rank] === undefined ? parsed : Math.max(q[rank]!, parsed);
     }
-    return q;
+    // Absent at every specificity scores below zero, which is how "not asked for" stays
+    // distinguishable from "asked for and refused".
+    return q[0] ?? q[1] ?? q[2] ?? -1;
   };
-  return best("text/markdown") > best("text/html");
+  const markdown = best("text/markdown");
+  return markdown > 0 && markdown > best("text/html");
 }
 
 function favicon(name: string, contentType: string): Response {
@@ -628,13 +639,17 @@ export async function startServer() {
       //
       // The front door is also where a thing that is not a person arrives, so this
       // response carries the Link header that says where everything machine-readable
-      // lives, and answers in markdown to a caller that asked for markdown. Vary is
-      // load-bearing: without it a cache that saw one of the two would serve it to
-      // everyone who asks for the other.
+      // lives, and answers in markdown to a caller that asked for markdown.
+      //
+      // Vary names both things this URL turns on, and both are load-bearing. Accept,
+      // because without it a cache that saw one representation would serve it to
+      // everyone who asked for the other. Cookie, because the page's action link reads
+      // the session, and a shared cache told to key on Accept alone would hand a
+      // signed-in reader's page to a stranger.
       "/": (req) => {
         const headers: Record<string, string> = {
           link: homepageLinkHeader(),
-          vary: "Accept",
+          vary: "Accept, Cookie",
         };
         if (prefersMarkdown(req)) {
           return new Response(landingMarkdown(), {
