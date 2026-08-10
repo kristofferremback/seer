@@ -175,12 +175,14 @@ An agent that arrives at `/` without having been told any of the above can find 
 | `GET /robots.txt` | Crawl rules (RFC 9309) plus `Content-Signal` preferences: search and AI answering yes, training no. |
 | `GET /sitemap.xml` | The public documents. No bundle and no review is listed — an unlisted URL should not become an index. |
 | `GET /` with `Accept: text/markdown` | The front page as markdown. HTML stays the default and the response carries `Vary: Accept`. |
-| `GET /openapi.json` | The credential-bearing API, as OpenAPI 3.1. |
+| `GET /openapi.json` | The credential-bearing API, as OpenAPI 3.1. Its `paths` are projected from `src/api.ts`, the same list `Bun.serve` is handed its route table from, so the document cannot name a route the server does not answer. |
 | `GET /auth.md` | How an agent gets a credential, in the [auth.md](https://github.com/workos/auth.md) shape. |
 | `GET /.well-known/api-catalog` | RFC 9727 linkset pointing at the spec, the docs and `/healthz`. |
 | `GET /.well-known/agent-skills/index.json` | The four skill documents, each with a SHA-256 of the bytes this deployment actually serves. |
 | `Link:` on `/` | The same targets as response headers, for a client that reads headers and not bodies. |
 | WebMCP on `/` | Two `navigator.modelContext` tools, for an agent driving a browser. |
+
+`src/api.ts` is where an API route is added: one entry carrying the handler and the description together. `doc` is required and nullable, so adding a route means saying what it is or saying, in as many words, that it is not an API anybody calls. `tests/api-contract.test.ts` then checks the half a projection cannot derive — that each field the document calls `required` is one the handler actually requires, and that a real 200 validates against the schema declared for it.
 
 Deliberately absent: `/.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`, `/.well-known/mcp/server-card.json` and `/.well-known/agent-card.json`. Seer has no OAuth authorization server, no MCP transport and no A2A service, and a discovery document naming an endpoint that does not answer costs an agent a round trip and a retry. `/auth.md` says so in prose to the agent that came looking. Adding any of them means building the thing first.
 
