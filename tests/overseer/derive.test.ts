@@ -139,7 +139,7 @@ function fakePull(
       base: { sha: sha(`base${number}`), ref: baseRef, repo: { id: 900 + number, full_name: "acme/widgets" } },
       updated_at: "2026-07-19T06:27:55Z",
     },
-    commits: [commit(`c${number}`, `commit for ${number}`)],
+    commits: [commit(sha(`mid${number}`), `commit for ${number}`), commit(sha(`sha${number}`), `head of ${number}`)],
     files: [file(`src/f${number}.ts`, PATCH)],
     comments: [],
     ...over,
@@ -731,6 +731,38 @@ describe("refs", () => {
         endLine: 1,
       }),
     ).toBe("outside");
+  });
+
+  test("a commit inside a pull request is a sha the review carries", async () => {
+    const { review } = await fixture({});
+    // Not the head and not the base: the commit before the tip. A witness that pinned
+    // its refs there was pinning them inside the change, and a whole review's citations
+    // read "outside this stack" for it.
+    expect(
+      deriveOrigin(review.prs, {
+        repo: REPO,
+        sha: sha("mid103"),
+        path: "src/f103.ts",
+        startLine: 1,
+        endLine: 1,
+      }),
+    ).toBe("in_stack");
+  });
+
+  test("a file the parent changed is inside the change at the child's head sha", async () => {
+    const { review } = await fixture({});
+    // The child's tree is the parent's tree and more, so quoting the parent's file at
+    // the tip of the stack is quoting the stack. Pairing each pull request's paths with
+    // only its own two shas called this outside.
+    expect(
+      deriveOrigin(review.prs, {
+        repo: REPO,
+        sha: sha("sha103"),
+        path: "src/f101.ts",
+        startLine: 1,
+        endLine: 1,
+      }),
+    ).toBe("in_stack");
   });
 
   test("a sha spelled in upper case is the same sha for origin", async () => {

@@ -145,6 +145,11 @@ export interface Pr {
   author: string | null;
   /** Derived: Co-Authored-By trailers across the pr's commits, deduplicated. */
   coAuthors: string[];
+  /** Derived: every commit in the pull request, oldest first. Stored because `origin`
+   *  is re-derived from this document when an answer's refs resolve, and a document
+   *  that had forgotten its commits would label those refs differently from the review
+   *  they hang on. Absent on documents published before it was written. */
+  commitShas?: string[];
   /** Derived: the pull request description, markdown as GitHub holds it. */
   body: string;
   /** Authored: this pull request's contribution to the whole change.

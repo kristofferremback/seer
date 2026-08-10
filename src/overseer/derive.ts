@@ -60,6 +60,10 @@ export interface DerivedPr {
   /** Null when the account is gone, which is a visible absence rather than a blank name. */
   author: string | null;
   coAuthors: string[];
+  /** Every commit in the pull request, oldest first. Read for `coAuthors` and kept for
+   *  `origin`: a ref pinned at a commit inside the change is pinned inside the change,
+   *  and the head sha is only the last of them. */
+  commitShas: string[];
   body: string;
   files: FileDiff[];
 }
@@ -316,6 +320,7 @@ export async function derivePrs(
       authored: pointer.parent ?? null,
       author: pull.user?.login ?? null,
       coAuthors: coAuthorsOf(commits.map((c) => c.commit.message)),
+      commitShas: commits.map((c) => c.sha),
       body: pull.body ?? "",
       files: diff.files,
     });
@@ -372,48 +377,76 @@ function refRange(pointer: RefPointer): string {
   return `${pointer.path}:${pointer.startLine}-${pointer.endLine}`;
 }
 
-/** The paths a review touches, per repo and sha, for `origin`. A rename counts under
- *  both of its names: the ref may point at either side of it. */
-function touchedIndex(prs: DerivedPr[]): Map<string, Set<string>> {
-  const index = new Map<string, Set<string>>();
-  const add = (repo: string, sha: string, path: string) => {
-    // Lowercased on the way in, because lookups lowercase the pointer's sha: GitHub
-    // answers to either spelling and the two sides must not be able to disagree.
-    const key = `${repo}@${sha.toLowerCase()}`;
-    let set = index.get(key);
-    if (!set) index.set(key, (set = new Set<string>()));
-    set.add(path);
+/** What a review carries, per repo, for `origin`: the commits it is about and the paths
+ *  it changes. A rename counts under both of its names, because the ref may point at
+ *  either side of it. */
+interface ReviewReach {
+  shas: Set<string>;
+  paths: Set<string>;
+}
+
+/** The two sets are unioned across the whole review rather than paired per pull request.
+ *  Pairing was the bug: it asked whether *this* pull request changed that path at
+ *  exactly one of *its own* two shas, so a file the parent of a stack changed, quoted at
+ *  the child's head sha, read `outside` — even though the child's tree is the parent's
+ *  tree plus more. The same strictness turned a whole review's refs `outside` whenever
+ *  the witness pinned them at any single commit that was not a head or a base.
+ *
+ *  Every commit in a pull request is in the set, not only its head. The base sha is in
+ *  it too and always was, which is what settles what the label means: not "the change is
+ *  present in the tree at this sha" — at the base it provably is not — but "this commit
+ *  is one this review is about, and this path is one it changes". */
+function reviewReach(prs: DerivedPr[]): Map<string, ReviewReach> {
+  const index = new Map<string, ReviewReach>();
+  const reach = (repo: string): ReviewReach => {
+    let at = index.get(repo);
+    if (!at) index.set(repo, (at = { shas: new Set(), paths: new Set() }));
+    return at;
   };
   for (const pr of prs) {
+    const at = reach(pr.repo);
+    // Lowercased on the way in, because lookups lowercase the pointer's sha: GitHub
+    // answers to either spelling and the two sides must not be able to disagree.
+    for (const sha of [pr.headSha, pr.baseSha, ...pr.commitShas]) at.shas.add(sha.toLowerCase());
     for (const file of pr.files) {
-      // Both shas of the pull request: a ref at the head sha shows the changed file,
-      // one at the base sha shows what it looked like before, and both are inside the
-      // change. Any other sha is a pointer at code this review does not carry.
-      add(pr.repo, pr.headSha, file.path);
-      add(pr.repo, pr.baseSha, file.path);
-      if (file.previousPath) {
-        add(pr.repo, pr.headSha, file.previousPath);
-        add(pr.repo, pr.baseSha, file.previousPath);
-      }
+      at.paths.add(file.path);
+      if (file.previousPath) at.paths.add(file.previousPath);
     }
   }
   return index;
 }
 
-/** `origin` per the data model: `in_stack` iff that path at that sha is touched by
- *  some pull request in the review. Derived, never authored: getting it wrong is a lie
- *  about the shape of the change. */
+/** `origin` per the data model: `in_stack` iff the review carries that sha and touches
+ *  that path, in that repo. Derived, never authored: getting it wrong is a lie about the
+ *  shape of the change. */
 export function deriveOrigin(prs: DerivedPr[], pointer: RefPointer): RefOrigin {
-  return originIn(touchedIndex(prs), pointer);
+  return originIn(reviewReach(prs), pointer);
 }
 
-function originIn(touched: Map<string, Set<string>>, pointer: RefPointer): RefOrigin {
-  return touched.get(`${pointer.repo}@${pointer.sha.toLowerCase()}`)?.has(pointer.path)
+function originIn(reach: Map<string, ReviewReach>, pointer: RefPointer): RefOrigin {
+  const at = reach.get(pointer.repo);
+  return at?.shas.has(pointer.sha.toLowerCase()) && at.paths.has(pointer.path)
     ? "in_stack"
     : "outside";
 }
 
-/** Resolves refs against one review: shared touched-path index, shared file cache. */
+/** The pull request in this review that changes `path`, if one does — under either name
+ *  when it is a rename. Independent of any sha: it answers "is this file part of the
+ *  change", which is what `outside this stack` is read as. The publish path asks it
+ *  about every ref that came back `outside`, because a ref quoting a changed file at a
+ *  commit the review does not carry is an authoring mistake and not a fact about the
+ *  code. */
+export function prChanging(prs: DerivedPr[], repo: string, path: string): DerivedPr | null {
+  for (const pr of prs) {
+    if (pr.repo !== repo) continue;
+    for (const file of pr.files) {
+      if (file.path === path || file.previousPath === path) return pr;
+    }
+  }
+  return null;
+}
+
+/** Resolves refs against one review: shared reach index, shared file cache. */
 export interface RefResolver {
   resolve(pointer: RefPointer): Promise<Ref>;
 }
@@ -435,7 +468,7 @@ export function sweepSnippetCache(now = Date.now()): number {
 }
 
 export function refResolver(client: GithubClient, review: DerivedReview): RefResolver {
-  const touched = touchedIndex(review.prs);
+  const reach = reviewReach(review.prs);
 
   // ref_snippets has no workspace column: the same (repo, sha, path) is the same bytes
   // for everyone, which makes it a shared cache of private source. The gate below is
@@ -556,7 +589,7 @@ export function refResolver(client: GithubClient, review: DerivedReview): RefRes
         startLine,
         endLine,
         highlight,
-        origin: originIn(touched, pointer),
+        origin: originIn(reach, pointer),
         snippet: lines.slice(startLine - 1, endLine).join("\n"),
       };
     },
