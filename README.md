@@ -166,6 +166,24 @@ Seer hosts its own usage doc, written for an AI agent that holds a base URL and 
 
 The landing page advertises the doc via `<link rel="alternate" type="text/markdown" href="/skill.md">` and a colophon link. Point an agent at `$BASE_URL/skill.md` (or `/llms.txt`) and it has everything it needs. A public workspace's bundle URLs are viewable by anyone, so an agent can hand the returned URL out — or fetch it back itself to verify the rendered page. A private workspace's URLs are members-only. The inventory (`GET /api/bundles`) always stays behind the key.
 
+### Discovery
+
+An agent that arrives at `/` without having been told any of the above can find its own way in. All of it is generated in `src/agent-discovery.ts` from the same `BASE_URL`, so a self-hosted instance describes itself rather than this one.
+
+| path | what it is |
+|---|---|
+| `GET /robots.txt` | Crawl rules (RFC 9309) plus `Content-Signal` preferences: search and AI answering yes, training no. |
+| `GET /sitemap.xml` | The public documents. No bundle and no review is listed — an unlisted URL should not become an index. |
+| `GET /` with `Accept: text/markdown` | The front page as markdown. HTML stays the default and the response carries `Vary: Accept`. |
+| `GET /openapi.json` | The credential-bearing API, as OpenAPI 3.1. |
+| `GET /auth.md` | How an agent gets a credential, in the [auth.md](https://github.com/workos/auth.md) shape. |
+| `GET /.well-known/api-catalog` | RFC 9727 linkset pointing at the spec, the docs and `/healthz`. |
+| `GET /.well-known/agent-skills/index.json` | The four skill documents, each with a SHA-256 of the bytes this deployment actually serves. |
+| `Link:` on `/` | The same targets as response headers, for a client that reads headers and not bodies. |
+| WebMCP on `/` | Two `navigator.modelContext` tools, for an agent driving a browser. |
+
+Deliberately absent: `/.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`, `/.well-known/mcp/server-card.json` and `/.well-known/agent-card.json`. Seer has no OAuth authorization server, no MCP transport and no A2A service, and a discovery document naming an endpoint that does not answer costs an agent a round trip and a retry. `/auth.md` says so in prose to the agent that came looking. Adding any of them means building the thing first.
+
 ## Configuration
 
 All configuration is via environment variables. Bun loads `.env` automatically. Copy `.env.example` to `.env` to start.
