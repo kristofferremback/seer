@@ -25,6 +25,22 @@ numReplicas = 1
 #   ALLOWED_EMAILS    comma-separated allowlist, e.g. you@example.com
 #   BASE_URL          the service's public https URL (set after first deploy)
 #   DATA_DIR          /data   (must match the mounted volume path)
+# The GitHub App. All six required; the server refuses to boot without them.
+# GITHUB_APP_PRIVATE_KEY is the PEM base64-encoded, because a Railway variable
+# does not survive its newlines: base64 -w0 < app.private-key.pem
+#   GITHUB_APP_ID
+#   GITHUB_APP_SLUG
+#   GITHUB_APP_PRIVATE_KEY
+#   GITHUB_APP_CLIENT_ID
+#   GITHUB_APP_CLIENT_SECRET
+#   GITHUB_WEBHOOK_SECRET
+# Envelope encryption, for the credentials Seer stores and reads back — a user's
+# fine-grained GitHub token is the first. Read lazily, so an instance without it
+# boots and passes its healthcheck and then fails at the first token pasted.
+# Set it BEFORE anyone connects a credential, and never lose it afterwards: it is
+# the only thing that can open what was sealed under it.
+#   SEER_ENCRYPTION_KEYS  v1:$(openssl rand -base64 32)
+#   SEER_ENCRYPTION_ACTIVE_KEY  v1
 # Blob store (bundle zips + images) in S3 — set all of these together. On the
 # first boot with S3_BUCKET set, the app copies every existing blob from the
 # volume into the bucket (idempotent; local files are left in place). SQLite
