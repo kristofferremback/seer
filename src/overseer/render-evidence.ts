@@ -62,6 +62,22 @@ export function safeInline(source: string | null | undefined): string {
   }
 }
 
+/** The control that lifts one block of code out of the column and onto the whole
+ *  screen. It is an enhancement and says so: the attribute is `hidden` in the markup
+ *  and only a script that can open the panel removes it, so a page with no scripting
+ *  never offers a control that would do nothing.
+ *
+ *  `title` is what the panel is called once it is open — a path, a range — so the
+ *  reader who is now looking at code with no column around it still knows what they
+ *  are looking at. Every code surface on the page wears the same control in the same
+ *  corner: one concept, one grammar. */
+export function zoomButton(title: string): string {
+  return (
+    `<button type="button" class="zoom" hidden data-zoom="${escapeHtml(title)}" ` +
+    `aria-label="${escapeHtml(`Read ${title} full screen`)}">${icon("expand", "mark")}</button>`
+  );
+}
+
 export function shortSha(sha: string): string {
   return sha.slice(0, 7);
 }
@@ -157,6 +173,7 @@ export function refFold(ownerId: string, ref: Ref, suffix = ""): string {
     `<span class="nb">${escapeHtml(shortSha(ref.sha))} ·</span> ` +
     `<span class="nb">L${ref.startLine}-${ref.endLine}</span>` +
     `</span>${icon("cue", "cue")}</summary>` +
+    zoomButton(`${ref.path} L${ref.startLine}-${ref.endLine}`) +
     `<div class="fold-body">` +
     `<pre class="snip scroll-x"><code>${snippetLines(ref)}</code></pre>` +
     `<p class="fold-out"><a href="${escapeHtml(githubBlobUrl(ref))}">` +
@@ -198,7 +215,10 @@ function payloadBlock(payload: Payload): string {
       );
     })
     .join("");
-  return `<div class="snipbox"><pre class="snip scroll-x"><code>${body}</code></pre></div>`;
+  return (
+    `<div class="snipbox">${zoomButton(`${payload.lang} payload`)}` +
+    `<pre class="snip scroll-x"><code>${body}</code></pre></div>`
+  );
 }
 
 const GLYPH: Record<"ctx" | "add" | "del", string> = { ctx: " ", add: "+", del: "-" };
@@ -227,7 +247,8 @@ function exampleBlock(
   const body = mark(marks, `${p}-text`, exampleBodyHtml(text, lang));
   return (
     `<figure class="ev ev-example" data-lang="${escapeHtml(lang)}">` +
-    `<div class="snipbox"><pre class="snip scroll-x"><code>${body}</code></pre></div>` +
+    `<div class="snipbox">${zoomButton(caption.trim() === "" ? lang : caption)}` +
+    `<pre class="snip scroll-x"><code>${body}</code></pre></div>` +
     `<figcaption>${mark(marks, `${p}-caption`, safeInline(caption))}</figcaption></figure>`
   );
 }

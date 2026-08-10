@@ -407,12 +407,13 @@ describe("the page itself", () => {
     expect(html).toContain("&lt;svg onload=1&gt;");
     // The escaped characters are text, so no tag on the page grew a handler.
     expect(html).not.toMatch(/<[a-z]+[^>]*\son[a-z]+\s*=/i);
-    // Only the three scripts the renderer writes itself: the theme floor, the page
-    // enhancement, and the freshness channel an unpinned page subscribes to.
-    expect(html.match(/<script/g)!.length).toBe(3);
+    // Only the four scripts the renderer writes itself: the theme floor, the page
+    // enhancement, the full-screen code panel, and the freshness channel an
+    // unpinned page subscribes to.
+    expect(html.match(/<script/g)!.length).toBe(4);
     // A pinned version is a record, so it has no channel and one script fewer.
     const pinned = page(doc(), { pinned: true });
-    expect(pinned.match(/<script/g)!.length).toBe(2);
+    expect(pinned.match(/<script/g)!.length).toBe(3);
   });
 
   test("the chain draws arrows for a stack and none for a set", () => {
@@ -583,14 +584,20 @@ describe("the page itself", () => {
       "--wash-add: hsl(var(--add) / 0.13);",
       "--wash-rem: hsl(var(--remove) / 0.11);",
       "--rail-add: hsl(var(--add) / 0.8);",
-      "--syn-cm: 10 14% 50%;",
       // The syntax hues were raised off the prototype's values after measuring a
       // real page: at the old chroma ceiling a keyword cleared body text by dE 23
       // with a 5.7 lightness gap, which reads as no colour at all. Hue distance
       // from the semantic marks is what keeps them apart, and it is unchanged.
-      "--syn-kw: 276 44% 42%;",
-      "--syn-st: 210 62% 38%;",
-      "--syn-kw: 283 58% 76%;",
+      // Raised a second time after measuring against the sunk panel a diff is
+      // actually drawn on, where the comment stood at 3.4:1, under the floor for
+      // text of any size. Both hues still sit under the loudest semantic mark in
+      // chroma; what changed is that the band is now spent rather than saved.
+      "--syn-cm: 12 22% 40%;",
+      "--syn-kw: 280 56% 33%;",
+      "--syn-st: 214 93% 30%;",
+      "--syn-cm: 14 16% 62%;",
+      "--syn-kw: 286 72% 79%;",
+      "--syn-st: 204 95% 72%;",
     ]) {
       expect(html).toContain(token);
     }
@@ -600,6 +607,20 @@ describe("the page itself", () => {
     // The sprite is inline, so no mark is a network request.
     expect(html).toContain('<symbol id="i-risk"');
     expect(html).toContain('href="/fonts/switzer.woff2"');
+  });
+
+  test("code on a phone scrolls sideways rather than wrapping", () => {
+    const html = page(doc());
+    // A line of code is the line the author wrote at every width: nothing anywhere
+    // re-flows it, which is what the phone block used to do below 700px.
+    expect(html).not.toContain("pre-wrap; overflow-wrap: anywhere");
+    expect(html).toContain(".snip .l {\n    display: block;\n    white-space: pre;");
+    // The gesture is contained, so swiping to the end of a line cannot be handed to
+    // the browser's back navigation instead.
+    expect(html).toContain("overscroll-behavior-x: contain");
+    // And the gutter rides along at every width, so the numbers and the +/- never
+    // scroll off the left edge of a diff.
+    expect(html).toContain(".filediff .snip .gut {\n    position: sticky; left: 0;");
   });
 
   test("no em dash reaches the page", async () => {
