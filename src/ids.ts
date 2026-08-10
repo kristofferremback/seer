@@ -47,3 +47,8 @@ export const ATT_ID_RE = new RegExp(`^att_${TINY}$`);
 export const SHR_ID_RE = new RegExp(`^shr_${TINY}$`);
 export const API_KEY_RE = /^seer_sk_[A-Za-z0-9_-]{32}$/;
 export const SHARE_TOKEN_RE = /^seer_sh_[A-Za-z0-9_-]{32}$/;
+
+/** What a bundle, a review and a share target may be called. Not an id — the publisher
+ *  chooses it — but it is matched in the same places and by the same rule, and the API
+ *  document states this pattern to callers, so it lives beside them. */
+export const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;

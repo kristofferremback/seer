@@ -1,4 +1,4 @@
-import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
+import type { ServerWebSocket, WebSocketHandler } from "bun";
 import { join, resolve } from "node:path";
 import { config } from "./config";
 import {
@@ -11,14 +11,11 @@ import {
   getWorkspace,
   isMember,
   listBundles,
-  listImages,
   listMembers,
   listUserKeys,
   listUserWorkspaces,
   listVersions,
-  createImage,
   createInvite,
-  createVersion,
   createWorkspace,
   mintApiKey,
   revokeApiKey,
@@ -28,27 +25,24 @@ import {
   legacyWorkspaceId,
   type Workspace,
 } from "./db";
+import { bunRoutes } from "./api";
+import { json, originOk } from "./http";
 import { migrate } from "./migrate";
-import { inspectZip, saveZip, openImage, imageLocation, saveImage, s3 } from "./store";
+import { openImage, imageLocation, s3 } from "./store";
 import { migrateBlobsToS3 } from "./migrate-blobs";
-import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
 import {
   acceptInvite,
   loginRedirect,
   handleCallback,
   lookupValidInvite,
-  requireApiKey,
   requireSession,
   sessionEmail,
   sessionUser,
   type SessionUser,
 } from "./auth";
-import { IMG_ID_RE, INV_ID_RE, WS_ID_RE } from "./ids";
+import { IMG_ID_RE, INV_ID_RE, SLUG_RE, WS_ID_RE } from "./ids";
 import {
   getShare,
-  handleCreateShare,
-  handleListShares,
-  handleRevokeShare,
   handleShareRequest,
   listShares,
   resolveShare,
@@ -56,7 +50,6 @@ import {
   setShareRevokedHook,
 } from "./shares";
 import { serveBundleFile } from "./serve-bundle";
-import { handlePublishReview } from "./overseer/routes";
 import {
   handleClaimInstallation,
   handleConnectGithub,
@@ -64,7 +57,6 @@ import {
   handleGithubSetupCallback,
   installUrl,
 } from "./overseer/github-claim";
-import { handleGithubWebhook } from "./overseer/webhook";
 import { handleConnectGithubAccount, handleGithubAccountCallback } from "./overseer/github-user-connect";
 import { handlePasteGithubToken } from "./overseer/github-user-pat";
 import {
@@ -80,14 +72,9 @@ import {
 } from "./overseer/installations";
 import { agoWords } from "./relative-time";
 import { setWorkspaceHoldings } from "./overseer/github-app";
-import { handleReadReview } from "./overseer/read";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
 import { handleAnnotation } from "./overseer/annotations";
-import {
-  handleRefreshReview,
-  reviewTopic,
-  setFreshnessPublisher,
-} from "./overseer/freshness";
+import { reviewTopic, setFreshnessPublisher } from "./overseer/freshness";
 import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
 import {
   agentSkillsIndex,
@@ -114,7 +101,6 @@ import {
   type SettingsReveal,
 } from "./pages";
 
-const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // Workspace-scoped bundle path: /<ws_id>/b/<slug>[/v/N][/rest]. Anything under a
 // well-formed /<ws_id>/b/ that doesn't resolve becomes a soft-404. The ws id class
 // is composed from WS_ID_RE (minus its ^…$ anchors) so the two never drift apart.
@@ -144,13 +130,6 @@ type WSData = { ws: string; slug: string; kind: "bundle" | "review"; shareId?: s
 function markdown(body: string): Response {
   return new Response(body, {
     headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-cache" },
-  });
-}
-
-function json(data: unknown, status = 200, contentType = "application/json"): Response {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: { "content-type": contentType },
   });
 }
 
@@ -221,22 +200,6 @@ function html(body: string, status = 200): Response {
 // See other: turn a mutation POST into a plain GET of the redirect target.
 function redirect(location: string): Response {
   return new Response(null, { status: 303, headers: { location } });
-}
-
-// ---- mutation guards ----
-
-// CSRF posture: SameSite=Lax session cookie + POST-only mutations, plus this
-// origin check. When an Origin/Referer header is present its host must match
-// BASE_URL's; a cross-site form post is refused. Absent headers pass (native
-// tooling, same-origin navigations that omit them). Deliberately slop-tier.
-function originOk(req: Request): boolean {
-  const src = req.headers.get("origin") ?? req.headers.get("referer");
-  if (!src) return true;
-  try {
-    return new URL(src).host === new URL(config.baseUrl).host;
-  } catch {
-    return false;
-  }
 }
 
 // A mutation must come from a signed-in member of the target workspace. No session
@@ -392,46 +355,6 @@ async function handleWorkspaceBundle(req: Request, wsId: string): Promise<Respon
   });
 }
 
-// ---- upload ----
-
-async function handleUpload(req: Request, slug: string, server: Server<WSData>): Promise<Response> {
-  const auth = requireApiKey(req);
-  if (auth instanceof Response) return auth;
-  if (!SLUG_RE.test(slug)) {
-    return json({ error: "Slug must match [a-z0-9][a-z0-9-]{0,63}" }, 400);
-  }
-
-  const body = new Uint8Array(await req.arrayBuffer());
-  if (body.length === 0) return json({ error: "Empty body; send the zip as the request body" }, 400);
-  if (body.length > config.maxUploadBytes) {
-    return json({ error: `Zip exceeds max size of ${config.maxUploadBytes} bytes` }, 413);
-  }
-
-  let files: string[];
-  try {
-    files = inspectZip(body);
-  } catch (err) {
-    return json({ error: `Invalid zip: ${(err as Error).message}` }, 400);
-  }
-
-  // The key resolves the workspace: the upload lands wherever the key belongs.
-  const ws = auth.workspaceId;
-  const version = createVersion(ws, slug, body.length, files.length);
-  await saveZip(ws, slug, version, body);
-  server.publish(`bundle:${ws}:${slug}`, "reload");
-
-  return json({
-    slug,
-    version,
-    workspace: ws,
-    url: `${config.baseUrl}/${ws}/b/${slug}/`,
-    versionUrl: `${config.baseUrl}/${ws}/b/${slug}/v/${version}/`,
-    bytes: body.length,
-    files: files.length,
-    hasIndexHtml: files.includes("index.html"),
-  });
-}
-
 // ---- images ----
 
 // GitHub fetches every image embedded in a PR, issue, or README through its camo
@@ -440,56 +363,6 @@ async function handleUpload(req: Request, slug: string, server: Server<WSData>):
 // the unguessable img id in the path is what actually protects a private image.
 function isGithubCamo(req: Request): boolean {
   return (req.headers.get("user-agent") ?? "").toLowerCase().includes("github-camo");
-}
-
-async function handleImageUpload(req: Request, filename: string): Promise<Response> {
-  const auth = requireApiKey(req);
-  if (auth instanceof Response) return auth;
-  const match = filename.match(IMG_NAME_RE);
-  if (!match) {
-    return json(
-      {
-        error:
-          "Filename must match [a-z0-9][a-z0-9._-]* (max 64 chars) and end in " +
-          ".png, .jpg, .jpeg, .gif, .webp, .avif, or .svg",
-      },
-      400,
-    );
-  }
-  const ext = match[1]!;
-
-  const body = new Uint8Array(await req.arrayBuffer());
-  if (body.length === 0) return json({ error: "Empty body; send the image bytes as the request body" }, 400);
-  if (body.length > config.maxUploadBytes) {
-    return json({ error: `Image exceeds max size of ${config.maxUploadBytes} bytes` }, 413);
-  }
-  if (!sniffOk(ext, body)) {
-    return json({ error: `Body does not look like a .${ext} file (magic bytes mismatch)` }, 400);
-  }
-
-  let img: ProcessedImage;
-  try {
-    img = await processImage(ext, filename, body);
-  } catch (err) {
-    return json({ error: `Could not decode image: ${(err as Error).message}` }, 400);
-  }
-
-  // Same ordering as bundles: row first, then bytes. The key resolves the workspace.
-  const ws = auth.workspaceId;
-  const id = createImage(ws, img.filename, img.contentType, img.data.length);
-  await saveImage(ws, id, img.data);
-
-  const url = `${config.baseUrl}/${ws}/i/${id}/${img.filename}`;
-  return json({
-    id,
-    filename: img.filename,
-    workspace: ws,
-    url,
-    markdown: `![${img.filename.replace(/\.[^.]+$/, "")}](${url})`,
-    bytes: img.data.length,
-    originalBytes: body.length,
-    contentType: img.contentType,
-  });
 }
 
 // Workspace-scoped image serving: /<ws_id>/i/<img_id>/<filename>. Same soft-404
@@ -629,6 +502,12 @@ export async function startServer() {
     routes: {
       "/healthz": () => new Response("ok"),
 
+      // The credential-bearing API, spread from the one list it and /openapi.json are
+      // both built from. See src/api.ts: a route added there is answered here and
+      // described there in the same breath, which is the only way the two can be made to
+      // agree without a test standing between them.
+      ...bunRoutes(),
+
       "/login": (req) => {
         const next = new URL(req.url).searchParams.get("next") ?? "/bundles";
         return loginRedirect(next);
@@ -738,31 +617,6 @@ export async function startServer() {
       "/favicon.png": () => favicon("favicon.png", "image/png"),
       "/apple-touch-icon.png": () => favicon("apple-touch-icon.png", "image/png"),
 
-      "/api/bundles": {
-        GET: (req) => {
-          const auth = requireApiKey(req);
-          if (auth instanceof Response) return auth;
-          const ws = auth.workspaceId;
-          return json(
-            listBundles(ws).map((b) => ({
-              slug: b.slug,
-              latestVersion: b.latest_version,
-              workspace: ws,
-              url: `${config.baseUrl}/${ws}/b/${b.slug}/`,
-              versions: listVersions(ws, b.slug).map((v) => ({
-                version: v.version,
-                createdAt: new Date(v.created_at).toISOString(),
-                bytes: v.bytes,
-                files: v.file_count,
-              })),
-            })),
-          );
-        },
-      },
-      "/api/bundles/:slug": {
-        PUT: (req, srv) => handleUpload(req, req.params.slug, srv),
-        POST: (req, srv) => handleUpload(req, req.params.slug, srv),
-      },
 
       // The witness skill doc. Public, no auth, same contract as /skill.md: an agent
       // reads this before it publishes a review.
@@ -771,39 +625,6 @@ export async function startServer() {
       // What a person installs into their own agent so it can dispatch a witness.
       // The witness never reads this one; whoever sets Overseer up reads it once.
       "/overseer/agent.md": () => handleOverseerAgentSkill(),
-
-      // Overseer: a review is authored in one shot, so publishing is one POST.
-      "/api/reviews": {
-        POST: (req) => handlePublishReview(req),
-      },
-      // Reading takes a bare slug, resolved across the caller's workspaces: the
-      // renderer and the witness both hold a slug, not a workspace id.
-      "/api/reviews/:slug": {
-        GET: (req) => handleReadReview(req, req.params.slug, null),
-      },
-      // The one thing written to a review after publication. A member files, an API
-      // key answers, and the route decides which by the body it was sent.
-      "/api/reviews/:slug/annotations": {
-        POST: (req) => {
-          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
-          return handleAnnotation(req, req.params.slug);
-        },
-      },
-      // Origin-checked like every other browser-reachable POST. It was not, and step 6
-      // then put a button on the review page pointing at it — so any page a signed-in
-      // member visited could spend their GitHub calls for them. The window bounds the
-      // damage to one check a minute per review rather than making it harmless, and
-      // originOk passes when Origin and Referer are both absent, so an API key posting
-      // this route with a bearer token is unaffected.
-      "/api/reviews/:slug/refresh": {
-        POST: (req) => {
-          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
-          return handleRefreshReview(req, req.params.slug);
-        },
-      },
-      "/api/reviews/:slug/v/:n": {
-        GET: (req) => handleReadReview(req, req.params.slug, req.params.n),
-      },
 
       // The review itself, as a page. Same gate as the JSON, same soft-404.
       "/r/:slug": {
@@ -814,46 +635,6 @@ export async function startServer() {
       },
       "/r/:slug/a/:id": {
         GET: (req) => handleReviewAttachment(req, req.params.slug, req.params.id),
-      },
-
-      // Minting and revoking, session-authenticated and member-only. The mint answers
-      // with the full /s/<token> URL, because the URL is the thing a person wants; the
-      // list answers without tokens, because only their hashes survived the mint.
-      "/api/shares": {
-        GET: (req) => handleListShares(req),
-        POST: (req) => {
-          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
-          return handleCreateShare(req);
-        },
-      },
-      "/api/shares/:id": {
-        DELETE: (req) => {
-          if (!originOk(req)) return new Response("Bad origin", { status: 403 });
-          return handleRevokeShare(req, req.params.id);
-        },
-      },
-
-      "/api/images": {
-        GET: (req) => {
-          const auth = requireApiKey(req);
-          if (auth instanceof Response) return auth;
-          const ws = auth.workspaceId;
-          return json(
-            listImages(ws).map((i) => ({
-              id: i.id,
-              filename: i.filename,
-              workspace: ws,
-              url: `${config.baseUrl}/${ws}/i/${i.id}/${i.filename}`,
-              bytes: i.bytes,
-              contentType: i.content_type,
-              createdAt: new Date(i.created_at).toISOString(),
-            })),
-          );
-        },
-      },
-      "/api/images/:filename": {
-        PUT: (req) => handleImageUpload(req, req.params.filename),
-        POST: (req) => handleImageUpload(req, req.params.filename),
       },
 
       // ---- workspace + settings mutations (session + membership; Origin guard) ----
@@ -970,19 +751,6 @@ export async function startServer() {
           revokeShare(share.id);
           return redirect(`/settings/${req.params.ws}`);
         },
-      },
-
-      // The claim flow. The callback RENDERS and this POST WRITES, which is the whole
-      // reason they are two routes: originOk() passes when Origin and Referer are both
-      // absent, the normal case for a top-level navigation, so it is no guard at all on
-      // the redirect GET GitHub sends.
-      // Deliberately NO originOk guard, and this comment is here so the next person
-      // reading the table does not add one and break it. Every other POST here is a
-      // browser form and Origin is what proves it came from Seer; GitHub is not a
-      // browser, sends no Origin, and cannot hold a Seer credential. The HMAC over the
-      // raw body is the whole of this route's authentication and is the right amount.
-      "/api/github/webhook": {
-        POST: (req) => handleGithubWebhook(req),
       },
 
       "/github/setup": {
