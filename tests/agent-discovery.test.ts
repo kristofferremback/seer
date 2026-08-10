@@ -7,6 +7,7 @@
 // drift from the route table is a test failure.
 
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { join } from "node:path";
 
 // Env is set by tests/setup.ts (preload) before these app modules import.
 import { config } from "../src/config";
@@ -74,7 +75,7 @@ describe("the documents an agent discovers", () => {
   test("the paths robots.txt allows are paths the server answers", async () => {
     const body = robotsTxt();
     const allowed = [...body.matchAll(/^Allow: (\/\S*)$/gm)]
-      .map((m) => m[1]!)
+      .map((m) => m[1]!.replace(/\$$/, "")) // "$" anchors the end of a path; it is not part of one.
       // The bare "/" and the directory prefix are shapes, not URLs to fetch.
       .filter((p) => p !== "/" && !p.endsWith("/"));
     expect(allowed.length).toBeGreaterThan(0);
@@ -210,6 +211,34 @@ describe("the documents an agent discovers", () => {
     expect(Object.keys(spec.components.securitySchemes).sort()).toEqual(["apiKey", "session"]);
   });
 
+  test("every /api/ route the server declares is in the OpenAPI document", async () => {
+    // The other direction. Without this the drift guard is one-way: a new API route can
+    // be added and never described, and the document stays quietly incomplete while every
+    // test still passes. The route table is a literal inside startServer() rather than an
+    // exported value, so this reads the source — brittle by construction, but a test that
+    // breaks when the table is refactored is the failure mode worth having.
+    const source = await Bun.file(join(import.meta.dir, "..", "src", "server.ts")).text();
+    const table = source.slice(source.indexOf("routes: {"), source.indexOf("\n    fetch(req, srv)"));
+    // GitHub's delivery endpoint is under /api/ and is not an API anybody calls: it takes
+    // no Seer credential, authenticates an HMAC over the raw body, and an agent that
+    // found it in a service description could do nothing with it but be confused. It is
+    // named here rather than filtered by a pattern, so adding a second exception is a
+    // deliberate act.
+    const notAnAgentsToCall = new Set(["/api/github/webhook"]);
+    const declared = [...table.matchAll(/^ {6}"(\/api\/[^"]*)":/gm)]
+      .map((m) => m[1]!)
+      .filter((route) => !notAnAgentsToCall.has(route));
+    expect(declared.length).toBeGreaterThan(0);
+
+    const spec = openApiSpec() as { paths: Record<string, unknown> };
+    const described = new Set(Object.keys(spec.paths));
+    for (const route of declared) {
+      // Bun writes a path parameter `:slug`; OpenAPI writes it `{slug}`.
+      const path = route.replace(/:([^/]+)/g, "{$1}");
+      expect({ route, described: described.has(path) }).toEqual({ route, described: true });
+    }
+  });
+
   test("every path in the OpenAPI document is a route the server declares", async () => {
     const spec = openApiSpec() as { paths: Record<string, Record<string, unknown>> };
     // Drift is the only thing that can go wrong in a hand-written spec, so it is the
@@ -231,6 +260,26 @@ describe("the documents an agent discovers", () => {
   });
 
   // ---- agent skills index ----
+
+  test("the annotation schema describes the body the handler actually reads", () => {
+    // A regression guard rather than a general schema checker. This route was described
+    // with `answer` as a string and no `id` at all, which would have had an agent
+    // authoring against the service description straight into a 422 — from the one
+    // document api-catalog names as what the API is. `annotations.ts` runs `answer`
+    // through `asObject` and `answerHere` requires a top-level `id`.
+    const spec = openApiSpec() as {
+      paths: Record<string, { post: { requestBody: { content: Record<string, { schema: any }> } } }>;
+    };
+    const schema = spec.paths["/api/reviews/{slug}/annotations"]!.post.requestBody.content[
+      "application/json"
+    ]!.schema;
+    const [file, answer] = schema.oneOf as { required: string[]; properties: Record<string, any> }[];
+
+    expect(file!.required).toEqual(["target", "body"]);
+    expect(answer!.required).toEqual(["id", "answer"]);
+    expect(answer!.properties.answer.type).toBe("object");
+    expect(answer!.properties.answer.required).toEqual(["body"]);
+  });
 
   test("the skills index digests match the bytes each URL actually serves", async () => {
     const res = await fetch(`${base}/.well-known/agent-skills/index.json`);

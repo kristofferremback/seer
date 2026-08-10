@@ -84,6 +84,11 @@ Disallow: /*/r/
 # not a corpus. These are the agents whose stated purpose is collecting one; the ones
 # that fetch a page because a person asked a question are covered by the group above and
 # are welcome.
+#
+# What is withheld here is what people put here, not what this site says about itself.
+# So the documents below stay open even to these: they are Seer's own instructions,
+# written to be read by an agent, and refusing them to the agents most likely to be
+# holding a reader's question would be this file working against the rest of the change.
 User-agent: anthropic-ai
 User-agent: Applebot-Extended
 User-agent: Bytespider
@@ -93,6 +98,15 @@ User-agent: Google-Extended
 User-agent: GPTBot
 User-agent: meta-externalagent
 Content-Signal: search=no, ai-input=no, ai-train=no
+Allow: /$
+Allow: /skill.md
+Allow: /llms.txt
+Allow: /auth.md
+Allow: /openapi.json
+Allow: /bundles/skill.md
+Allow: /overseer/skill.md
+Allow: /overseer/agent.md
+Allow: /.well-known/
 Disallow: /
 
 Sitemap: ${base}/sitemap.xml
@@ -543,17 +557,66 @@ export function openApiSpec(): unknown {
           parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }],
           requestBody: {
             required: true,
+            // The two acts have disjoint field sets, and `answer` present is what picks
+            // between them, so they are two schemas rather than one with everything
+            // optional: a reader of this document has to be able to tell which fields go
+            // together, and a flattened object would let them send half of each.
             content: {
               "application/json": {
                 schema: {
-                  type: "object",
-                  properties: {
-                    target: {
+                  oneOf: [
+                    {
+                      title: "File a question",
                       type: "object",
-                      properties: { type: { type: "string" }, id: { type: "string" } },
+                      required: ["target", "body"],
+                      properties: {
+                        target: {
+                          type: "object",
+                          required: ["type", "id"],
+                          properties: {
+                            type: { type: "string", description: "What kind of thing on the page is being asked about." },
+                            id: { type: "string", description: "That thing's id in the published document." },
+                          },
+                        },
+                        body: { type: "string", description: "The question." },
+                        quote: { type: "string", description: "Optional: the text on the page it hangs off." },
+                      },
                     },
-                    body: { type: "string", description: "The question, when filing." },
-                    answer: { type: "string", description: "The answer, when answering." },
+                    {
+                      title: "Answer an open question",
+                      type: "object",
+                      required: ["id", "answer"],
+                      properties: {
+                        id: { type: "string", description: "The annotation being answered." },
+                        answer: {
+                          type: "object",
+                          required: ["body"],
+                          properties: {
+                            body: { type: "string" },
+                            refs: {
+                              type: "array",
+                              description:
+                                "Optional code references, resolved exactly as a published document's are.",
+                              items: {},
+                            },
+                          },
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+              "application/x-www-form-urlencoded": {
+                schema: {
+                  type: "object",
+                  description: "The page's own form. A form files; it never answers.",
+                  required: ["target", "body"],
+                  properties: {
+                    target: { type: "string", description: "`<type>:<id>`, split on the first colon." },
+                    target_type: { type: "string", description: "The two halves separately, instead of `target`." },
+                    target_id: { type: "string" },
+                    body: { type: "string" },
+                    quote: { type: "string" },
                   },
                 },
               },
