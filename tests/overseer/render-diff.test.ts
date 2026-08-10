@@ -222,8 +222,15 @@ describe("the walkthrough", () => {
     expect(section).toContain('<details class="grp"');
     expect(section).toContain('<details class="frow">');
     expect(section).not.toMatch(/\son[a-z]+\s*=/i);
-    expect(section).not.toContain("<button");
     expect(section).not.toContain("<script");
+    // The one control the walkthrough carries is the full-screen panel, and it
+    // ships hidden: a page with no script never offers a button that does
+    // nothing, and the diff under it reads either way.
+    for (const tag of section.match(/<button[^>]*>/g) ?? []) {
+      expect(tag).toContain(' hidden ');
+      expect(tag).toContain('class="zoom"');
+    }
+    expect(section).toContain('data-zoom="src/auth.ts"');
     // The contents row points at it.
     expect(html).toContain('<a href="#walkthrough">implementation walkthrough</a>');
   });
@@ -250,6 +257,19 @@ describe("syntax", () => {
     expect(html).toContain('<span class="ty">Gate</span>');
     expect(html).toContain('<span class="st">&quot;on&quot;</span>');
     expect(html).toContain('<span class="cm">// why</span>');
+  });
+
+  test("what the tokenizer has no opinion about keeps the ink around it", () => {
+    // Only the four classes are ever emitted. Punctuation was briefly a fifth and its
+    // cost was a doubling of the markup of every hunk, so a brace, an operator and a
+    // separator are the ink of the code and carry no span at all.
+    const html = codeHtml("const x = { a: 1 };", "ts");
+    expect(html).not.toContain('class="pn"');
+    expect(html).toBe('<span class="kw">const</span> x = { a: <span class="st">1</span> };');
+    // And a letter the tokenizer does not know is a letter, not a symbol: a negated
+    // character class would have greyed these out one at a time, mid-word.
+    expect(codeHtml("const naïve = café(x);", "ts")).toContain("naïve = café(x);");
+    expect(codeHtml("const 名前 = 値;", "ts")).toContain("名前 = 値;");
   });
 
   test("a declared name is a name whatever case it is written in", () => {

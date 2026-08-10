@@ -166,6 +166,10 @@ const STYLE = `  @font-face {
        is stronger than any hue at this size, and a comment stays a recessive
        neutral, because its job is to be skipped.
 
+       The code itself was moved up to full ink at the same time as the values
+       below were measured. It used to be set in the body's softened ink, which
+       made the one thing this page exists to show the quietest text on it.
+
        These were far quieter until it was measured against a real page, twice.
        The rule had been that syntax stays under 70% of the *quietest* semantic
        mark, and at that ceiling a keyword cleared the body text by dE 23 with a
@@ -181,14 +185,23 @@ const STYLE = `  @font-face {
        CIELAB exaggerates violet against red badly enough to have rejected
        every readable keyword for the wrong reason.
 
-       Measured in OKLCh against the removal red at C 0.157: keyword C 0.153,
-       literal C 0.115, comment C 0.039. Every one under the loudest semantic
-       mark, so the change semantics still lead the page, and contrast on paper
-       is 6.7, 5.9 and 3.9 to 1. Code is the most important thing on a review
-       and it now reads that way; suppressing it was hiding the subject. */
-    --syn-cm: 10 14% 50%;
-    --syn-kw: 276 44% 42%;
-    --syn-st: 210 62% 38%;
+       Measured a third time, on a phone, where it failed. Against the sunk
+       panel a diff is drawn on, the comment stood at 3.4:1, under the floor
+       for body text at any size and certainly at 12px in daylight, and the
+       two hues at 5.8 and 5.1 were carrying a page whose subject is code.
+
+       So the band is spent rather than saved. Both hues sit just under the
+       ceiling in chroma and are pushed down the lightness ramp until they
+       clear the panel properly, and the comment is lifted until it is legible
+       while staying the weakest thing on the surface. Measured in OKLCh
+       against the removal red at C 0.157, contrast against the sunk panel:
+       keyword C 0.155 at 7.8:1, literal C 0.145 at 7.4:1, comment C 0.050 at
+       4.9:1. Every one still under the loudest semantic mark; the hues sit at
+       312 and 258, which is 76 and 106 degrees off the nearest of add 152,
+       change 66 and remove 28. */
+    --syn-cm: 12 22% 40%;
+    --syn-kw: 280 56% 33%;
+    --syn-st: 214 93% 30%;
 
     /* Diff washes. A shade stronger in dark than the other candidates, because
        the oxblood substrate absorbs a wash more than a neutral charcoal does,
@@ -225,11 +238,15 @@ const STYLE = `  @font-face {
     --risk: 2 66% 72%;
     --note: 14 13% 67%;
 
-    /* same band at the other end: ceiling 0.1118 (the remove red), line 0.06,
-       both hues at 57% of the ceiling. Same OKLCh hues as light, 318 and 249. */
-    --syn-cm: 16 12% 54%;
-    --syn-kw: 283 58% 76%;
-    --syn-st: 206 70% 71%;
+    /* Same band at the other end, with the ceiling read the way the rule
+       states it rather than by habit: the loudest semantic mark in dark is
+       the change amber at C 0.127, not the remove red at 0.112. Keyword
+       C 0.123 at 9.7:1 on the sunk panel, literal C 0.111 at 10.2:1, comment
+       C 0.030 at 6.9:1. Hues 318 and 239, which is 64 and 86 degrees off the
+       nearest of add 153, change 79 and remove 22. */
+    --syn-cm: 14 16% 62%;
+    --syn-kw: 286 72% 79%;
+    --syn-st: 204 95% 72%;
 
     --wash-add: hsl(var(--add) / 0.19);
     --wash-rem: hsl(var(--remove) / 0.165);
@@ -672,7 +689,10 @@ const STYLE = `  @font-face {
     font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.62;
-    color: hsl(var(--ink-soft));
+    /* full ink, not the body's softened ink: an identifier is the thing being
+       read on a code surface, and everything that is not one (punctuation,
+       gutter, comment) steps back from it rather than it stepping down. */
+    color: hsl(var(--ink));
   }
   .snipbox {
     background: hsl(var(--ink) / 0.03);
@@ -1137,43 +1157,24 @@ const STYLE = `  @font-face {
   .filediff .snip .l.void-line { color: hsl(var(--muted)); }
 
   /* ---- code on a phone ----
-     Horizontal scroll inside a diff is the right answer on a desk and the
-     wrong one in a hand: at 390px it hid half of every line behind a gesture
-     nobody makes. Below 700px the code soft-wraps instead, hanging past the
-     gutter so the wrapped part of a line still reads as that line, and the
-     type drops to 11px to buy back some of the width. It costs height, and
-     height is the cheap axis here. Above 700px nothing about the diff
-     changes: it scrolls, and it is the best thing on the page. */
+     Code below 700px used to soft-wrap. It was the wrong trade: a wrapped line
+     is not the line the author wrote, indentation stops carrying structure,
+     and one long call turns three lines of a hunk into eight rows of prose.
+     Nobody reads code that way. So the phone scrolls sideways like everything
+     else does, the gutter stays sticky at the left edge so the numbers and the
+     +/- never leave, and the type stays at 11.5px, which is the size at which
+     80 columns of Commit Mono still resolve in a hand.
+
+     Two things make the gesture work rather than merely exist. The scroll is
+     contained, so swiping to the end of a line cannot hand the gesture to the
+     browser's back navigation. And the clipped edge fades, which is the only
+     thing on the page saying there is more line to the right. */
   @media (max-width: 699.98px) {
-    .snip { font-size: 11px; }
-    .snip code { width: auto; }
-    .snip .l { white-space: pre-wrap; overflow-wrap: anywhere; }
-    .snip .l:has(> .n) { padding-left: calc(8px + 3.3em); text-indent: -3.3em; }
-    .filediff .snip .l { padding-left: 58px; text-indent: -58px; }
-    /* the hanging indent is the line's, not the gutter's: these are inline
-       blocks, so they would otherwise inherit the pull and step off the edge */
-    .snip .n, .snip .g, .filediff .snip .gut { text-indent: 0; }
-    .filediff .snip .gut {
-      position: static;
-      width: 58px;
-      padding: 0 8px 0 6px;
-      /* nothing scrolls under it here, so it stops being a lid and lets the
-         line's own wash and rail run straight through */
-      background: none;
-      border-right-color: transparent;
-    }
-    /* a wrapped line is three rows tall and the gutter only sits on the first,
-       so the rail is drawn on the line itself and runs the whole way down */
-    .filediff .snip .l.add,
-    .filediff .snip .l.del {
-      background-image: linear-gradient(to right, transparent 56px, var(--rail) 56px, var(--rail) 58px, transparent 58px);
-    }
-    /* nothing is clipped once it wraps, so nothing may claim it is */
-    .snip.scroll-x { overflow-x: hidden; }
-    .snip.scroll-x,
-    .snip[data-clip="right"] { -webkit-mask-image: none; mask-image: none; }
-    .fold.clipped > summary > .cue,
-    .frow:has(.filediff.clipped) > summary .cue { display: none; }
+    .snip { font-size: 11.5px; }
+    .snip.scroll-x { overscroll-behavior-x: contain; }
+    /* the touch scrollbar is a resting hint as much as a control: 6px of it on
+       a phone is a hair, so it thickens where the pointer is coarse. */
+    .snip.scroll-x::-webkit-scrollbar { height: 8px; }
   }
 
   /* on the narrowest screens the summary grid tightens, and the body indent
@@ -1285,6 +1286,15 @@ const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
   <symbol id="i-contrast" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="12" cy="12" r="10"/><path d="M12 18a6 6 0 0 0 0-12v12z"/>
   </symbol>
+  <!-- the two marks the full-screen panel is worked by: four corners pushed out,
+       and the cross that puts them back. -->
+  <symbol id="i-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 3h6v6"/><path d="m14 10 7-7"/>
+    <path d="M9 21H3v-6"/><path d="m10 14-7 7"/>
+  </symbol>
+  <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+  </symbol>
   <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
     <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
@@ -1325,6 +1335,143 @@ const EVIDENCE_STYLE = `
   .fig .fig-edge.fig-dim { stroke: hsl(var(--muted) / 0.55); stroke-dasharray: 3 5; }
   .prbody-body { padding: 10px 12px 1px; }
   .prbody { margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: hsl(var(--ink-soft)); white-space: pre-wrap; }
+`;
+
+/** Code, taken out of the column.
+ *
+ *  A review column is 760px wide and a phone is 390px, and there is no width at which
+ *  a diff of real code is comfortable inside a paragraph of prose. So every code
+ *  surface carries one control that lifts it onto the whole screen: the walkthrough's
+ *  file diffs, the quoted refs, the payloads and the examples, the same mark in the
+ *  same corner of each.
+ *
+ *  On a phone the panel is the screen — a title, a cross, and code — because the phone
+ *  has no width to spend on anything else. On a desk it is a panel the size of the
+ *  application rather than the size of the monitor, and a reader with a large monitor
+ *  can drag it larger from its corner and have that remembered. The cap is deliberate:
+ *  a 5000px line of code is not more readable than a 1600px one.
+ *
+ *  Inside the panel the whole file scrolls as one surface rather than each hunk
+ *  scrolling on its own, so a column of code is followed down the file with one
+ *  gesture and the gutter stays pinned to the panel's left edge the whole way. */
+const ZOOM_STYLE = `
+  .filediff, .snipbox, .fold { position: relative; }
+  .zoom {
+    position: absolute; top: 5px; right: 6px; z-index: 2;
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 34px; min-height: 34px; padding: 8px;
+    border: 1px solid hsl(var(--line));
+    border-radius: 6px;
+    background: hsl(var(--paper));
+    color: hsl(var(--muted));
+    cursor: pointer; line-height: 0;
+  }
+  .zoom .mark { display: block; width: 15px; height: 15px; stroke-width: 1.7; }
+  .zoom:active { background: hsl(var(--paper-sunk)); color: hsl(var(--ink)); }
+  @media (hover: hover) and (pointer: fine) {
+    .zoom:hover { color: hsl(var(--ink)); border-color: hsl(var(--ink) / 0.3); }
+  }
+  /* the thumb is the unit here, not the cursor */
+  @media (pointer: coarse) { .zoom { min-width: 42px; min-height: 42px; } }
+  /* the control sits in the block's own top rail, so the rail gives it room
+     rather than the code running under it */
+  .filediff > .hunk:first-of-type .hh { padding-right: 48px; }
+  /* only while the control is there. A closed fold's summary is the primary
+     label (a path, a sha, a line range), and reserving 48px beside a control
+     that is not drawn wraps that label onto a second row of every closed fold
+     on a phone. */
+  .fold[open] > summary { padding-right: 48px; }
+  /* a closed fold is a line of text, not a code surface: nothing to enlarge yet */
+  .fold:not([open]) > .zoom { display: none; }
+  /* a payload or an example has no rail of its own, so it is given one: without
+     it the opaque control sits on the first line of the code and, because it
+     rides the box rather than the scroller, scrolling never brings out what is
+     underneath it. */
+  .snipbox > .zoom + .snip { padding-top: 34px; }
+
+  html.code-open { overflow: hidden; }
+  .zoomdlg {
+    display: none;
+    padding: 0; margin: 0; border: 0;
+    width: 100dvw; max-width: 100dvw;
+    height: 100dvh; max-height: 100dvh;
+    background: hsl(var(--paper));
+    color: hsl(var(--ink));
+    overflow: hidden;
+  }
+  .zoomdlg[open] { display: flex; flex-direction: column; }
+  /* a scrim darkens in both themes: the ink is a near-white in dark, and a veil
+     of it would light the page up rather than put it behind glass */
+  .zoomdlg::backdrop { background: hsl(0 0% 0% / 0.5); }
+  .zoom-bar {
+    flex: none;
+    display: flex; align-items: center; gap: 10px;
+    padding-top: max(5px, env(safe-area-inset-top));
+    padding-right: 5px;
+    padding-bottom: 5px;
+    padding-left: max(13px, env(safe-area-inset-left));
+    border-bottom: 1px solid hsl(var(--line));
+  }
+  /* the path is the only word the panel spends, and it is the one word a reader
+     who is now looking at code with no page around it actually needs */
+  .zoom-title {
+    font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted));
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .zoom-x {
+    margin-left: auto; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 44px; min-height: 44px; padding: 10px;
+    border: 0; border-radius: 6px; background: none;
+    color: hsl(var(--accent)); cursor: pointer; line-height: 0;
+  }
+  .zoom-x .mark { display: block; width: 18px; height: 18px; stroke-width: 1.6; }
+  .zoom-x:active { background: hsl(var(--ink) / 0.07); }
+  /* the UA ring is drawn for a control the size of a thumb and reads as a slab at
+     this scale. Same job, the page's own ink, and only for the keyboard. */
+  .zoomdlg :focus-visible {
+    outline: 2px solid hsl(var(--accent));
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  .zoom-body:focus, .zoom-body:focus-visible { outline: none; }
+  .zoom-body {
+    flex: 1 1 auto; min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    background: hsl(var(--paper-sunk));
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* shrink-wrapped to the widest line, so the panel scrolls the file as one
+     surface and a short line's wash still runs the full width of it */
+  .zoom-inner { display: inline-block; min-width: 100%; vertical-align: top; }
+  .zoom-body .snip.scroll-x { overflow: visible; -webkit-mask-image: none; mask-image: none; }
+  .zoom-body .filediff, .zoom-body .snipbox {
+    border: 0; border-radius: 0; background: none; overflow: visible;
+  }
+  .zoom-body .snip { font-size: 12.5px; padding-bottom: 16px; }
+  /* which hunk is being read stays said while it is being read: the range rides
+     the top of the panel until the next hunk pushes it off. Opaque, because the
+     code now scrolls underneath it rather than beside it. */
+  .zoom-body .hh {
+    position: sticky; top: 0; z-index: 1;
+    background-color: hsl(var(--paper-sunk));
+    background-image: linear-gradient(hsl(var(--ink) / 0.04), hsl(var(--ink) / 0.04));
+    border-bottom: 1px solid hsl(var(--line));
+  }
+  @media (min-width: 700px) {
+    .zoomdlg {
+      width: min(94vw, 980px);
+      height: min(86dvh, 840px);
+      max-width: min(94vw, 1680px);
+      max-height: 90dvh;
+      margin: auto;
+      border: 1px solid hsl(var(--line));
+      border-radius: 10px;
+      box-shadow: 0 24px 64px hsl(var(--ink) / 0.28);
+      resize: both;
+    }
+  }
 `;
 
 /** Resolved before first paint so the surface never flashes, and stored so an explicit
@@ -1392,24 +1539,161 @@ const PAGE_SCRIPT = `
   addEventListener("hashchange", openFromHash);
   openFromHash();
 
-  const wraps = matchMedia("(max-width: 699.98px)");
   const snips = Array.from(document.querySelectorAll(".snip.scroll-x"));
-  const measure = () => {
-    const wrapped = wraps.matches;
-    snips.forEach((el) => {
-      const over = wrapped ? 0 : el.scrollWidth - el.clientWidth;
-      const unit = el.closest("details.fold, .filediff");
-      if (unit) unit.classList.toggle("clipped", over > 1);
-      if (over > 1 && el.scrollLeft < over - 1) el.dataset.clip = "right";
-      else delete el.dataset.clip;
-    });
+  const measureOne = (el) => {
+    const over = el.scrollWidth - el.clientWidth;
+    const unit = el.closest("details.fold, .filediff");
+    if (unit) unit.classList.toggle("clipped", over > 1);
+    if (over > 1 && el.scrollLeft < over - 1) el.dataset.clip = "right";
+    else delete el.dataset.clip;
   };
-  wraps.addEventListener("change", measure);
-  snips.forEach((el) => el.addEventListener("scroll", measure, { passive: true }));
+  const measure = () => snips.forEach(measureOne);
+  // A scroll asks about the block being scrolled and nothing else. Sweeping the page
+  // was affordable while phones could not scroll code sideways at all; now that they
+  // can, it is a forced layout for every hunk on the page on every frame of the one
+  // gesture this change exists to make good.
+  snips.forEach((el) =>
+    el.addEventListener("scroll", () => measureOne(el), { passive: true }),
+  );
   document.querySelectorAll("details").forEach((d) => d.addEventListener("toggle", measure));
   addEventListener("resize", measure, { passive: true });
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(measure);
   measure();
+})();
+`;
+
+/** The panel, worked. Like every other script on this page it is an enhancement: the
+ *  controls ship `hidden` and only this removes them, so a page with no scripting never
+ *  shows a button that would do nothing, and the code is still on it either way.
+ *
+ *  Opening pushes a history entry, so the phone's back gesture — the way a reader
+ *  actually closes a full-screen thing — closes the panel and lands back on the review
+ *  rather than on whatever preceded it. Closing any other way pops that entry itself, so
+ *  the panel never leaves a step in the history a reader has to walk back through. */
+const ZOOM_SCRIPT = `
+(() => {
+  const buttons = Array.from(document.querySelectorAll("button.zoom"));
+  if (buttons.length === 0) return;
+  if (typeof HTMLDialogElement !== "function" || !HTMLDialogElement.prototype.showModal) return;
+
+  const SIZE_KEY = "overseer:code-panel";
+  const wide = matchMedia("(min-width: 700px)");
+  let dlg = null;
+  // A history entry this panel pushed and has not given back. It is cleared at the
+  // moment the entry stops existing rather than around the close: \`close()\` only
+  // queues the close event, so a flag set and cleared around the call is already
+  // false by the time the handler reads it, and the panel would walk back a second
+  // entry the reader never gave it. That is the whole page, gone under a back gesture.
+  let owes = false;
+  // A traversal this panel asked for and has not yet been told about. \`history.back()\`
+  // lands asynchronously too, so the popstate it produces has to be recognised as ours
+  // rather than read as the reader's back gesture.
+  let consuming = false;
+  let dragging = false; // a drag on the panel's own resize corner is under way
+
+  const build = () => {
+    if (dlg) return dlg;
+    dlg = document.createElement("dialog");
+    dlg.className = "zoomdlg";
+    dlg.innerHTML =
+      '<div class="zoom-bar"><span class="zoom-title"></span>' +
+      '<button type="button" class="zoom-x" aria-label="Close full screen">' +
+      '<svg class="mark" aria-hidden="true"><use href="#i-close"/></svg></button></div>' +
+      // The code takes the focus, not the cross. A modal focuses its first focusable
+      // child, and a reader who just asked to read something should not have to tab
+      // past the way out of it: arrow keys scroll the code straight away, and the
+      // cross still takes a ring when it is tabbed to.
+      '<div class="zoom-body" tabindex="-1" autofocus><div class="zoom-inner"></div></div>';
+    document.body.appendChild(dlg);
+    dlg.querySelector(".zoom-x").addEventListener("click", () => dlg.close());
+    dlg.addEventListener("close", () => {
+      document.documentElement.classList.remove("code-open");
+      dlg.querySelector(".zoom-inner").textContent = "";
+      if (!owes) return;
+      owes = false;
+      consuming = true;
+      history.back();
+    });
+    // A size is remembered only when the reader made it: a drag that starts in the
+    // resize corner and ends somewhere else. Watching the box instead cannot tell a
+    // drag from the window moving under it, and guessing wrong pins every later panel
+    // to the size of one window that happened to be resized once.
+    dlg.addEventListener("pointerdown", (e) => {
+      if (!wide.matches) return;
+      const box = dlg.getBoundingClientRect();
+      dragging = box.right - e.clientX < 22 && box.bottom - e.clientY < 22;
+    });
+    addEventListener("pointerup", () => {
+      if (!dragging) return;
+      dragging = false;
+      const box = dlg.getBoundingClientRect();
+      const w = Math.round(box.width), h = Math.round(box.height);
+      if (w < 480 || h < 320) return;
+      try { localStorage.setItem(SIZE_KEY, w + "x" + h); } catch (e) {}
+    });
+    return dlg;
+  };
+
+  const open = (btn) => {
+    const box = btn.closest(".filediff, .fold, .snipbox");
+    if (!box) return;
+    const source = box.classList.contains("filediff") ? box : box.querySelector("pre.snip");
+    if (!source) return;
+    const d = build();
+    const clone = source.cloneNode(true);
+    // The clone is a second copy of markup the page already addresses by id, and two
+    // elements answering to one id is a page whose citations stop landing.
+    clone.removeAttribute("id");
+    clone.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
+    clone.querySelectorAll("button.zoom, .cue").forEach((el) => el.remove());
+    // Nothing is clipped in here: it is the panel's whole job not to be.
+    clone.removeAttribute("data-clip");
+    clone.querySelectorAll("[data-clip]").forEach((el) => el.removeAttribute("data-clip"));
+    const inner = d.querySelector(".zoom-inner");
+    inner.textContent = "";
+    inner.appendChild(clone);
+    const title = btn.dataset.zoom || "";
+    d.querySelector(".zoom-title").textContent = title;
+    d.setAttribute("aria-label", title === "" ? "Code, full screen" : title);
+    d.style.width = "";
+    d.style.height = "";
+    if (wide.matches) {
+      try {
+        const saved = (localStorage.getItem(SIZE_KEY) || "").split("x");
+        const w = Number(saved[0]), h = Number(saved[1]);
+        if (w > 480 && h > 320) { d.style.width = w + "px"; d.style.height = h + "px"; }
+      } catch (e) {}
+    }
+    document.documentElement.classList.add("code-open");
+    d.showModal();
+    const body = d.querySelector(".zoom-body");
+    body.scrollTop = 0;
+    body.scrollLeft = 0;
+    // One entry per panel, however fast they are opened: a panel that opens while the
+    // last one's traversal is still in the air inherits the entry rather than stacking
+    // a second one the reader would have to press back through twice.
+    if (!owes) {
+      try { history.pushState({ overseerCode: 1 }, ""); owes = true; } catch (e) { owes = false; }
+    }
+  };
+
+  addEventListener("popstate", () => {
+    // Ours, arriving late. The entry is already gone, so there is nothing to close and
+    // nothing left to give back.
+    if (consuming) { consuming = false; return; }
+    if (!dlg || !dlg.open) return;
+    owes = false;
+    dlg.close();
+  });
+
+  buttons.forEach((b) => {
+    b.removeAttribute("hidden");
+    b.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      open(b);
+    });
+  });
 })();
 `;
 
@@ -2540,7 +2824,7 @@ export function renderReviewPage(input: RenderInput): string {
     `<link rel="icon" type="image/svg+xml" href="${FAVICON}">\n` +
     `<link rel="preload" href="/fonts/switzer.woff2" as="font" type="font/woff2" crossorigin>\n` +
     `<link rel="preload" href="/fonts/commit-mono-400.woff2" as="font" type="font/woff2" crossorigin>\n` +
-    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${DELTA_STYLE}${QUESTION_STYLE}` +
+    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${ZOOM_STYLE}${DELTA_STYLE}${QUESTION_STYLE}` +
     `${input.canShare ? SHARE_STYLE : ""}</style>\n` +
     `</head>\n<body>\n` +
     SPRITE +
@@ -2605,7 +2889,7 @@ export function renderReviewPage(input: RenderInput): string {
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
     )} · <a href="/overseer/agent.md">agent instructions</a></p>\n` +
-    `</main>\n<script>${PAGE_SCRIPT}</script>\n` +
+    `</main>\n<script>${PAGE_SCRIPT}</script>\n<script>${ZOOM_SCRIPT}</script>\n` +
     (input.canShare ? `<script>${shareScript(wsId, slug)}</script>\n` : "") +
     // A pinned version is a record of what was published, so it gets no live channel:
     // only the page reading the current version can go behind while it is open. A page

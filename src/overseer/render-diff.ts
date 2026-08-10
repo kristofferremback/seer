@@ -12,10 +12,16 @@
 // walkthrough still opens, still numbers its lines and still marks its words.
 //
 // The syntax classes are the prototype's four: a comment, a keyword, a literal and a
-// declared name. The tokenizer below is deliberately small and single-line, because a
-// hunk is a window into a file and never carries enough of it to parse. It knows two
-// languages and says nothing at all about a third, which is the mono fallback: an
-// unrecognized file reads as code without an opinion about it.
+// declared name. A fifth, punctuation in the gutter's muted ink, was written and then
+// taken out again: the braces and operators of one ordinary line are a dozen separate
+// spans, it more than doubled the markup of every hunk on a page nothing compresses,
+// and set beside the same diff without it the difference was one a screenshot had to
+// be studied to find. Everything else on the line reads at the ink of the code.
+//
+// The tokenizer below is deliberately small and single-line, because a hunk is a window
+// into a file and never carries enough of it to parse. It knows two languages and says
+// nothing at all about a third, which is the mono fallback: an unrecognized file reads
+// as code without an opinion about it.
 
 import { escapeHtml } from "../escape";
 import type { ReviewDoc } from "./db";
@@ -29,7 +35,7 @@ import {
   type DeltaIndex,
   type EntityDelta,
 } from "./delta";
-import { icon, safeBlock, safeInline, shortSha } from "./render-evidence";
+import { icon, safeBlock, safeInline, shortSha, zoomButton } from "./render-evidence";
 import type { Group, Hunk, HunkLine, StatementKind, UnaccountedFile } from "./types";
 
 /** The anchor a target grows once something has been asked about it, supplied by the
@@ -416,7 +422,7 @@ function fileRow(
     `</summary>` +
     `<div class="frow-body">` +
     here("file", file.path) +
-    `<div class="filediff" id="${escapeHtml(domId)}">${lines}</div>` +
+    `<div class="filediff" id="${escapeHtml(domId)}">${zoomButton(file.path)}${lines}</div>` +
     `</div></details>`
   );
 }
