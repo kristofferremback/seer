@@ -90,7 +90,17 @@ import {
 } from "./overseer/freshness";
 import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
 import {
+  agentSkillsIndex,
+  apiCatalog,
+  authMd,
+  homepageLinkHeader,
+  openApiSpec,
+  robotsTxt,
+  sitemapXml,
+} from "./agent-discovery";
+import {
   landingPage,
+  landingMarkdown,
   bundlesPage,
   reviewsPage,
   invitePage,
@@ -137,11 +147,50 @@ function markdown(body: string): Response {
   });
 }
 
-function json(data: unknown, status = 200): Response {
+function json(data: unknown, status = 200, contentType = "application/json"): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": contentType },
   });
+}
+
+function text(body: string, contentType: string): Response {
+  return new Response(body, {
+    headers: { "content-type": contentType, "cache-control": "public, max-age=3600" },
+  });
+}
+
+/**
+ * Proactive content negotiation (RFC 9110 §12.5.1), cut down to the one question this
+ * server asks a request: would you rather have markdown than HTML?
+ *
+ * The comparison is what makes it safe to turn on for a page a browser also loads.
+ * `Accept: text/markdown` scores markdown 1 and HTML 0 and gets markdown; a browser
+ * leads with `text/html` at 1 and reaches markdown only through its trailing wildcard
+ * at 0.8, so it gets the page. A tie goes to HTML, because HTML is what the URL has
+ * always meant, and a caller that named neither gets the page too.
+ */
+function prefersMarkdown(req: Request): boolean {
+  const accept = req.headers.get("accept");
+  if (!accept) return false;
+  const best = (type: string): number => {
+    let q = -1;
+    for (const part of accept.split(",")) {
+      const [raw, ...params] = part.split(";");
+      const candidate = raw!.trim().toLowerCase();
+      const matches =
+        candidate === type || candidate === `${type.split("/")[0]}/*` || candidate === "*/*";
+      if (!matches) continue;
+      const weight = params
+        .map((p) => p.trim().toLowerCase())
+        .find((p) => p.startsWith("q="));
+      const value = weight === undefined ? 1 : Number(weight.slice(2));
+      // A malformed q is not a preference; treat it as absent rather than as zero.
+      q = Math.max(q, Number.isFinite(value) ? value : 1);
+    }
+    return q;
+  };
+  return best("text/markdown") > best("text/html");
 }
 
 function favicon(name: string, contentType: string): Response {
@@ -576,10 +625,38 @@ export async function startServer() {
       "/auth/callback": (req) => handleCallback(req),
 
       // Public pamphlet. No auth; shows a quiet link onward when signed in.
-      "/": (req) =>
-        new Response(landingPage(!!sessionEmail(req)), {
-          headers: { "content-type": "text/html;charset=utf-8" },
-        }),
+      //
+      // The front door is also where a thing that is not a person arrives, so this
+      // response carries the Link header that says where everything machine-readable
+      // lives, and answers in markdown to a caller that asked for markdown. Vary is
+      // load-bearing: without it a cache that saw one of the two would serve it to
+      // everyone who asks for the other.
+      "/": (req) => {
+        const headers: Record<string, string> = {
+          link: homepageLinkHeader(),
+          vary: "Accept",
+        };
+        if (prefersMarkdown(req)) {
+          return new Response(landingMarkdown(), {
+            headers: { ...headers, "content-type": "text/markdown; charset=utf-8" },
+          });
+        }
+        return new Response(landingPage(!!sessionEmail(req)), {
+          headers: { ...headers, "content-type": "text/html;charset=utf-8" },
+        });
+      },
+
+      // ---- what this deployment says about itself to something that is not a person ----
+      //
+      // The documents live in ./agent-discovery, which explains why the OAuth, MCP and
+      // A2A well-knowns the same standards suite asks for are deliberately absent.
+
+      "/robots.txt": () => text(robotsTxt(), "text/plain;charset=utf-8"),
+      "/sitemap.xml": () => text(sitemapXml(), "application/xml;charset=utf-8"),
+      "/auth.md": () => markdown(authMd()),
+      "/openapi.json": () => json(openApiSpec()),
+      "/.well-known/api-catalog": () => json(apiCatalog(), 200, "application/linkset+json"),
+      "/.well-known/agent-skills/index.json": async () => json(await agentSkillsIndex()),
 
       // Agent-facing usage doc. Public, no auth — agents (and llms.txt probers)
       // fetch this to learn how to publish. Both paths serve identical markdown.

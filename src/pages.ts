@@ -1209,6 +1209,96 @@ without a credential.
 
 // ---- public landing ----
 
+/**
+ * The front page for something that reads rather than looks — served at `/` when the
+ * request's Accept header wants markdown more than it wants HTML.
+ *
+ * It is the same page said plainly, not a redirect to `/skill.md`: an agent that asked
+ * what this site is should get an answer to that question, with the pointer to the
+ * operating instructions as the last line rather than the whole reply.
+ */
+export function landingMarkdown(): string {
+  const base = config.baseUrl;
+  return `# Seer
+
+A private instrument for previewing HTML bundles, and for reading pull requests.
+
+An agent builds a page, zips it, and pushes it here. Seer keeps every version and hands
+back a URL that reloads itself the moment a new build lands. Bundles live inside a
+workspace, and a workspace can have more than one pair of hands. Pushing a bundle needs a
+key and the ledger stays members-only, but public bundle links are public: hand one to
+anyone and they can open it, no sign-in.
+
+\`\`\`sh
+curl -X PUT --data-binary @bundle.zip \\
+  -H "Authorization: Bearer $SEER_API_KEY" \\
+  ${base}/api/bundles/your-slug
+\`\`\`
+
+Back comes \`/<workspace>/b/your-slug/\`, versioned and live.
+
+## Overseer
+
+The same deployment reads pull requests. Point it at one, or at a stack of them, and it
+publishes a page you read instead of the diff: what changed, what it costs, what to look
+at closely, every claim one tap from the lines it stands on.
+
+It derives the facts itself, so the file list, the hunks, every line number and every
+commit come from GitHub rather than from an agent's memory. The judgment comes from a
+sub-agent that did not write the change, because one that did describes what it meant to
+do rather than what the diff says. Reviews are private to their workspace.
+
+## Where to go next
+
+| you want | fetch |
+|---|---|
+| what this deployment does, and which document you need | \`${base}/skill.md\` |
+| to publish a page, dashboard, report or small app | \`${base}/bundles/skill.md\` |
+| to review a pull request, or a stack of them | \`${base}/overseer/agent.md\` |
+| a credential | \`${base}/auth.md\` |
+| the API, described | \`${base}/openapi.json\` |
+| every skill this site publishes | \`${base}/.well-known/agent-skills/index.json\` |
+
+Source: ${GITHUB_URL}
+`;
+}
+
+/**
+ * WebMCP (webmachinelearning.github.io/webmcp): the two things an agent driving a browser
+ * on this page might actually want, offered as tools so it does not have to guess the
+ * URLs. Both are plain reads of documents already public at their own addresses, so the
+ * tools add reach for an agent inside a page and no reach at all for anyone else.
+ *
+ * Two spellings of the same API are in the wild — `registerTool` per the current draft and
+ * `provideContext` per the earlier one — and which a browser ships is not this page's
+ * business, so it offers to both and does nothing at all where neither exists.
+ */
+function webMcpScript(): string {
+  const tools = `[
+  {
+    name: "seer_get_instructions",
+    description: "Fetch Seer's own instructions for agents: what this deployment does and which document to read to publish an HTML bundle or a pull request review.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    async execute() {
+      const r = await fetch("/skill.md", { headers: { accept: "text/markdown" } });
+      return { content: [{ type: "text", text: await r.text() }] };
+    }
+  },
+  {
+    name: "seer_list_skills",
+    description: "List every agent skill this Seer deployment publishes, with the URL and SHA-256 digest of each.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    async execute() {
+      const r = await fetch("/.well-known/agent-skills/index.json");
+      return { content: [{ type: "text", text: await r.text() }] };
+    }
+  }
+]`;
+  return `<script>(()=>{const mc=navigator.modelContext;if(!mc)return;const tools=${tools};
+if(typeof mc.registerTool==="function"){for(const t of tools)mc.registerTool(t);}
+else if(typeof mc.provideContext==="function"){mc.provideContext({tools});}})();</script>`;
+}
+
 export function landingPage(signedIn: boolean): string {
   const curl = `curl -X PUT --data-binary @bundle.zip \\
   <span class="flag">-H "Authorization: Bearer $API_TOKEN"</span> \\
@@ -1237,7 +1327,17 @@ export function landingPage(signedIn: boolean): string {
 
   return `<!doctype html>
 <html lang="en">
-${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">`)}
+${head(
+  "Seer",
+  og,
+  // The Link header on this response says the same thing; both are here because a
+  // crawler that only parsed the body and an agent that only read the headers should
+  // each find the way in.
+  `<link rel="alternate" type="text/markdown" href="/skill.md">
+<link rel="service-desc" type="application/json" href="/openapi.json">
+<link rel="service-doc" type="text/markdown" href="/skill.md">
+<link rel="api-catalog" href="/.well-known/api-catalog">`,
+)}
 <body>
 <div class="frame warm">
   <div class="shell spine">
@@ -1308,6 +1408,7 @@ ${head("Seer", og, `<link rel="alternate" type="text/markdown" href="/skill.md">
   </div>
 </div>
 ${themeToggleScript()}
+${webMcpScript()}
 </body>
 </html>`;
 }
