@@ -105,12 +105,52 @@ describe("the document and the router are one list", () => {
     expect(ids.length).toBe(new Set(ids).size);
   });
 
+  test("every mutation a session can reach refuses a foreign Origin", async () => {
+    // `guarded()` is a wrapper, and a wrapper is a convention: nothing in the types makes
+    // anyone reach for it. This is where it becomes an obligation. The list is derived
+    // rather than written down, so a new session-reachable mutation joins it without
+    // anybody remembering to.
+    const shouldGuard = API_ROUTES.flatMap((r) =>
+      Object.entries(r.methods)
+        .filter(([method, entry]) => entry.doc?.security === "keyOrSession" && method !== "GET")
+        .map(([method]) => ({ path: r.path, method })),
+    );
+    expect(shouldGuard.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+      "DELETE /api/shares/:id",
+      "POST /api/reviews/:slug/annotations",
+      "POST /api/reviews/:slug/refresh",
+      "POST /api/shares",
+    ]);
+
+    for (const { path, method } of shouldGuard) {
+      const probe = path.replace("/:slug", `/${SLUG}`).replace(/\/:[^/]+/g, "/probe");
+      const res = await fetch(`${base}${probe}`, {
+        method,
+        headers: auth({ "content-type": "application/json", origin: "https://evil.example" }),
+        body: method === "DELETE" ? undefined : "{}",
+      });
+      // 403 with these bytes, and before anything else the handler would have said —
+      // a cross-site post must not reach the work.
+      expect({ path, method, status: res.status, said: await res.text() }).toEqual({
+        path,
+        method,
+        status: 403,
+        said: "Bad origin",
+      });
+    }
+  });
+
   test("every described path is one Bun actually routes", async () => {
     // The projection rewrites `:slug` to `{slug}`. That rewrite, and nothing else, stands
     // between the two spellings — so this is the one structural thing still worth
     // checking end to end. A path nothing matched comes back as the catch-all's exact
     // bytes; several of these answer 404 on purpose and are not that.
-    for (const [path, operations] of Object.entries(openApiPaths())) {
+    //
+    // Walked off the whole served document rather than off openApiPaths(), so /healthz —
+    // the one path still written by hand, because it is not an /api/ route — is checked
+    // too. It was not, briefly, and nothing said so.
+    const served = (openApiSpec() as { paths: Record<string, Record<string, unknown>> }).paths;
+    for (const [path, operations] of Object.entries(served)) {
       const probe = path.replace(/\{[^}]+\}/g, "probe");
       for (const method of Object.keys(operations)) {
         const res = await fetch(`${base}${probe}`, { method: method.toUpperCase() });
@@ -302,13 +342,16 @@ describe("a 200 matches the schema the document declares for it", () => {
     await check("listBundles", () => fetch(`${base}/api/bundles`, { headers: auth() }));
   });
 
-  test("publishBundle", async () => {
+  test("publishBundle, by both verbs", async () => {
+    // Both, because the document says PUT and POST are identical and that is a claim
+    // about the server rather than a note about the code. Listing the POST as driven
+    // while driving only the PUT was how this test file first said it.
+    const zip = () => zipSync({ "index.html": strToU8("<html></html>") });
     await check("publishBundle", () =>
-      fetch(`${base}/api/bundles/contract-published`, {
-        method: "PUT",
-        headers: auth(),
-        body: zipSync({ "index.html": strToU8("<html></html>") }),
-      }),
+      fetch(`${base}/api/bundles/contract-published`, { method: "PUT", headers: auth(), body: zip() }),
+    );
+    await check("publishBundleViaPost", () =>
+      fetch(`${base}/api/bundles/contract-published`, { method: "POST", headers: auth(), body: zip() }),
     );
   });
 

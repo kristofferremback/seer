@@ -86,8 +86,16 @@ const slugParam = {
   schema: { type: "string", pattern: SLUG_RE.source },
 };
 
-/** A browser-reachable POST. Origin is what proves it came from Seer, and it is checked
- *  here rather than inside each handler so a new mutation route cannot quietly omit it. */
+/**
+ * A browser-reachable mutation. Origin is what proves it came from Seer, and it is a
+ * wrapper rather than a line inside each handler so that forgetting it is a visible
+ * omission at the route rather than an invisible one three files away.
+ *
+ * A wrapper is still only a convention — nothing in the types makes you reach for it. So
+ * the obligation lives in tests/api-contract.test.ts, which derives the routes that need
+ * it (a mutation a session can reach) and sends each one a foreign Origin. A new
+ * unguarded mutation fails there rather than shipping.
+ */
 function guarded<P extends string>(
   run: (req: Bun.BunRequest<P>) => Response | Promise<Response>,
 ): (req: Bun.BunRequest<P>) => Response | Promise<Response> {
