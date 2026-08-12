@@ -386,17 +386,28 @@ function paragraphsOf(source: string): number {
   return paragraphs;
 }
 
+/** The periods that belong to a word rather than to the end of a sentence: the handful
+ *  of abbreviations that turn up in writing about code, and a single letter, which is
+ *  every initial and every acronym spelled with stops. Reading the following word is
+ *  the only other way to tell "e.g. Bun serves it" from a sentence break, and that
+ *  needs a dictionary. */
+const ABBREVIATION = /(?:\b(?:e\.g|i\.e|etc|cf|vs|al|approx|fig|eq|ca|no)|\b[A-Za-z])\.$/i;
+
 /** Sentence terminators at the end of the field, or followed by the start of another
  *  sentence: a capital, a quote or an opening bracket, with or without a space between.
- *  A period followed by a lower-case word is inside "e.g." or "v1.2 shipped" rather than
- *  between two sentences, and counting it turned a two-sentence field into a 422 its
- *  author could not read back off the page. This is a ceiling, so where a reading is
- *  uncertain it takes the lower one. */
+ *  A period inside "e.g.", "U.S." or "v1.2 shipped" is not between two sentences, and
+ *  counting it turned a two-sentence field into a 422 its author could not read back off
+ *  the page. This is a ceiling, so where a reading is uncertain it takes the lower one. */
 function sentencesOf(source: string): number {
   const text = source.trim();
   if (text === "") return 0;
-  const ends = text.match(/[.!?]+(?:$|\s*(?=["'(\[]|[A-Z]))/g);
-  return ends ? ends.length : 1;
+  let ends = 0;
+  for (const end of text.matchAll(/[.!?]+(?:$|\s*(?=["'(\[]|[A-Z]))/g)) {
+    const terminator = end[0].trimEnd();
+    if (ABBREVIATION.test(text.slice(0, end.index + terminator.length))) continue;
+    ends += 1;
+  }
+  return ends === 0 ? 1 : ends;
 }
 
 /** A path as authored: one line, no control characters. It renders as a filename, so a
