@@ -12,7 +12,7 @@
 // them turns the slug into an oracle for what a workspace is working on.
 
 import { config } from "../config";
-import { listUserWorkspaces } from "../db";
+import { getWorkspace, listUserWorkspaces } from "../db";
 import { requireApiKey, sessionUser } from "../auth";
 import {
   getReviewVersion,
@@ -24,11 +24,15 @@ import {
 import { lookupPrStatus, statusOf, type PrStatusWord } from "./installations";
 import { prKey, type Freshness, type Review } from "./types";
 
-const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /** Every soft-404 on this path is this exact response. It is built fresh per call and
- *  from no request-derived value, so two of them are byte-identical by construction. */
-function softNotFound(): Response {
+ *  from no request-derived value, so two of them are byte-identical by construction.
+ *
+ *  Exported because the context route answers on the same terms: it serves bytes out of
+ *  a review, so every way of not being allowed to read one has to look the same there
+ *  too, down to the body. */
+export function softNotFound(): Response {
   return new Response(JSON.stringify({ error: "No such review" }, null, 2), {
     status: 404,
     headers: { "content-type": "application/json", "cache-control": "no-store" },
@@ -155,9 +159,27 @@ export function observedAtOf(wsId: string, slug: string, doc: ReviewDoc): number
   return oldest;
 }
 
+/**
+ * The review this request may read, or null for the one soft-404.
+ *
+ * `wsId` pins the workspace when the URL named one, which is the shape publish hands
+ * back; a bare slug resolves across every workspace the reader can reach, as the JSON
+ * path does. It lives here rather than beside the page it was written for because the
+ * context route needs the same gate, and a second copy of a privacy gate is a second
+ * place for it to drift.
+ */
+export function resolveFor(req: Request, slug: string, wsId: string | null) {
+  if (!SLUG_RE.test(slug)) return null;
+  if (wsId !== null && !getWorkspace(wsId)) return null;
+  const readable = readableWorkspaces(req);
+  const ids = wsId === null ? readable : readable.filter((id) => id === wsId);
+  if (ids.length === 0) return null;
+  return resolveReview(ids, slug);
+}
+
 /** A version number as it may appear in a URL. Anything else is out of range, and out
  *  of range is a soft-404 like every other miss. */
-function versionNumber(raw: string): number | null {
+export function versionNumber(raw: string): number | null {
   if (!/^[0-9]{1,9}$/.test(raw)) return null;
   const n = Number(raw);
   return Number.isInteger(n) && n >= 1 ? n : null;

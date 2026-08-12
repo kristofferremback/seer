@@ -294,6 +294,25 @@ function hunkLine(line: HunkLine, lang: "ts" | "json" | null): string {
   );
 }
 
+/**
+ * A run of the file the hunks came out of, as the same lines they are drawn as.
+ *
+ * The context route serves these rather than the bare text, so the panel's markup is
+ * the page's markup and the tokenizer stays in one place. `first` is the new-side
+ * number of `lines[0]`: a line of surrounding code counts against the new file, the
+ * same way an unchanged line inside a hunk does.
+ */
+export function contextLines(first: number, lines: string[], lang: "ts" | "json" | null): string[] {
+  return lines.map(
+    (content, i) =>
+      `<span class="l"><span class="gut">` +
+      `<span class="n">${first + i}</span>` +
+      `<span class="g"> </span></span>` +
+      codeHtml(content, lang) +
+      `</span>`,
+  );
+}
+
 /** `@@ -a,b +c,d @@`, exactly as the header the parser read it from. */
 export function hunkRange(hunk: Hunk): string {
   return `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`;
@@ -313,6 +332,33 @@ export function hunkAnchorId(hunkId: string): string {
   return `h-${safeId(hunkId)}`;
 }
 
+/**
+ * Which lines of the new file this hunk draws: the first and the last number in its
+ * own gutter, not the range its header claims.
+ *
+ * The two agree for a hunk a parser wrote, and the header is the wrong one to build a
+ * layout on anyway — it says what the diff covers, while a panel laying the file out
+ * around this element needs to know what the element actually puts on screen. Taking
+ * the numbers off the lines makes that true by construction rather than by the header
+ * being right.
+ *
+ * A hunk that only deletes draws no new-side line at all. Its span is empty, and the
+ * empty span is positioned rather than sized: `to` one short of `from` says it belongs
+ * between the line before it and the line after, which is exactly what `@@ -a,b +c,0 @@`
+ * means.
+ */
+export function newSpan(hunk: Hunk): { from: number; to: number } {
+  let from: number | null = null;
+  let to: number | null = null;
+  for (const line of hunk.lines) {
+    if (line.newNo === null) continue;
+    if (from === null || line.newNo < from) from = line.newNo;
+    if (to === null || line.newNo > to) to = line.newNo;
+  }
+  if (from === null || to === null) return { from: hunk.newStart + 1, to: hunk.newStart };
+  return { from, to };
+}
+
 function hunkBlock(
   hunk: Hunk,
   previous: Hunk | undefined,
@@ -320,13 +366,23 @@ function hunkBlock(
   here: QuestionsHere,
 ): string {
   const broke = previous !== undefined && sourceOf(previous) !== sourceOf(hunk);
+  const span = newSpan(hunk);
   const lines = hunk.lines.map((l) => hunkLine(l, lang)).join("");
   return (
     // The hunk's own id travels with it. It is a handle rather than an anchor, so it
     // is an attribute the page can be checked against: the groups partition the
     // document's hunks, and a partition drawn on the page is one every id reaches
     // exactly once.
-    `<div class="hunk" id="${escapeHtml(hunkAnchorId(hunk.id))}" data-hunk="${escapeHtml(hunk.id)}"${broke ? " data-src-break" : ""}>` +
+    //
+    // Beside it, where this hunk sits in the file it came out of: the path, the commit
+    // it counts against, and the run of new-side lines it draws. The panel builds its
+    // file view out of these, gathering every hunk of one (path, sha) wherever on the
+    // page they are drawn, so a file whose hunks two groups claim is still one file up
+    // there. They are the numbers in the hunk's own gutter, so a line that lands in the
+    // wrong place in the panel is a line that is wrong on the page.
+    `<div class="hunk" id="${escapeHtml(hunkAnchorId(hunk.id))}" data-hunk="${escapeHtml(hunk.id)}"` +
+    ` data-path="${escapeHtml(hunk.path)}" data-sha="${escapeHtml(hunk.sha)}"` +
+    ` data-new-from="${span.from}" data-new-to="${span.to}"${broke ? " data-src-break" : ""}>` +
     `<div class="hh"><span class="hh-at">${escapeHtml(hunkRange(hunk))}</span>` +
     `<span class="hh-src">${escapeHtml(sourceOf(hunk))}</span></div>` +
     `<pre class="snip scroll-x"><code>${lines}</code></pre>` +
