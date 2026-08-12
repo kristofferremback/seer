@@ -46,7 +46,7 @@ import {
   type EntityDelta,
 } from "./delta";
 import type { PrStatusWord } from "./installations";
-import { freshnessOf, observedAtOf, readableWorkspaces, statusesOf } from "./read";
+import { freshnessOf, observedAtOf, resolveFor, statusesOf } from "./read";
 import {
   KIND_LABEL,
   hunkAnchorId,
@@ -1459,6 +1459,59 @@ const ZOOM_STYLE = `
     background-image: linear-gradient(hsl(var(--ink) / 0.04), hsl(var(--ink) / 0.04));
     border-bottom: 1px solid hsl(var(--line));
   }
+  /* Once the file is around them the numbers run unbroken down the panel, so the
+     range header says nothing the gutter has not already said, and every hunk
+     wearing one turns a file into a stack of cards again. It stays in the column,
+     where the numbers do jump. */
+  .filefull .hh { display: none; }
+  .filefull .snip { padding-top: 0; padding-bottom: 0; }
+  .filefull { padding: 6px 0 16px; }
+  /* the hunk the reader pressed to get here, marked at the far edge of the gutter:
+     the page's own ink rather than a change hue, because the washes already say
+     which way a line went and this says the other thing, that you are here. */
+  .filefull .hunk.focus .gut { box-shadow: inset 2px 0 0 hsl(var(--accent)); }
+  /* the file between two stretches that are loaded, and how much of it is left.
+     It reads as the rail a hunk header used to be, because it is the same kind of
+     thing: a line about the code rather than a line of it. */
+  .gapfill {
+    display: block; width: 100%;
+    margin: 0; padding: 6px 0;
+    border: 0;
+    border-top: 1px solid hsl(var(--line));
+    border-bottom: 1px solid hsl(var(--line));
+    background: hsl(var(--ink) / 0.04);
+    font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
+    color: hsl(var(--muted));
+    text-align: left; cursor: pointer;
+  }
+  /* pinned to the panel's left edge like the gutter it lines up with, so scrolling
+     a long line sideways never leaves the count behind */
+  .gapfill .gfi { position: sticky; left: 0; display: inline-block; padding-left: 8px; }
+  .gapfill .gfg { display: inline-block; width: 3.4em; letter-spacing: 0.14em; }
+  .gapfill .gfn { text-underline-offset: 3px; }
+  .gapfill[data-failed] { cursor: default; }
+  @media (hover: hover) and (pointer: fine) {
+    .gapfill:not([data-failed]):hover { color: hsl(var(--ink)); }
+    .gapfill:not([data-failed]):hover .gfn { text-decoration: underline; }
+  }
+  /* lines on their way in: their numbers are known, their code is not */
+  .filefull .l.sk .skb {
+    display: inline-block; height: 0.7em; border-radius: 2px;
+    background: hsl(var(--ink) / 0.09); vertical-align: middle;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .filefull .l.sk .skb { animation: skpulse 1.15s ease-in-out infinite; }
+  }
+  @keyframes skpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }
+  /* the one sentence the panel says when the file will not come. It sits above the
+     hunks, which are still exactly what they were. */
+  .nocontext {
+    padding: 9px 14px 9px 12px;
+    border-bottom: 1px solid hsl(var(--line));
+    background: hsl(var(--ink) / 0.04);
+    font-family: var(--font-body); font-size: 12.5px; line-height: 1.45;
+    color: hsl(var(--muted));
+  }
   @media (min-width: 700px) {
     .zoomdlg {
       width: min(94vw, 980px);
@@ -1570,11 +1623,23 @@ const PAGE_SCRIPT = `
  *  actually closes a full-screen thing — closes the panel and lands back on the review
  *  rather than on whatever preceded it. Closing any other way pops that entry itself, so
  *  the panel never leaves a step in the history a reader has to walk back through. */
-const ZOOM_SCRIPT = `
+function zoomScript(basePath: string, version: number, context: boolean): string {
+  return `
 (() => {
   const buttons = Array.from(document.querySelectorAll("button.zoom"));
   if (buttons.length === 0) return;
   if (typeof HTMLDialogElement !== "function" || !HTMLDialogElement.prototype.showModal) return;
+
+  // Where the file around a hunk is asked for, and whether it may be asked for at all.
+  // A shared page passes false: what the link handed out is the review and the hunks
+  // the walkthrough drew, and the whole of every file they touch is a larger thing
+  // than the person who minted the link agreed to.
+  const CONTEXT = ${context ? "true" : "false"};
+  const BASE = ${JSON.stringify(basePath)};
+  const VERSION = ${JSON.stringify(version)};
+  const PAD = 20;    // lines each side of a hunk when the panel opens
+  const CHUNK = 40;  // lines per scroll-driven step
+  const FILL = 40;   // a gap shorter than this is closed rather than offered
 
   const SIZE_KEY = "overseer:code-panel";
   const wide = matchMedia("(min-width: 700px)");
@@ -1609,11 +1674,31 @@ const ZOOM_SCRIPT = `
     dlg.addEventListener("close", () => {
       document.documentElement.classList.remove("code-open");
       dlg.querySelector(".zoom-inner").textContent = "";
+      // Whatever the file view was still waiting for, it is waiting for a panel that
+      // is not there. The token it was started under is dropped with it, so an answer
+      // still in the air lands on nothing.
+      stop();
       if (!owes) return;
       owes = false;
       consuming = true;
       history.back();
     });
+    // A gap is a control as well as a measure: scrolling into it takes the next stretch,
+    // and pressing it takes the rest, which is what a keyboard and a reader in a hurry
+    // both reach for.
+    dlg.addEventListener("click", (e) => {
+      if (!view || !e.target || !e.target.closest) return;
+      const gap = e.target.closest(".gapfill");
+      if (!gap || gap.hasAttribute("data-failed")) return;
+      grow(Number(attr(gap, "data-from")), Number(attr(gap, "data-to")), true);
+    });
+    // Which way the reader is going, so a gap grows from the side they are coming from.
+    dlg.querySelector(".zoom-body").addEventListener("scroll", (e) => {
+      if (!view) return;
+      const at = e.target.scrollTop;
+      if (Math.abs(at - view.lastTop) > 2) view.down = at > view.lastTop;
+      view.lastTop = at;
+    }, { passive: true });
     // A size is remembered only when the reader made it: a drag that starts in the
     // resize corner and ends somewhere else. Watching the box instead cannot tell a
     // drag from the window moving under it, and guessing wrong pins every later panel
@@ -1634,21 +1719,433 @@ const ZOOM_SCRIPT = `
     return dlg;
   };
 
+  // ---- the file the hunks were cut from ----
+  //
+  // The panel opens on the hunks the page already carries, which is what it has always
+  // shown and what it goes on showing if nothing else ever arrives. Then it asks for
+  // the file at the commit those hunks count against and lays them back into it. The
+  // swap keeps the reader's place by scrolling to the same hunk afterwards, so the code
+  // under their eye does not move: the file appears around it.
+  //
+  // Every number here is the hunk's own, read off the attributes the renderer wrote:
+  // where in the new file it starts and how many lines of it it occupies. Nothing is
+  // re-derived, so a line that lands in the wrong place in the panel is a line that is
+  // wrong in the document.
+  let view = null;
+  let token = 0;
+
+  const clean = (node) => {
+    // The clone is a second copy of markup the page already addresses by id, and two
+    // elements answering to one id is a page whose citations stop landing.
+    node.removeAttribute("id");
+    node.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
+    node.querySelectorAll("button.zoom, .cue").forEach((el) => el.remove());
+    // Nothing is clipped in here: it is the panel's whole job not to be.
+    node.removeAttribute("data-clip");
+    node.querySelectorAll("[data-clip]").forEach((el) => el.removeAttribute("data-clip"));
+    return node;
+  };
+
+  const attr = (el, name) => el.getAttribute(name);
+  const int = (el, name) => {
+    const n = Number(attr(el, name));
+    return Number.isInteger(n) ? n : null;
+  };
+
+  /** The one file this row is a view of, or null when it is not one file. */
+  const fileOf = (box) => {
+    if (!CONTEXT || !box.classList.contains("filediff")) return null;
+    const own = Array.from(box.querySelectorAll(".hunk[data-path][data-sha]"));
+    if (own.length === 0) return null;
+    const path = attr(own[0], "data-path");
+    const sha = attr(own[0], "data-sha");
+    // A file view is a view of one file at one commit. Two shas under one row is a
+    // stack's seam, and there is no single file to lay both sides out in, so that row
+    // keeps the panel it has always had.
+    for (const h of own) {
+      if (attr(h, "data-path") !== path || attr(h, "data-sha") !== sha) return null;
+    }
+    const mine = new Set(own.map((h) => attr(h, "data-hunk")));
+    const hunks = [];
+    // Every hunk of this file on the page, not only this row's. A file whose hunks two
+    // groups claim is still one file, and a view of it with holes where the other
+    // group's changes went would be a claim about the file rather than a shorter view
+    // of it.
+    document.querySelectorAll(".hunk[data-path][data-sha]").forEach((el) => {
+      // The panel is in the document too, and by now it is holding a copy of this very
+      // row. A copy is not a second hunk of the file, and counting it as one draws
+      // every hunk twice.
+      if (dlg && dlg.contains(el)) return;
+      if (attr(el, "data-path") !== path || attr(el, "data-sha") !== sha) return;
+      const from = int(el, "data-new-from"), to = int(el, "data-new-to");
+      if (from === null || to === null || from < 1 || to < from - 1) return;
+      hunks.push({ el: el, from: from, to: to, focus: mine.has(attr(el, "data-hunk")) });
+    });
+    if (hunks.length === 0) return null;
+    hunks.sort((a, b) => a.from - b.from || a.to - b.to);
+    return { path: path, sha: sha, hunks: hunks };
+  };
+
+  const merged = (list) => {
+    const sorted = list.map((r) => [r[0], r[1]]).sort((a, b) => a[0] - b[0]);
+    const out = [];
+    for (const r of sorted) {
+      const last = out[out.length - 1];
+      if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]);
+      else out.push(r);
+    }
+    return out;
+  };
+
+  /** What the panel lays out, once the holes too small to be worth a control are not
+   *  offered as one: a five-line gap with a count in it is worse than the five lines. */
+  const settle = () => {
+    let list = merged(view.shown);
+    if (view.total !== null) {
+      list = list
+        .map((s) => [Math.min(s[0], view.total), Math.min(s[1], view.total)])
+        .filter((s) => s[0] <= s[1]);
+    }
+    const out = [];
+    for (const s of list) {
+      const last = out[out.length - 1];
+      if (last && s[0] - last[1] - 1 <= FILL) last[1] = Math.max(last[1], s[1]);
+      else out.push([s[0], s[1]]);
+    }
+    if (out.length > 0 && out[0][0] - 1 <= FILL) out[0][0] = 1;
+    const end = out[out.length - 1];
+    if (end && view.total !== null && view.total - end[1] <= FILL) end[1] = view.total;
+    view.shown = out;
+  };
+
+  const inHunk = (n) => {
+    for (const h of view.hunks) {
+      if (n >= h.from && n <= h.to) return true;
+    }
+    return false;
+  };
+
+  /** Ask for every line the panel is showing that it does not have. A hunk's own lines
+   *  are already on the page, so they are never fetched: what is asked for is the file
+   *  between and around them. */
+  const fill = () => {
+    for (const s of view.shown) {
+      let n = s[0];
+      while (n <= s[1]) {
+        if (view.lines.has(n) || view.asking.has(n) || inHunk(n)) { n++; continue; }
+        const a = n;
+        while (n <= s[1] && !view.lines.has(n) && !view.asking.has(n) && !inHunk(n)) n++;
+        ask(a, n - 1, null);
+      }
+    }
+  };
+
+  const ask = (a, b, gapFrom) => {
+    // The route bounds one request; this keeps a widened span from ever reaching that
+    // bound, which would turn a legitimate ask into the same refusal a bad URL gets.
+    if (b - a + 1 > 300) {
+      for (let at = a; at <= b; at += 300) ask(at, Math.min(b, at + 299), gapFrom);
+      return;
+    }
+    for (let n = a; n <= b; n++) view.asking.add(n);
+    const mine = view.token;
+    const forget = () => {
+      for (let n = a; n <= b; n++) view.asking.delete(n);
+    };
+    const url =
+      BASE + "/c?path=" + encodeURIComponent(view.path) +
+      "&sha=" + encodeURIComponent(view.sha) +
+      "&from=" + a + "&to=" + b + "&v=" + encodeURIComponent(String(VERSION));
+    fetch(url, { headers: { accept: "application/json" } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body) => {
+        if (!view || view.token !== mine) return;
+        forget();
+        if (!body || !body.lines) { refuse(gapFrom, body && body.why); return; }
+        for (let i = 0; i < body.lines.length; i++) view.lines.set(body.from + i, body.lines[i]);
+        if (typeof body.total === "number") view.total = body.total;
+        landed();
+      })
+      .catch(() => {
+        if (!view || view.token !== mine) return;
+        forget();
+        refuse(gapFrom, null);
+      });
+  };
+
+  const esc = (s) =>
+    String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  const gapHtml = (from, to) => {
+    const why = view.gapFail[from];
+    const n = to - from + 1;
+    const said = why ? esc(why) : n + " lines";
+    return (
+      '<button type="button" class="gapfill" data-from="' + from + '" data-to="' + to + '"' +
+      (why ? ' data-failed aria-disabled="true"' : "") +
+      ' aria-label="' + (why ? esc(why) : "Show the " + n + " lines hidden here") + '">' +
+      '<span class="gfi">' +
+      (why ? "" : '<span class="gfg">\\u00b7\\u00b7\\u00b7</span>') +
+      '<span class="gfn">' + said + "</span></span></button>"
+    );
+  };
+
+  /** A line the panel is laying out but does not have yet. Its number is already known,
+   *  so the file grows into the space it will occupy rather than jumping when it lands. */
+  const skeleton = (n) => {
+    const w = 12 + ((n * 37) % 48);
+    return (
+      '<span class="l sk"><span class="gut"><span class="n">' + n +
+      '</span><span class="g"> </span></span>' +
+      '<span class="skb" style="width:' + w + 'ch"></span></span>'
+    );
+  };
+
+  const hunkNode = (h) => {
+    const node = clean(h.el.cloneNode(true));
+    if (h.focus) node.classList.add("focus");
+    return node;
+  };
+
+  const emit = (parts, done, from, to) => {
+    let run = "";
+    let n = from;
+    const flush = () => {
+      if (run === "") return;
+      parts.push('<pre class="snip scroll-x"><code>' + run + "</code></pre>");
+      run = "";
+    };
+    while (n <= to) {
+      const here = view.at.get(n);
+      if (here) {
+        let jumped = false;
+        for (const h of here) {
+          if (done.has(h)) continue;
+          flush();
+          done.add(h);
+          parts.push(hunkNode(h));
+          // A hunk that only deletes draws no line of the new file, so the walk stays
+          // where it is and the line it was about to draw follows the deletion.
+          if (h.to >= h.from) { n = h.to + 1; jumped = true; }
+        }
+        if (jumped) continue;
+      }
+      const got = view.lines.get(n);
+      run += got === undefined ? skeleton(n) : got;
+      n++;
+    }
+    flush();
+  };
+
+  /** The key an element is found again by after a repaint. A context line is keyed by
+   *  the number in its own gutter, which is the new-side number by construction: only a
+   *  deletion carries an old one, and deletions live inside hunks. */
+  const keyOf = (el) => {
+    if (el.classList.contains("hunk")) return "h" + attr(el, "data-new-from");
+    if (el.classList.contains("gapfill")) return "g" + attr(el, "data-from");
+    const n = el.querySelector(".n");
+    return n ? "n" + n.textContent.trim() : null;
+  };
+  const ROWS = ".filefull .hunk, .filefull .gapfill, .filefull > pre.snip > code > .l";
+
+  const anchorOf = (body, inner) => {
+    const top = body.getBoundingClientRect().top;
+    const list = inner.querySelectorAll(ROWS);
+    for (const el of list) {
+      const box = el.getBoundingClientRect();
+      if (box.bottom <= top + 1) continue;
+      const key = keyOf(el);
+      if (key) return { key: key, off: box.top - top };
+    }
+    return null;
+  };
+
+  const restore = (body, inner, a) => {
+    if (!a) return;
+    const list = inner.querySelectorAll(ROWS);
+    for (const el of list) {
+      if (keyOf(el) !== a.key) continue;
+      const top = body.getBoundingClientRect().top;
+      body.scrollTop += el.getBoundingClientRect().top - top - a.off;
+      return;
+    }
+  };
+
+  const paint = (keep) => {
+    const body = dlg.querySelector(".zoom-body");
+    const inner = dlg.querySelector(".zoom-inner");
+    const a = keep ? anchorOf(body, inner) : null;
+    // A gap pressed from the keyboard is a gap that is about to stop existing, and the
+    // element holding the focus going away hands it back to the document. Inside a
+    // modal that means the next tab starts from the top of it.
+    const held = inner.contains(document.activeElement);
+
+    const parts = [];
+    const done = new Set();
+    let at = 1;
+    for (const s of view.shown) {
+      if (s[0] > at) parts.push(gapHtml(at, s[0] - 1));
+      emit(parts, done, s[0], s[1]);
+      at = Math.max(at, s[1] + 1);
+    }
+    // The end of the file is not known until the first answer comes back, and a gap
+    // whose size is unknown is not one the panel can honestly draw.
+    if (view.total !== null && at <= view.total) parts.push(gapHtml(at, view.total));
+    // A hunk the walk never reached is still the reader's. Nothing should reach this,
+    // since every hunk's own lines are in the shown spans from the start, but a walkthrough that
+    // quietly loses a hunk is a partition nobody can check, so it lands at the end
+    // rather than nowhere.
+    for (const h of view.hunks) if (!done.has(h)) parts.push(hunkNode(h));
+
+    const wrap = document.createElement("div");
+    wrap.className = "filediff filefull";
+    let buffer = "";
+    const drain = () => {
+      if (buffer === "") return;
+      const holder = document.createElement("div");
+      holder.innerHTML = buffer;
+      while (holder.firstChild) wrap.appendChild(holder.firstChild);
+      buffer = "";
+    };
+    for (const p of parts) {
+      if (typeof p === "string") buffer += p;
+      else { drain(); wrap.appendChild(p); }
+    }
+    drain();
+
+    inner.textContent = "";
+    inner.appendChild(wrap);
+    if (held) body.focus();
+    restore(body, inner, a);
+    watch();
+  };
+
+  const toFocus = () => {
+    const body = dlg.querySelector(".zoom-body");
+    const el = dlg.querySelector(".filefull .hunk.focus");
+    if (!el) return;
+    body.scrollTop +=
+      el.getBoundingClientRect().top - body.getBoundingClientRect().top - body.clientHeight / 3;
+  };
+
+  const landed = () => {
+    view.busy = false;
+    settle();
+    fill();
+    if (view.painted) { paint(true); return; }
+    view.painted = true;
+    paint(false);
+    toFocus();
+  };
+
+  const refuse = (gapFrom, why) => {
+    view.busy = false;
+    const said = why || "The code around this change could not be loaded.";
+    if (!view.painted) {
+      // Nothing was ever swapped in, so the panel is still the hunks it opened on: the
+      // reader loses the surrounding file and keeps everything they had before it was
+      // offered. One line above them says which nothing this is.
+      const inner = dlg.querySelector(".zoom-inner");
+      if (!inner.querySelector(".nocontext")) {
+        const p = document.createElement("p");
+        p.className = "nocontext";
+        p.textContent = said;
+        inner.insertBefore(p, inner.firstChild);
+      }
+      stop();
+      return;
+    }
+    if (gapFrom === null) return;
+    view.gapFail[gapFrom] = said;
+    paint(true);
+  };
+
+  const grow = (from, to, all) => {
+    if (!view || !view.painted || view.busy) return;
+    const size = all ? to - from + 1 : CHUNK;
+    let a, b;
+    // From the side the reader is coming from, so the lines land between them and the
+    // gap and the gap moves away rather than staying under their eye.
+    if (view.down) { a = from; b = Math.min(to, from + size - 1); }
+    else { b = to; a = Math.max(from, to - size + 1); }
+    if (to - from + 1 - (b - a + 1) <= FILL) { a = from; b = to; }
+    view.shown = merged(view.shown.concat([[a, b]]));
+    settle();
+    paint(true);
+    fill();
+    // Only busy if something is actually on its way. A step that turned out to need no
+    // fetch would otherwise hold the gate shut and the gaps would stop growing.
+    view.busy = view.asking.size > 0;
+  };
+
+  const watch = () => {
+    if (view.io) view.io.disconnect();
+    view.io = null;
+    if (typeof IntersectionObserver !== "function") return;
+    const body = dlg.querySelector(".zoom-body");
+    const io = new IntersectionObserver((entries) => {
+      if (!view || view.io !== io) return;
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        if (e.target.hasAttribute("data-failed")) continue;
+        grow(Number(attr(e.target, "data-from")), Number(attr(e.target, "data-to")), false);
+        return;
+      }
+    }, { root: body, rootMargin: "60px 0px" });
+    view.io = io;
+    dlg.querySelectorAll(".gapfill").forEach((g) => io.observe(g));
+  };
+
+  const stop = () => {
+    if (view && view.io) view.io.disconnect();
+    view = null;
+  };
+
+  const start = (file) => {
+    stop();
+    const at = new Map();
+    for (const h of file.hunks) {
+      // Where the hunk is drawn: before the first line of the new file it draws. A
+      // hunk that only deletes draws none, and its span is already positioned so that
+      // the same number puts it between the line before it and the line after.
+      const key = h.from;
+      const list = at.get(key);
+      if (list) list.push(h);
+      else at.set(key, [h]);
+    }
+    token = token + 1;
+    view = {
+      token: token,
+      path: file.path,
+      sha: file.sha,
+      hunks: file.hunks,
+      at: at,
+      lines: new Map(),
+      asking: new Set(),
+      gapFail: {},
+      shown: [],
+      total: null,
+      painted: false,
+      busy: false,
+      down: true,
+      lastTop: 0,
+      io: null,
+    };
+    view.shown = merged(
+      file.hunks.map((h) => [Math.max(1, h.from - PAD), Math.max(h.to, h.from) + PAD]),
+    );
+    settle();
+    fill();
+  };
+
   const open = (btn) => {
     const box = btn.closest(".filediff, .fold, .snipbox");
     if (!box) return;
     const source = box.classList.contains("filediff") ? box : box.querySelector("pre.snip");
     if (!source) return;
     const d = build();
-    const clone = source.cloneNode(true);
-    // The clone is a second copy of markup the page already addresses by id, and two
-    // elements answering to one id is a page whose citations stop landing.
-    clone.removeAttribute("id");
-    clone.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
-    clone.querySelectorAll("button.zoom, .cue").forEach((el) => el.remove());
-    // Nothing is clipped in here: it is the panel's whole job not to be.
-    clone.removeAttribute("data-clip");
-    clone.querySelectorAll("[data-clip]").forEach((el) => el.removeAttribute("data-clip"));
+    stop();
+    const clone = clean(source.cloneNode(true));
     const inner = d.querySelector(".zoom-inner");
     inner.textContent = "";
     inner.appendChild(clone);
@@ -1675,6 +2172,10 @@ const ZOOM_SCRIPT = `
     if (!owes) {
       try { history.pushState({ overseerCode: 1 }, ""); owes = true; } catch (e) { owes = false; }
     }
+    // Last, and only once the panel is up: what is on screen already stands on its own,
+    // and the file around it arrives when it arrives.
+    const file = typeof fetch === "function" ? fileOf(box) : null;
+    if (file) start(file);
   };
 
   addEventListener("popstate", () => {
@@ -1696,6 +2197,7 @@ const ZOOM_SCRIPT = `
   });
 })();
 `;
+}
 
 /** The delta's own ink. Every field starts as clean current prose. Standalone fields
  *  and expanded entities each have an explicit edited checkbox; opening a row alone
@@ -2539,6 +3041,12 @@ export interface RenderInput {
    *  someone who is not a member: that channel asks for membership, so the script could
    *  only fail, and it would print the workspace id into a page served on a secret. */
   live?: boolean;
+  /** Whether the full-screen panel may ask for the file around a hunk. False for a
+   *  shared page: the link handed out the review and the hunks the walkthrough drew,
+   *  and the whole of every file they touch is a larger thing than the person who
+   *  minted it agreed to. The route refuses a share token as well, so this is the
+   *  panel not offering what it would not be given rather than the gate itself. */
+  context?: boolean;
   doc: ReviewDoc;
   version: number;
   latestVersion: number;
@@ -2889,7 +3397,8 @@ export function renderReviewPage(input: RenderInput): string {
     `<p class="colophon">${escapeHtml(
       `${slug} · ${marking}${publishedOn(doc.updatedAt)}`,
     )} · <a href="/overseer/agent.md">agent instructions</a></p>\n` +
-    `</main>\n<script>${PAGE_SCRIPT}</script>\n<script>${ZOOM_SCRIPT}</script>\n` +
+    `</main>\n<script>${PAGE_SCRIPT}</script>\n` +
+    `<script>${zoomScript(ctx.basePath, input.version, input.context !== false)}</script>\n` +
     (input.canShare ? `<script>${shareScript(wsId, slug)}</script>\n` : "") +
     // A pinned version is a record of what was published, so it gets no live channel:
     // only the page reading the current version can go behind while it is open. A page
@@ -3031,18 +3540,6 @@ function versionNumber(raw: string): number | null {
   return Number.isInteger(n) && n >= 1 ? n : null;
 }
 
-/** The review this request may read, or null for the one soft-404. `wsId` pins the
- *  workspace when the URL named one, which is the shape publish hands back; a bare
- *  slug resolves across every workspace the reader can reach, as the JSON path does. */
-function resolveFor(req: Request, slug: string, wsId: string | null) {
-  if (!SLUG_RE.test(slug)) return null;
-  if (wsId !== null && !getWorkspace(wsId)) return null;
-  const readable = readableWorkspaces(req);
-  const ids = wsId === null ? readable : readable.filter((id) => id === wsId);
-  if (ids.length === 0) return null;
-  return resolveReview(ids, slug);
-}
-
 /**
  * GET /r/:slug and GET /r/:slug/v/:n, workspace-scoped or bare.
  *
@@ -3182,6 +3679,7 @@ function reviewPage(args: {
     slug,
     basePath: sharePath ?? undefined,
     live: !shared,
+    context: !shared,
     doc: row.doc,
     version: asked,
     latestVersion: review.latest_version,

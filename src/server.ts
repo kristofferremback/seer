@@ -76,6 +76,7 @@ import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill"
 import { handleAnnotation } from "./overseer/annotations";
 import { reviewTopic, setFreshnessPublisher } from "./overseer/freshness";
 import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
+import { handleReviewContext } from "./overseer/context";
 import {
   agentSkillsIndex,
   apiCatalog,
@@ -112,6 +113,13 @@ const WS_IMG_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/i/`
 // every workspace the reader can reach.
 const WS_REVIEW_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)(?:/(v|a)/([^/]+))?/?$`,
+);
+// The same review's surrounding code: /<ws_id>/r/<slug>/c, everything else in the
+// query. Its own pattern rather than a third branch of the one above, because the tail
+// carries no path segment of its own and folding it in would make `v` and `a` optional
+// too, which would let `/r/<slug>/v` through as a version of nothing.
+const WS_REVIEW_CONTEXT_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/c/?$`,
 );
 
 // The write a review page makes, under the workspace that page is served from: the
@@ -636,6 +644,11 @@ export async function startServer() {
       "/r/:slug/a/:id": {
         GET: (req) => handleReviewAttachment(req, req.params.slug, req.params.id),
       },
+      // The code around a hunk, for the full-screen panel. Same gate again, and the
+      // file it will serve is named by the review's own hunks rather than by the URL.
+      "/r/:slug/c": {
+        GET: (req) => handleReviewContext(req, req.params.slug),
+      },
 
       // ---- workspace + settings mutations (session + membership; Origin guard) ----
 
@@ -913,6 +926,9 @@ export async function startServer() {
         if (!originOk(req)) return new Response("Bad origin", { status: 403 });
         return handleAnnotation(req, wsAnnotations[2]!, wsAnnotations[1]!);
       }
+
+      const wsContext = url.pathname.match(WS_REVIEW_CONTEXT_RE);
+      if (wsContext) return handleReviewContext(req, wsContext[2]!, wsContext[1]!);
 
       const wsReview = url.pathname.match(WS_REVIEW_RE);
       if (wsReview) {

@@ -58,6 +58,17 @@ and a link handed to an outsider should carry the account rather than the discus
 This is a default rather than a law; if it turns out people share reviews _to_ discuss
 them, a per-share flag is the obvious next move.
 
+**It carries the change, not the codebase.** A shared review draws its hunks, the same
+ones the walkthrough drew. It does not draw the file around them: for a member the
+full-screen panel asks `/<ws>/r/<slug>/c` for the file at the commit a hunk counts
+against and lays the hunks back into it, and on a share that route answers the soft 404
+and the page does not offer the control in the first place. The difference is what was
+agreed to. The person who minted the link handed over a review of a change; the whole of
+every file that change touches is a larger thing, and links already in the wild would
+have widened silently on the day the feature shipped. Like the annotations rule above
+this is a default rather than a law, and a per-share flag is the obvious next move if
+outside reviewers turn out to need the context to review at all.
+
 **It is not a login.** Following a share never creates a session, never joins the
 workspace, and never widens on a second visit. The holder of a token sees one asset.
 
