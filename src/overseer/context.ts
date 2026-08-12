@@ -174,10 +174,36 @@ async function contextRange(
   if (hunks.length === 0) return softNotFound();
   const repo = hunks[0]!.repo;
 
-  let content = getSnippet(repo, sha, path);
+  const client = githubClientFor(ws, asker);
+
+  // Whether the cache may be read at all.
+  //
+  // `ref_snippets` has no workspace column, because the same (repo, sha, path) is the
+  // same bytes for everyone. That makes it a shared cache of private source, and the
+  // ref resolver refuses exactly this shortcut on purpose: its `proven` set starts
+  // empty and opens only after a fetch this caller was actually allowed to make,
+  // because it too is rebuilt from a stored document and a document is evidence of
+  // what a workspace could read once rather than of what it can read now.
+  //
+  // This route is the same shape, so it asks the same question in the cheapest form
+  // there is: does this workspace still hold an installation covering the repository?
+  // That is a routing lookup and a membership read, both already cached, against
+  // current state rather than against the document. When the answer is no, the cache
+  // stays shut and the read pays a real fetch, which will refuse on its own if the
+  // workspace has no other way in. Nothing is served that GitHub was not asked about.
+  let allowed = false;
+  if (client.installationFor) {
+    try {
+      allowed = (await client.installationFor(repo)) !== null;
+    } catch {
+      allowed = false;
+    }
+  }
+
+  let content = allowed ? getSnippet(repo, sha, path) : null;
   if (content === null) {
     try {
-      content = await githubClientFor(ws, asker).getFileAtSha(repo, path, sha);
+      content = await client.getFileAtSha(repo, path, sha);
     } catch (err) {
       // Every way GitHub can decline is the same fact to the reader: the file is not
       // there to read. A refusal by the App router and a dead credential are named

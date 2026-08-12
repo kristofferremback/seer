@@ -232,11 +232,14 @@ interface Asked {
 
 let asked: Asked[] = [];
 let answer: "file" | "refuse" | "dead" = "file";
+/** Once the file is on screen, everything after this many answers fails. */
+let failAfter = Infinity;
 const realFetch = globalThis.fetch;
 
 function serveFile(): void {
   asked = [];
   answer = "file";
+  failAfter = Infinity;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (globalThis as any).fetch = async (input: string) => {
     const url = new URL(String(input), "https://seer.test");
@@ -249,7 +252,7 @@ function serveFile(): void {
       to,
     });
     if (answer === "dead") throw new Error("offline");
-    if (answer === "refuse") {
+    if (answer === "refuse" || asked.length > failAfter) {
       return new Response(JSON.stringify({ context: null, why: "GitHub would not serve this file." }), {
         headers: { "content-type": "application/json" },
       });
@@ -400,6 +403,38 @@ describe("the file the hunks were cut from", () => {
     expect(view()).toBeNull();
     expect(document.querySelectorAll(".zoom-body .nocontext").length).toBe(1);
     expect(document.querySelectorAll(".zoom-body .hunk").length).toBe(1);
+  });
+
+  test("a stretch that will not come stops pulsing, says why, and stops asking", async () => {
+    openFile(GOLDEN_HUNKS.auth.path);
+    await settled();
+    expect(view()).not.toBeNull();
+    const before = asked.length;
+
+    // Everything from here on fails. The reader presses the gap at the end of the file.
+    failAfter = before;
+    const gap = gaps()[0]!;
+    const from = Number(gap.getAttribute("data-from"));
+    gap.click();
+    await settled();
+
+    // The gap is still there, because the lines behind it never arrived, and it says
+    // what happened instead of how many. Nothing is left pulsing in its place.
+    const after = gaps();
+    expect(after.length).toBe(1);
+    expect(Number(after[0]!.getAttribute("data-from"))).toBe(from);
+    expect(after[0]!.textContent).toContain("GitHub would not serve this file");
+    expect(after[0]!.getAttribute("data-failed")).not.toBeNull();
+    expect(document.querySelectorAll(".zoom-body .l.sk").length).toBe(0);
+    // The file the reader already had is untouched.
+    expect(numbers()[0]).toBe(1);
+
+    // And it does not ask again. A gap that failed and kept offering itself would
+    // re-issue the same request on every scroll for as long as the reader sat there.
+    const spent = asked.length;
+    after[0]!.click();
+    await settled();
+    expect(asked.length).toBe(spent);
   });
 
   test("closing drops what it was waiting for", async () => {

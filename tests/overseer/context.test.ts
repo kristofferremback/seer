@@ -52,11 +52,21 @@ const AUTH_FILE = (() => {
 })();
 
 /** Counts what the route actually asked GitHub for, so the cache can be shown to be
- *  doing its job rather than assumed to be. */
-function serving(files: Record<string, string>): { client: GithubClient; reads: string[] } {
+ *  doing its job rather than assumed to be.
+ *
+ *  `routed` is whether this workspace still holds an installation covering the
+ *  repository. It is what decides whether the shared snippet cache may be read at all,
+ *  so a fake that always said yes could not show the case that matters. */
+function serving(
+  files: Record<string, string>,
+  routed = true,
+): { client: GithubClient; reads: string[] } {
   const reads: string[] = [];
   const client: GithubClient = {
     ...offlineGithubClient(),
+    async installationFor() {
+      return routed ? 4242 : null;
+    },
     async getFileAtSha(repo, path, sha) {
       reads.push(`${repo}:${sha}:${path}`);
       const got = files[`${sha}:${path}`];
@@ -161,6 +171,35 @@ describe("the file around a hunk", () => {
     // The first request may or may not have paid for it, depending on what the test
     // before left in the cache. What matters is that the second did not.
     expect(reads.length).toBeLessThanOrEqual(1);
+  });
+
+  test("a workspace that no longer holds the repository gets no cached bytes", async () => {
+    // Warm the cache as a workspace that does hold it. `ref_snippets` has no workspace
+    // column, so from here on those bytes are sitting in a table anyone could read out
+    // of if the route let them.
+    const warm = serving({ [`${GOLDEN_HEAD_SHA_12}:src/auth.ts`]: AUTH_FILE });
+    setGithubClientFactory(() => warm.client);
+    sweepSnippets(Date.now() + 1);
+    expect((await ask(ws, "golden", { path: "src/auth.ts", sha: GOLDEN_HEAD_SHA_12, from: "1", to: "5" })).status).toBe(200);
+    expect(warm.reads.length).toBe(1);
+
+    // The same review, the same document naming the same file, and an installation that
+    // has since gone away. The document is evidence of what this workspace could read
+    // once; it is not evidence about now, so the cache stays shut.
+    const gone = serving({}, false);
+    setGithubClientFactory(() => gone.client);
+    const res = await ask(ws, "golden", {
+      path: "src/auth.ts",
+      sha: GOLDEN_HEAD_SHA_12,
+      from: "1",
+      to: "5",
+    });
+    // GitHub was asked, rather than the cache answering on its own...
+    expect(gone.reads.length).toBe(1);
+    // ...and since it declined, nothing of the file comes back.
+    const body = await read(res);
+    expect(body.context).toBe(null);
+    expect(JSON.stringify(body)).not.toContain("filler");
   });
 
   test("asked past the end, it answers with the file and its length", async () => {

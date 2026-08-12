@@ -1815,7 +1815,33 @@ function zoomScript(basePath: string, version: number, context: boolean): string
     if (out.length > 0 && out[0][0] - 1 <= FILL) out[0][0] = 1;
     const end = out[out.length - 1];
     if (end && view.total !== null && view.total - end[1] <= FILL) end[1] = view.total;
-    view.shown = out;
+    // Last, and after the small holes have been closed: a stretch that failed to load
+    // is cut back out. Closing over it would put the skeleton rows back and the next
+    // pass would ask for it again, which is a loop rather than a retry.
+    let shown = out;
+    for (const f of view.failed) shown = without(shown, f.from, f.to);
+    view.shown = shown;
+  };
+
+  /** A list of spans with one range taken out of it. */
+  const without = (list, a, b) => {
+    const out = [];
+    for (const s of list) {
+      if (b < s[0] || a > s[1]) { out.push(s); continue; }
+      if (s[0] < a) out.push([s[0], a - 1]);
+      if (s[1] > b) out.push([b + 1, s[1]]);
+    }
+    return out;
+  };
+
+  /** Why the file between these two lines is not here, when it was asked for and did
+   *  not come. Any overlap counts: the gap a failed range reappears inside is rarely
+   *  the range itself, because the reader asked for forty lines of a gap of two hundred. */
+  const failedIn = (from, to) => {
+    for (const f of view.failed) {
+      if (f.from <= to && f.to >= from) return f.why;
+    }
+    return "";
   };
 
   const inHunk = (n) => {
@@ -1835,16 +1861,16 @@ function zoomScript(basePath: string, version: number, context: boolean): string
         if (view.lines.has(n) || view.asking.has(n) || inHunk(n)) { n++; continue; }
         const a = n;
         while (n <= s[1] && !view.lines.has(n) && !view.asking.has(n) && !inHunk(n)) n++;
-        ask(a, n - 1, null);
+        ask(a, n - 1);
       }
     }
   };
 
-  const ask = (a, b, gapFrom) => {
+  const ask = (a, b) => {
     // The route bounds one request; this keeps a widened span from ever reaching that
     // bound, which would turn a legitimate ask into the same refusal a bad URL gets.
     if (b - a + 1 > 300) {
-      for (let at = a; at <= b; at += 300) ask(at, Math.min(b, at + 299), gapFrom);
+      for (let at = a; at <= b; at += 300) ask(at, Math.min(b, at + 299));
       return;
     }
     for (let n = a; n <= b; n++) view.asking.add(n);
@@ -1861,7 +1887,7 @@ function zoomScript(basePath: string, version: number, context: boolean): string
       .then((body) => {
         if (!view || view.token !== mine) return;
         forget();
-        if (!body || !body.lines) { refuse(gapFrom, body && body.why); return; }
+        if (!body || !body.lines) { refuse(a, b, body && body.why); return; }
         for (let i = 0; i < body.lines.length; i++) view.lines.set(body.from + i, body.lines[i]);
         if (typeof body.total === "number") view.total = body.total;
         landed();
@@ -1869,7 +1895,7 @@ function zoomScript(basePath: string, version: number, context: boolean): string
       .catch(() => {
         if (!view || view.token !== mine) return;
         forget();
-        refuse(gapFrom, null);
+        refuse(a, b, null);
       });
   };
 
@@ -1877,7 +1903,7 @@ function zoomScript(basePath: string, version: number, context: boolean): string
     String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
   const gapHtml = (from, to) => {
-    const why = view.gapFail[from];
+    const why = failedIn(from, to);
     const n = to - from + 1;
     const said = why ? esc(why) : n + " lines";
     return (
@@ -2038,7 +2064,7 @@ function zoomScript(basePath: string, version: number, context: boolean): string
     toFocus();
   };
 
-  const refuse = (gapFrom, why) => {
+  const refuse = (a, b, why) => {
     view.busy = false;
     const said = why || "The code around this change could not be loaded.";
     if (!view.painted) {
@@ -2055,8 +2081,12 @@ function zoomScript(basePath: string, version: number, context: boolean): string
       stop();
       return;
     }
-    if (gapFrom === null) return;
-    view.gapFail[gapFrom] = said;
+    // The file was already on screen, so the reader keeps it and loses only the stretch
+    // that did not come. It goes back to being a gap, which now says why instead of how
+    // many and stops offering itself: the same scroll that asked would otherwise ask
+    // again, and again, for as long as the reader sat there.
+    view.failed.push({ from: a, to: b, why: said });
+    settle();
     paint(true);
   };
 
@@ -2122,7 +2152,7 @@ function zoomScript(basePath: string, version: number, context: boolean): string
       at: at,
       lines: new Map(),
       asking: new Set(),
-      gapFail: {},
+      failed: [],
       shown: [],
       total: null,
       painted: false,
