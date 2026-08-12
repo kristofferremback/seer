@@ -120,6 +120,42 @@ describe("forbidden constructs are named, never stripped", () => {
   });
 });
 
+describe("a bracketed word that is not a tag", () => {
+  // A route template, a generic and an inequality are the three ways an author writing
+  // about code puts angle brackets in a sentence, and all three were a 422 that named
+  // a tag nobody had written.
+  const kept: [name: string, source: string, html: string][] = [
+    [
+      "route template",
+      "the route is /<ws>/r/<slug>/c",
+      "<p>the route is /&lt;ws&gt;/r/&lt;slug&gt;/c</p>",
+    ],
+    ["generic", "a Map<string, number> per path", "<p>a Map&lt;string, number&gt; per path</p>"],
+    ["type parameter", "Foo<T> is generic", "<p>Foo&lt;T&gt; is generic</p>"],
+    ["inequality", "while a < b the loop runs", "<p>while a &lt; b the loop runs</p>"],
+  ];
+  for (const [name, source, html] of kept) {
+    test(`${name} renders as the characters it is`, () => {
+      expect(render(source)).toBe(html);
+      expect(renderInline(source)).toBe(html.slice(3, -4));
+    });
+  }
+
+  // The gate is what the author meant, so everything that reads as markup still stops:
+  // an element name, the hyphen that spells a custom element, and attributes.
+  const refused = ["<div>", "</span>", "<b>bold</b>", "<my-widget>", '<ws class="x">', "<ws/>"];
+  for (const source of refused) {
+    test(`${source} is still refused by name`, () => {
+      expect(rejection(source).construct).toBe("raw HTML tag");
+    });
+  }
+
+  test("a refusal that has a remedy carries it", () => {
+    expect(rejection("<div>").message).toContain("backticks");
+    expect(validateInline("`</div>` in the body").ok).toBe(true);
+  });
+});
+
 describe("adversarial input", () => {
   const TAG = /<\/?([a-zA-Z][a-zA-Z0-9-]*)/g;
   const WHITELIST = new Set(["p", "em", "strong", "code", "a", "ul", "ol", "li", "pre"]);

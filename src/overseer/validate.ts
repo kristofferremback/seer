@@ -386,14 +386,16 @@ function paragraphsOf(source: string): number {
   return paragraphs;
 }
 
-/** Sentence terminators followed by a break, the end of the field, or the start of the
- *  next sentence written without a space. Abbreviations ending in a period followed by a
- *  space would count as a sentence here, which the cap of two makes tolerable and
- *  nothing else depends on. */
+/** Sentence terminators at the end of the field, or followed by the start of another
+ *  sentence: a capital, a quote or an opening bracket, with or without a space between.
+ *  A period followed by a lower-case word is inside "e.g." or "v1.2 shipped" rather than
+ *  between two sentences, and counting it turned a two-sentence field into a 422 its
+ *  author could not read back off the page. This is a ceiling, so where a reading is
+ *  uncertain it takes the lower one. */
 function sentencesOf(source: string): number {
   const text = source.trim();
   if (text === "") return 0;
-  const ends = text.match(/[.!?]+(?:\s+|$|(?=["'(\[]|[A-Z]))/g);
+  const ends = text.match(/[.!?]+(?:$|\s*(?=["'(\[]|[A-Z]))/g);
   return ends ? ends.length : 1;
 }
 
@@ -513,9 +515,29 @@ export interface PublishUsage {
   groups: { used: number; min: number; max: number };
   design: { modules: number; coverage: number; prose: number };
   hunks: number;
-  /** Every authored character on the page, which is the number the skill calibrates
-   *  against, plus the prose-only subset so the two readings never have to be guessed. */
-  prose: { total: number; bodies: number; perPr: number };
+  /** `bodies` is paragraph prose and `structure` is the lines and labels around it,
+   *  which together are `total`. `perPr` divides `bodies` alone, because that is the
+   *  half the length anchor judges: structure is the shape of the partition, and the
+   *  entity budgets above are what price that. */
+  prose: { total: number; bodies: number; structure: number; perPr: number };
+}
+
+/** The paragraph half of what a payload spent. Shared with the length warning so the
+ *  number a witness reads back and the number the write path judges are one number. */
+export function proseBodies(payload: PublishPayload): number {
+  const len = (v: unknown) => (typeof v === "string" ? v.length : 0);
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const design = payload.codeDesign ?? { placement: "", modules: [], coverage: [] };
+  return (
+    len(payload.authorIntent) +
+    len(payload.summary) +
+    len(design.placement) +
+    sum((design.modules ?? []).map((x) => len(x?.body))) +
+    sum((design.coverage ?? []).map((x) => len(x?.body))) +
+    sum((payload.statements ?? []).map((x) => len(x?.body))) +
+    sum((payload.notes ?? []).map((x) => len(x?.body))) +
+    sum((payload.groups ?? []).map((x) => len(x?.paragraph)))
+  );
 }
 
 export function publishUsage(payload: PublishPayload, hunks: number): PublishUsage {
@@ -532,15 +554,7 @@ export function publishUsage(payload: PublishPayload, hunks: number): PublishUsa
     len(design.placement) +
     sum(designModules.map((x) => len(x?.title) + len(x?.body) + sum((x?.paths ?? []).map(len)))) +
     sum(designCoverage.map((x) => len(x?.title) + len(x?.body)));
-  const bodies =
-    len(payload.authorIntent) +
-    len(payload.summary) +
-    len(design.placement) +
-    sum(designModules.map((x) => len(x?.body))) +
-    sum(designCoverage.map((x) => len(x?.body))) +
-    sum(statements.map((x) => len(x?.body))) +
-    sum(notes.map((x) => len(x?.body))) +
-    sum(groups.map((x) => len(x?.paragraph)));
+  const bodies = proseBodies(payload);
   const total =
     bodies +
     len(payload.title) +
@@ -556,7 +570,12 @@ export function publishUsage(payload: PublishPayload, hunks: number): PublishUsa
     groups: { used: groups.length, min: BUDGETS.groups.min, max: maxGroups(prCount) },
     design: { modules: designModules.length, coverage: designCoverage.length, prose: designProse },
     hunks,
-    prose: { total, bodies, perPr: Math.round(total / prCount) },
+    prose: {
+      total,
+      bodies,
+      structure: total - bodies,
+      perPr: Math.round(bodies / prCount),
+    },
   };
 }
 
@@ -616,6 +635,19 @@ export function validatePublish(
       field: "groups",
       rule: "decomposition",
       message: `this review spends its whole group budget of ${groupCap} on ${prCount} pull request${prCount === 1 ? "" : "s"}, which may mean the change warranted further decomposition`,
+    });
+  }
+
+  // The length judgement, made where the numbers are. Every field cap can be met by a
+  // review several times longer than it should be, so length is a thing only the whole
+  // document can be asked about, and asking a witness to hold an anchor in mind and
+  // divide by the right denominator is how it goes unasked.
+  const bodiesPerPr = Math.round(proseBodies(payload) / Math.max(1, prCount));
+  if (bodiesPerPr > BUDGETS.prose.warnAt) {
+    warnings.push({
+      field: "prose",
+      rule: "length",
+      message: `this review carries ${bodiesPerPr} characters of paragraph prose per pull request, against an anchor of about ${BUDGETS.prose.perPr}; delete a paragraph and ask what the reader no longer knows`,
     });
   }
 
@@ -756,8 +788,10 @@ export function validatePublish(
     }
 
     // "every statement carries at least one ref": a claim with nothing behind it does
-    // not belong on the page.
-    if (s.refs.length === 0) {
+    // not belong on the page. A ref in evidence[] is that pointer as much as one in
+    // refs[] is, and the page draws it, so the rule counts both. It read the narrower
+    // way until an author who had written a ref was told it carried none.
+    if (s.refs.length === 0 && !s.evidence.some((e) => e.type === "ref")) {
       errors.push({
         field: `${at}.refs`,
         rule: "statement_unbacked",

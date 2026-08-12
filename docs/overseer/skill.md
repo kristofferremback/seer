@@ -145,9 +145,14 @@ Shorter and more informative is the target, every time. If cutting words costs
 information, you cut the wrong words.
 
 For calibration rather than as a rule: a pull request of about 130 changed lines across
-six files came out well at roughly 2,700 characters of prose, all fields counted. An
-earlier pass over the same change spent 10,900 and said less, because the length went
-into framing and restatement rather than into reasons.
+six files came out well at roughly 2,700 characters of paragraph prose. An earlier pass
+over the same change spent 10,900 and said less, because the length went into framing and
+restatement rather than into reasons.
+
+Paragraph prose is bodies: author intent, the summary, design placement and bodies,
+statement and note bodies, group paragraphs. The lines and labels around them are the
+shape of the partition rather than length, and the entity budgets below are what price
+those, so nothing you write there counts against this anchor.
 
 **That anchor is per pull request, and it does not move with the size of the diff.** A
 2,000-line pull request that does one thing well deserves about what a 130-line one
@@ -158,16 +163,17 @@ length because the diff was large is the exact move that produced the 10,900 pas
 
 The code-design account is per review, not per pull request. A useful one is commonly
 600 to 1,200 characters across placement, modules and coverage. It may bring a focused
-single-pull-request review above the old 2,700-character anchor; that is earned when it
+single-pull-request review above the 2,700-character anchor; that is earned when it
 explains placement or closes a real sprawl question, not merely because more fields now
 exist. Read `usage.design.prose` separately before cutting it.
 
 The per-field caps are no help in judging this. They permit over 24,000 characters
 for a single pull request, an order of magnitude past the anchor, so clearing every
 one of them says nothing about whether the review is the right size.
-`usage.prose.perPr` in the publish response is the number to judge by. Past roughly
-double the anchor, test it: delete a paragraph and ask what the reader no longer
-knows. If the answer is "nothing", that was the length talking.
+`usage.prose.perPr` in the publish response is the number to judge by, and past double
+the anchor the publish says so in a `length` warning. Either way the test is the same:
+delete a paragraph and ask what the reader no longer knows. If the answer is "nothing",
+that was the length talking.
 
 ## Reading a stack
 
@@ -378,10 +384,11 @@ never flattened onto the entry.
 Beyond the required ref, pick the form that carries the claim:
 
 `refs[]` and `evidence[]` are different jobs. `refs[]` is the citation the claim stands
-on and is what the required-ref rule counts; put the pointer there. `evidence[]` is what
-the reader is shown under the prose, in the order you choose, and it may carry a ref
-again when you want that snippet drawn at that point in the reading. A statement whose
-refs are enough sends `evidence: []`.
+on, drawn as a link beside it. `evidence[]` is what the reader is shown under the prose,
+in the order you choose, and it may carry a ref when you want that snippet drawn at that
+point in the reading. A ref in either place backs the claim, so the required-ref rule is
+satisfied wherever you put the pointer. A statement whose refs are enough sends
+`evidence: []`.
 
 - **ref**: the default. A SHA-pinned pointer,
   `{ repo, sha, path, startLine, endLine, highlight[] }`, camelCase like every other
@@ -480,22 +487,24 @@ usage: {
   statements: { used, min, max },   notes: { used, min, max },
   groups:     { used, min, max },   hunks,
   design: { modules, coverage, prose },
-  prose: { total, bodies, perPr }
+  prose: { total, bodies, structure, perPr }
 }
 ```
 
-`prose.total` is every authored character on the page and `prose.perPr` divides it by the
-number of pull requests, which is the figure to compare against the calibration above:
-roughly 2,700 characters for a pull request of about 130 changed lines, whatever the size
-of its diff. Well past that and the review is long, whatever the per-field caps say.
+`prose.bodies` is the paragraphs: author intent, the summary, design placement and
+bodies, statement bodies, note bodies, and group paragraphs. `prose.structure` is every
+line and label around them: the title, each pr gist and detail, statement and note lines,
+note checks, group titles, and file notes. `prose.total` is both.
 
-`prose.bodies` is the subset that is paragraphs: author intent, the summary, design
-placement and bodies, statement bodies, note bodies, and group paragraphs. `total` is those plus every line and label around them:
-the title, each pr gist and detail, statement and note lines, note checks, group titles,
-and file notes. Read the split when you are deciding what to cut. A large `bodies` is
-prose, and prose is where cutting works. A large `total - bodies` is structure, many
-short labelled things, and cutting there removes claims rather than words, so the answer
-is fewer statements or fewer groups, not shorter ones.
+`prose.perPr` divides `bodies` by the number of pull requests, which is the figure to
+compare against the calibration above: roughly 2,700 characters for a pull request of
+about 130 changed lines, whatever the size of its diff. Well past that and the review is
+long, whatever the per-field caps say.
+
+Read the split when you are deciding what to cut. A large `bodies` is prose, and prose is
+where cutting works. A large `structure` is many short labelled things, so cutting there
+removes claims rather than words: read it against the `used` and `max` counts above, not
+against the length anchor.
 
 You can republish: same slug, same ids for the claims that survive, and the reader sees
 what you cut.
@@ -590,7 +599,10 @@ first sentence says what the code accomplishes and its important implication.
 
 `authorIntent`, `summary`, design placement and bodies, statement and note bodies, and
 group paragraphs accept emphasis, inline code, links, lists, and fenced code. Headings, tables, raw HTML, and inline images are a 422
-naming the construct. One-line fields stay plain, inline code only.
+naming the construct. One-line fields stay plain, inline code only. A bracketed word that
+no browser knows, `<slug>` in a route or `Foo<T>`, is text rather than a tag and renders
+as the characters it is; a real tag name is refused, and the refusal says to wrap it in
+backticks.
 
 One repo per review until multi-repo is built. Every pull request and every ref in one
 review names the same repo.
