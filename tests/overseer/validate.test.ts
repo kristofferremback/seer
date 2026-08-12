@@ -1588,6 +1588,11 @@ describe("sentence counting", () => {
       "The gate runs on the installation, e.g. the one that answers for this repo. It is checked per request.",
       "Every refusal is byte identical, i.e. the same status, type and body. A slug is never an oracle.",
       "Paths, shas, ranges etc. are all checked before GitHub is called. Nothing else reaches it.",
+      // The word after the abbreviation is capitalised, so nothing about the following
+      // text says this is a sentence break. Only the abbreviation itself does.
+      "The route is served by the runtime, e.g. Bun serves it here. It is checked per request.",
+      "The header names a host, i.e. Seer's own. Nothing else is read off it.",
+      "The U.S. spelling is the one in the fixtures. Both parse the same.",
     ]) {
       const payload = golden();
       payload.prs[0]!.detail = detail;

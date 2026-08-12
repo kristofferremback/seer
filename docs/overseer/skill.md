@@ -170,10 +170,10 @@ exist. Read `usage.design.prose` separately before cutting it.
 The per-field caps are no help in judging this. They permit over 24,000 characters
 for a single pull request, an order of magnitude past the anchor, so clearing every
 one of them says nothing about whether the review is the right size.
-`usage.prose.perPr` in the publish response is the number to judge by, and past double
-the anchor the publish says so in a `length` warning. Either way the test is the same:
-delete a paragraph and ask what the reader no longer knows. If the answer is "nothing",
-that was the length talking.
+`usage.prose.perPr` in the publish response is the number to judge by, and past 5,400,
+double the anchor, the publish says so in a `length` warning. Either way the test is the
+same: delete a paragraph and ask what the reader no longer knows. If the answer is
+"nothing", that was the length talking.
 
 ## Reading a stack
 
@@ -433,8 +433,6 @@ view, then send the document and its attachments with `POST /api/reviews`. A 422
 or deliberate refinement sends the whole document again and may create a later version.
 
 The host is **https://seer.build**, which is also the origin serving you this document.
-`$SEER_URL` below is that origin. It was left undefined here, and a witness had to guess
-it from wherever the page happened to come from.
 
 Bare JSON when there are no attachments. Otherwise `multipart/form-data`:
 
@@ -443,7 +441,7 @@ Bare JSON when there are no attachments. Otherwise `multipart/form-data`:
   file bytes
 
 ```
-curl -X POST "$SEER_URL/api/reviews" \
+curl -X POST https://seer.build/api/reviews \
   -H "Authorization: Bearer $SEER_API_KEY" \
   -F document=@review.json \
   -F att_flow=@flow.png

@@ -38,6 +38,10 @@ describe("overseer skill doc", () => {
     // canonical host; if substitution were off, the committed host would still be here.
     expect(config.baseUrl).not.toBe("https://seer.build");
     expect(doc).not.toContain("https://seer.build");
+    // And the example is pasteable: naming the origin in prose while the command line
+    // held a variable nothing defined left the one line a witness actually runs broken.
+    expect(doc).not.toContain("$SEER_URL");
+    expect(doc).toContain(`curl -X POST ${config.baseUrl}/api/reviews`);
   });
 
   // The retrieval preamble. A fetch-and-summarize tool refused this document outright,
@@ -106,6 +110,13 @@ describe("overseer skill doc", () => {
     expect(BUDGETS.statements.ceiling).toBe(12);
     expect(BUDGETS.groups.ceiling).toBe(16);
     expect(doc).toContain("decomposition");
+
+    // The length anchor and the line the write path warns at, both named. A witness
+    // aiming at a threshold it can only read off the source is aiming blind.
+    const thousands = (n: number) => n.toLocaleString("en-US");
+    expect(doc).toContain(`${thousands(BUDGETS.prose.perPr)} characters`);
+    expect(doc).toContain(`past ${thousands(BUDGETS.prose.warnAt)}`);
+    expect<number>(BUDGETS.prose.warnAt).toBe(BUDGETS.prose.perPr * 2);
   });
 
   test("separates attributed intent, the witness account, and implementation", () => {
