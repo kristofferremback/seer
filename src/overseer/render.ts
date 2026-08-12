@@ -1469,7 +1469,13 @@ const ZOOM_STYLE = `
   /* the hunk the reader pressed to get here, marked at the far edge of the gutter:
      the page's own ink rather than a change hue, because the washes already say
      which way a line went and this says the other thing, that you are here. */
-  .filefull .hunk.focus .gut { box-shadow: inset 2px 0 0 hsl(var(--accent)); }
+  .filefull .hunk.focus .gut, .filefull .l.focus .gut {
+    box-shadow: inset 2px 0 0 hsl(var(--accent));
+  }
+  /* a quoted ref keeps the wash its own lines wear on the page, so the lines the
+     statement singled out are the same lines here */
+  .filefull .l.hl { background: hsl(var(--ink) / 0.055); }
+  .filefull .l.hl .gut { background-image: linear-gradient(hsl(var(--ink) / 0.055), hsl(var(--ink) / 0.055)); }
   /* the file between two stretches that are loaded, and how much of it is left.
      It reads as the rail a hunk header used to be, because it is the same kind of
      thing: a line about the code rather than a line of it. */
@@ -1752,9 +1758,18 @@ function zoomScript(basePath: string, version: number, context: boolean): string
     return Number.isInteger(n) ? n : null;
   };
 
-  /** The one file this row is a view of, or null when it is not one file. */
+  /**
+   * The one file this code surface is a view of, or null when it is not one file.
+   *
+   * Two shapes reach here. A file diff is a run of hunks, and the panel lays the file
+   * out around elements the page already drew. A quoted ref is a range of the file and
+   * nothing else, so the panel draws the whole thing from the route and marks the lines
+   * the ref singled out. Everything after this point treats them the same: a payload or
+   * an example is neither, and keeps the panel it has always had.
+   */
   const fileOf = (box) => {
-    if (!CONTEXT || !box.classList.contains("filediff")) return null;
+    if (!CONTEXT) return null;
+    if (!box.classList.contains("filediff")) return refOf(box);
     const own = Array.from(box.querySelectorAll(".hunk[data-path][data-sha]"));
     if (own.length === 0) return null;
     const path = attr(own[0], "data-path");
@@ -1783,7 +1798,27 @@ function zoomScript(basePath: string, version: number, context: boolean): string
     });
     if (hunks.length === 0) return null;
     hunks.sort((a, b) => a.from - b.from || a.to - b.to);
-    return { path: path, sha: sha, hunks: hunks };
+    return { path: path, sha: sha, hunks: hunks, mark: null, hl: [] };
+  };
+
+  /** A quoted range of a file: its path, its commit, the lines it quotes and the ones
+   *  it singles out inside them. */
+  const refOf = (box) => {
+    const pre = box.querySelector("pre.snip[data-path][data-sha][data-ref-from]");
+    if (!pre) return null;
+    const from = int(pre, "data-ref-from"), to = int(pre, "data-ref-to");
+    if (from === null || to === null || from < 1 || to < from) return null;
+    const hl = (attr(pre, "data-ref-hl") || "")
+      .split(",")
+      .map((n) => Number(n))
+      .filter((n) => Number.isInteger(n) && n >= from && n <= to);
+    return {
+      path: attr(pre, "data-path"),
+      sha: attr(pre, "data-sha"),
+      hunks: [],
+      mark: { from: from, to: to },
+      hl: hl,
+    };
   };
 
   const merged = (list) => {
@@ -2039,6 +2074,17 @@ function zoomScript(basePath: string, version: number, context: boolean): string
     }
     drain();
 
+    // What the reader came for, when it is a range rather than an element: the quoted
+    // lines take the same "you are here" mark a pressed hunk takes, and the lines the
+    // ref singled out keep the wash they wear on the page.
+    if (view.mark) {
+      for (const el of wrap.querySelectorAll("pre.snip > code > .l")) {
+        const n = Number(el.querySelector(".n").textContent);
+        if (n >= view.mark.from && n <= view.mark.to) el.classList.add("focus");
+        if (view.hl.indexOf(n) !== -1) el.classList.add("hl");
+      }
+    }
+
     inner.textContent = "";
     inner.appendChild(wrap);
     if (held) body.focus();
@@ -2048,7 +2094,7 @@ function zoomScript(basePath: string, version: number, context: boolean): string
 
   const toFocus = () => {
     const body = dlg.querySelector(".zoom-body");
-    const el = dlg.querySelector(".filefull .hunk.focus");
+    const el = dlg.querySelector(".filefull .focus");
     if (!el) return;
     body.scrollTop +=
       el.getBoundingClientRect().top - body.getBoundingClientRect().top - body.clientHeight / 3;
@@ -2149,6 +2195,8 @@ function zoomScript(basePath: string, version: number, context: boolean): string
       path: file.path,
       sha: file.sha,
       hunks: file.hunks,
+      mark: file.mark,
+      hl: file.hl,
       at: at,
       lines: new Map(),
       asking: new Set(),
@@ -2161,9 +2209,10 @@ function zoomScript(basePath: string, version: number, context: boolean): string
       lastTop: 0,
       io: null,
     };
-    view.shown = merged(
-      file.hunks.map((h) => [Math.max(1, h.from - PAD), Math.max(h.to, h.from) + PAD]),
-    );
+    const anchors = file.mark
+      ? [[file.mark.from, file.mark.to]]
+      : file.hunks.map((h) => [h.from, Math.max(h.to, h.from)]);
+    view.shown = merged(anchors.map((r) => [Math.max(1, r[0] - PAD), r[1] + PAD]));
     settle();
     fill();
   };

@@ -33,12 +33,12 @@
 // the hunks go through. One tokenizer, on the server, and the markup the panel inserts
 // is the markup the page already carries.
 
-import { getSnippet, getReviewVersion, putSnippet, type ReviewDoc } from "./db";
+import { getSnippet, getReviewVersion, listAnnotations, putSnippet, type ReviewDoc } from "./db";
 import { GithubError } from "./github";
 import { GithubAppRefusal, GithubCredentialDeadError, githubClientFor } from "./github-app";
 import { askingUserId, resolveFor, softNotFound, versionNumber } from "./read";
 import { contextLines, langOfPath } from "./render-diff";
-import type { Hunk } from "./types";
+import type { Evidence, Hunk, Ref } from "./types";
 
 /** The bytes of one file, and how much of it may be asked for at a time. The cache
  *  cap is the ref resolver's, named again rather than shared: the two paths write the
@@ -167,12 +167,13 @@ async function contextRange(
   if (from === null || to === null || to < from) return softNotFound();
   if (to - from + 1 > MAX_RANGE_LINES) return softNotFound();
 
-  // The allow-list: this exact file, at this exact commit, as some hunk of this
-  // version records it. A pair the document does not name is not a smaller mistake
+  // The allow-list: this exact file, at this exact commit, as some hunk or some ref of
+  // this version records it. A pair the document does not name is not a smaller mistake
   // than a slug in another workspace, and it does not get a smaller answer.
   const hunks = hunksOf(row.doc, path, sha);
-  if (hunks.length === 0) return softNotFound();
-  const repo = hunks[0]!.repo;
+  const refs = refsAt(refsOf(row.doc, listAnnotations(ws, slug)), path, sha);
+  if (hunks.length === 0 && refs.length === 0) return softNotFound();
+  const repo = hunks[0]?.repo ?? refs[0]!.repo;
 
   const client = githubClientFor(ws, asker);
 
@@ -227,7 +228,7 @@ async function contextRange(
   }
 
   const lines = fileLines(content);
-  if (!hunksAgree(hunks, lines)) return noContext("drifted");
+  if (!hunksAgree(hunks, lines) || !refsAgree(refs, lines)) return noContext("drifted");
 
   // Asked past the end is not an error: the panel asks for a window around a hunk
   // before it knows how long the file is, and the answer to "give me twenty lines
@@ -245,8 +246,63 @@ async function contextRange(
   });
 }
 
-/** The document's hunks for one file at one commit. Exported for the test that has to
- *  know the allow-list is read off the stored document and nothing else. */
-export function hunksOf(doc: ReviewDoc, path: string, sha: string): Hunk[] {
+/** The document's hunks for one file at one commit. */
+function hunksOf(doc: ReviewDoc, path: string, sha: string): Hunk[] {
   return doc.hunks.filter((h) => h.path === path && h.sha.toLowerCase() === sha);
+}
+
+/**
+ * Every ref the page draws, wherever on it they are drawn.
+ *
+ * A hunk is not the only code a review puts on screen. A statement quotes lines, a note
+ * quotes lines, the code design quotes lines for each module and each coverage path,
+ * and an answer to a question quotes lines. Each of those is a code surface wearing the
+ * same full-screen control as a file diff, so each has the same claim on the file
+ * around it: one control, one thing it does.
+ *
+ * A ref also carries its own resolution — the workspace fetched those exact lines at
+ * that exact sha when the review was published — so a ref in a stored document is the
+ * same kind of evidence a hunk is, and it opens the same door and no wider.
+ */
+export function refsOf(doc: ReviewDoc, annotations: { answer: { refs: Ref[] } | null }[]): Ref[] {
+  const out: Ref[] = [];
+  const evidence = (list: Evidence[]) => {
+    for (const e of list) if (e.type === "ref") out.push(e.ref);
+  };
+  for (const s of doc.statements) {
+    out.push(...s.refs);
+    evidence(s.evidence);
+  }
+  for (const n of doc.notes) {
+    out.push(...n.refs);
+    evidence(n.evidence);
+  }
+  if (doc.codeDesign) {
+    for (const m of doc.codeDesign.modules) out.push(...m.refs);
+    for (const c of doc.codeDesign.coverage) out.push(...c.refs);
+  }
+  // An answer's refs are on the page beside the question, and they are not in the
+  // document: an annotation belongs to the review rather than to a version.
+  for (const a of annotations) if (a.answer) out.push(...a.answer.refs);
+  return out;
+}
+
+function refsAt(refs: Ref[], path: string, sha: string): Ref[] {
+  return refs.filter((r) => r.path === path && r.sha.toLowerCase() === sha);
+}
+
+/**
+ * Whether the file the fetch returned still says what the refs quoted from it.
+ *
+ * A ref's snippet is the copy the page is already showing, so it is exactly the
+ * evidence that the file being laid out around it is the same file. If it is not, the
+ * panel would put a reader's mark on lines the statement never quoted, which is the
+ * quiet kind of wrong this refuses rather than ships.
+ */
+export function refsAgree(refs: Ref[], lines: string[]): boolean {
+  for (const ref of refs) {
+    if (ref.startLine < 1 || ref.endLine > lines.length) return false;
+    if (lines.slice(ref.startLine - 1, ref.endLine).join("\n") !== ref.snippet) return false;
+  }
+  return true;
 }

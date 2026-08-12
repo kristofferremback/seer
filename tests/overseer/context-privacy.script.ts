@@ -33,13 +33,13 @@ const { offlineGithubClient, offlineGithubOAuth } = await import("../offline-git
 const { GithubError } = await import("../../src/overseer/github");
 const { GOLDEN_HEAD_SHA_12 } = await import("./fixtures/golden-review");
 
+const { GOLDEN_REF_LINES, GOLDEN_REF_START } = await import("./fixtures/stored-review");
+
 const SECRET_LINE = "  const apiKey = process.env.SEER_SECRET;";
 const FILE = (() => {
   const lines: string[] = [];
   for (let n = 1; n <= 120; n++) lines.push(SECRET_LINE);
-  lines[39] = "export function gate(req: Request) {";
-  lines[40] = "  return session(req) !== null;";
-  lines[41] = "}";
+  GOLDEN_REF_LINES.forEach((line, i) => { lines[GOLDEN_REF_START - 1 + i] = line; });
   return lines.join("\n") + "\n";
 })();
 

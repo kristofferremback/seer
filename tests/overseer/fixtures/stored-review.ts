@@ -16,19 +16,47 @@ import {
   goldenPayload,
 } from "./golden-review";
 
-function ref(id: string, path: string, sha: string): Ref {
+/**
+ * The nine lines every ref in this fixture quotes, at 40..48 of the file it names.
+ *
+ * They used to be the placeholder `// a resolved snippet`, which was enough while
+ * nothing compared a snippet to anything. The context route does: a ref's stored lines
+ * are the only evidence that the file it fetches is the file the page already showed,
+ * so a fixture whose snippet could not be true of any file left that check untestable.
+ *
+ * The first three are the golden hunk's own new-side lines, so one file can satisfy
+ * both the hunk check and the ref check at once.
+ */
+export const GOLDEN_REF_LINES = [
+  "export function gate(req: Request) {",
+  "  return session(req) !== null;",
+  "}",
+  "",
+  "export function readable(req: Request): string[] {",
+  "  const user = sessionUser(req);",
+  "  if (!user) return [];",
+  "  return listUserWorkspaces(user.id).map((w) => w.id);",
+  "}",
+];
+
+export const GOLDEN_REF_START = 40;
+export const GOLDEN_REF_END = GOLDEN_REF_START + GOLDEN_REF_LINES.length - 1;
+
+export function goldenRef(id: string, path: string, sha: string): Ref {
   return {
     id,
     repo: GOLDEN_REPO,
     sha,
     path,
-    startLine: 40,
-    endLine: 48,
+    startLine: GOLDEN_REF_START,
+    endLine: GOLDEN_REF_END,
     highlight: [42],
     origin: "in_stack",
-    snippet: "// a resolved snippet\n",
+    snippet: GOLDEN_REF_LINES.join("\n"),
   };
 }
+
+const ref = goldenRef;
 
 /** The golden review as it sits in `review_versions`, minus the fields the store
  *  owns: `id`, `slug` and `version` are written by createReviewVersion. */

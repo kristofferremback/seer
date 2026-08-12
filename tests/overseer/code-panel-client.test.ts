@@ -19,6 +19,7 @@ import type { ReviewDoc } from "../../src/overseer/db";
 import { goldenStoredDoc } from "./fixtures/stored-review";
 import { GOLDEN_HUNKS } from "./fixtures/golden-review";
 import { contextLines } from "../../src/overseer/render-diff";
+import { GOLDEN_REF_END, GOLDEN_REF_START } from "./fixtures/stored-review";
 
 // tsconfig omits the DOM lib on purpose: this is a server, and `document` quietly
 // typechecking inside src/ would be a mistake worth catching. happy-dom installs the
@@ -444,6 +445,39 @@ describe("the file the hunks were cut from", () => {
     // The answers landed on a panel that is not there, and none of them put anything
     // back into it.
     expect(panel()!.querySelector(".zoom-inner")!.innerHTML).toBe("");
+  });
+
+  test("a quoted ref opens the file around the lines it quotes", async () => {
+    // A ref is the other kind of code surface on the page, and it wears the same
+    // control. The panel does the same thing with it: the file, with the quoted lines
+    // marked rather than alone.
+    const control = controls().find((b) => /L\d+-\d+$/.test(b.dataset.zoom ?? ""))!;
+    expect(control).toBeDefined();
+    control.click();
+    await settled();
+
+    expect(view()).not.toBeNull();
+    const seen = numbers();
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).toBe(seen[i - 1]! + 1);
+    // The quoted range sits inside a stretch of the file rather than being all of it.
+    expect(seen[0]).toBe(1);
+    expect(seen).toContain(GOLDEN_REF_START - 5);
+    expect(seen).toContain(GOLDEN_REF_END + 5);
+
+    // Marked, so the reader can still see which lines the claim stood on...
+    const marked = [...document.querySelectorAll(".zoom-body .filefull .l.focus")].map((l) =>
+      Number(l.querySelector(".n")!.textContent),
+    );
+    expect(marked[0]).toBe(GOLDEN_REF_START);
+    expect(marked[marked.length - 1]).toBe(GOLDEN_REF_END);
+    // ...and the line it singled out inside them keeps its own wash.
+    const lit = [...document.querySelectorAll(".zoom-body .filefull .l.hl")].map((l) =>
+      Number(l.querySelector(".n")!.textContent),
+    );
+    expect(lit).toEqual([42]);
+
+    // It asked for the file the ref names, and never for a hunk's file.
+    for (const a of asked) expect(a.path).toBe("src/auth.ts");
   });
 
   test("a shared page never asks", async () => {
