@@ -30,7 +30,14 @@ import {
   GOLDEN_OUTSIDE_PATH,
   GOLDEN_REPO,
 } from "./fixtures/golden-review";
-import { storeGoldenReview } from "./fixtures/stored-review";
+import {
+  GOLDEN_REF_LINES,
+  GOLDEN_REF_START,
+  goldenRef,
+  goldenStoredDoc,
+  storeGoldenReview,
+} from "./fixtures/stored-review";
+import { createReviewVersion } from "../../src/overseer/db";
 import { fileLines, hunksAgree } from "../../src/overseer/context";
 import { newSpan } from "../../src/overseer/render-diff";
 
@@ -39,24 +46,32 @@ let base = "";
 let ws = "";
 let other = "";
 
-/** A file whose lines 40, 41 and 42 are the golden hunk's own, so the drift check
- *  passes and the panel's numbers line up with the file's. Everything else is filler
- *  that is recognisably not the hunk. */
+/** A file that agrees with everything the golden document says about it: lines 40 to 48
+ *  are the lines its refs quote, and the first three of those are the golden hunk's own
+ *  new-side lines. Everything else is filler that is recognisably neither. */
 const AUTH_FILE = (() => {
   const lines: string[] = [];
   for (let n = 1; n <= 120; n++) lines.push("const filler" + n + " = " + n + ";");
-  lines[39] = "export function gate(req: Request) {";
-  lines[40] = "  return session(req) !== null;";
-  lines[41] = "}";
+  GOLDEN_REF_LINES.forEach((line, i) => { lines[GOLDEN_REF_START - 1 + i] = line; });
   return lines.join("\n") + "\n";
 })();
 
 /** Counts what the route actually asked GitHub for, so the cache can be shown to be
- *  doing its job rather than assumed to be. */
-function serving(files: Record<string, string>): { client: GithubClient; reads: string[] } {
+ *  doing its job rather than assumed to be.
+ *
+ *  `routed` is whether this workspace still holds an installation covering the
+ *  repository. It is what decides whether the shared snippet cache may be read at all,
+ *  so a fake that always said yes could not show the case that matters. */
+function serving(
+  files: Record<string, string>,
+  routed = true,
+): { client: GithubClient; reads: string[] } {
   const reads: string[] = [];
   const client: GithubClient = {
     ...offlineGithubClient(),
+    async installationFor() {
+      return routed ? 4242 : null;
+    },
     async getFileAtSha(repo, path, sha) {
       reads.push(`${repo}:${sha}:${path}`);
       const got = files[`${sha}:${path}`];
@@ -118,6 +133,17 @@ beforeAll(async () => {
 
   storeGoldenReview(ws, "golden");
   storeGoldenReview(other, "theirs");
+
+  // The same review with one note quoting a file no pull request touches. The
+  // walkthrough can say nothing about that file; the note is the only reason it is on
+  // the page at all, and therefore the only thing that may open it.
+  const quoted = goldenStoredDoc();
+  createReviewVersion(ws, "quoted", {
+    ...quoted,
+    notes: quoted.notes.map((n, i) =>
+      i === 0 ? { ...n, refs: [goldenRef("ref_outside", GOLDEN_OUTSIDE_PATH, GOLDEN_HEAD_SHA_12)] } : n,
+    ),
+  });
 });
 
 afterAll(() => {
@@ -161,6 +187,35 @@ describe("the file around a hunk", () => {
     // The first request may or may not have paid for it, depending on what the test
     // before left in the cache. What matters is that the second did not.
     expect(reads.length).toBeLessThanOrEqual(1);
+  });
+
+  test("a workspace that no longer holds the repository gets no cached bytes", async () => {
+    // Warm the cache as a workspace that does hold it. `ref_snippets` has no workspace
+    // column, so from here on those bytes are sitting in a table anyone could read out
+    // of if the route let them.
+    const warm = serving({ [`${GOLDEN_HEAD_SHA_12}:src/auth.ts`]: AUTH_FILE });
+    setGithubClientFactory(() => warm.client);
+    sweepSnippets(Date.now() + 1);
+    expect((await ask(ws, "golden", { path: "src/auth.ts", sha: GOLDEN_HEAD_SHA_12, from: "1", to: "5" })).status).toBe(200);
+    expect(warm.reads.length).toBe(1);
+
+    // The same review, the same document naming the same file, and an installation that
+    // has since gone away. The document is evidence of what this workspace could read
+    // once; it is not evidence about now, so the cache stays shut.
+    const gone = serving({}, false);
+    setGithubClientFactory(() => gone.client);
+    const res = await ask(ws, "golden", {
+      path: "src/auth.ts",
+      sha: GOLDEN_HEAD_SHA_12,
+      from: "1",
+      to: "5",
+    });
+    // GitHub was asked, rather than the cache answering on its own...
+    expect(gone.reads.length).toBe(1);
+    // ...and since it declined, nothing of the file comes back.
+    const body = await read(res);
+    expect(body.context).toBe(null);
+    expect(JSON.stringify(body)).not.toContain("filler");
   });
 
   test("asked past the end, it answers with the file and its length", async () => {
@@ -224,15 +279,15 @@ describe("the file around a hunk", () => {
 describe("what the document does not name", () => {
   test("a path the review never touched is the same answer as an unknown slug", async () => {
     // A real file, in a repository this workspace has an installation for, at a sha
-    // the review does name. Everything about it is plausible except that no hunk of
+    // the review does name. Everything about it is plausible except that nothing in
     // this review carries it, which is the whole of the allow-list.
     const { client, reads } = serving({
-      [`${GOLDEN_HEAD_SHA_12}:${GOLDEN_OUTSIDE_PATH}`]: "const secret = 1;\n",
+      [`${GOLDEN_HEAD_SHA_12}:src/nowhere.ts`]: "const secret = 1;\n",
     });
     setGithubClientFactory(() => client);
 
     const res = await ask(ws, "golden", {
-      path: GOLDEN_OUTSIDE_PATH,
+      path: "src/nowhere.ts",
       sha: GOLDEN_HEAD_SHA_12,
       from: "1",
       to: "10",
@@ -240,6 +295,70 @@ describe("what the document does not name", () => {
     expect(await shape(res)).toBe(await refusal());
     // And GitHub was never asked, so the refusal is not a leak of what is there.
     expect(reads).toEqual([]);
+  });
+
+  test("a file only a quoted ref names is opened, because a ref is on the page too", async () => {
+    // A hunk is not the only code a review shows. A statement, a note, the code design
+    // and an answer each quote lines, each wears the same full-screen control, and each
+    // has the same claim on the file around it.
+    const outside: string[] = [];
+    for (let n = 1; n <= 90; n++) outside.push("const elsewhere" + n + " = " + n + ";");
+    GOLDEN_REF_LINES.forEach((line, i) => { outside[GOLDEN_REF_START - 1 + i] = line; });
+    const { client } = serving({
+      [`${GOLDEN_HEAD_SHA_12}:${GOLDEN_OUTSIDE_PATH}`]: outside.join("\n") + "\n",
+    });
+    setGithubClientFactory(() => client);
+    sweepSnippets(Date.now() + 1);
+
+    const body = await read(
+      await ask(ws, "quoted", {
+        path: GOLDEN_OUTSIDE_PATH,
+        sha: GOLDEN_HEAD_SHA_12,
+        from: "20",
+        to: "30",
+      }),
+    );
+    expect(body.total).toBe(90);
+    expect(body.lines!.length).toBe(11);
+    expect(body.lines![0]).toContain("elsewhere20");
+
+    // The same file on the review that does not quote it stays shut.
+    expect(
+      await shape(
+        await ask(ws, "golden", {
+          path: GOLDEN_OUTSIDE_PATH,
+          sha: GOLDEN_HEAD_SHA_12,
+          from: "20",
+          to: "30",
+        }),
+      ),
+    ).toBe(await refusal());
+  });
+
+  test("a file that no longer says what a ref quoted is refused rather than marked", async () => {
+    // Line 44 is inside the range the note quotes. A file that says something else
+    // there is not the file that snippet came from, and laying the panel out around it
+    // would put the reader's mark on lines nobody quoted.
+    const outside: string[] = [];
+    for (let n = 1; n <= 90; n++) outside.push("const elsewhere" + n + " = " + n + ";");
+    GOLDEN_REF_LINES.forEach((line, i) => { outside[GOLDEN_REF_START - 1 + i] = line; });
+    outside[GOLDEN_REF_START + 3] = "  // something else entirely";
+    const { client } = serving({
+      [`${GOLDEN_HEAD_SHA_12}:${GOLDEN_OUTSIDE_PATH}`]: outside.join("\n") + "\n",
+    });
+    setGithubClientFactory(() => client);
+    sweepSnippets(Date.now() + 1);
+
+    const body = await read(
+      await ask(ws, "quoted", {
+        path: GOLDEN_OUTSIDE_PATH,
+        sha: GOLDEN_HEAD_SHA_12,
+        from: "20",
+        to: "30",
+      }),
+    );
+    expect(body.context).toBe(null);
+    expect(body.why).toContain("no longer matches");
   });
 
   test("the right path at the wrong commit is refused too", async () => {

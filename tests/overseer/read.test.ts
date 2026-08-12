@@ -15,7 +15,7 @@ import { createAnnotation } from "../../src/overseer/db";
 import { upsertPrStatus } from "../../src/overseer/installations";
 import { tinyId } from "../../src/ids";
 import { GOLDEN_REPO, GOLDEN_HEAD_SHA_12, goldenPayload } from "./fixtures/golden-review";
-import { storeGoldenReview } from "./fixtures/stored-review";
+import { GOLDEN_REF_LINES, storeGoldenReview } from "./fixtures/stored-review";
 
 let server: Awaited<ReturnType<typeof startServer>>;
 let base: string;
@@ -92,7 +92,9 @@ describe("GET /api/reviews/:slug", () => {
     expect(doc.version).toBe(1);
     expect(doc.title).toBe(goldenPayload().title);
     expect(doc.prs.map((p: { number: number }) => p.number)).toEqual([12, 13]);
-    expect(doc.statements[0]!.refs[0]!.snippet).toContain("resolved snippet");
+    // The resolved lines travel with the ref, which is what lets a reader see the code
+    // a claim stands on without a second request.
+    expect(doc.statements[0]!.refs[0]!.snippet).toBe(GOLDEN_REF_LINES.join("\n"));
     expect(doc.groups[0]!.hunks.length).toBe(doc.hunks.length);
   });
 

@@ -175,7 +175,15 @@ export function refFold(ownerId: string, ref: Ref, suffix = ""): string {
     `</span>${icon("cue", "cue")}</summary>` +
     zoomButton(`${ref.path} L${ref.startLine}-${ref.endLine}`) +
     `<div class="fold-body">` +
-    `<pre class="snip scroll-x"><code>${snippetLines(ref)}</code></pre>` +
+    // Where these lines sit in the file they were quoted from, so the panel can put the
+    // rest of it around them. The same four facts a hunk carries, said the same way: a
+    // quoted ref and a file diff are two code surfaces wearing one control, and the
+    // control does one thing. `hl` travels too, because the lines the ref singles out
+    // are drawn here and have to be drawn there.
+    `<pre class="snip scroll-x" data-path="${escapeHtml(ref.path)}" data-sha="${escapeHtml(ref.sha)}" ` +
+    `data-ref-from="${ref.startLine}" data-ref-to="${ref.endLine}"` +
+    (ref.highlight.length === 0 ? "" : ` data-ref-hl="${ref.highlight.join(",")}"`) +
+    `><code>${snippetLines(ref)}</code></pre>` +
     `<p class="fold-out"><a href="${escapeHtml(githubBlobUrl(ref))}">` +
     `${escapeHtml(`${ref.repo} at ${shortSha(ref.sha)}`)}</a></p>` +
     `</div></details>`

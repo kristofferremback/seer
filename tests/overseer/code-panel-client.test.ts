@@ -19,6 +19,7 @@ import type { ReviewDoc } from "../../src/overseer/db";
 import { goldenStoredDoc } from "./fixtures/stored-review";
 import { GOLDEN_HUNKS } from "./fixtures/golden-review";
 import { contextLines } from "../../src/overseer/render-diff";
+import { GOLDEN_REF_END, GOLDEN_REF_START } from "./fixtures/stored-review";
 
 // tsconfig omits the DOM lib on purpose: this is a server, and `document` quietly
 // typechecking inside src/ would be a mistake worth catching. happy-dom installs the
@@ -232,11 +233,14 @@ interface Asked {
 
 let asked: Asked[] = [];
 let answer: "file" | "refuse" | "dead" = "file";
+/** Once the file is on screen, everything after this many answers fails. */
+let failAfter = Infinity;
 const realFetch = globalThis.fetch;
 
 function serveFile(): void {
   asked = [];
   answer = "file";
+  failAfter = Infinity;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (globalThis as any).fetch = async (input: string) => {
     const url = new URL(String(input), "https://seer.test");
@@ -249,7 +253,7 @@ function serveFile(): void {
       to,
     });
     if (answer === "dead") throw new Error("offline");
-    if (answer === "refuse") {
+    if (answer === "refuse" || asked.length > failAfter) {
       return new Response(JSON.stringify({ context: null, why: "GitHub would not serve this file." }), {
         headers: { "content-type": "application/json" },
       });
@@ -402,6 +406,38 @@ describe("the file the hunks were cut from", () => {
     expect(document.querySelectorAll(".zoom-body .hunk").length).toBe(1);
   });
 
+  test("a stretch that will not come stops pulsing, says why, and stops asking", async () => {
+    openFile(GOLDEN_HUNKS.auth.path);
+    await settled();
+    expect(view()).not.toBeNull();
+    const before = asked.length;
+
+    // Everything from here on fails. The reader presses the gap at the end of the file.
+    failAfter = before;
+    const gap = gaps()[0]!;
+    const from = Number(gap.getAttribute("data-from"));
+    gap.click();
+    await settled();
+
+    // The gap is still there, because the lines behind it never arrived, and it says
+    // what happened instead of how many. Nothing is left pulsing in its place.
+    const after = gaps();
+    expect(after.length).toBe(1);
+    expect(Number(after[0]!.getAttribute("data-from"))).toBe(from);
+    expect(after[0]!.textContent).toContain("GitHub would not serve this file");
+    expect(after[0]!.getAttribute("data-failed")).not.toBeNull();
+    expect(document.querySelectorAll(".zoom-body .l.sk").length).toBe(0);
+    // The file the reader already had is untouched.
+    expect(numbers()[0]).toBe(1);
+
+    // And it does not ask again. A gap that failed and kept offering itself would
+    // re-issue the same request on every scroll for as long as the reader sat there.
+    const spent = asked.length;
+    after[0]!.click();
+    await settled();
+    expect(asked.length).toBe(spent);
+  });
+
   test("closing drops what it was waiting for", async () => {
     openFile(GOLDEN_HUNKS.auth.path);
     (panel()!.querySelector(".zoom-x") as El).click();
@@ -409,6 +445,39 @@ describe("the file the hunks were cut from", () => {
     // The answers landed on a panel that is not there, and none of them put anything
     // back into it.
     expect(panel()!.querySelector(".zoom-inner")!.innerHTML).toBe("");
+  });
+
+  test("a quoted ref opens the file around the lines it quotes", async () => {
+    // A ref is the other kind of code surface on the page, and it wears the same
+    // control. The panel does the same thing with it: the file, with the quoted lines
+    // marked rather than alone.
+    const control = controls().find((b) => /L\d+-\d+$/.test(b.dataset.zoom ?? ""))!;
+    expect(control).toBeDefined();
+    control.click();
+    await settled();
+
+    expect(view()).not.toBeNull();
+    const seen = numbers();
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).toBe(seen[i - 1]! + 1);
+    // The quoted range sits inside a stretch of the file rather than being all of it.
+    expect(seen[0]).toBe(1);
+    expect(seen).toContain(GOLDEN_REF_START - 5);
+    expect(seen).toContain(GOLDEN_REF_END + 5);
+
+    // Marked, so the reader can still see which lines the claim stood on...
+    const marked = [...document.querySelectorAll(".zoom-body .filefull .l.focus")].map((l) =>
+      Number(l.querySelector(".n")!.textContent),
+    );
+    expect(marked[0]).toBe(GOLDEN_REF_START);
+    expect(marked[marked.length - 1]).toBe(GOLDEN_REF_END);
+    // ...and the line it singled out inside them keeps its own wash.
+    const lit = [...document.querySelectorAll(".zoom-body .filefull .l.hl")].map((l) =>
+      Number(l.querySelector(".n")!.textContent),
+    );
+    expect(lit).toEqual([42]);
+
+    // It asked for the file the ref names, and never for a hunk's file.
+    for (const a of asked) expect(a.path).toBe("src/auth.ts");
   });
 
   test("a shared page never asks", async () => {
