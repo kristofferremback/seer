@@ -434,6 +434,13 @@ export const BUDGETS = {
     authorIntent: 2,
     summary: 2, // review.summary, <= 2 paragraphs
   },
+  /** Paragraph prose per pull request. Not a cap: the per-field caps permit an order of
+   *  magnitude more, and a review is refused for what it says, never for its length.
+   *  It counts bodies alone, because the number of things a review says is priced by
+   *  the entity budgets above; charging their titles here would bill a wider partition
+   *  twice and read as verbosity. The write path says so out loud past `warnAt`, which
+   *  is the "delete a paragraph and see what the reader loses" line from the skill. */
+  prose: { perPr: 2700, warnAt: 5400 },
 } as const;
 
 /** Max statements for a review of `prCount` pull requests. */

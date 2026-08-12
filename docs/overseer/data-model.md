@@ -99,7 +99,7 @@ statement
 
 `body` is prose, and it is where the reader opts in. It explains why the change exists, its important implication, and the high-level mechanism. Low-level control flow belongs in the walkthrough. These are areas to cover, never labels to print. The prototype tried printing them as labels and it read as a form.
 
-Constraint: every statement carries at least one ref. A claim with nothing behind it does not belong on the page.
+Constraint: every statement carries at least one ref, in `refs[]` or as a `ref` entry in `evidence[]`. A claim with nothing behind it does not belong on the page, and either place is a pointer the reader can follow, so the rule reads both the way the note rules always have.
 
 The prototype also had a fourth kind, `keep`, for stating what a change deliberately does not touch. It is cut. It was the only kind that could carry no evidence, which made it the only place a claim could be unfalsifiable, and it is not needed to ship a first review. If the blast radius is worth stating, it belongs in the summary or in the body of the statement whose scope it bounds. This can come back later on evidence that reviews are worse without it, and the renderer should treat the kind list as closed until then.
 

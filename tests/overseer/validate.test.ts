@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { BUDGETS } from "../../src/overseer/types";
+import { BUDGETS, maxNotes, maxStatements } from "../../src/overseer/types";
 import {
   REINDEX_EPSILON,
   reindexSignificance,
@@ -461,8 +461,20 @@ test("a statement naming a pull request outside the review is an error", () => {
 test("a statement with no ref is an error", () => {
   const payload = golden();
   payload.statements[1]!.refs = [];
+  payload.statements[1]!.evidence = [];
   const err = find(run(payload).errors, "statement_unbacked");
   expect(err.field).toBe("statements[1].refs");
+});
+
+// The note rules have always counted a ref wherever the author put it. The statement
+// rule counted only refs[], so a witness that filed its pointer as evidence was told
+// the statement carried no ref while looking straight at the ref it had written.
+test("a ref filed as evidence backs the statement it belongs to", () => {
+  const payload = golden();
+  const moved = payload.statements[1]!.refs[0]!;
+  payload.statements[1]!.refs = [];
+  payload.statements[1]!.evidence = [{ type: "ref", ref: moved }];
+  expect(rules(run(payload).errors)).not.toContain("statement_unbacked");
 });
 
 // ---- rule: a risk note has checks or a ref into a changed hunk ----
@@ -1567,6 +1579,21 @@ describe("sentence counting", () => {
     payload.prs[0]!.detail = "The timeout moves from 1.5 seconds to 2.5 seconds.";
     expect(rules(run(payload).errors)).not.toContain("cap_sentences");
   });
+
+  // An abbreviation is a period inside a sentence. Counting it refused two sentences as
+  // three, and nothing in the message named the period that did it, so the author was
+  // left counting the same two sentences over and over.
+  test("does not count an abbreviation as a sentence end", () => {
+    for (const detail of [
+      "The gate runs on the installation, e.g. the one that answers for this repo. It is checked per request.",
+      "Every refusal is byte identical, i.e. the same status, type and body. A slug is never an oracle.",
+      "Paths, shas, ranges etc. are all checked before GitHub is called. Nothing else reaches it.",
+    ]) {
+      const payload = golden();
+      payload.prs[0]!.detail = detail;
+      expect(rules(run(payload).errors)).not.toContain("cap_sentences");
+    }
+  });
 });
 
 describe("pr.detail", () => {
@@ -1665,17 +1692,59 @@ describe("what a publish spent", () => {
     const afterTitle = publishUsage(payload, 0).prose;
     expect(afterTitle.total).toBe(afterDesign.prose.total + 1);
     expect(afterTitle.bodies).toBe(afterDesign.prose.bodies);
+    expect(afterTitle.structure).toBe(afterTitle.total - afterTitle.bodies);
   });
 
-  test("perPr divides by the pull requests, which is the figure to calibrate against", () => {
+  // The anchor is about prose, and a partition is not prose: a review told to spend its
+  // whole group budget would otherwise read back as long for having done so.
+  test("perPr divides the bodies, so a wider partition is not counted as length", () => {
     const payload = golden();
     const two = publishUsage(payload, 0);
-    expect(two.prose.perPr).toBe(Math.round(two.prose.total / 2));
+    expect(two.prose.perPr).toBe(Math.round(two.prose.bodies / 2));
+
+    const titled = golden();
+    titled.groups = titled.groups.map((g) => ({ ...g, title: `${g.title} and more of it` }));
+    const wider = publishUsage(titled, 0);
+    expect(wider.prose.total).toBeGreaterThan(two.prose.total);
+    expect(wider.prose.perPr).toBe(two.prose.perPr);
+
     // Dropping a pull request drops its own gist and detail from the total too, so
-    // the check is against the recomputed total rather than the old one.
+    // the check is against the recomputed numbers rather than the old ones.
     payload.prs = [payload.prs[0]!];
     const one = publishUsage(payload, 0);
-    expect(one.prose.perPr).toBe(one.prose.total);
+    expect(one.prose.perPr).toBe(one.prose.bodies);
     expect(one.prose.total).toBeLessThan(two.prose.total);
+  });
+
+  test("a review well past the anchor is taken, and told", () => {
+    const payload = golden();
+    expect(rules(run(payload).warnings)).not.toContain("length");
+
+    // Every body filled to the cap that governs it, so this is a review the write path
+    // takes. A length signal that only fired on payloads already being refused would
+    // never reach anyone: the point is the review that clears every rule and is long.
+    const long = golden();
+    const filler = (n: number) => "word ".repeat(Math.floor(n / 5)).trim();
+    long.summary = filler(BUDGETS.chars.summary);
+    long.authorIntent = filler(BUDGETS.chars.authorIntent);
+    const wide = (n: number) => Array.from({ length: n }, (_, i) => i);
+    long.statements = wide(maxStatements(long.prs.length)).map((i) => ({
+      ...long.statements[i % long.statements.length]!,
+      id: `st-long-${i}`,
+      body: filler(BUDGETS.chars.statementBody),
+    }));
+    long.notes = wide(maxNotes()).map((i) => ({
+      ...long.notes[i % long.notes.length]!,
+      id: `nt-long-${i}`,
+      body: filler(BUDGETS.chars.noteBody),
+    }));
+    long.groups = long.groups.map((g) => ({ ...g, paragraph: filler(BUDGETS.chars.groupParagraph) }));
+
+    const { errors, warnings } = run(long);
+    expect(errors).toEqual([]);
+    const warned = warnings.find((w) => w.rule === "length");
+    expect(warned).toBeDefined();
+    expect(warned!.field).toBe("prose");
+    expect(publishUsage(long, 0).prose.perPr).toBeGreaterThan(BUDGETS.prose.warnAt);
   });
 });

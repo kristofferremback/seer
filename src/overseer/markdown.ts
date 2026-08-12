@@ -17,6 +17,8 @@
 // written; only constructs that would otherwise disappear from the page are refused by
 // name. That is why `_emph_`, `__strong__`, `- [ ] task` and `<https://autolink>` render
 // as the characters they are, while a heading, a table or a raw tag is named and refused.
+// The same line decides what counts as a raw tag: `<div>` is refused, `<slug>` is the
+// four characters somebody typed into a route template and renders as itself.
 //
 // A rejection quotes the offending source verbatim, so `message` and `text` are safe in
 // a JSON body but must go through `escapeHtml` before reaching any HTML template.
@@ -55,11 +57,16 @@ export class MarkdownRejection extends Error {
     readonly construct: string,
     readonly position: Position,
     text: string,
+    /** What to write instead, when the author's text can be kept as it stands. The
+     *  message is the only documentation that reaches an author at the moment it is
+     *  needed, so a refusal it can act on carries the correction with it. */
+    readonly hint: string = "",
   ) {
     const clamped = clampText(text);
     super(
       `${construct} is not allowed here (line ${position.line}, column ${position.column})` +
-        (clamped ? `: ${clamped}` : ""),
+        (clamped ? `: ${clamped}` : "") +
+        (hint ? `. ${hint}` : ""),
     );
     this.text = clamped;
     this.name = "MarkdownRejection";
@@ -70,8 +77,8 @@ export type ValidationResult =
   | { ok: true }
   | { ok: false; construct: string; position: Position; text: string; message: string };
 
-function reject(construct: string, position: Position, text = ""): never {
-  throw new MarkdownRejection(construct, position, text);
+function reject(construct: string, position: Position, text = "", hint = ""): never {
+  throw new MarkdownRejection(construct, position, text, hint);
 }
 
 function fail(err: MarkdownRejection): ValidationResult {
@@ -142,6 +149,41 @@ const HTML_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>])[^<>]*>/;
 const ATTRIBUTE_LESS_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*>/;
 
 /**
+ * Every element name a browser knows, obsolete ones included, because an obsolete tag
+ * is still a tag somebody meant. A name outside this set and without a hyphen is not
+ * markup anybody wrote: it is a route template, a placeholder or a type parameter.
+ */
+const HTML_ELEMENTS = new Set(
+  ("a abbr acronym address applet area article aside audio b base basefont bdi bdo bgsound big " +
+    "blink blockquote body br button canvas caption center cite code col colgroup data datalist " +
+    "dd del details dfn dialog dir div dl dt em embed fieldset figcaption figure font footer form " +
+    "frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe image img input ins kbd " +
+    "keygen label legend li link main map mark marquee math menu menuitem meta meter nav nobr " +
+    "noembed noframes noscript object ol optgroup option output p param picture plaintext pre " +
+    "progress q rb rp rt rtc ruby s samp script search section select slot small source spacer " +
+    "span strike strong style sub summary sup svg table tbody td template textarea tfoot th thead " +
+    "time title tr track tt u ul var video wbr xmp").split(" "),
+);
+
+/**
+ * A tag-shaped span the renderer refuses. The subset refuses raw HTML so that markup an
+ * author meant is never silently escaped into literal text, and that reason runs out
+ * where the span could not have been markup: `<ws>` in `/<ws>/r/<slug>/c` renders as the
+ * characters it is, which is what was written. So the gate is intent rather than shape.
+ * A known element name is markup; so is a hyphenated name, which is how a custom element
+ * is spelled; so is anything carrying attributes, since nobody writes those by accident.
+ */
+function isMarkup(match: string): boolean {
+  const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(match)![1]!;
+  if (name.includes("-")) return true;
+  if (HTML_ELEMENTS.has(name.toLowerCase())) return true;
+  return !ATTRIBUTE_LESS_TAG.test(match);
+}
+
+/** The one correction that keeps the author's characters exactly as written. */
+const WRAP_IT = "Wrap it in backticks to publish it as written.";
+
+/**
  * Constructs that are refused wherever they appear at the head of a line. Checked
  * before anything decides what the line is, so a heading inside a paragraph is as
  * loud as one on its own.
@@ -198,11 +240,15 @@ function rejectDanglingTag(line: SourceLine, lines: SourceLine[], next: number, 
   const open = /<\/?[A-Za-z][A-Za-z0-9-]*[^<>]*$/.exec(line.text);
   if (!open) return;
   if (!closesOnALaterLine(lines, next)) return;
+  // The span is unterminated on this line, so what closes it is unknown: the name and
+  // whatever follows it are all there is to judge by, and `isMarkup` reads both.
+  if (!isMarkup(`${open[0]!}>`)) return;
   const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(open[0]!)![1]!;
   reject(
     "raw HTML tag",
     positionOf(starts, line.offset + open.index),
     `<${open[0]!.startsWith("</") ? "/" : ""}${name}>`,
+    WRAP_IT,
   );
 }
 
@@ -406,16 +452,16 @@ function renderUrl(raw: string, position: Position): string {
 /** Rejects a raw HTML tag or comment starting at `index`, if that is what this is. */
 function rejectHtml(text: string, index: number, position: Position): void {
   const rest = text.slice(index);
-  if (rest.startsWith("<!--")) reject("raw HTML comment", position, "<!--");
+  if (rest.startsWith("<!--")) reject("raw HTML comment", position, "<!--", WRAP_IT);
   if (rest.startsWith("<!") || rest.startsWith("<?")) {
-    reject("raw HTML declaration", position, rest.slice(0, 2));
+    reject("raw HTML declaration", position, rest.slice(0, 2), WRAP_IT);
   }
   const tag = HTML_TAG.exec(rest);
   const plain = ATTRIBUTE_LESS_TAG.exec(rest);
   const match = (tag && tag.index === 0 ? tag[0] : null) ?? (plain && plain.index === 0 ? plain[0] : null);
-  if (match) {
+  if (match && isMarkup(match)) {
     const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(match)![1]!;
-    reject("raw HTML tag", position, `<${match.startsWith("</") ? "/" : ""}${name}>`);
+    reject("raw HTML tag", position, `<${match.startsWith("</") ? "/" : ""}${name}>`, WRAP_IT);
   }
 }
 
