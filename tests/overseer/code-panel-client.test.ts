@@ -217,7 +217,7 @@ describe("the full-screen code panel", () => {
  *  are the golden hunk's own, so the file and the hunk agree about the code there. */
 const FILE: string[] = (() => {
   const out: string[] = [];
-  for (let n = 1; n <= 300; n++) out.push("const filler" + n + " = " + n + ";");
+  for (let n = 1; n <= 900; n++) out.push("const filler" + n + " = " + n + ";");
   out[39] = "export function gate(req: Request) {";
   out[40] = "  return session(req) !== null;";
   out[41] = "}";
@@ -277,7 +277,7 @@ function serveFile(): void {
 
 /** Let every stubbed answer land, including the ones the answers themselves ask for. */
 async function settled(): Promise<void> {
-  for (let i = 0; i < 12; i++) await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
 const openFile = (path: string): void => {
@@ -404,6 +404,29 @@ describe("the file the hunks were cut from", () => {
     expect(view()).toBeNull();
     expect(document.querySelectorAll(".zoom-body .nocontext").length).toBe(1);
     expect(document.querySelectorAll(".zoom-body .hunk").length).toBe(1);
+  });
+
+  test("a long gap is taken a piece at a time, not all at once", async () => {
+    openFile(GOLDEN_HUNKS.auth.path);
+    await settled();
+    const gap = gaps()[0]!;
+    const left = Number(gap.getAttribute("data-to")) - Number(gap.getAttribute("data-from")) + 1;
+    expect(left).toBeGreaterThan(300);
+
+    // Press it: the whole rest of the file at once, as far as the reader is concerned.
+    const before = asked.length;
+    gap.click();
+    // One request has left, not four. Four would be four requests for one file with
+    // none of them back yet, so none of them has filled the cache the others would
+    // have hit, and the route fetches the same file from GitHub four times over.
+    expect(asked.length - before).toBe(1);
+    expect(asked[asked.length - 1]!.to - asked[asked.length - 1]!.from + 1).toBe(300);
+
+    // And the rest still arrives, in pieces, on the way back.
+    await settled();
+    expect(gaps().length).toBe(0);
+    expect(numbers()[numbers().length - 1]).toBe(FILE.length);
+    for (const a of asked) expect(a.to - a.from + 1).toBeLessThanOrEqual(300);
   });
 
   test("a stretch that will not come stops pulsing, says why, and stops asking", async () => {
