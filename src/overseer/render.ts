@@ -1902,10 +1902,19 @@ function zoomScript(basePath: string, version: number, context: boolean): string
   };
 
   const ask = (a, b) => {
-    // The route bounds one request; this keeps a widened span from ever reaching that
-    // bound, which would turn a legitimate ask into the same refusal a bad URL gets.
+    // The route bounds one request, so a long stretch is taken in pieces. One piece
+    // now, and the rest on the way back: every answer runs the fill pass again, which
+    // finds what is still missing and asks for the next.
+    //
+    // Firing them all at once was the obvious shape and the wrong one. Pressing a gap
+    // in a long file asks for thousands of lines, which is a dozen requests leaving
+    // together, and they are a dozen requests for the SAME file: none of them has
+    // returned yet, so none of them has filled the cache the others would have hit,
+    // and the route fetches one file from GitHub a dozen times over. One at a time
+    // costs a round trip per piece and fills the file down the page as it goes, which
+    // is also the better thing to watch.
     if (b - a + 1 > 300) {
-      for (let at = a; at <= b; at += 300) ask(at, Math.min(b, at + 299));
+      ask(a, a + 299);
       return;
     }
     for (let n = a; n <= b; n++) view.asking.add(n);
@@ -2127,13 +2136,38 @@ function zoomScript(basePath: string, version: number, context: boolean): string
       stop();
       return;
     }
-    // The file was already on screen, so the reader keeps it and loses only the stretch
-    // that did not come. It goes back to being a gap, which now says why instead of how
-    // many and stops offering itself: the same scroll that asked would otherwise ask
-    // again, and again, for as long as the reader sat there.
+    // The file was already on screen, so the reader keeps it and loses only what did
+    // not come. That is more than the one range: pressing a gap lays out the whole of
+    // it and takes it a piece at a time, so a piece that fails leaves the rest of it
+    // standing as skeleton rows nothing is on its way to fill. The panel goes back to
+    // what it is actually holding, and everything it was showing on the strength of
+    // this request goes back to being a gap, which now says why instead of how many
+    // and stops offering itself: the same scroll that asked would otherwise ask again,
+    // and again, for as long as the reader sat there.
     view.failed.push({ from: a, to: b, why: said });
+    view.shown = merged(held());
     settle();
     paint(true);
+    // A hole small enough that settle closed it again is one worth asking for, and it
+    // is not the range that just failed, because settle cuts those back out.
+    fill();
+  };
+
+  /** What the panel is actually holding: the lines it has, the hunks it draws itself,
+   *  and the pieces still on their way. Everything else it was showing was a promise. */
+  const held = () => {
+    const runs = [];
+    const real = (n) => view.lines.has(n) || view.asking.has(n) || inHunk(n);
+    for (const s of view.shown) {
+      let n = s[0];
+      while (n <= s[1]) {
+        if (!real(n)) { n++; continue; }
+        const a = n;
+        while (n <= s[1] && real(n)) n++;
+        runs.push([a, n - 1]);
+      }
+    }
+    return runs;
   };
 
   const grow = (from, to, all) => {
