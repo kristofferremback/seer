@@ -168,7 +168,9 @@ export function refFold(ownerId: string, ref: Ref, suffix = ""): string {
   return (
     `<details class="fold" id="${escapeHtml(foldId(ownerId, ref, suffix))}">` +
     `<summary>${icon("chev", "tick")}<span class="fh">` +
-    `<span class="nb"><b>${escapeHtml(ref.path)}</b> ·</span> ` +
+    // The path is the one part of this head with no bound on its length, so it is
+    // the one part allowed to wrap; the dot stays glued to its tail.
+    `<span class="fhpath"><b>${escapeHtml(ref.path)}</b>&nbsp;·</span> ` +
     `<span class="nb">${escapeHtml(origin)} ·</span> ` +
     `<span class="nb">${escapeHtml(shortSha(ref.sha))} ·</span> ` +
     `<span class="nb">L${ref.startLine}-${ref.endLine}</span>` +

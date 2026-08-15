@@ -623,6 +623,30 @@ describe("the page itself", () => {
     expect(html).toContain(".filediff .snip .gut {\n    position: sticky; left: 0;");
   });
 
+  test("a long file name wraps rather than dragging the page sideways", () => {
+    const long =
+      "packages/server/migrations/20260808073545_bot_invocation_source_revisions.sql";
+    const html = page(
+      doc({ statements: [statement({ id: "st_w", refs: [ref("ref_w", long)] })] }),
+    );
+    // A migration filename is wider than a phone. The ref label may break anywhere,
+    // because the alternative was the whole page scrolling sideways to reach it.
+    const refRule = html.match(/\.ref \{([^}]*)\}/)?.[1] ?? "";
+    expect(refRule).not.toContain("nowrap");
+    expect(html).toContain(".reftext { text-decoration: underline");
+    expect(html).toContain("min-width: 0; overflow-wrap: anywhere; }");
+    // The fold head carries the full path, which wraps the same way with the
+    // separator glued to its tail rather than being guillotined by the fold's edge.
+    expect(html).toContain(`<span class="fhpath"><b>${long}</b>&nbsp;·</span>`);
+    expect(html).toContain(".fold > summary .fh .fhpath { overflow-wrap: anywhere; }");
+    // And the two page-level guards: prose breaks a long word instead of widening
+    // the column, and the horizontal axis is clipped outright, not scroll-hidden,
+    // because a phone will pan a hidden viewport to whatever pokes past the edge.
+    expect(html).toContain("overflow-wrap: break-word");
+    expect(html).toContain("-webkit-text-size-adjust: 100%; overflow-x: clip;");
+    expect(html).toContain("overflow-x: clip;\n    /* every string");
+  });
+
   test("no em dash reaches the page", async () => {
     const html = page(doc());
     expect(html).not.toContain("—");

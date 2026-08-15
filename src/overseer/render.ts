@@ -290,7 +290,11 @@ const STYLE = `  @font-face {
 
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
-  html { -webkit-text-size-adjust: 100%; }
+  /* clip, not hidden: hidden makes the viewport a scroll container, and a phone
+     will still pan it sideways to whatever pokes past the edge. clip forbids the
+     axis outright, so a long token that escapes every rule below costs its own
+     tail and never drags the page with it. */
+  html { -webkit-text-size-adjust: 100%; overflow-x: clip; }
   @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
   body {
     margin: 0;
@@ -302,7 +306,11 @@ const STYLE = `  @font-face {
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     touch-action: manipulation;
-    overflow-x: hidden;
+    overflow-x: clip;
+    /* every string on this page that GitHub authored can be one unbroken token:
+       a migration filename, a branch, a URL in a description. Inherited by all
+       prose, so a word wider than the column breaks instead of widening it. */
+    overflow-wrap: break-word;
   }
   ::selection { background: hsl(var(--accent) / 0.2); }
 
@@ -555,24 +563,27 @@ const STYLE = `  @font-face {
   .ref {
     position: relative;
     display: inline-flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 4px;
     font-family: var(--font-mono);
     font-size: 11.5px;
     font-weight: 500;
     line-height: 1.45;
     color: hsl(var(--accent));
-    white-space: nowrap;
     cursor: pointer;
     text-decoration: none;
   }
-  .reftext { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  /* a migration filename is longer than a phone is wide. The label wraps rather
+     than carrying the page off the right edge, and the chevron holds the first
+     line instead of centring on however many the name takes. */
+  .reftext { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; min-width: 0; overflow-wrap: anywhere; }
   .ref:hover, .ref:active { text-decoration: none; background: none; }
   .ref:active .reftext { text-decoration-thickness: 2px; }
   .rtick {
     display: inline-block;
     flex: none;
     width: 10px; height: 10px;
+    margin-top: 3px;
     stroke-width: 2.5;
     transform: rotate(0deg);
     transition: transform 150ms cubic-bezier(0.2, 0.9, 0.25, 1);
@@ -655,6 +666,7 @@ const STYLE = `  @font-face {
     color: hsl(var(--muted));
   }
   .fold > summary .fh { min-width: 0; }
+  .fold > summary .fh .fhpath { overflow-wrap: anywhere; }
   .fold > summary .fh b { font-weight: 500; color: hsl(var(--ink)); }
   .fold[open] > summary { border-bottom: 1px solid hsl(var(--line)); }
   /* the code runs wider than the box: say so in the header, with the sideways
@@ -772,7 +784,7 @@ const STYLE = `  @font-face {
   .rrefs:empty { display: none; }
   /* a file cited at several lines: the name once, then each line as its own link */
   .refset { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; font-family: var(--font-mono); font-size: 11.5px; }
-  .reffile { color: hsl(var(--muted)); }
+  .reffile { color: hsl(var(--muted)); min-width: 0; overflow-wrap: anywhere; }
   .refline { gap: 3px; }
   .row-body { padding: 4px 2px 18px calc(4px + 12px + 14px + var(--sgap) * 2); }
   .row-body > *:first-child { margin-top: 0; }
@@ -903,6 +915,10 @@ const STYLE = `  @font-face {
     color: hsl(var(--muted));
   }
   .base .ic { color: hsl(var(--muted)); }
+  /* the branch is named by whoever pushed it; a long one wraps in place. The
+     sha beside it is seven characters and stays whole. */
+  .base > span { min-width: 0; overflow-wrap: anywhere; }
+  .base .sha { flex: none; }
   .base .sha { color: hsl(var(--muted) / 0.85); }
   .arw { display: block; flex: none; width: 14px; height: 14px; stroke-width: 1.8; color: hsl(var(--muted) / 0.55); margin: 4px 0 4px var(--spine); }
 
@@ -942,7 +958,7 @@ const STYLE = `  @font-face {
   .c-ref::after { content: ""; position: absolute; left: -6px; right: -6px; top: 50%; height: 34px; transform: translateY(-50%); }
   /* the rule belongs under the text, not under the mark that labels it */
   .c-ref, .c-ref:active { text-decoration: none; background-color: transparent; }
-  .c-reftext { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; white-space: nowrap; }
+  .c-reftext { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; min-width: 0; overflow-wrap: anywhere; }
   .c-ref:active .c-reftext { text-decoration-thickness: 2px; }
   @media (hover: hover) and (pointer: fine) {
     .c-ref:hover .c-reftext { text-decoration-thickness: 2px; }
