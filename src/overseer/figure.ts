@@ -389,7 +389,11 @@ export function figureSvg(figure: Figure): string {
     // from the other side: shrinking scales the labels with the drawing, and past
     // 78% of drawn size the 11.5px type drops under 9px and stops being text. A
     // column narrower than that pans the figure instead of shrinking it further.
+    // width/height attributes give the drawing an intrinsic size the stylesheet's
+    // rules override in the column and fall back to in the full-screen panel, where
+    // the figure stands at drawn size and the panel pans.
     `<svg class="fig" style="max-width:${round(widthOut)}px;min-width:${round(widthOut * 0.78)}px" ` +
+    `width="${round(widthOut)}" height="${round(height)}" ` +
     `viewBox="0 0 ${round(widthOut)} ${round(height)}" ` +
     `role="img" aria-label="${escapeHtml(figureLabel(figure))}">` +
     lines +

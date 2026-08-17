@@ -66,6 +66,7 @@ import {
   safeBlock,
   safeInline,
   shortSha,
+  zoomButton,
   type EvidenceMarks,
   type HunkIndex,
 } from "./render-evidence";
@@ -1376,9 +1377,12 @@ const EVIDENCE_STYLE = `
   /* a stub carries its former file list without the .gfiles wrapper, so the paths
      take that wrapper's size and ink here. */
   .dpb .gfile { font-size: 12px; color: hsl(var(--muted)); margin-right: 8px; }
-  /* the box scrolls sideways when the drawing's legibility floor is wider than the
-     column, so a phone pans a wide figure instead of reading 4px labels. */
-  .ev-figure { border: 1px solid hsl(var(--line)); border-radius: 6px; padding: 11px 13px; background: hsl(var(--paper-sunk)); overflow-x: auto; }
+  /* the drawing scrolls sideways when its legibility floor is wider than the
+     column, so a phone pans a wide figure instead of reading 4px labels. The
+     scrolling lives on an inner wrapper: the box itself stays column-wide, which
+     is what keeps the full-screen control in its corner while the drawing pans. */
+  .ev-figure { border: 1px solid hsl(var(--line)); border-radius: 6px; padding: 11px 13px; background: hsl(var(--paper-sunk)); }
+  .figscroll { overflow-x: auto; }
   /* the drawing is laid out server-side, so the only thing left to say here is what
      its ink is: one weight of line, one type size, and a muted state that steps back
      without changing hue. It scales with its box rather than fixing a pixel size. */
@@ -1436,7 +1440,9 @@ const STRUCTURE_STYLE = `
   .gbar { display: inline-block; width: 52px; height: 4px; margin-right: 10px; vertical-align: 2px; background: hsl(var(--ink) / 0.08); border-radius: 999px; overflow: hidden; }
   .gbar i { display: block; height: 100%; background: hsl(var(--muted) / 0.75); border-radius: 999px; }
   /* a derived figure hugs its drawing instead of spanning the column */
-  .figbox { display: inline-block; margin: 6px 0 12px; }
+  /* block, not inline-block: a shrink-wrapped box takes the drawing's floor as its
+     own width and pokes past the column, where the page's clip eats the overflow. */
+  .figbox { margin: 6px 0 12px; }
 `;
 
 /** Code, taken out of the column.
@@ -1457,7 +1463,7 @@ const STRUCTURE_STYLE = `
  *  scrolling on its own, so a column of code is followed down the file with one
  *  gesture and the gutter stays pinned to the panel's left edge the whole way. */
 const ZOOM_STYLE = `
-  .filediff, .snipbox, .fold { position: relative; }
+  .filediff, .snipbox, .fold, .ev-figure { position: relative; }
   .zoom {
     position: absolute; top: 5px; right: 6px; z-index: 2;
     display: inline-flex; align-items: center; justify-content: center;
@@ -1490,6 +1496,9 @@ const ZOOM_STYLE = `
      rides the box rather than the scroller, scrolling never brings out what is
      underneath it. */
   .snipbox > .zoom + .snip { padding-top: 34px; }
+  /* a figure's top row of nodes runs into the same corner the control sits in,
+     so the control gets the same rail a payload does */
+  .ev-figure > .zoom + .figscroll { margin-top: 34px; }
 
   html.code-open { overflow: hidden; }
   .zoomdlg {
@@ -1552,6 +1561,9 @@ const ZOOM_STYLE = `
     border: 0; border-radius: 0; background: none; overflow: visible;
   }
   .zoom-body .snip { font-size: 12.5px; padding-bottom: 16px; }
+  /* in the panel a figure stands at its drawn size (the width/height attributes
+     the column's rules override) and the panel pans it in both axes */
+  .zoom-body .fig { width: auto; height: auto; min-width: 0; max-width: none; margin: 18px; }
   /* which hunk is being read stays said while it is being read: the range rides
      the top of the panel until the next hunk pushes it off. Opaque, because the
      code now scrolls underneath it rather than beside it. */
@@ -2380,9 +2392,15 @@ function zoomScript(basePath: string, version: number, context: boolean): string
   };
 
   const open = (btn) => {
-    const box = btn.closest(".filediff, .fold, .snipbox");
+    const box = btn.closest(".filediff, .fold, .snipbox, .ev-figure");
     if (!box) return;
-    const source = box.classList.contains("filediff") ? box : box.querySelector("pre.snip");
+    // A figure lifts its drawing; a code surface lifts the code. In the panel the
+    // figure stands at drawn size (its width/height attributes) and the body pans.
+    const source = box.classList.contains("filediff")
+      ? box
+      : box.classList.contains("ev-figure")
+        ? box.querySelector("svg.fig")
+        : box.querySelector("pre.snip");
     if (!source) return;
     const d = build();
     stop();
@@ -3058,7 +3076,7 @@ function coverageFigure(coverage: DesignCoverage[]): string {
     ],
     edges: coverage.map((c) => ({ from: `cov-${c.id}`, to: "change", label: "" })),
   });
-  return `<div class="ev-figure figbox">${svg}</div>`;
+  return `<div class="ev-figure figbox">${zoomButton("coverage")}<div class="figscroll">${svg}</div></div>`;
 }
 
 function noteRow(n: Note, ctx: RenderCtx): string {
