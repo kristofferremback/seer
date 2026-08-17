@@ -185,6 +185,10 @@ describe("the page itself", () => {
     expect(design).toContain('<svg class="fig"');
     expect(design).toContain(">this change</text>");
     expect(design).toContain(">Browser reads</text>");
+    // The drawing wears the same full-screen control every code surface does.
+    expect(design).toContain(
+      'class="ev-figure figbox"><button type="button" class="zoom" hidden data-zoom="coverage"',
+    );
     // One path is not a sprawl check, and gets no drawing. The golden fixture
     // carries exactly one coverage path, which is what makes it the case.
     expect(doc().codeDesign!.coverage.length).toBe(1);
@@ -653,6 +657,19 @@ describe("the page itself", () => {
       }),
     );
     expect(html).toContain('class="ev ev-figure"');
+    // The drawing pans inside its wrapper when wider than its legibility floor,
+    // while the box itself stays column-wide so the control keeps its corner.
+    expect(html).toContain(".figscroll { overflow-x: auto; }");
+    expect(html).toContain('<div class="figscroll"><svg class="fig"');
+    // And the same full-screen control every code surface wears, so a phone can
+    // open the drawing at drawn size and pan it. In the panel the column's width
+    // rules yield to the svg's own width/height attributes.
+    expect(html).toContain(
+      'class="ev ev-figure"><button type="button" class="zoom" hidden data-zoom="figure"',
+    );
+    expect(html).toContain(
+      ".zoom-body .fig { width: auto; height: auto; min-width: 0; max-width: none; margin: 18px; }",
+    );
     const svg = html.match(/<svg class="fig"[\s\S]*?<\/svg>/)![0];
     expect(svg).toContain(">request</text>");
     expect(svg).toContain('class="dim"');

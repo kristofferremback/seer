@@ -428,7 +428,7 @@ function figureBlock(figure: Figure, p: string, marks: EvidenceMarks | null): st
     figure.edges
       .map((e, j) => whenMoved(marks, `${p}-edge-${j}`, safeInline(e.label)))
       .join("");
-  return `<div class="ev ev-figure">${figureSvg(figure)}${moved}</div>`;
+  return `<div class="ev ev-figure">${zoomButton("figure")}<div class="figscroll">${figureSvg(figure)}</div>${moved}</div>`;
 }
 
 /** How this row's delta reaches the evidence it hangs off. Handed in rather than

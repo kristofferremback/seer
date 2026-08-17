@@ -385,8 +385,15 @@ export function figureSvg(figure: Figure): string {
   return (
     // Capped at its own drawn size: the stylesheet lets a figure shrink to a narrow
     // column, and without this cap it also stretched a small drawing to fill a wide
-    // one, printing its 11.5px labels at poster scale.
-    `<svg class="fig" style="max-width:${round(widthOut)}px" ` +
+    // one, printing its 11.5px labels at poster scale. The floor is the same idea
+    // from the other side: shrinking scales the labels with the drawing, and past
+    // 78% of drawn size the 11.5px type drops under 9px and stops being text. A
+    // column narrower than that pans the figure instead of shrinking it further.
+    // width/height attributes give the drawing an intrinsic size the stylesheet's
+    // rules override in the column and fall back to in the full-screen panel, where
+    // the figure stands at drawn size and the panel pans.
+    `<svg class="fig" style="max-width:${round(widthOut)}px;min-width:${round(widthOut * 0.78)}px" ` +
+    `width="${round(widthOut)}" height="${round(height)}" ` +
     `viewBox="0 0 ${round(widthOut)} ${round(height)}" ` +
     `role="img" aria-label="${escapeHtml(figureLabel(figure))}">` +
     lines +
