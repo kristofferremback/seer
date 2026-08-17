@@ -21,7 +21,7 @@ import {
   robotsTxt,
   sitemapXml,
 } from "../src/agent-discovery";
-import { skillDoc, skillRouter } from "../src/pages";
+import { landingPage, skillDoc, skillRouter } from "../src/pages";
 import { startServer } from "../src/server";
 
 function sha256(text: string): string {
@@ -116,7 +116,9 @@ describe("the documents an agent discovers", () => {
   // ---- Link headers ----
 
   test("the homepage carries a Link header pointing at each machine-readable document", async () => {
-    const res = await fetch(`${base}/`);
+    // Manual, because a signed-in browser is redirected into the app and the header
+    // has to be on the answer `/` itself gives, not on where it sends people.
+    const res = await fetch(`${base}/`, { redirect: "manual" });
     const link = res.headers.get("link");
     expect(link).not.toBeNull();
     expect(link).toContain(`rel="api-catalog"`);
@@ -151,22 +153,31 @@ describe("the documents an agent discovers", () => {
     expect(body).not.toContain("<!doctype html>");
   });
 
-  test("a browser still gets the page", async () => {
+  // The HTML side of the negotiation now has two readers: a signed-in browser is sent
+  // into the app, a signed-out one gets the pamphlet. AUTH_DISABLED makes every request
+  // here signed in, so the HTML branch asserts the redirect; the signed-out pamphlet is
+  // asserted in share-privacy.script.ts, where a request can genuinely be nobody.
+
+  test("a signed-in browser is sent into the app, not shown the pamphlet", async () => {
     const res = await fetch(`${base}/`, {
       headers: { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+      redirect: "manual",
     });
-    expect(res.headers.get("content-type")).toStartWith("text/html");
-    expect(await res.text()).toStartWith("<!doctype html>");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/bundles");
+    // The answer turns on both the Accept header and the session, and Vary says so.
+    expect(res.headers.get("vary")).toBe("Accept, Cookie");
   });
 
-  test("no Accept header at all is HTML, and so is a tie", async () => {
-    // curl sends */* and means "whatever"; the URL has always meant the page.
+  test("no Accept header at all is the HTML answer, and so is a tie", async () => {
+    // curl sends */* and means "whatever"; the URL has always meant the page, and the
+    // page for this signed-in caller is the app.
     for (const accept of [undefined, "*/*", "text/html,text/markdown"]) {
-      const res = await fetch(`${base}/`, { headers: accept ? { accept } : {} });
-      expect({ accept, type: res.headers.get("content-type") }).toEqual({
-        accept,
-        type: "text/html;charset=utf-8",
+      const res = await fetch(`${base}/`, {
+        headers: accept ? { accept } : {},
+        redirect: "manual",
       });
+      expect({ accept, status: res.status }).toEqual({ accept, status: 302 });
     }
   });
 
@@ -180,11 +191,8 @@ describe("the documents an agent discovers", () => {
     // below zero, so `text/markdown;q=0` — a caller saying markdown is the one thing it
     // cannot read — beat an HTML it never named, and got markdown.
     for (const accept of ["text/markdown;q=0", "text/markdown;q=0, */*;q=0.1"]) {
-      const res = await fetch(`${base}/`, { headers: { accept } });
-      expect({ accept, type: res.headers.get("content-type") }).toEqual({
-        accept,
-        type: "text/html;charset=utf-8",
-      });
+      const res = await fetch(`${base}/`, { headers: { accept }, redirect: "manual" });
+      expect({ accept, status: res.status }).toEqual({ accept, status: 302 });
     }
   });
 
@@ -309,9 +317,11 @@ describe("the documents an agent discovers", () => {
   // three layers of quoting and no compiler between them. So it is not string-matched
   // here; it is pulled out of the served page, parsed, and run against a stub browser.
 
-  /** The page's WebMCP script, as a browser would receive it. */
+  /** The page's WebMCP script, as a browser would receive it. Rendered directly:
+   *  over HTTP this process is always signed in and `/` would answer with the
+   *  redirect into the app rather than the pamphlet that carries the script. */
   async function webMcpSource(): Promise<string> {
-    const html = await (await fetch(`${base}/`)).text();
+    const html = landingPage(false);
     const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!);
     const found = scripts.find((s) => s.includes("modelContext"));
     expect(found).toBeDefined();

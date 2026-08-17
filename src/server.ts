@@ -604,7 +604,17 @@ export async function startServer() {
             headers: { ...headers, "content-type": "text/markdown; charset=utf-8" },
           });
         }
-        return new Response(landingPage(!!sessionEmail(req)), {
+        // A signed-in browser is sent into the app rather than shown the pamphlet:
+        // the front door is for strangers and for machines, and both are handled
+        // above or below. 302 rather than 301 — the same URL is the pamphlet again
+        // the moment the session ends — and Vary already names Cookie for any cache.
+        if (sessionUser(req)) {
+          return new Response(null, {
+            status: 302,
+            headers: { ...headers, location: "/bundles", "cache-control": "no-store" },
+          });
+        }
+        return new Response(landingPage(false), {
           headers: { ...headers, "content-type": "text/html;charset=utf-8" },
         });
       },

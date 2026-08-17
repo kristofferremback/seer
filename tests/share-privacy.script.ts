@@ -526,6 +526,26 @@ for (const [what, token] of [
   );
 }
 
+// ---- the front door reads the session ----
+//
+// Signed out, `/` is the pamphlet; signed in, it is a door into the app. Only this
+// process can ask the first half, and the pair proves the redirect is the session's
+// and not the URL's.
+{
+  const stranger = await fetch(`${base}/`, { redirect: "manual" });
+  assert(stranger.status === 200, `the pamphlet should 200 signed out, got ${stranger.status}`);
+  assert(
+    (await stranger.text()).startsWith("<!doctype html>"),
+    "a signed-out browser should get the landing page",
+  );
+
+  const mine = await fetch(`${base}/`, { headers: memberCookie, redirect: "manual" });
+  assert(
+    mine.status === 302 && mine.headers.get("location") === "/bundles",
+    `a signed-in browser should be sent into the app, got ${mine.status} ${mine.headers.get("location")}`,
+  );
+}
+
 // ---- the workspace's own pages are members-only ----
 //
 // Under AUTH_DISABLED every request is the root user, so only this process can ask
