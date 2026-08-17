@@ -4,19 +4,22 @@
 // figure produces the same bytes on every render, which is what lets a review be
 // compared against itself across versions.
 //
-// The layout is layered top-down, the way the prototype's flow reads: rank a node one
-// past the deepest node that points at it, lay each rank out as a row, and draw every
-// edge as a line from the bottom of its source to the top of its target. A cycle
-// cannot make this loop forever, because the ranking relaxes a fixed number of times
-// and stops.
+// The layout is layered top-down: rank a node one past the deepest node that points at
+// it, lay each rank out as a centred row, and order every row below the first by the
+// mean centre of its placed parents, so parents and child meet instead of crossing. A
+// cycle cannot make the ranking loop forever, because it relaxes a fixed number of
+// times and stops.
 //
-// Three placement rules keep a real graph legible rather than merely drawn, and all
-// three are deterministic. Rows are centred on the widest row, so a lone child sits
-// under its parents instead of flushing left. Within a row below the first, nodes
-// order by the mean centre of the placed nodes pointing at them, so two parents and
-// their child form a V rather than a crossing. And an edge label takes the first spot
-// along its own edge where it covers neither a node nor a label already placed, so two
-// labels sharing a gap never print over each other.
+// Edges are drawn the way flow diagrams are read, not the way segments are cheapest:
+// each one leaves the bottom of its source, runs orthogonally — down, across the gap,
+// down again — through rounded corners, and enters the top of its target under an
+// arrowhead. A node with several edges on one side spreads their attachment points
+// along that side, so two arrows into one box stay two arrows instead of a bird's
+// foot. A label sits on its own horizontal run when the run can hold it, over a patch
+// of the figure's own surface so the line visibly passes beneath the words; a label
+// whose run is too short sits beside its entry drop, on the outside of the slope. In
+// either spot it takes the first position that covers neither a node, a placed label,
+// nor another edge's line.
 //
 // The drawing carries no text of its own that a screen reader could use, so the whole
 // figure is one image with a composed label: its nodes, which of them are muted, and
@@ -28,11 +31,11 @@ import type { Figure } from "./types";
 /** Geometry, in the same units the viewBox is drawn in. */
 const PAD = 2;
 const NODE_H = 26;
-const NODE_GAP = 18;
-const RANK_GAP = 34;
-/** The gap between ranks when any edge carries words: room for a label to sit beside
- *  its line, and for a second label to take a different spot along its own edge. */
-const RANK_GAP_LABELLED = 46;
+const NODE_GAP = 22;
+const RANK_GAP = 40;
+/** The gap between ranks when any edge carries words: room for a run to hold its
+ *  label, and for a second lane when two runs would otherwise share a line. */
+const RANK_GAP_LABELLED = 56;
 /** Commit Mono at 11.5px, measured off the prototype: wide enough that a 40 character
  *  label (the budget) never runs out of its box. */
 const CHAR_W = 6.9;
@@ -40,6 +43,9 @@ const CHAR_W = 6.9;
 const LABEL_CHAR_W = 6.6;
 const LABEL_H = 12;
 const NODE_MIN_W = 76;
+/** Corner radius of an elbow, and the size of the arrowhead under it. */
+const BEND = 6;
+const TIP = 3.5;
 
 interface Placed {
   id: string;
@@ -65,14 +71,19 @@ function boxesOverlap(a: Box, b: Box): boolean {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
-/** Whether the segment from (x1,y1) to (x2,y2) passes through the box: sampled, not
- *  solved, because forty points at layout scale cannot miss a 12px-tall label box. */
-function segmentCrosses(box: Box, x1: number, y1: number, x2: number, y2: number): boolean {
-  for (let i = 0; i <= 40; i++) {
-    const t = i / 40;
-    const px = x1 + (x2 - x1) * t;
-    const py = y1 + (y2 - y1) * t;
-    if (px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + box.h) return true;
+/** Whether any of the polyline's segments passes through the box: sampled, not
+ *  solved, because forty points per segment at layout scale cannot miss a 12px-tall
+ *  label box. */
+function polylineCrosses(box: Box, points: [number, number][]): boolean {
+  for (let s = 0; s + 1 < points.length; s++) {
+    const [x1, y1] = points[s]!;
+    const [x2, y2] = points[s + 1]!;
+    for (let i = 0; i <= 40; i++) {
+      const t = i / 40;
+      const px = x1 + (x2 - x1) * t;
+      const py = y1 + (y2 - y1) * t;
+      if (px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + box.h) return true;
+    }
   }
   return false;
 }
@@ -181,100 +192,180 @@ export function figureLabel(figure: Figure): string {
   return edges === "" ? head : `${head} ${edges}.`;
 }
 
+/** One edge, routed: where it leaves, where it lands, the height of its horizontal
+ *  run, and the corner points a crossing test walks. */
+interface Routed {
+  e: Figure["edges"][number];
+  sx: number;
+  sy: number;
+  tx: number;
+  ty: number;
+  runY: number;
+  muted: boolean;
+  points: [number, number][];
+}
+
 /** The figure, drawn. One `svg`, no ids inside it, nothing that needs a script. */
 export function figureSvg(figure: Figure): string {
   const labelled = figure.edges.some((e) => e.label != null && e.label !== "");
   const rankGap = labelled ? RANK_GAP_LABELLED : RANK_GAP;
   const { nodes, width, height } = place(figure, rankGap);
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
-
   const edges = figure.edges.filter((e) => byId.has(e.from) && byId.has(e.to));
-  const lines = edges
-    .map((e) => {
-      const a = byId.get(e.from)!;
-      const b = byId.get(e.to)!;
-      const x1 = a.x + a.w / 2;
-      const y1 = a.y + NODE_H;
-      const x2 = b.x + b.w / 2;
-      const y2 = b.y;
-      const cls = a.muted || b.muted ? "fig-edge fig-dim" : "fig-edge";
-      return `<path class="${cls}" d="M${x1} ${y1}L${x2} ${y2}"/>`;
+
+  // Attachment points, spread: a node's outgoing edges leave its bottom at evenly
+  // spaced points ordered by where they are going, and its incoming edges land on
+  // its top the same way. Two arrows into one box stay two arrows.
+  const exitX = new Map<Figure["edges"][number], number>();
+  const entryX = new Map<Figure["edges"][number], number>();
+  for (const n of nodes) {
+    const centre = (id: string) => {
+      const at = byId.get(id)!;
+      return at.x + at.w / 2;
+    };
+    const out = edges
+      .filter((e) => e.from === n.id)
+      .sort((a, b) => centre(a.to) - centre(b.to));
+    out.forEach((e, i) => exitX.set(e, n.x + (n.w * (i + 1)) / (out.length + 1)));
+    const into = edges
+      .filter((e) => e.to === n.id)
+      .sort((a, b) => centre(a.from) - centre(b.from));
+    into.forEach((e, i) => entryX.set(e, n.x + (n.w * (i + 1)) / (into.length + 1)));
+  }
+
+  // Routes, with the horizontal runs laned: runs that share a gap and overlap
+  // sideways take different heights within it, so no two lines ever lie in each
+  // other. Lanes hand out from the middle of the gap.
+  const LANES = [0.5, 0.72, 0.28, 0.86, 0.14];
+  const routed: Routed[] = [];
+  const gaps = new Map<number, { span: [number, number]; lane: number }[]>();
+  for (const e of edges) {
+    const a = byId.get(e.from)!;
+    const b = byId.get(e.to)!;
+    const sx = exitX.get(e)!;
+    const sy = a.y + NODE_H;
+    const tx = entryX.get(e)!;
+    const ty = b.y;
+    const gapTop = ty - rankGap;
+    const span: [number, number] = [Math.min(sx, tx) - 6, Math.max(sx, tx) + 6];
+    const inGap = gaps.get(gapTop) ?? [];
+    let lane = 0;
+    while (
+      lane < LANES.length - 1 &&
+      inGap.some((have) => have.lane === lane && have.span[0] < span[1] && span[0] < have.span[1])
+    )
+      lane++;
+    inGap.push({ span, lane });
+    gaps.set(gapTop, inGap);
+    const runY = gapTop + rankGap * LANES[lane]!;
+    routed.push({
+      e,
+      sx,
+      sy,
+      tx,
+      ty,
+      runY,
+      muted: a.muted || b.muted,
+      points: [
+        [sx, sy],
+        [sx, runY],
+        [tx, runY],
+        [tx, ty],
+      ],
+    });
+  }
+
+  const lines = routed
+    .map((r) => {
+      const cls = r.muted ? "fig-edge fig-dim" : "fig-edge";
+      const dx = r.tx - r.sx;
+      const path =
+        Math.abs(dx) < 2
+          ? `M${round(r.sx)} ${round(r.sy)}L${round(r.tx)} ${round(r.ty)}`
+          : (() => {
+              const dir = dx > 0 ? 1 : -1;
+              const bend = Math.min(BEND, Math.abs(dx) / 2);
+              return (
+                `M${round(r.sx)} ${round(r.sy)}` +
+                `L${round(r.sx)} ${round(r.runY - bend)}` +
+                `Q${round(r.sx)} ${round(r.runY)} ${round(r.sx + dir * bend)} ${round(r.runY)}` +
+                `L${round(r.tx - dir * bend)} ${round(r.runY)}` +
+                `Q${round(r.tx)} ${round(r.runY)} ${round(r.tx)} ${round(r.runY + bend)}` +
+                `L${round(r.tx)} ${round(r.ty)}`
+              );
+            })();
+      // The arrowhead is the entry, said in the line's own stroke: a chevron over
+      // the target's top edge, dimmed with its edge when the edge is dimmed.
+      const tip =
+        `<path class="${r.muted ? "fig-tip fig-dim" : "fig-tip"}" ` +
+        `d="M${round(r.tx - TIP)} ${round(r.ty - TIP - 1)}L${round(r.tx)} ${round(r.ty - 0.5)}` +
+        `L${round(r.tx + TIP)} ${round(r.ty - TIP - 1)}"/>`;
+      return `<path class="${cls}" d="${path}"/>` + tip;
     })
     .join("");
 
-  // A label sits beside its own edge, at the first spot along it where it covers
-  // neither a node nor a label already placed. Candidates walk out from the middle;
-  // each is tried to the right of the line, then to the left. When every spot is
-  // taken the middle-right stands, which is the old behaviour and cannot regress.
+  // Labels. On the run when the run can hold the words; beside the entry drop, on
+  // the outside of the slope, when it cannot. Every candidate is tested against the
+  // nodes, the labels already placed, and every other edge's line, with air around
+  // it, and the first clear spot wins.
   const taken: Box[] = nodes.map((n) => ({ x: n.x, y: n.y, w: n.w, h: NODE_H }));
-  const segments = edges.map((e) => {
-    const a = byId.get(e.from)!;
-    const b = byId.get(e.to)!;
-    return { e, x1: a.x + a.w / 2, y1: a.y + NODE_H, x2: b.x + b.w / 2, y2: b.y };
-  });
   let widthOut = width;
-  const labels = edges
-    .filter((e) => e.label != null && e.label !== "")
-    .map((e) => {
-      const a = byId.get(e.from)!;
-      const b = byId.get(e.to)!;
-      const x1 = a.x + a.w / 2;
-      const y1 = a.y + NODE_H;
-      const x2 = b.x + b.w / 2;
-      const y2 = b.y;
-      const w = e.label!.length * LABEL_CHAR_W;
-      // A label leans to the outside of its own slope — left of a line going down-left,
-      // right of one going down-right — so two edges leaving one node in a V carry
-      // their words away from each other instead of into the middle they share.
-      const sides = x2 < x1 ? [true, false] : [false, true];
-      let spot: { box: Box; x: number; y: number; end: boolean } | null = null;
-      for (const t of [0.5, 0.34, 0.66, 0.22, 0.78]) {
-        const px = x1 + (x2 - x1) * t;
-        const py = y1 + (y2 - y1) * t;
-        for (const end of sides) {
-          const box: Box = {
-            x: end ? px - 6 - w : px + 6,
-            y: py - LABEL_H / 2,
-            w,
-            h: LABEL_H,
-          };
-          if (box.x < 0) continue;
-          // Tested with air around it: a label that only just misses its neighbour
-          // still reads as printed over it at this size.
-          const roomy: Box = { x: box.x - 4, y: box.y - 4, w: box.w + 8, h: box.h + 8 };
-          if (taken.some((have) => boxesOverlap(roomy, have))) continue;
-          // Nor across another edge's line: words on a line are words that cannot be
-          // told apart from it. The label's own line is exempt — the 6px offset
-          // already holds the text beside it.
-          if (
-            segments.some(
-              (s) => s.e !== e && segmentCrosses(roomy, s.x1, s.y1, s.x2, s.y2),
-            )
-          )
-            continue;
-          spot = { box, x: end ? px - 6 : px + 6, y: py, end };
-          break;
-        }
-        if (spot) break;
+  const labels = routed
+    .filter((r) => r.e.label != null && r.e.label !== "")
+    .map((r) => {
+      const text = r.e.label!;
+      const w = text.length * LABEL_CHAR_W;
+      const clear = (box: Box): boolean => {
+        if (box.x < 0) return false;
+        const roomy: Box = { x: box.x - 4, y: box.y - 3, w: box.w + 8, h: box.h + 6 };
+        if (taken.some((have) => boxesOverlap(roomy, have))) return false;
+        return !routed.some((other) => other !== r && polylineCrosses(roomy, other.points));
+      };
+      const runLength = Math.abs(r.tx - r.sx) - 2 * BEND;
+      const outside = r.tx >= r.sx;
+
+      type Spot = { x: number; y: number; anchor: "middle" | "start" | "end"; box: Box; onRun: boolean };
+      const candidates: Spot[] = [];
+      if (runLength >= w + 10) {
+        const cx = (r.sx + r.tx) / 2;
+        candidates.push({
+          x: cx,
+          y: r.runY,
+          anchor: "middle",
+          box: { x: cx - w / 2, y: r.runY - LABEL_H / 2, w, h: LABEL_H },
+          onRun: true,
+        });
       }
-      if (!spot) {
-        // Every spot is taken: the middle on the slope's own side stands, which is
-        // no worse than the layout that had no collision rule at all.
-        const px = x1 + (x2 - x1) / 2;
-        const py = y1 + (y2 - y1) / 2;
-        const end = x2 < x1 && px - 6 - w >= 0;
-        spot = {
-          box: { x: end ? px - 6 - w : px + 6, y: py - LABEL_H / 2, w, h: LABEL_H },
-          x: end ? px - 6 : px + 6,
-          y: py,
-          end,
-        };
-      }
+      const beside = (x: number, y: number, right: boolean): Spot => ({
+        x: right ? x + 7 : x - 7,
+        y,
+        anchor: right ? "start" : "end",
+        box: { x: right ? x + 7 : x - 7 - w, y: y - LABEL_H / 2, w, h: LABEL_H },
+        onRun: false,
+      });
+      const entryY = (r.runY + r.ty) / 2;
+      const exitY = (r.sy + r.runY) / 2;
+      candidates.push(
+        beside(r.tx, entryY, outside),
+        beside(r.tx, entryY, !outside),
+        beside(r.sx, exitY, outside),
+        beside(r.sx, exitY, !outside),
+      );
+      const spot = candidates.find((c) => clear(c.box)) ?? candidates[candidates.length > 1 ? 1 : 0]!;
+
       taken.push(spot.box);
       widthOut = Math.max(widthOut, spot.box.x + spot.box.w + PAD);
+      // On the run, the words take a patch of the figure's own surface, so the line
+      // is seen to pass beneath them rather than through them.
+      const backing = spot.onRun
+        ? `<rect class="fig-mat" x="${round(spot.box.x - 4)}" y="${round(spot.box.y - 2)}" ` +
+          `width="${round(spot.box.w + 8)}" height="${round(spot.box.h + 4)}"/>`
+        : "";
       return (
+        backing +
         `<text class="cap" x="${round(spot.x)}" y="${round(spot.y)}" dy="0.35em"` +
-        `${spot.end ? ' text-anchor="end"' : ""}>${escapeHtml(e.label!)}</text>`
+        (spot.anchor === "start" ? "" : ` text-anchor="${spot.anchor}"`) +
+        `>${escapeHtml(text)}</text>`
       );
     })
     .join("");

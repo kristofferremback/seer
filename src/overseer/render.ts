@@ -1357,6 +1357,13 @@ const EVIDENCE_STYLE = `
   .fig .fig-edge { fill: none; stroke: hsl(var(--ink-soft) / 0.45); stroke-width: 1.4; stroke-linecap: round; }
   .fig .fig-box.fig-dim { stroke: hsl(var(--muted)); }
   .fig .fig-edge.fig-dim { stroke: hsl(var(--muted) / 0.55); stroke-dasharray: 3 5; }
+  /* the arrowhead is a shade stronger than its line, because it is the one part of
+     the line that carries meaning on its own; a dimmed edge's tip dims with it but
+     never dashes, or a chevron becomes two dots. */
+  .fig .fig-tip { fill: none; stroke: hsl(var(--ink-soft) / 0.75); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  .fig .fig-tip.fig-dim { stroke: hsl(var(--muted) / 0.75); }
+  /* the patch of surface a run label sits on, so the line passes beneath the words */
+  .fig .fig-mat { fill: hsl(var(--paper-sunk)); }
   .prbody-body { padding: 10px 12px 1px; }
   .prbody { margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: hsl(var(--ink-soft)); white-space: pre-wrap; }
 `;
