@@ -76,7 +76,7 @@ pr
   kinds[]         derived: the distinct kinds of the statements attributed to this pr
 ```
 
-`kinds[]` is derived on purpose. The marks on a pull request card are then provably tied to real claims, instead of being a second thing the skill can get out of step with the first.
+`kinds[]` is derived on purpose. The marks on a pull request card are then provably tied to real claims, instead of being a second thing the skill can get out of step with the first. The card goes further and draws the realizing statements themselves, each behind its kind mark, each a jump to the claim — because the most important thing a card can point at is what the pull request is on the page for, not a window into its code. `detail_ref` remains the mandatory pointer behind the card's detail, but the card does not wear it as a code panel: one quoted stretch cannot back a whole pull request, and rendering it as evidence gave an arbitrary snippet the most prominent code surface in the stack view.
 
 Every pull request in the review is realized by at least one statement. A pull request that warrants no statement warrants a question, namely why it is in the review at all. Its `gist` names the part of the whole change that this pull request contributes. Its `detail` gives the reason for that slice and its high-level mechanism, rather than repeating the GitHub title or listing files. Both are mandatory; this closes the other gap, a card the overview never mentions.
 

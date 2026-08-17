@@ -568,20 +568,32 @@ describe("the page itself", () => {
     expect(html).not.toContain("[the plan]");
   });
 
-  test("a card folds the ref its detail names", () => {
+  test("a card points at the claims that realize it, never at a code panel", () => {
     const base = doc();
-    const r = ref("ref_detail", "src/session.ts", 12);
-    const st = statement({ id: "st_a", refs: [r] });
-    const prs = base.prs.map((pr) => ({ ...pr, detailRef: r.id }));
-    const html = page({ ...base, prs, statements: [st] });
-    expect(html).toContain(`<details class="fold" id="pr-12-ref_detail"`);
-    // A detail ref no version of the document carries grows no fold at all.
-    const orphan = page({
-      ...base,
-      prs: base.prs.map((pr) => ({ ...pr, detailRef: "ref_gone" })),
-      statements: [st],
+    const mine = statement({
+      id: "st_mine",
+      text: "The gate moves to the session helper",
+      prs: [`${GOLDEN_REPO}#12`],
     });
-    expect(orphan).not.toContain("ref_gone");
+    const other = statement({
+      id: "st_other",
+      text: "A claim another pull request realizes",
+      prs: [`${GOLDEN_REPO}#13`],
+    });
+    const html = page(doc({ statements: [mine, other] }));
+    const cardBlock = html.slice(
+      html.indexOf('<details class="card" id="pr-12"'),
+      html.indexOf('<details class="card" id="pr-13"'),
+    );
+    // Each realizing statement, behind its kind mark, as a jump to the claim.
+    expect(cardBlock).toContain('<div class="c-claims">');
+    expect(cardBlock).toContain('<a href="#st_mine">');
+    expect(cardBlock).toContain("The gate moves to the session helper");
+    // Only its own: a card cannot advertise a claim the overview ties elsewhere.
+    expect(cardBlock).not.toContain('href="#st_other"');
+    // The detail ref stays in the document as the pointer behind the detail; the
+    // card no longer wears it as a code panel.
+    expect(html).not.toContain(`id="pr-12-${base.prs[0]!.detailRef}"`);
   });
 
   test("a row citing one pointer twice draws it once", () => {

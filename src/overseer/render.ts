@@ -999,6 +999,24 @@ const STYLE = `  @font-face {
   /* the marks are the first thing a tap reveals, so they get room to land in
      rather than butting against the line they opened from */
   .c-kinds { display: flex; align-items: center; gap: 9px; margin: 4px 0 7px; }
+  /* the claims this pull request realizes: each behind its kind mark, each a jump
+     to the statement itself. The card's pointer is the overview, not a code panel. */
+  .c-claims { display: grid; gap: 5px; margin: 8px 0 2px; }
+  .c-claims a {
+    display: inline-flex; align-items: flex-start; gap: 8px;
+    font-size: 13px; line-height: 1.5;
+    text-decoration: none; min-width: 0;
+  }
+  .c-claims a .ic { margin-top: 3px; }
+  .c-claims a > span {
+    min-width: 0;
+    text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px;
+  }
+  .c-claims a:active { background: none; }
+  .c-claims a:active > span { text-decoration-thickness: 2px; }
+  @media (hover: hover) and (pointer: fine) {
+    .c-claims a:hover > span { text-decoration-thickness: 2px; }
+  }
   .c-more > summary {
     display: flex; align-items: center; gap: 7px;
     margin-top: 10px; padding: 0;
@@ -2643,22 +2661,6 @@ function prBody(ownerId: string, body: string, d: EntityDelta | null): string {
   );
 }
 
-/** Every ref the document carries, by id. `detail_ref` is stored as an id alone, so the
- *  snippet it names is found here; a version whose only mention of that ref was on a
- *  statement that has since been rewritten simply grows no fold. */
-function refsById(doc: ReviewDoc): Map<string, Ref> {
-  const byId = new Map<string, Ref>();
-  const take = (refs: Ref[], evidence: Evidence[]) => {
-    for (const r of refs) byId.set(r.id, r);
-    for (const e of evidence) if (e.type === "ref") byId.set(e.ref.id, e.ref);
-  };
-  for (const s of doc.statements) take(s.refs, s.evidence);
-  for (const n of doc.notes) take(n.refs, n.evidence);
-  for (const m of doc.codeDesign?.modules ?? []) take(m.refs, []);
-  for (const c of doc.codeDesign?.coverage ?? []) take(c.refs, []);
-  return byId;
-}
-
 /** What one pull request changed, counted off the hunks the document carries for it
  *  rather than off anything authored or fetched a second time. The chain and the
  *  walkthrough therefore cannot disagree: they add up the same lines. A pull request
@@ -2691,20 +2693,14 @@ function statusGlyph(status: PrStatusWord | undefined): string {
 
 function card(
   pr: Pr,
-  refs: Map<string, Ref>,
+  claims: Statement[],
   hunks: Hunk[],
   ctx: RenderCtx,
 ): string {
-  const kinds = pr.kinds
-    .map((k) => icon(k, `ic k-${k}`, KIND_LABEL[k] ?? k))
-    .join("");
   const owner = `pr-${pr.number}`;
-  const detailRef = refs.get(pr.detailRef);
-  const detailFold = detailRef ? refFold(owner, detailRef, "", ctx.hunks) : "";
   const d = ctx.delta ? ctx.delta.get("pr", prKey(pr.repo, pr.number)) : null;
   const edit = entityEditControl(d, owner);
-  const hasMore =
-    pr.detail.trim() !== "" || detailFold !== "" || pr.body.trim() !== "";
+  const hasMore = pr.detail.trim() !== "" || pr.body.trim() !== "";
   // Three readings, each earned by a tap. Closed is the title and what it cost,
   // which is what a stack is scanned for. Open adds the clean one-line gist and an
   // explicit edit control when needed. The nested fold holds the author's own account, which is the longest
@@ -2714,10 +2710,24 @@ function card(
       `<span class="c-morelabel">${escapeHtml(prLabel(pr))} on GitHub</span></summary>` +
       `<div class="card-body">` +
       marked(safeBlock(pr.detail), d, "detail", owner) +
-      detailFold +
       prBody(owner, pr.body, d) +
       `</div></details>`
     : "";
+  // What this pull request is on the page for: the statements that realize it,
+  // each behind its own kind mark, each a jump to the claim itself. Derived from
+  // `statement.prs[]`, so a card can never advertise a claim the overview does not
+  // make. This is where the card used to draw its detail ref as a code panel; a
+  // single quoted window cannot back a whole pull request, and the most important
+  // thing a card can point at is the claims, not one arbitrary stretch of code.
+  // The detail ref stays in the document as the pointer behind the detail prose;
+  // the card simply stops wearing it as evidence.
+  const realized = claims
+    .map(
+      (s) =>
+        `<a href="#${escapeHtml(s.id)}">${icon(s.kind, `ic k-${s.kind}`, KIND_LABEL[s.kind] ?? s.kind)}` +
+        `<span>${safeInline(s.text)}</span></a>`,
+    )
+    .join("");
   return (
     `<details class="card" id="${escapeHtml(owner)}">` +
     `<summary>` +
@@ -2735,9 +2745,10 @@ function card(
     `</span>` +
     `</summary>${edit.input}` +
     `<div class="c-open">` +
-    `<span class="c-kinds">${kinds}${statusMark(d)}</span>` +
+    (statusMark(d) === "" ? "" : `<span class="c-kinds">${statusMark(d)}</span>`) +
     edit.label +
     `<span class="c-line">${marked(safeInline(pr.gist), d, "gist", owner)}</span>` +
+    (realized === "" ? "" : `<div class="c-claims">${realized}</div>`) +
     more +
     `</div></details>`
   );
@@ -2790,9 +2801,15 @@ function chain(doc: ReviewDoc, ctx: RenderCtx): string {
         `<span class="sha">${escapeHtml(shortSha(root.baseSha))}</span></p>`
       : "";
   const arrow = `${icon("arrow", "arw")}`;
-  const refs = refsById(doc);
   const cards = prs
-    .map((pr) => card(pr, refs, doc.hunks, ctx))
+    .map((pr) =>
+      card(
+        pr,
+        doc.statements.filter((s) => s.prs.includes(prKey(pr.repo, pr.number))),
+        doc.hunks,
+        ctx,
+      ),
+    )
     .join(stack ? arrow : "");
   // A pull request the base version carried and this one does not stays in the
   // chain as a stub. A link that quietly leaves the stack is the one change a
