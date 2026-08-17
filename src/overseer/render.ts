@@ -1439,7 +1439,6 @@ const STRUCTURE_STYLE = `
   /* a group's share of the changed lines, drawn beside its own count */
   .gbar { display: inline-block; width: 52px; height: 4px; margin-right: 10px; vertical-align: 2px; background: hsl(var(--ink) / 0.08); border-radius: 999px; overflow: hidden; }
   .gbar i { display: block; height: 100%; background: hsl(var(--muted) / 0.75); border-radius: 999px; }
-  /* a derived figure hugs its drawing instead of spanning the column */
   /* block, not inline-block: a shrink-wrapped box takes the drawing's floor as its
      own width and pokes past the column, where the page's clip eats the overflow. */
   .figbox { margin: 6px 0 12px; }

@@ -369,7 +369,7 @@ describe("figures", () => {
   test("a figure shrinks only to its legibility floor, then pans", () => {
     // The inline style caps the drawing at its drawn size and floors it at 78% of
     // that, where the 11.5px labels reach 9px. A narrower column scrolls the box
-    // (.ev-figure carries overflow-x) instead of scaling the text into a smear.
+    // (.figscroll carries overflow-x) instead of scaling the text into a smear.
     const svg = figureSvg(figure);
     const m = svg.match(/style="max-width:([\d.]+)px;min-width:([\d.]+)px"/);
     expect(m).not.toBeNull();
