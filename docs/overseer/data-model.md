@@ -54,7 +54,7 @@ review
 
 `kind` is derived, not declared: one pull request is `single`, several where each is the base of the next is `stack`, anything else is `set`. The renderer draws the same chain either way; the difference is only whether the chain has edges or is a list.
 
-`author_intent` and `summary` are the forest with provenance kept visible. `author_intent` paraphrases only the problem and reason stated in the pull request descriptions. `summary` is the witness's independent account of what the code accomplishes, its important implication and high-level mechanism. A mismatch between them is a finding, not something the witness silently resolves by replacing the author's account. For a stack both describe the completed feature, fix or implementation, not the pull requests in sequence. File names, test counts and minor edge cases stay out. The first rendering of this very document buried its own purpose and read, for a moment, as if the tool were the reviewer. That is the failure this split exists to prevent, and the skill gets graded on it.
+`author_intent` and `summary` are the forest with provenance kept visible. `author_intent` paraphrases only the problem and reason stated in the pull request descriptions. `summary` is the witness's independent account of what the code accomplishes, its important implication and high-level mechanism. The renderer titles them by the reader's question — the problem, the solution — and keeps the provenance as each label's quiet suffix, so the arc reads in order and whose words are whose stays visible. A mismatch between them is a finding, not something the witness silently resolves by replacing the author's account. For a stack both describe the completed feature, fix or implementation, not the pull requests in sequence. File names, test counts and minor edge cases stay out. The first rendering of this very document buried its own purpose and read, for a moment, as if the tool were the reviewer. That is the failure this split exists to prevent, and the skill gets graded on it.
 
 ### PullRequest
 
@@ -201,7 +201,7 @@ The remaining way to be wrong is to quote a changed file at a SHA the review doe
 
 Refs are SHA-pinned, so a force push cannot rot them.
 
-A ref renders its snippet and links out to GitHub at the pinned SHA. The snippet is the bounded view and the link is the unbounded one; Overseer never grows a code browser. The point of the page is that the reader should not have to read code to review, and the point of the evidence is that they always can: every claim stays one tap from the lines it stands on, which is what keeps the skill honest even on the days nobody taps.
+A ref whose lines a hunk of the review wrote renders as that diff — the deleted lines laid back in, the added lines washed — and links to the pull request's files view, because the claim it backs is about the change and the file standing where the change was asks the reader to find it again. Every other ref renders its snippet and links out to GitHub at the pinned SHA. Either way the snippet is the bounded view and the link is the unbounded one; Overseer never grows a code browser. The point of the page is that the reader should not have to read code to review, and the point of the evidence is that they always can: every claim stays one tap from the lines it stands on, which is what keeps the skill honest even on the days nobody taps.
 
 ### Figure
 

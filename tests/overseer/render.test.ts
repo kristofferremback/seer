@@ -134,13 +134,32 @@ describe("the page itself", () => {
     expect(html).toContain('<a href="#summary">overview</a>');
     expect(html).toContain('<a href="#design">code design</a>');
     expect(html).toContain('<p class="account-title"><svg class="account-icon"');
-    expect(html).toContain("<span>Author intent</span>");
-    expect(html).toContain("<span>Witness account</span>");
+    // The reader's questions lead; whose account each is stays as the suffix.
+    expect(html).toContain("<span>The problem</span>");
+    expect(html).toContain('<span class="account-prov">· as the authors state it</span>');
+    expect(html).toContain("<span>The solution</span>");
+    expect(html).toContain('<span class="account-prov">· as the witness verified it</span>');
+    expect(html).toContain('<p class="rows-title">What changes</p>');
     expect(html).toContain(doc().authorIntent!);
-    expect(html).not.toContain("from pull request descriptions");
     expect(html).not.toContain("verified against the code");
     expect(html).not.toContain('class="provenance"');
     expect(html).not.toContain('class="source-tag"');
+  });
+
+  test("each named section carries its one-line clarifier", () => {
+    const html = page(doc());
+    expect(html).toContain(
+      '<p class="secnote">Where the change lives in the code, and why there.</p>',
+    );
+    expect(html).toContain(
+      '<p class="secnote">Every path that must reach the change, each proven in code.</p>',
+    );
+    expect(html).toContain(
+      '<p class="secnote">Decisions to make, risks to verify, and things easy to miss.</p>',
+    );
+    expect(html).toContain(
+      '<p class="secnote">The whole diff, grouped by reason for change, most significant first.</p>',
+    );
   });
 
   test("code design renders responsibility areas, paths, coverage, and refs", () => {
@@ -168,7 +187,7 @@ describe("the page itself", () => {
     const html = page(legacy);
     expect(html).not.toContain('<section id="design"');
     expect(html).not.toContain('<a href="#design">');
-    expect(html).not.toContain("<span>Author intent</span>");
+    expect(html).not.toContain("<span>The problem</span>");
     expect(html).toContain("Reviews carry private source");
   });
 
@@ -247,6 +266,51 @@ describe("the page itself", () => {
       `https://github.com/${GOLDEN_REPO}/blob/${"4".repeat(40)}/src/auth.ts#L40-L42`,
     );
     expect(html).toContain("in this stack");
+  });
+
+  describe("a ref into changed code is drawn as the change", () => {
+    const fold = (html: string, id: string): string => {
+      const start = html.indexOf(`<details class="fold" id="${id}"`);
+      expect(start).toBeGreaterThan(-1);
+      return html.slice(start, html.indexOf("</details>", start));
+    };
+
+    test("the quoted range renders the diff that produced it", () => {
+      // The golden statement's ref quotes src/auth.ts at the head sha whose hunk
+      // rewrote line 41, so the citation is the change, not the file after it.
+      const html = page(doc());
+      const block = fold(html, "st_gate-ref_st_gate");
+      // The deleted line is laid back in with its old-file number and glyph.
+      expect(block).toContain(
+        '<span class="l del"><span class="n">41</span><span class="g">-</span>',
+      );
+      // The deleted text itself, syntax-classed like every other line of code.
+      expect(block).toContain('<span class="kw">true</span>;');
+      // The added line keeps its wash and its word marks.
+      expect(block).toContain(
+        '<span class="l add"><span class="n">41</span><span class="g">+</span>',
+      );
+      expect(block).toContain('class="w"');
+      // Lines the change did not write still come from the snippet, numbered on,
+      // and the line the ref singles out keeps its mark.
+      expect(block).toContain('<span class="l hl"><span class="n">42</span>');
+      expect(block).toContain('<span class="n">48</span>');
+      // The way out leads to the pull request that wrote these lines, with the
+      // sha-pinned quote still one tap away.
+      expect(block).toContain(`https://github.com/${GOLDEN_REPO}/pull/12/files#diff-`);
+      expect(block).toContain(`${GOLDEN_REPO}#12</a>`);
+      expect(block).toContain(">at 2222222</a>");
+    });
+
+    test("a ref at a commit the hunks do not count against keeps the snippet", () => {
+      // ref() pins at 44…4, a sha no hunk counts against: its numbering names a
+      // different tree, so no diff may be laid over it.
+      const html = page(doc({ statements: [statement()] }));
+      const block = fold(html, "st_x-ref_a");
+      expect(block).not.toContain('class="l del"');
+      expect(block).not.toContain("/pull/");
+      expect(block).toContain(`blob/${"4".repeat(40)}/src/auth.ts#L40-L42`);
+    });
   });
 
   test("payload, attachment and bundle evidence render as themselves", () => {

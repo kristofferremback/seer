@@ -325,6 +325,22 @@ function sourceOf(hunk: Hunk): string {
   return `#${hunk.prNumber} ${shortSha(hunk.sha)}`;
 }
 
+/** These same lines on GitHub's own review surface: the pull request's Files tab,
+ *  landed on this file. GitHub keys each file's anchor by the SHA-256 of its path,
+ *  and `R<line>` lands on a new-side line within it. */
+export function prFilesUrl(
+  repo: string,
+  prNumber: number,
+  path: string,
+  line?: number,
+): string {
+  const anchor = new Bun.CryptoHasher("sha256").update(path).digest("hex");
+  return (
+    `https://github.com/${repo}/pull/${prNumber}/files#diff-${anchor}` +
+    (line === undefined ? "" : `R${line}`)
+  );
+}
+
 /** The id a hunk's element carries, so a question filed against a hunk has somewhere
  *  to point. The hunk's own id holds characters a fragment reads badly, so the anchor
  *  is the escaped form both sides derive the same way. */
@@ -384,7 +400,13 @@ function hunkBlock(
     ` data-path="${escapeHtml(hunk.path)}" data-sha="${escapeHtml(hunk.sha)}"` +
     ` data-new-from="${span.from}" data-new-to="${span.to}"${broke ? " data-src-break" : ""}>` +
     `<div class="hh"><span class="hh-at">${escapeHtml(hunkRange(hunk))}</span>` +
-    `<span class="hh-src">${escapeHtml(sourceOf(hunk))}</span></div>` +
+    // The source is a link to these very lines on the pull request's Files tab: the
+    // walkthrough is the better view of the diff, not a wall between the reader and
+    // where they comment on it. A hunk that only deletes has no new-side line to
+    // land on, so its link lands on the file.
+    `<span class="hh-src"><a href="${escapeHtml(
+      prFilesUrl(hunk.repo, hunk.prNumber, hunk.path, span.to >= span.from ? span.from : undefined),
+    )}">${escapeHtml(sourceOf(hunk))}</a></span></div>` +
     `<pre class="snip scroll-x"><code>${lines}</code></pre>` +
     here("hunk", hunk.id) +
     `</div>`
@@ -579,6 +601,7 @@ export function walkthroughSection(
       .join("") + removedBefore(null);
   return (
     `<section id="walkthrough"><h2>Implementation walkthrough</h2>` +
+    `<p class="secnote">The whole diff, grouped by reason for change, most significant first.</p>` +
     unaccountedBlock(doc.unaccounted ?? []) +
     `<div class="walk">${groups}</div></section>`
   );

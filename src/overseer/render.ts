@@ -57,6 +57,7 @@ import {
 } from "./render-diff";
 import {
   icon,
+  indexHunks,
   refLink,
   refLinks,
   refFold,
@@ -65,6 +66,7 @@ import {
   safeInline,
   shortSha,
   type EvidenceMarks,
+  type HunkIndex,
 } from "./render-evidence";
 import {
   OBSERVATION_STALE_MS,
@@ -1322,6 +1324,12 @@ const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
  *  apart from the transcribed block above so the prototype stays diffable against it. */
 const EVIDENCE_STYLE = `
   .fold-out { margin: 0; padding: 8px 12px 10px; font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); border-top: 1px solid hsl(var(--line)); }
+  /* a ref into changed code is drawn as the diff it cites, in the walkthrough's own
+     grammar. The line washes and gutter glyphs come with the .snip rules; the word
+     marks are scoped to .filediff there, so the fold carries its own copy. */
+  .fold .snip .l.add .w { background: var(--word-add); border-radius: 2px; }
+  .fold .snip .l.del .w { background: var(--word-rem); border-radius: 2px; }
+  .fold .snip .l .w:empty { display: inline-block; width: 3px; }
   .ev { margin: 12px 0 14px; }
   .ev-example .snipbox { margin: 0; }
   .ev figcaption { margin-top: 7px; font-size: 13px; line-height: 1.5; color: hsl(var(--muted)); }
@@ -1351,6 +1359,31 @@ const EVIDENCE_STYLE = `
   .fig .fig-edge.fig-dim { stroke: hsl(var(--muted) / 0.55); stroke-dasharray: 3 5; }
   .prbody-body { padding: 10px 12px 1px; }
   .prbody { margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: hsl(var(--ink-soft)); white-space: pre-wrap; }
+`;
+
+/** The reading arc and the section clarifiers.
+ *
+ *  The overview's two accounts used to be labelled by provenance alone — "Author
+ *  intent", "Witness account" — which told a reader who was speaking and never which
+ *  question was being answered. The page's own arc is the reader's three questions in
+ *  order: what problem, what solution, how implemented. So each label leads with the
+ *  question and keeps the provenance as its quiet suffix, because the two accounts
+ *  disagreeing is a finding and the reader must still see whose words are whose.
+ *
+ *  The clarifier under a section heading is one muted line saying what the section
+ *  holds. "Coverage" and "Review focus" are this product's own vocabulary, and a
+ *  heading a first-time reader cannot decode is ambiguity, not economy. */
+const STRUCTURE_STYLE = `
+  .account-title { color: hsl(var(--ink-soft)); }
+  .account-prov { color: hsl(var(--muted)); font-weight: 400; }
+  .rows-title {
+    display: flex; align-items: center; gap: 7px; margin: 20px 0 0;
+    font: 500 13px/1.35 var(--font-body); color: hsl(var(--ink-soft));
+  }
+  .rows-title + .rows { margin-top: 8px; }
+  .secnote { margin: -4px 0 14px; font-size: 13px; line-height: 1.55; color: hsl(var(--muted)); }
+  #notes .secnote, #walkthrough .secnote { margin: 7px 0 6px; }
+  .design-heading + .secnote { margin: -2px 0 8px; }
 `;
 
 /** Code, taken out of the column.
@@ -2651,7 +2684,7 @@ function card(
     .join("");
   const owner = `pr-${pr.number}`;
   const detailRef = refs.get(pr.detailRef);
-  const detailFold = detailRef ? refFold(owner, detailRef) : "";
+  const detailFold = detailRef ? refFold(owner, detailRef, "", ctx.hunks) : "";
   const d = ctx.delta ? ctx.delta.get("pr", prKey(pr.repo, pr.number)) : null;
   const edit = entityEditControl(d, owner);
   const hasMore =
@@ -2789,7 +2822,7 @@ function evidenceMarks(
 function statementRow(s: Statement, ctx: RenderCtx): string {
   const refs = uniqueRefs(s.refs);
   const links = refLinks(s.id, refs);
-  const folds = refs.map((r) => refFold(s.id, r)).join("");
+  const folds = refs.map((r) => refFold(s.id, r, "", ctx.hunks)).join("");
   const d = ctx.delta ? ctx.delta.get("statement", s.id) : null;
   const edit = entityEditControl(d, s.id);
   return (
@@ -2852,7 +2885,7 @@ function removedStubsBefore(
 function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
   const refs = uniqueRefs(m.refs);
   const links = refLinks(m.id, refs);
-  const folds = refs.map((r) => refFold(m.id, r)).join("");
+  const folds = refs.map((r) => refFold(m.id, r, "", ctx.hunks)).join("");
   const d = ctx.delta ? ctx.delta.get("module", m.id) : null;
   const edit = entityEditControl(d, m.id);
   return (
@@ -2870,7 +2903,7 @@ function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
 function designCoverageBlock(c: DesignCoverage, ctx: RenderCtx): string {
   const refs = uniqueRefs(c.refs);
   const links = refLinks(c.id, refs);
-  const folds = refs.map((r) => refFold(c.id, r)).join("");
+  const folds = refs.map((r) => refFold(c.id, r, "", ctx.hunks)).join("");
   const d = ctx.delta ? ctx.delta.get("coverage", c.id) : null;
   const edit = entityEditControl(d, c.id);
   return (
@@ -2916,11 +2949,13 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
   const placement = marked(safeBlock(design.placement), d, "placement", "design", true);
   return (
     `<section id="design"><h2>Code design</h2>` +
+    `<p class="secnote">Where the change lives in the code, and why there.</p>` +
     (placement === "" ? "" : `<div class="placement">${placement}</div>`) +
     (modules === "" ? "" : `<div class="design-grid">${modules}</div>`) +
     (coverage === ""
       ? ""
       : `<h3 class="design-heading">${icon("branch")}<span>Coverage</span></h3>` +
+        `<p class="secnote">Every path that must reach the change, each proven in code.</p>` +
         `<div class="coverage-list">${coverage}</div>`) +
     `</section>\n`
   );
@@ -2929,7 +2964,7 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
 function noteRow(n: Note, ctx: RenderCtx): string {
   const refs = uniqueRefs(n.refs);
   const links = refLinks(n.id, refs);
-  const folds = refs.map((r) => refFold(n.id, r)).join("");
+  const folds = refs.map((r) => refFold(n.id, r, "", ctx.hunks)).join("");
   const d = ctx.delta ? ctx.delta.get("note", n.id) : null;
   const edit = entityEditControl(d, n.id);
   // A check the base version carried and this one dropped keeps its place in the
@@ -3133,6 +3168,9 @@ interface RenderCtx {
   wsId: string;
   /** The path this page is served under, which is what an attachment hangs off. */
   basePath: string;
+  /** Every hunk of the document by (sha, path), so a ref into changed code is drawn
+   *  as the diff it cites. */
+  hunks: HunkIndex;
   /** What moved since the base version, or null when this page has no base. */
   delta: DeltaIndex | null;
   /** Every annotation on the review, by `${targetType}:${targetId}`. Annotations
@@ -3386,6 +3424,7 @@ export function renderReviewPage(input: RenderInput): string {
   const ctx: RenderCtx = {
     wsId,
     basePath: input.basePath ?? `/${wsId}/r/${slug}`,
+    hunks: indexHunks(doc.hunks),
     delta,
     annotations: byTarget,
     status: input.status ?? {},
@@ -3461,7 +3500,7 @@ export function renderReviewPage(input: RenderInput): string {
     `<link rel="icon" type="image/svg+xml" href="${FAVICON}">\n` +
     `<link rel="preload" href="/fonts/switzer.woff2" as="font" type="font/woff2" crossorigin>\n` +
     `<link rel="preload" href="/fonts/commit-mono-400.woff2" as="font" type="font/woff2" crossorigin>\n` +
-    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${ZOOM_STYLE}${DELTA_STYLE}${QUESTION_STYLE}` +
+    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${STRUCTURE_STYLE}${ZOOM_STYLE}${DELTA_STYLE}${QUESTION_STYLE}` +
     `${input.canShare ? SHARE_STYLE : ""}</style>\n` +
     `</head>\n<body>\n` +
     SPRITE +
@@ -3504,14 +3543,15 @@ export function renderReviewPage(input: RenderInput): string {
     (doc.authorIntent == null || doc.authorIntent.trim() === ""
       ? ""
       : `<div class="account"><p class="account-title">${icon("pr", "account-icon")}` +
-        `<span>Author intent</span></p>` +
+        `<span>The problem</span> <span class="account-prov">· as the authors state it</span></p>` +
         `<div class="author-intent">${marked(safeBlock(doc.authorIntent), intentDelta, "authorIntent", "intent", true)}</div>` +
         `</div>`) +
     `<div class="account"><p class="account-title">${icon("eye", "account-icon")}` +
-    `<span>Witness account</span></p>` +
+    `<span>The solution</span> <span class="account-prov">· as the witness verified it</span></p>` +
     `<div class="witness-account">${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary", true)}</div>` +
     `</div>` +
     questionsHere(ctx, "summary", "summary") +
+    `<p class="rows-title">What changes</p>` +
     `<div class="rows">${rows}</div>` +
     `<p class="contents"><span class="nb"><a href="#summary">overview</a> ·</span> ` +
     designLink +
@@ -3519,7 +3559,9 @@ export function renderReviewPage(input: RenderInput): string {
     `<span class="nb"><a href="#walkthrough">implementation walkthrough</a></span></p>` +
     `</section></div>\n` +
     codeDesignSection(doc, ctx) +
-    `<section id="notes"><h2>Review focus</h2><div class="notes">${notes}</div></section>\n` +
+    `<section id="notes"><h2>Review focus</h2>` +
+    `<p class="secnote">Decisions to make, risks to verify, and things easy to miss.</p>` +
+    `<div class="notes">${notes}</div></section>\n` +
     walkthroughSection(doc, delta, (type, id) => questionsHere(ctx, type, id)) +
     `\n` +
     questionsSection(input, annotations, ctx.basePath) +

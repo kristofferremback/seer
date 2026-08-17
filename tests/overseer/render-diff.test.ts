@@ -8,6 +8,7 @@
 // the parsed ranges, and two renders of one document are the same bytes.
 
 import { test, expect, describe } from "bun:test";
+import { createHash } from "node:crypto";
 
 import { renderReviewPage } from "../../src/overseer/render";
 import { codeHtml, groupsInOrder, langOfPath, walkthroughSection } from "../../src/overseer/render-diff";
@@ -139,6 +140,33 @@ describe("the walkthrough", () => {
       `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
     );
     expect(block).toContain(`#${hunk.prNumber} ${hunk.sha.slice(0, 7)}`);
+  });
+
+  test("a hunk's source links to those lines on the pull request's files tab", () => {
+    const hunk = GOLDEN_HUNKS.auth;
+    const html = walkthroughSection(doc({ groups: [group({ hunks: [hunk.id] })] }));
+    // The anchor GitHub keys a file by: the SHA-256 of its path, computed here a
+    // second time so the page is held to the mechanism rather than to itself.
+    const anchor = createHash("sha256").update(hunk.path).digest("hex");
+    expect(html).toContain(
+      `<span class="hh-src"><a href="https://github.com/${hunk.repo}/pull/${hunk.prNumber}` +
+        `/files#diff-${anchor}R${hunk.newStart}">#${hunk.prNumber} ${hunk.sha.slice(0, 7)}</a></span>`,
+    );
+  });
+
+  test("a hunk that only deletes links to its file, not to a new-side line", () => {
+    const source = GOLDEN_HUNKS.auth;
+    const hunk: Hunk = {
+      ...source,
+      newLines: 0,
+      lines: [{ kind: "del", oldNo: 40, newNo: null, content: "gone();", wordRanges: [] }],
+    };
+    const html = walkthroughSection(
+      doc({ hunks: [hunk], groups: [group({ hunks: [hunk.id] })] }),
+    );
+    const anchor = createHash("sha256").update(hunk.path).digest("hex");
+    expect(html).toContain(`/files#diff-${anchor}"`);
+    expect(html).not.toContain(`/files#diff-${anchor}R`);
   });
 
   test("word marks land exactly on the ranges the hunk carries, and nowhere else", () => {
