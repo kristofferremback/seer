@@ -109,8 +109,12 @@ describe("the page itself", () => {
     const links = [...stripped.matchAll(/<a class="ref" href="#([^"]+)"/g)].map((m) => m[1]!);
     expect(links.length).toBeGreaterThan(0);
     for (const id of links) expect(stripped).toContain(`<details class="fold" id="${id}"`);
-    // The one control that needs a script is hidden until it has one.
+    // The one control that needs a script is hidden until it has one. It knows
+    // three states: the contrast disc for an explicit choice, a monitor when the
+    // page follows the system, and "system" stored as the absence of the key.
     expect(stripped).toContain("data-theme-toggle hidden");
+    expect(stripped).toContain('<svg class="sysmark" aria-hidden="true"><use href="#i-system"/></svg>');
+    expect(html).toContain('localStorage.removeItem("overseer:theme")');
   });
 
   test("the refresh button tells a fresh observation from the recorded one", () => {

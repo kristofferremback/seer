@@ -389,8 +389,9 @@ function styles(): string {
     text-decoration: none;
   }
 
-  /* quiet theme toggle — a bare icon, no pill. Shows the icon for the mode a
-     click switches TO (moon in light, sun in dark). */
+  /* quiet theme toggle — a bare icon, no pill. Shows the mode in force: sun for
+     light, moon for dark, a monitor when the page follows the system. A click
+     cycles light → dark → system. */
   .theme-toggle {
     background: none; border: 0; padding: 4px; margin: 0;
     color: hsl(var(--muted));
@@ -398,10 +399,11 @@ function styles(): string {
     display: inline-flex; align-items: center;
     border-radius: 4px;
   }
-  .theme-toggle .tt-sun { display: none; }
-  .theme-toggle .tt-moon { display: block; }
-  :root[data-theme="dark"] .theme-toggle .tt-sun { display: block; }
-  :root[data-theme="dark"] .theme-toggle .tt-moon { display: none; }
+  .theme-toggle svg { display: none; }
+  :root[data-theme-mode="light"] .theme-toggle .tt-sun { display: block; }
+  :root[data-theme-mode="dark"] .theme-toggle .tt-moon { display: block; }
+  :root[data-theme-mode="system"] .theme-toggle .tt-sys,
+  :root:not([data-theme-mode]) .theme-toggle .tt-sys { display: block; }
 
   /* ---- display + body type ---- */
   .h-display {
@@ -991,22 +993,28 @@ ${tags}
 </head>`;
 }
 
-// Pre-paint theme resolution: a stored choice wins, else the system preference.
-// Runs inline in <head> so data-theme is set before the first paint (no flash).
+// Pre-paint theme resolution. The stored value is the *choice* — "light" or
+// "dark"; no key means "follow the system". data-theme-mode carries the choice
+// (it picks the toggle's icon), data-theme the resolved surface every style
+// rule keys off. Runs inline in <head> so both land before the first paint.
 function themeBootstrap(): string {
-  return `(()=>{let t=null;try{t=localStorage.getItem("seer:theme")}catch(e){}const d=t==="dark"||(t!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light"})();`;
+  return `(()=>{let t=null;try{t=localStorage.getItem("seer:theme")}catch(e){}const m=t==="dark"||t==="light"?t:"system";const r=document.documentElement;r.dataset.themeMode=m;r.dataset.theme=m==="system"?(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"):m})();`;
 }
 
-// The toggle writes the explicit choice and flips data-theme on <html>. One
-// delegated listener covers every toggle on the page.
+// A click cycles light → dark → system. "System" is stored as the absence of a
+// choice, so the pre-paint resolution above and any page saved before the third
+// state existed agree on what it means; while it is in force, an OS preference
+// change re-resolves the surface live. One delegated listener covers every
+// toggle on the page.
 function themeToggleScript(): string {
-  return `<script>(()=>{if(window.__seerTT)return;window.__seerTT=1;document.addEventListener("click",e=>{const b=e.target.closest("[data-theme-toggle]");if(!b)return;const n=document.documentElement.dataset.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=n;try{localStorage.setItem("seer:theme",n)}catch(x){}})})();</script>`;
+  return `<script>(()=>{if(window.__seerTT)return;window.__seerTT=1;const r=document.documentElement,mq=matchMedia("(prefers-color-scheme: dark)"),names={light:"Light mode",dark:"Dark mode",system:"System"};const apply=()=>{const m=r.dataset.themeMode||"system";r.dataset.theme=m==="system"?(mq.matches?"dark":"light"):m;document.querySelectorAll("[data-theme-toggle]").forEach(b=>{b.title=names[m];b.setAttribute("aria-label","Theme: "+names[m])})};mq.addEventListener("change",()=>{if((r.dataset.themeMode||"system")==="system")apply()});document.addEventListener("click",e=>{const b=e.target.closest("[data-theme-toggle]");if(!b)return;const o=["light","dark","system"],m=o[(o.indexOf(r.dataset.themeMode)+1)%3];r.dataset.themeMode=m;try{m==="system"?localStorage.removeItem("seer:theme"):localStorage.setItem("seer:theme",m)}catch(x){}apply()});apply()})();</script>`;
 }
 
 function themeToggle(): string {
-  return `<button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle light and dark mode">
+  return `<button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch color theme">
     <svg class="tt-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
     <svg class="tt-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+    <svg class="tt-sys" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
   </button>`;
 }
 
