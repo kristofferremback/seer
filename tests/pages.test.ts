@@ -762,6 +762,17 @@ describe("the app bar", () => {
     expect(html).toContain('href="/reviews" aria-current="true">All workspaces</a>');
   });
 
+  test("the theme toggle knows three states, and system is the absence of a choice", () => {
+    const html = bundlesPage(nav(), groups(), NOW);
+    // One mark per mode; CSS shows the one data-theme-mode names.
+    for (const mark of ["tt-sun", "tt-moon", "tt-sys"]) expect(html).toContain(`class="${mark}"`);
+    // The pre-paint script writes the choice and the resolved surface separately,
+    // and a click back to system removes the key rather than storing a word, so
+    // pages saved before the third state existed agree on what it means.
+    expect(html).toContain("r.dataset.themeMode=m");
+    expect(html).toContain('localStorage.removeItem("seer:theme")');
+  });
+
   test("scoped, the section links stay inside the workspace and the switcher marks it", () => {
     const html = bundlesPage(
       nav({ current: { id: "ws_7g2kq4xbvm", name: "Crystal Palace" } }),

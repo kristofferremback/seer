@@ -477,6 +477,10 @@ const STYLE = `  @font-face {
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) .theme-toggle .mark { transform: translateY(0.5px) rotate(180deg); }
   }
+  /* the third state: following the system, the disc yields to a monitor. */
+  .theme-toggle .sysmark { display: none; width: 18px; height: 18px; stroke-width: 1.45; }
+  :root[data-theme-mode="system"] .theme-toggle .mark { display: none; }
+  :root[data-theme-mode="system"] .theme-toggle .sysmark { display: block; }
   .theme-toggle:active { background: hsl(var(--ink) / 0.07); }
   @media (hover: hover) and (pointer: fine) {
     .theme-toggle .mark { transition: transform 220ms cubic-bezier(0.2, 0.9, 0.25, 1); }
@@ -1328,6 +1332,9 @@ const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
   <symbol id="i-contrast" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="12" cy="12" r="10"/><path d="M12 18a6 6 0 0 0 0-12v12z"/>
   </symbol>
+  <symbol id="i-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>
+  </symbol>
   <!-- the two marks the full-screen panel is worked by: four corners pushed out,
        and the cross that puts them back. -->
   <symbol id="i-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
@@ -1626,12 +1633,15 @@ const ZOOM_STYLE = `
   }
 `;
 
-/** Resolved before first paint so the surface never flashes, and stored so an explicit
- *  choice survives a reload. Without it the CSS floor still lands on the right surface. */
+/** Resolved before first paint so the surface never flashes. The stored value is the
+ *  choice — "light" or "dark"; no key means "follow the system" — carried on
+ *  data-theme-mode (it picks the toggle's mark) while data-theme stays the resolved
+ *  surface. Without it the CSS floor still lands on the right surface. */
 const THEME_SCRIPT =
   `(()=>{let t=null;try{t=localStorage.getItem("overseer:theme")}catch(e){}` +
-  `const d=t==="dark"||(t!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);` +
-  `document.documentElement.dataset.theme=d?"dark":"light"})();`;
+  `const m=t==="dark"||t==="light"?t:"system";` +
+  `const r=document.documentElement;r.dataset.themeMode=m;` +
+  `r.dataset.theme=m==="system"?(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"):m})();`;
 
 /** The enhancement, in full. Nothing here is load-bearing: the toggle appears only
  *  once it can work, a citation without it is a fragment jump the `:target` rules
@@ -1641,13 +1651,36 @@ const PAGE_SCRIPT = `
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
   document.querySelectorAll("[data-theme-toggle]").forEach((b) => b.removeAttribute("hidden"));
 
+  // The toggle cycles light, dark, system. "System" is stored as the absence of
+  // a choice (so the pre-paint script and pages saved before the third state
+  // existed agree on what it means), and while it is in force an OS preference
+  // change re-resolves the surface live.
+  const mqDark = matchMedia("(prefers-color-scheme: dark)");
+  const modeNames = { light: "Light mode", dark: "Dark mode", system: "System" };
+  const applyTheme = () => {
+    const m = document.documentElement.dataset.themeMode || "system";
+    document.documentElement.dataset.theme = m === "system" ? (mqDark.matches ? "dark" : "light") : m;
+    document.querySelectorAll("[data-theme-toggle]").forEach((b) => {
+      b.title = modeNames[m];
+      b.setAttribute("aria-label", "Theme: " + modeNames[m]);
+    });
+  };
+  mqDark.addEventListener("change", () => {
+    if ((document.documentElement.dataset.themeMode || "system") === "system") applyTheme();
+  });
   document.addEventListener("click", (e) => {
     const b = e.target.closest("[data-theme-toggle]");
     if (!b) return;
-    const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = next;
-    try { localStorage.setItem("overseer:theme", next); } catch (x) {}
+    const order = ["light", "dark", "system"];
+    const m = order[(order.indexOf(document.documentElement.dataset.themeMode) + 1) % 3];
+    document.documentElement.dataset.themeMode = m;
+    try {
+      if (m === "system") localStorage.removeItem("overseer:theme");
+      else localStorage.setItem("overseer:theme", m);
+    } catch (x) {}
+    applyTheme();
   });
+  applyTheme();
 
   const openAncestors = (el) => {
     let d = el.parentElement && el.parentElement.closest("details");
@@ -3596,8 +3629,8 @@ export function renderReviewPage(input: RenderInput): string {
         `aria-label="Share this review outside the workspace">${icon("link", "mark")}</button>`
       : "") +
     `<button type="button" class="theme-toggle" data-theme-toggle hidden ` +
-    `aria-label="Switch between the light and dark reading surface">` +
-    `${icon("contrast", "mark")}</button>` +
+    `aria-label="Switch between the light, dark, and system reading surface">` +
+    `${icon("contrast", "mark")}${icon("system", "sysmark")}</button>` +
     `</div>` +
     `<h1 class="title">${marked(safeInline(doc.title), review, "title", "review", true)}</h1>` +
     // A single-pull-request review is the ordinary case, and naming it says nothing
