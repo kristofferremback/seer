@@ -168,7 +168,10 @@ describe("the page itself", () => {
     expect(html).not.toContain("secnote");
   });
 
-  test("two or more coverage paths draw the convergence figure, one draws none", () => {
+  test("the coverage list draws no figure — a fan of its own titles says nothing new", () => {
+    // The section once drew every coverage title converging on "this change",
+    // derived from the titles alone: a diagram that could only ever restate the
+    // headings below it. The list stands on its own.
     const two = doc();
     two.codeDesign = {
       ...two.codeDesign!,
@@ -182,22 +185,9 @@ describe("the page itself", () => {
       drawn.indexOf('<section id="design"'),
       drawn.indexOf('<div class="coverage-list">'),
     );
-    expect(design).toContain('<svg class="fig"');
-    expect(design).toContain(">this change</text>");
-    expect(design).toContain(">Browser reads</text>");
-    // The drawing wears the same full-screen control every code surface does.
-    expect(design).toContain(
-      'class="ev-figure figbox"><button type="button" class="zoom" hidden data-zoom="coverage"',
-    );
-    // One path is not a sprawl check, and gets no drawing. The golden fixture
-    // carries exactly one coverage path, which is what makes it the case.
-    expect(doc().codeDesign!.coverage.length).toBe(1);
-    const one = page(doc());
-    const oneDesign = one.slice(
-      one.indexOf('<section id="design"'),
-      one.indexOf('<div class="coverage-list">'),
-    );
-    expect(oneDesign).not.toContain('<svg class="fig"');
+    expect(design).not.toContain('<svg class="fig"');
+    expect(design).not.toContain(">this change</text>");
+    expect(drawn).not.toContain('data-zoom="coverage"');
   });
 
   test("code design renders responsibility areas, paths, coverage, and refs", () => {
@@ -662,14 +652,20 @@ describe("the page itself", () => {
     expect(html).toContain(".figscroll { overflow-x: auto; }");
     expect(html).toContain('<div class="figscroll"><svg class="fig"');
     // And the same full-screen control every code surface wears, so a phone can
-    // open the drawing at drawn size and pan it. In the panel the column's width
-    // rules yield to the svg's own width/height attributes.
+    // open the drawing whole and zoom into it. In the panel the column's width
+    // rules yield to the svg's own width/height, first attributes then the scale.
     expect(html).toContain(
       'class="ev ev-figure"><button type="button" class="zoom" hidden data-zoom="figure"',
     );
     expect(html).toContain(
       ".zoom-body .fig { width: auto; height: auto; min-width: 0; max-width: none; margin: 18px; }",
     );
+    // The panel's bar carries the figure's scale controls, shipped hidden: the
+    // script shows them only when what it lifted is a drawing.
+    expect(html).toContain('<span class="zoom-scale" hidden>');
+    expect(html).toContain('data-zs="out"');
+    expect(html).toContain('data-zs="fit"');
+    expect(html).toContain('data-zs="in"');
     const svg = html.match(/<svg class="fig"[\s\S]*?<\/svg>/)![0];
     expect(svg).toContain(">request</text>");
     expect(svg).toContain('class="dim"');
