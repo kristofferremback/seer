@@ -344,14 +344,16 @@ function styles(): string {
     .wsmenu-panel a { padding: 0.65rem 0.6rem; }
   }
 
-  /* the scoped page's own line: id, visibility, settings — under the workspace name */
+  /* the scoped page's context line — workspace, id, visibility, settings — above the
+     section title, so the page says where you are and then what you are looking at */
   .scope-row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 0.4rem 0.85rem;
-    margin-top: 0.8rem;
+    margin: 0 0 0.7rem;
   }
+  .scope-row .scope-ws { font-size: 0.95rem; color: hsl(var(--ink)); }
   .scope-row .mono-id { font-family: var(--font-mono); font-size: 0.78rem; color: hsl(var(--muted)); }
 
   /* the ledger filter — one input, matched against each row's own haystack */
@@ -1826,13 +1828,17 @@ export function bundlesPage(nav: NavContext, groups: LedgerGroup[], now = Date.n
     <button class="rowmenu-item accent" type="button" role="menuitem" data-share-new>Create a share link</button>
   </div>`;
 
+  // Scoped, the page says where you are and then what you are looking at: the
+  // workspace as the context line, the section as the title. Without both, the
+  // scoped bundles and reviews pages are the same masthead with different tables.
   const masthead = scoped
-    ? `<h1 class="h-section">${escapeHtml(nav.current!.name)}</h1>
-    <div class="scope-row">
+    ? `<div class="scope-row">
+      <span class="scope-ws">${escapeHtml(nav.current!.name)}</span>
       <span class="mono-id">${escapeHtml(nav.current!.id)}</span>
       <span class="pill${groups[0]?.visibility === "public" ? " public" : ""}"><span class="bead"></span>${groups[0]?.visibility ?? "private"}</span>
       <a class="nav-action" href="/settings/${escapeHtml(nav.current!.id)}">settings</a>
-    </div>`
+    </div>
+    <h1 class="h-section">Bundles</h1>`
     : `<h1 class="h-section">Bundles</h1>
     <p class="subtitle">Everything Seer is holding, workspace by workspace.</p>`;
 
@@ -1993,13 +1999,15 @@ export function reviewsPage(nav: NavContext, groups: ReviewLedgerGroup[]): strin
       ? `<p class="empty">No workspaces yet.</p>`
       : groups.map((g) => groupBlock(g, !scoped)).join("\n");
 
+  // Same grammar as the bundles page: where you are, then what you are looking at.
   const masthead = scoped
-    ? `<h1 class="h-section">${escapeHtml(nav.current!.name)}</h1>
-    <div class="scope-row">
+    ? `<div class="scope-row">
+      <span class="scope-ws">${escapeHtml(nav.current!.name)}</span>
       <span class="mono-id">${escapeHtml(nav.current!.id)}</span>
       <span class="pill${groups[0]?.visibility === "public" ? " public" : ""}"><span class="bead"></span>${groups[0]?.visibility ?? "private"}</span>
       <a class="nav-action" href="/settings/${escapeHtml(nav.current!.id)}">settings</a>
-    </div>`
+    </div>
+    <h1 class="h-section">Reviews</h1>`
     : `<h1 class="h-section">Reviews</h1>
     <p class="subtitle">Every review published here, newest first, workspace by workspace.</p>`;
 

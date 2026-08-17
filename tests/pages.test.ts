@@ -779,15 +779,27 @@ describe("the app bar", () => {
 describe("the workspace-scoped ledgers", () => {
   const scopedNav = () => nav({ current: { id: "ws_7g2kq4xbvm", name: "Crystal Palace" } });
 
-  test("the workspace is the masthead, so the group head does not say it again", () => {
+  test("the masthead says where you are, then what you are looking at", () => {
     const html = bundlesPage(scopedNav(), [groups()[0]!], NOW);
-    expect(html).toContain('<h1 class="h-section">Crystal Palace</h1>');
+    // The workspace is the context line; the section is the title. Without both, the
+    // scoped bundles and reviews pages would be one masthead with different tables.
+    expect(html).toContain('<span class="scope-ws">Crystal Palace</span>');
+    expect(html).toContain('<h1 class="h-section">Bundles</h1>');
     expect(html).not.toContain('class="ws-head"');
-    // Its line carries the id, the visibility, and the way into settings.
+    // The context line carries the id, the visibility, and the way into settings.
     expect(html).toContain('class="scope-row"');
     expect(html).toContain('href="/settings/ws_7g2kq4xbvm"');
     // One estate's page does not offer to found another.
     expect(html).not.toContain('action="/workspaces"');
+    // And the tab says the same thing, most specific first.
+    expect(html).toContain("<title>Bundles · Crystal Palace · Seer</title>");
+  });
+
+  test("the scoped reviews page titles itself as reviews, not as the same page again", () => {
+    const html = reviewsPage(nav({ section: "reviews", current: { id: "ws_7g2kq4xbvm", name: "Crystal Palace" } }), []);
+    expect(html).toContain('<span class="scope-ws">Crystal Palace</span>');
+    expect(html).toContain('<h1 class="h-section">Reviews</h1>');
+    expect(html).toContain("<title>Reviews · Crystal Palace · Seer</title>");
   });
 
   test("the all-workspaces view keeps its group heads and the new-workspace form", () => {
