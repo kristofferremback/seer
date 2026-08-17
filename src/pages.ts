@@ -262,6 +262,103 @@ function styles(): string {
     .spine::before, .spine::after { display: none; }
   }
 
+  /* ---- app bar: the signed-in masthead ----
+     One row that is the same on every signed-in page: brand, the two sections,
+     the workspace switcher, who you are, the theme toggle. The switcher is a
+     <details>, so it opens and closes with no script at all; the script only adds
+     close-on-outside-click. */
+  .appbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.1rem;
+    margin-bottom: clamp(2.2rem, 6vw, 3.2rem);
+  }
+  .appnav { display: flex; align-items: center; gap: 1.05rem; }
+  .appnav a {
+    font-family: var(--font-body);
+    font-size: 0.95rem;
+    color: hsl(var(--ink-soft));
+    text-decoration: none;
+    padding: 3px 1px;
+  }
+  .appnav a[aria-current="page"] {
+    color: hsl(var(--ink));
+    box-shadow: inset 0 -2px 0 hsl(var(--accent));
+  }
+  .appbar .bar-spacer { flex: 1; }
+  @media (max-width: 640px) { .appbar .email-tag { display: none; } }
+
+  .wsmenu { position: relative; }
+  .wsmenu > summary {
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: 0.92rem;
+    color: hsl(var(--ink-soft));
+    border: 1px solid hsl(var(--line));
+    border-radius: 8px;
+    padding: 0.35rem 0.7rem;
+    max-width: min(16rem, 60vw);
+  }
+  .wsmenu > summary::-webkit-details-marker { display: none; }
+  .wsmenu > summary::marker { content: ""; }
+  .wsmenu .ws-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wsmenu .ws-chevron { flex: none; width: 9px; height: 9px; color: hsl(var(--muted)); transition: transform 140ms ease; }
+  .wsmenu[open] > summary { color: hsl(var(--ink)); border-color: hsl(var(--accent) / 0.45); }
+  .wsmenu[open] .ws-chevron { transform: rotate(90deg); }
+  .wsmenu-panel {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    z-index: 40;
+    min-width: 15rem;
+    max-width: calc(100vw - 24px);
+    background: hsl(var(--paper));
+    border: 1px solid hsl(var(--line));
+    border-radius: 12px;
+    padding: 0.4rem;
+    box-shadow: 0 14px 34px hsl(var(--night) / 0.16), 0 2px 6px hsl(var(--night) / 0.08);
+  }
+  .wsmenu-panel a {
+    display: block;
+    padding: 0.45rem 0.55rem;
+    border-radius: 7px;
+    font-size: 0.92rem;
+    color: hsl(var(--ink-soft));
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  .wsmenu-panel a[aria-current="true"] { color: hsl(var(--ink)); background: hsl(var(--paper-sunk)); }
+  .wsmenu-panel a .mono-id { font-family: var(--font-mono); font-size: 0.72rem; color: hsl(var(--muted)); margin-left: 0.5rem; }
+  .wsmenu-sep { height: 1px; background: hsl(var(--line)); margin: 0.35rem 0.3rem; }
+  @media (hover: hover) and (pointer: fine) {
+    .appnav a:hover { color: hsl(var(--accent)); }
+    .wsmenu > summary:hover { color: hsl(var(--accent)); border-color: hsl(var(--accent) / 0.5); }
+    .wsmenu-panel a:hover { background: hsl(var(--paper-sunk)); }
+  }
+  @media (pointer: coarse) {
+    .wsmenu-panel a { padding: 0.65rem 0.6rem; }
+  }
+
+  /* the scoped page's own line: id, visibility, settings — under the workspace name */
+  .scope-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.85rem;
+    margin-top: 0.8rem;
+  }
+  .scope-row .mono-id { font-family: var(--font-mono); font-size: 0.78rem; color: hsl(var(--muted)); }
+
+  /* the ledger filter — one input, matched against each row's own haystack */
+  .filter-row { margin: 1.4rem 0 0; }
+  .filter-row .input { max-width: 21rem; }
+  tr[hidden] { display: none; }
+
   /* ---- masthead / nav row ---- */
   .nav-row {
     display: flex;
@@ -615,6 +712,10 @@ function styles(): string {
   }
   .ws-head .mono-id { font-family: var(--font-mono); font-size: 0.78rem; color: hsl(var(--muted)); }
   .ws-head .spacer { flex: 1; }
+  /* The name is the way into the workspace's own view; it reads as a heading and
+     declares itself a link on hover rather than wearing an underline at rest. */
+  .ws-head h2 a { text-decoration: none; color: inherit; }
+  @media (hover: hover) and (pointer: fine) { .ws-head h2 a:hover { color: hsl(var(--accent)); } }
 
   /* table action links (roll / revoke) */
   .act { font-family: var(--font-mono); font-size: 0.78rem; white-space: nowrap; }
@@ -682,6 +783,11 @@ function styles(): string {
      not spread — so here the count is a mono numeral and the plain word. */
   .row-sub { display: block; font-size: 11px; color: hsl(var(--muted)); }
   td.status-cell { white-space: nowrap; }
+  /* The pull requests a review names, each a way out to GitHub. The tally reads
+     underneath: first which, then in what state. */
+  .pr-refs { display: flex; flex-wrap: wrap; gap: 0.25rem 0.6rem; margin-bottom: 0.2rem; }
+  .pr-refs a { font-family: var(--font-mono); font-size: 0.78rem; color: hsl(var(--ink-soft)); text-decoration: none; }
+  @media (hover: hover) and (pointer: fine) { .pr-refs a:hover { color: hsl(var(--accent)); } }
   .tally { display: inline-flex; flex-wrap: wrap; gap: 0.55rem; align-items: baseline; }
   .tally-part { display: inline-flex; gap: 0.3rem; align-items: baseline; }
   .tally-n { font-family: var(--font-mono); font-size: 12px; }
@@ -915,6 +1021,110 @@ function navRow(action: { href: string; label: string } | null): string {
       ${themeToggle()}
     </div>
   </nav>`;
+}
+
+// ---- the app bar ----
+//
+// The signed-in masthead, the same on every page behind the session: brand, the two
+// sections, the workspace switcher, who you are, the theme toggle. Navigation is
+// chrome, so it is one component used everywhere rather than a corner link each page
+// improvises for itself.
+
+export interface NavWorkspace {
+  id: string;
+  name: string;
+}
+
+export type NavSection = "bundles" | "reviews" | "settings";
+
+export interface NavContext {
+  email: string;
+  workspaces: NavWorkspace[];
+  /** The workspace the page is scoped to, or null for the all-workspaces view. */
+  current: NavWorkspace | null;
+  section: NavSection;
+}
+
+/** Where a section lives, scoped or not. Settings has no all-workspaces page, so its
+ *  unscoped answer is the bundles ledger, where every workspace's settings link is. */
+function sectionHref(section: NavSection, wsId: string | null): string {
+  if (wsId === null) return section === "reviews" ? "/reviews" : "/bundles";
+  if (section === "settings") return `/settings/${wsId}`;
+  return `/${wsId}/${section}`;
+}
+
+export function appBar(nav: NavContext): string {
+  const chevron = `<svg class="ws-chevron" viewBox="0 0 8 8" fill="none" aria-hidden="true"><path d="M2.5 1 L6 4 L2.5 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const scope = nav.current?.id ?? null;
+
+  const link = (section: NavSection, label: string) =>
+    `<a href="${sectionHref(section, scope)}"${nav.section === section ? ` aria-current="page"` : ""}>${label}</a>`;
+
+  // Every row goes to this section's page in that workspace; the switcher moves the
+  // scope, never the subject. "All workspaces" is a scope like any other.
+  const rows = [
+    `<a href="${sectionHref(nav.section, null)}"${scope === null ? ` aria-current="true"` : ""}>All workspaces</a>`,
+    `<div class="wsmenu-sep"></div>`,
+    ...nav.workspaces.map(
+      (w) =>
+        `<a href="${sectionHref(nav.section, w.id)}"${w.id === scope ? ` aria-current="true"` : ""}>${escapeHtml(w.name)}<span class="mono-id">${escapeHtml(w.id)}</span></a>`,
+    ),
+  ];
+
+  return `<nav class="appbar" aria-label="Seer">
+    <a class="brand" href="/">
+      ${markSvg("mark")}
+      <span class="wordmark">Seer</span>
+    </a>
+    <div class="appnav">
+      ${link("bundles", "Bundles")}
+      ${link("reviews", "Reviews")}
+    </div>
+    <span class="bar-spacer"></span>
+    <details class="wsmenu">
+      <summary aria-label="Switch workspace"><span class="ws-current">${escapeHtml(nav.current?.name ?? "All workspaces")}</span>${chevron}</summary>
+      <div class="wsmenu-panel">${rows.join("\n")}</div>
+    </details>
+    <span class="email-tag">${escapeHtml(nav.email)}</span>
+    ${themeToggle()}
+  </nav>`;
+}
+
+/** The app bar's and the filter's few behaviours, shared by every page that draws
+ *  either. Both read correctly without it: the switcher is a <details>, and a page
+ *  with no filter box is simply the whole list. */
+function appScript(): string {
+  return `<script>(()=>{
+document.addEventListener("click",(e)=>{
+  for(const d of document.querySelectorAll("details.wsmenu[open]")){
+    if(!d.contains(e.target))d.open=false;
+  }
+});
+const input=document.querySelector("[data-filter-input]");
+if(!input)return;
+const apply=()=>{
+  const q=input.value.trim().toLowerCase();
+  for(const tr of document.querySelectorAll("tr[data-filter]")){
+    tr.hidden=!!q&&!tr.dataset.filter.includes(q);
+  }
+  for(const scope of document.querySelectorAll("[data-filter-hide]")){
+    // First touch records how the page loaded, so clearing the filter restores it
+    // (the ledger's own script may have hidden an empty section already).
+    if(scope.__fh===undefined){scope.__fh=scope.hidden;scope.__fo=scope.open;}
+    const hit=!!scope.querySelector("tr[data-filter]:not([hidden])");
+    scope.hidden=q?!hit:scope.__fh;
+    // A match inside a folded section is invisible, so filtering unfolds; clearing
+    // folds back to how the reader had it.
+    if("open" in scope)scope.open=q?hit:scope.__fo;
+  }
+};
+input.addEventListener("input",apply);
+})();</script>`;
+}
+
+/** The one input every ledger filter is: type, rows that do not match disappear. */
+function filterRow(placeholder: string): string {
+  return `<div class="filter-row"><input class="input" type="search" placeholder="${escapeHtml(placeholder)}" aria-label="${escapeHtml(placeholder)}" data-filter-input></div>`;
 }
 
 // Footer, in the reference register: mark + wordmark left, mono links right.
@@ -1490,9 +1700,12 @@ function fmtInstant(ms: number): string {
 }
 
 /** `now` is a parameter rather than a call so the sectioning is testable and so every
- *  group on one render is cut against the same instant. */
-export function bundlesPage(email: string, groups: LedgerGroup[], now = Date.now()): string {
-  const og = { "og:title": "Bundles · Seer", "og:type": "website", robots: "noindex" };
+ *  group on one render is cut against the same instant. Scoped or not is read off
+ *  `nav.current`: the caller passes the one group a scoped page holds. */
+export function bundlesPage(nav: NavContext, groups: LedgerGroup[], now = Date.now()): string {
+  const scoped = nav.current !== null;
+  const title = scoped ? `Bundles · ${nav.current!.name} · Seer` : "Bundles · Seer";
+  const og = { "og:title": title, "og:type": "website", robots: "noindex" };
 
   const today = utcDay(now);
   const bundleUrl = (wsId: string, slug: string) => `/${wsId}/b/${encodeURIComponent(slug)}/`;
@@ -1515,7 +1728,7 @@ export function bundlesPage(email: string, groups: LedgerGroup[], now = Date.now
         ? `<button type="button" class="more-versions" data-menu-more` +
           ` aria-label="All ${b.versions.length} versions of ${escapeHtml(b.slug)}">+${rest}</button>`
         : "");
-    return `<tr data-at="${b.updatedAt}">
+    return `<tr data-at="${b.updatedAt}" data-filter="${escapeHtml(b.slug.toLowerCase())}">
           <td class="slug"><a href="${url}">${escapeHtml(b.slug)}</a></td>
           <td class="mono">v${b.latestVersion}</td>
           <td class="mono"><time datetime="${new Date(b.updatedAt).toISOString()}">${fmtInstant(b.updatedAt)}</time></td>
@@ -1534,7 +1747,7 @@ export function bundlesPage(email: string, groups: LedgerGroup[], now = Date.now
     const held = g.bundles.filter((b) => bucketFor(utcDay(b.updatedAt), today) === bucket.key);
     const open = bucket.key === "older" ? "" : " open";
     const hidden = held.length === 0 ? " hidden" : "";
-    return `<details class="ledger-section" data-section="${bucket.key}"${open}${hidden}>
+    return `<details class="ledger-section" data-section="${bucket.key}" data-filter-hide${open}${hidden}>
       <summary>${chevron}<span>${bucket.label}</span><span class="section-count" data-section-count>${held.length}</span><span class="section-rule"></span></summary>
       <div class="ledger scroll-x">
         <table>
@@ -1547,35 +1760,43 @@ export function bundlesPage(email: string, groups: LedgerGroup[], now = Date.now
     </details>`;
   };
 
-  const groupBlock = (g: LedgerGroup) => {
+  const groupBlock = (g: LedgerGroup, withHead: boolean) => {
+    // The scoped page carries the workspace in its own masthead, so the group head
+    // would say the same thing twice; the all view keeps it, with the name as the way
+    // into the workspace's own view.
     const pill = `<span class="pill${g.visibility === "public" ? " public" : ""}"><span class="bead"></span>${g.visibility}</span>`;
-    const head = `<div class="ws-head">
-      <h2>${escapeHtml(g.name)}</h2>
+    const head = withHead
+      ? `<div class="ws-head">
+      <h2><a href="/${g.wsId}/bundles">${escapeHtml(g.name)}</a></h2>
       <span class="mono-id">${escapeHtml(g.wsId)}</span>
       ${pill}
       <span class="spacer"></span>
       <a class="nav-action" href="/settings/${g.wsId}">settings</a>
-    </div>`;
+    </div>`
+      : "";
 
     if (g.bundles.length === 0) {
-      return `${head}
-      <p class="empty">No bundles here yet.</p>`;
+      return `<div data-filter-hide>${head}
+      <p class="empty">No bundles here yet.</p></div>`;
     }
 
-    return `${head}
+    return `<div data-filter-hide>${head}
     <div data-ledger-group>
       ${LEDGER_BUCKETS.map((bucket) => section(g, bucket)).join("\n")}
-    </div>`;
+    </div></div>`;
   };
 
   const body =
     groups.length === 0
       ? `<p class="empty">No workspaces yet.</p>`
-      : groups.map(groupBlock).join("\n");
+      : groups.map((g) => groupBlock(g, !scoped)).join("\n");
 
   // A member can always spin up another estate. Public by default; visibility is
-  // its own settings toggle.
-  const newWorkspace = `<form class="panel-row stack-gap" method="post" action="/workspaces">
+  // its own settings toggle. Only the all-workspaces view offers it: a scoped page is
+  // one estate's, and creating another is not something done from inside one.
+  const newWorkspace = scoped
+    ? ""
+    : `<form class="panel-row stack-gap" id="new-workspace" method="post" action="/workspaces">
       <input class="input" type="text" name="name" placeholder="new workspace name" maxlength="80" aria-label="New workspace name">
       <button class="btn primary" type="submit">New workspace</button>
     </form>`;
@@ -1605,25 +1826,38 @@ export function bundlesPage(email: string, groups: LedgerGroup[], now = Date.now
     <button class="rowmenu-item accent" type="button" role="menuitem" data-share-new>Create a share link</button>
   </div>`;
 
+  const masthead = scoped
+    ? `<h1 class="h-section">${escapeHtml(nav.current!.name)}</h1>
+    <div class="scope-row">
+      <span class="mono-id">${escapeHtml(nav.current!.id)}</span>
+      <span class="pill${groups[0]?.visibility === "public" ? " public" : ""}"><span class="bead"></span>${groups[0]?.visibility ?? "private"}</span>
+      <a class="nav-action" href="/settings/${escapeHtml(nav.current!.id)}">settings</a>
+    </div>`
+    : `<h1 class="h-section">Bundles</h1>
+    <p class="subtitle">Everything Seer is holding, workspace by workspace.</p>`;
+
   return `<!doctype html>
 <html lang="en">
-${head("Bundles · Seer", og)}
+${head(title, og)}
 <body>
 <div class="frame warm">
   <div class="shell spine">
-    ${navRow({ href: "/reviews", label: "reviews" })}
-    <p class="eyebrow"><span class="email-tag">${escapeHtml(email)}</span></p>
-    <h1 class="h-section">Bundles</h1>
-    <p class="subtitle">Everything Seer is holding, workspace by workspace.</p>
+    ${appBar(nav)}
+    ${masthead}
+    ${filterRow("Filter bundles")}
   </div>
 </div>
 <div class="frame grow">
   <div class="shell spine">
     ${body}
     ${newWorkspace}
-    <p class="aside stack-gap">You appear here for every workspace you're a member of. Each group is
+    ${
+      scoped
+        ? ""
+        : `<p class="aside stack-gap">You appear here for every workspace you're a member of. Each group is
     its own little estate — its visibility rides on its sleeve, its settings one click away.
-    A share link opens one bundle for someone who is in none of them, and it can be taken back.</p>
+    A share link opens one bundle for someone who is in none of them, and it can be taken back.</p>`
+    }
   </div>
 </div>
 <div class="frame night">
@@ -1633,6 +1867,7 @@ ${head("Bundles · Seer", og)}
 </div>
 ${rowMenu}
 ${themeToggleScript()}
+${appScript()}
 <script>${bundlesScript()}</script>
 </body>
 </html>`;
@@ -1651,6 +1886,9 @@ export interface LedgerReview {
   title: string;
   latestVersion: number;
   publishedAt: number;
+  /** The pull requests the review names, from `review_prs` — what a reader searching
+   *  "where was repo#123 reviewed" is actually searching by. */
+  prs: { repo: string; number: number }[];
   tally: { merged: number; closed: number; draft: number; open: number; unknown: number; total: number };
 }
 
@@ -1688,36 +1926,58 @@ function tallyCell(t: LedgerReview["tally"]): string {
   return `<span class="tally">${parts.join("")}</span>`;
 }
 
-export function reviewsPage(email: string, groups: ReviewLedgerGroup[]): string {
-  const og = { "og:title": "Reviews · Seer", "og:type": "website", robots: "noindex" };
+export function reviewsPage(nav: NavContext, groups: ReviewLedgerGroup[]): string {
+  const scoped = nav.current !== null;
+  const title = scoped ? `Reviews · ${nav.current!.name} · Seer` : "Reviews · Seer";
+  const og = { "og:title": title, "og:type": "website", robots: "noindex" };
 
   const row = (g: ReviewLedgerGroup, r: LedgerReview) => {
     const url = `/${g.wsId}/r/${encodeURIComponent(r.slug)}/`;
-    return `<tr>
+    // `owner/repo#12` and `repo#12` are both in the haystack, so the filter answers the
+    // question however the reader spells it.
+    const haystack = [
+      r.title,
+      r.slug,
+      ...r.prs.flatMap((p) => [`${p.repo}#${p.number}`, `${p.repo.split("/")[1] ?? p.repo}#${p.number}`]),
+    ]
+      .join(" ")
+      .toLowerCase();
+    const refs =
+      r.prs.length === 0
+        ? ""
+        : `<span class="pr-refs">${r.prs
+            .map(
+              (p) =>
+                `<a href="https://github.com/${escapeHtml(p.repo)}/pull/${p.number}" title="${escapeHtml(p.repo)}#${p.number}">${escapeHtml(p.repo.split("/")[1] ?? p.repo)}#${p.number}</a>`,
+            )
+            .join("")}</span>`;
+    return `<tr data-filter="${escapeHtml(haystack)}">
           <td class="slug"><a href="${url}">${escapeHtml(r.title)}</a>
             <span class="row-sub mono">${escapeHtml(r.slug)}</span></td>
           <td class="mono">v${r.latestVersion}</td>
           <td class="mono"><time datetime="${new Date(r.publishedAt).toISOString()}">${fmtInstant(r.publishedAt)}</time></td>
-          <td class="status-cell">${tallyCell(r.tally)}</td>
+          <td class="status-cell">${refs}${tallyCell(r.tally)}</td>
         </tr>`;
   };
 
-  const groupBlock = (g: ReviewLedgerGroup) => {
+  const groupBlock = (g: ReviewLedgerGroup, withHead: boolean) => {
     const pill = `<span class="pill${g.visibility === "public" ? " public" : ""}"><span class="bead"></span>${g.visibility}</span>`;
-    const head = `<div class="ws-head">
-      <h2>${escapeHtml(g.name)}</h2>
+    const head = withHead
+      ? `<div class="ws-head">
+      <h2><a href="/${g.wsId}/reviews">${escapeHtml(g.name)}</a></h2>
       <span class="mono-id">${escapeHtml(g.wsId)}</span>
       ${pill}
       <span class="spacer"></span>
       <a class="nav-action" href="/settings/${g.wsId}">settings</a>
-    </div>`;
+    </div>`
+      : "";
 
     if (g.reviews.length === 0) {
-      return `${head}
-      <p class="empty">No reviews here yet.</p>`;
+      return `<div data-filter-hide>${head}
+      <p class="empty">No reviews here yet.</p></div>`;
     }
 
-    return `${head}
+    return `<div data-filter-hide>${head}
     <div class="ledger scroll-x">
       <table>
         <thead><tr><th>Review</th><th>Latest</th><th>Published</th><th>Pull requests</th></tr></thead>
@@ -1725,24 +1985,33 @@ export function reviewsPage(email: string, groups: ReviewLedgerGroup[]): string 
         ${g.reviews.map((r) => row(g, r)).join("\n")}
         </tbody>
       </table>
-    </div>`;
+    </div></div>`;
   };
 
   const body =
     groups.length === 0
       ? `<p class="empty">No workspaces yet.</p>`
-      : groups.map(groupBlock).join("\n");
+      : groups.map((g) => groupBlock(g, !scoped)).join("\n");
+
+  const masthead = scoped
+    ? `<h1 class="h-section">${escapeHtml(nav.current!.name)}</h1>
+    <div class="scope-row">
+      <span class="mono-id">${escapeHtml(nav.current!.id)}</span>
+      <span class="pill${groups[0]?.visibility === "public" ? " public" : ""}"><span class="bead"></span>${groups[0]?.visibility ?? "private"}</span>
+      <a class="nav-action" href="/settings/${escapeHtml(nav.current!.id)}">settings</a>
+    </div>`
+    : `<h1 class="h-section">Reviews</h1>
+    <p class="subtitle">Every review published here, newest first, workspace by workspace.</p>`;
 
   return `<!doctype html>
 <html lang="en">
-${head("Reviews · Seer", og)}
+${head(title, og)}
 <body>
 <div class="frame warm">
   <div class="shell spine">
-    ${navRow({ href: "/bundles", label: "bundles" })}
-    <p class="eyebrow"><span class="email-tag">${escapeHtml(email)}</span></p>
-    <h1 class="h-section">Reviews</h1>
-    <p class="subtitle">Every review published here, newest first, workspace by workspace.</p>
+    ${appBar(nav)}
+    ${masthead}
+    ${filterRow("Filter by title or repo#123")}
   </div>
 </div>
 <div class="frame grow">
@@ -1760,6 +2029,7 @@ ${head("Reviews · Seer", og)}
   </div>
 </div>
 ${themeToggleScript()}
+${appScript()}
 </body>
 </html>`;
 }
@@ -2089,6 +2359,7 @@ export interface SettingsInstallation {
 }
 
 export interface SettingsData {
+  nav: NavContext;
   wsId: string;
   name: string;
   visibility: "public" | "private";
@@ -2220,7 +2491,7 @@ ${head(`Settings · ${d.name} · Seer`, og)}
 <body>
 <div class="frame warm">
   <div class="shell spine">
-    ${navRow({ href: "/bundles", label: "bundles" })}
+    ${appBar(d.nav)}
     <p class="eyebrow"><span class="email-tag">${escapeHtml(d.wsId)} · workspace</span></p>
     <h1 class="h-section">${escapeHtml(d.name)}</h1>
     <p class="subtitle">Settings, members, and your keys.</p>
@@ -2350,6 +2621,7 @@ ${head(`Settings · ${d.name} · Seer`, og)}
   </div>
 </div>
 ${themeToggleScript()}
+${appScript()}
 </body>
 </html>`;
 }

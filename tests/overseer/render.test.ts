@@ -819,6 +819,13 @@ describe("GET /r/:slug", () => {
     expect(await res.text()).toContain('<div class="chain">');
   });
 
+  test("a member's page carries the way back to the workspace's reviews", async () => {
+    const res = await fetch(`${base}/${wsA}/r/shown`);
+    expect(await res.text()).toContain(
+      `<a class="head-index" href="/${wsA}/reviews">All reviews</a>`,
+    );
+  });
+
   test("a pinned version marks itself", async () => {
     const res = await fetch(`${base}/r/shown/v/1`);
     expect(res.status).toBe(200);

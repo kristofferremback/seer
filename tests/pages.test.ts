@@ -7,12 +7,15 @@ import {
   bucketFor,
   utcDay,
   landingPage,
+  reviewsPage,
   settingsPage,
   githubClaimPage,
   invitePage,
   noSeatPage,
   type LedgerBundle,
   type LedgerGroup,
+  type NavContext,
+  type ReviewLedgerGroup,
   type SettingsData,
   type InviteData,
 } from "../src/pages";
@@ -23,6 +26,7 @@ import { legacyWorkspaceId } from "../src/db";
 
 function settings(over: Partial<SettingsData> = {}): SettingsData {
   return {
+    nav: nav({ section: "settings", current: { id: "ws_7g2kq4xbvm", name: "Crystal Palace" } }),
     wsId: "ws_7g2kq4xbvm",
     name: "Crystal Palace",
     visibility: "private",
@@ -313,6 +317,21 @@ describe("settings markers", () => {
 
 // ---- bundles: grouping + new-workspace affordance ----
 
+// The app bar's context, in the shape every signed-in page takes first. The email
+// used to be the first argument; it now rides in here with the switcher's data.
+function nav(over: Partial<NavContext> = {}): NavContext {
+  return {
+    email: "me@example.com",
+    workspaces: [
+      { id: "ws_7g2kq4xbvm", name: "Crystal Palace" },
+      { id: "ws_4n8rp2wcfd", name: "Pierre's bench" },
+    ],
+    current: null,
+    section: "bundles",
+    ...over,
+  };
+}
+
 // A Wednesday, so that "this week" (Monday the 3rd onward) and "last week" are both
 // reachable and distinguishable from yesterday. Every offset below is days back from it.
 const NOW = Date.parse("2026-08-05T09:00:00Z");
@@ -339,10 +358,10 @@ function groups(): LedgerGroup[] {
 }
 
 describe("bundles grouping", () => {
-  test("one group head per workspace: name, ws id, visibility pill, settings link", () => {
-    const html = bundlesPage("kristoffer.remback@gmail.com", groups(), NOW);
-    expect(html).toContain("<h2>Crystal Palace</h2>");
-    expect(html).toContain("<h2>Pierre's bench</h2>"); // escapeHtml leaves apostrophes alone
+  test("one group head per workspace: name into its own view, ws id, visibility pill, settings link", () => {
+    const html = bundlesPage(nav(), groups(), NOW);
+    expect(html).toContain(`<h2><a href="/ws_7g2kq4xbvm/bundles">Crystal Palace</a></h2>`);
+    expect(html).toContain(`<h2><a href="/ws_4n8rp2wcfd/bundles">Pierre's bench</a></h2>`); // escapeHtml leaves apostrophes alone
     expect(html).toContain("ws_7g2kq4xbvm");
     expect(html).toContain("ws_4n8rp2wcfd");
     // Private group: bare pill; public group: pill with the public modifier.
@@ -353,25 +372,25 @@ describe("bundles grouping", () => {
   });
 
   test("bundle and history URLs are workspace-scoped", () => {
-    const html = bundlesPage("me@example.com", groups(), NOW);
+    const html = bundlesPage(nav(), groups(), NOW);
     expect(html).toContain('href="/ws_7g2kq4xbvm/b/onboarding-report/"');
     expect(html).toContain('href="/ws_7g2kq4xbvm/b/onboarding-report/v/3/"');
     expect(html).toContain('href="/ws_4n8rp2wcfd/b/recipe-box/v/1/"');
   });
 
   test("a New workspace button posts to /workspaces", () => {
-    const html = bundlesPage("me@example.com", groups(), NOW);
+    const html = bundlesPage(nav(), groups(), NOW);
     expect(html).toContain('action="/workspaces"');
     expect(html).toContain("New workspace");
   });
 
   test("a workspace with no bundles still gets its head and an empty note", () => {
     const html = bundlesPage(
-      "me@example.com",
+      nav(),
       [{ wsId: "ws_0000000000", name: "Empty", visibility: "public", bundles: [] }],
       NOW,
     );
-    expect(html).toContain("<h2>Empty</h2>");
+    expect(html).toContain(`<h2><a href="/ws_0000000000/bundles">Empty</a></h2>`);
     expect(html).toContain("No bundles here yet");
     // No bundles means no sections at all, not five empty ones.
     expect(html).not.toContain(`<details class="ledger-section"`);
@@ -427,7 +446,7 @@ describe("bundles recency sections", () => {
   });
 
   test("every bucket is drawn in one order, and each row lands in its own", () => {
-    const html = bundlesPage("me@example.com", dated(), NOW);
+    const html = bundlesPage(nav(), dated(), NOW);
     const order = ["today", "yesterday", "this-week", "last-week", "older"];
     let at = -1;
     for (const key of order) {
@@ -444,21 +463,21 @@ describe("bundles recency sections", () => {
   });
 
   test("each head carries its own count", () => {
-    const html = bundlesPage("me@example.com", dated(), NOW);
+    const html = bundlesPage(nav(), dated(), NOW);
     expect(sectionOf(html, "today")).toContain(">Today</span><span class=\"section-count\" data-section-count>2<");
     expect(sectionOf(html, "yesterday")).toContain(">Yesterday</span><span class=\"section-count\" data-section-count>1<");
     expect(sectionOf(html, "older")).toContain(">Older</span><span class=\"section-count\" data-section-count>1<");
   });
 
   test("Older ships folded and the rest open; an empty bucket is hidden, not dropped", () => {
-    const html = bundlesPage("me@example.com", dated(), NOW);
-    expect(sectionOf(html, "today").startsWith('<details class="ledger-section" data-section="today" open')).toBe(true);
+    const html = bundlesPage(nav(), dated(), NOW);
+    expect(sectionOf(html, "today").startsWith('<details class="ledger-section" data-section="today" data-filter-hide open')).toBe(true);
     expect(sectionOf(html, "older")).not.toContain(" open");
 
     // One bundle, one occupied bucket: the other four are still there for the browser
     // to move rows into when it re-dates them locally.
     const one = bundlesPage(
-      "me@example.com",
+      nav(),
       [{ wsId: "ws_7g2kq4xbvm", name: "One", visibility: "public", bundles: [
         { slug: "solo", latestVersion: 1, updatedAt: daysAgo(0), versions: [1] },
       ] }],
@@ -475,7 +494,7 @@ describe("bundles recency sections", () => {
     // is therefore written twice, and this is what stops the two from drifting: the
     // browser's copy is lifted out of the page it was emitted into and asked the same
     // questions the server's answers.
-    const html = bundlesPage("me@example.com", dated(), NOW);
+    const html = bundlesPage(nav(), dated(), NOW);
     const opens = "const bucket = (day, today) => {";
     const closes = "\n  };";
     const start = html.indexOf(opens);
@@ -498,7 +517,7 @@ describe("bundles recency sections", () => {
   });
 
   test("a row carries the raw instant and a machine-readable stamp beside the printed one", () => {
-    const html = bundlesPage("me@example.com", dated(), NOW);
+    const html = bundlesPage(nav(), dated(), NOW);
     expect(html).toContain(`data-at="${daysAgo(0)}"`);
     expect(html).toContain(`<time datetime="${new Date(daysAgo(1)).toISOString()}">2026-08-04 09:00</time>`);
   });
@@ -508,14 +527,14 @@ describe("bundles recency sections", () => {
 
 describe("the bundle row menu", () => {
   test("every row gets a menu button naming its workspace, slug and URL", () => {
-    const html = bundlesPage("me@example.com", groups(), NOW);
+    const html = bundlesPage(nav(), groups(), NOW);
     expect(html).toContain('data-ws="ws_7g2kq4xbvm" data-slug="onboarding-report" data-url="/ws_7g2kq4xbvm/b/onboarding-report/"');
     expect(html).toContain('aria-label="Actions for recipe-box"');
     expect(html).toContain('aria-expanded="false"');
   });
 
   test("one popover serves the page, and it mints bundle shares", () => {
-    const html = bundlesPage("me@example.com", groups(), NOW);
+    const html = bundlesPage(nav(), groups(), NOW);
     expect(html.split('<div class="rowmenu"').length - 1).toBe(1);
     expect(html).toContain("data-share-new");
     expect(html).toContain("data-share-list");
@@ -527,7 +546,7 @@ describe("the bundle row menu", () => {
 
   test("a short history prints in full and asks for no overflow", () => {
     const html = bundlesPage(
-      "me@example.com",
+      nav(),
       [{ wsId: "ws_7g2kq4xbvm", name: "Five", visibility: "public", bundles: [
         { slug: "five", latestVersion: 5, updatedAt: daysAgo(0), versions: [5, 4, 3, 2, 1] },
       ] }],
@@ -542,7 +561,7 @@ describe("the bundle row menu", () => {
   test("a long history prints its head and hands the tail to the menu", () => {
     const versions = [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
     const html = bundlesPage(
-      "me@example.com",
+      nav(),
       [{ wsId: "ws_7g2kq4xbvm", name: "Many", visibility: "public", bundles: [
         { slug: "many", latestVersion: 12, updatedAt: daysAgo(0), versions },
       ] }],
@@ -565,7 +584,7 @@ describe("the bundle row menu", () => {
 
   test("no bundles, no menu button — but the popover markup is harmless either way", () => {
     const html = bundlesPage(
-      "me@example.com",
+      nav(),
       [{ wsId: "ws_0000000000", name: "Empty", visibility: "public", bundles: [] }],
       NOW,
     );
@@ -667,6 +686,162 @@ describe("reveal never survives to a plain GET", () => {
     const html = await page.text();
     expect(html).not.toContain('class="reveal"');
     expect(html).not.toContain("shown once");
+  });
+});
+
+// ---- the workspace's own pages, over HTTP (AUTH_DISABLED → root member) ----
+
+describe("the workspace's own pages", () => {
+  let server: Awaited<ReturnType<typeof startServer>>;
+  let base: string;
+  let rootWs: string;
+
+  beforeAll(async () => {
+    server = await startServer();
+    base = `http://localhost:${server.port}`;
+    rootWs = legacyWorkspaceId()!;
+  });
+  afterAll(() => server.stop(true));
+
+  test("the bare id is a front door to its bundles", async () => {
+    const res = await fetch(`${base}/${rootWs}`, { redirect: "manual" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe(`/${rootWs}/bundles`);
+  });
+
+  test("the scoped ledgers render with the app bar and the workspace masthead", async () => {
+    for (const section of ["bundles", "reviews"]) {
+      const res = await fetch(`${base}/${rootWs}/${section}`);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain('class="appbar"');
+      expect(html).toContain('class="scope-row"');
+      expect(html).toContain(rootWs);
+    }
+  });
+
+  test("settings keeps its one canonical URL", async () => {
+    const res = await fetch(`${base}/${rootWs}/settings`, { redirect: "manual" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe(`/settings/${rootWs}`);
+  });
+
+  test("a workspace that does not exist is the soft-404", async () => {
+    const res = await fetch(`${base}/ws_0000000000/bundles`, { redirect: "manual" });
+    expect(res.status).toBe(404);
+  });
+});
+
+// ---- the app bar: one chrome for every signed-in page ----
+
+describe("the app bar", () => {
+  test("every signed-in page draws the same chrome: sections, switcher, email", () => {
+    for (const html of [
+      bundlesPage(nav(), groups(), NOW),
+      reviewsPage(nav({ section: "reviews" }), []),
+      settingsPage(settings()),
+    ]) {
+      expect(html).toContain('class="appbar"');
+      expect(html).toContain(">Bundles</a>");
+      expect(html).toContain(">Reviews</a>");
+      expect(html).toContain("All workspaces");
+      expect(html).toContain("me@example.com");
+    }
+  });
+
+  test("the section being read is marked, and only that one", () => {
+    const html = bundlesPage(nav(), groups(), NOW);
+    expect(html).toContain('href="/bundles" aria-current="page">Bundles</a>');
+    expect(html).toContain('href="/reviews">Reviews</a>');
+  });
+
+  test("the switcher moves the scope and keeps the section", () => {
+    const html = reviewsPage(nav({ section: "reviews" }), []);
+    expect(html).toContain('href="/ws_7g2kq4xbvm/reviews"');
+    expect(html).toContain('href="/ws_4n8rp2wcfd/reviews"');
+    expect(html).toContain('href="/reviews" aria-current="true">All workspaces</a>');
+  });
+
+  test("scoped, the section links stay inside the workspace and the switcher marks it", () => {
+    const html = bundlesPage(
+      nav({ current: { id: "ws_7g2kq4xbvm", name: "Crystal Palace" } }),
+      [groups()[0]!],
+      NOW,
+    );
+    expect(html).toContain('href="/ws_7g2kq4xbvm/bundles" aria-current="page">Bundles</a>');
+    expect(html).toContain('href="/ws_7g2kq4xbvm/reviews">Reviews</a>');
+    expect(html).toContain('aria-current="true"');
+  });
+});
+
+// ---- the scoped page ----
+
+describe("the workspace-scoped ledgers", () => {
+  const scopedNav = () => nav({ current: { id: "ws_7g2kq4xbvm", name: "Crystal Palace" } });
+
+  test("the workspace is the masthead, so the group head does not say it again", () => {
+    const html = bundlesPage(scopedNav(), [groups()[0]!], NOW);
+    expect(html).toContain('<h1 class="h-section">Crystal Palace</h1>');
+    expect(html).not.toContain('class="ws-head"');
+    // Its line carries the id, the visibility, and the way into settings.
+    expect(html).toContain('class="scope-row"');
+    expect(html).toContain('href="/settings/ws_7g2kq4xbvm"');
+    // One estate's page does not offer to found another.
+    expect(html).not.toContain('action="/workspaces"');
+  });
+
+  test("the all-workspaces view keeps its group heads and the new-workspace form", () => {
+    const html = bundlesPage(nav(), groups(), NOW);
+    expect(html).toContain('class="ws-head"');
+    expect(html).toContain('action="/workspaces"');
+  });
+});
+
+// ---- reviews: found by the pull request they name ----
+
+function reviewGroups(): ReviewLedgerGroup[] {
+  return [
+    {
+      wsId: "ws_7g2kq4xbvm",
+      name: "Crystal Palace",
+      visibility: "private",
+      reviews: [
+        {
+          slug: "gate-rewrite",
+          title: "The gate, rewritten",
+          latestVersion: 2,
+          publishedAt: NOW,
+          prs: [
+            { repo: "acme/atlas", number: 12 },
+            { repo: "acme/atlas", number: 13 },
+          ],
+          tally: { merged: 1, closed: 0, draft: 0, open: 1, unknown: 0, total: 2 },
+        },
+      ],
+    },
+  ];
+}
+
+describe("reviews found by pull request", () => {
+  test("a row names its pull requests, each a way out to GitHub", () => {
+    const html = reviewsPage(nav({ section: "reviews" }), reviewGroups());
+    expect(html).toContain('href="https://github.com/acme/atlas/pull/12"');
+    expect(html).toContain(">atlas#12</a>");
+    expect(html).toContain(">atlas#13</a>");
+  });
+
+  test("the filter's haystack answers both spellings of a pull request", () => {
+    const html = reviewsPage(nav({ section: "reviews" }), reviewGroups());
+    expect(html).toContain("acme/atlas#12");
+    expect(html).toContain("atlas#12");
+    expect(html).toContain("the gate, rewritten"); // the title, lowercased
+    expect(html).toContain("data-filter-input");
+  });
+
+  test("the bundles ledger filters by slug the same way", () => {
+    const html = bundlesPage(nav(), groups(), NOW);
+    expect(html).toContain('data-filter="onboarding-report"');
+    expect(html).toContain("data-filter-input");
   });
 });
 

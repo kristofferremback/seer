@@ -181,6 +181,12 @@ assert(
     !html.includes(`/${ws}/r/golden`),
     "a shared page should not print the private url",
   );
+  // Nor the index it was cut out of: the holder was handed one page. (The class name
+  // itself rides in the shared stylesheet; the anchor is what must be absent.)
+  assert(
+    !html.includes(`<a class="head-index"`),
+    "a shared page should not link to the reviews index",
+  );
 }
 
 // ---- dead tokens are one refusal, byte for byte ----
@@ -301,9 +307,13 @@ for (const [what, token] of [
   // exists to be refused.
   const mine = await fetch(`${base}/${ws}/b/preview/`, { headers: memberCookie });
   assert(mine.status === 200, `a member should reach their own bundle, got ${mine.status}`);
+  const mineHtml = await mine.text();
+  assert(mineHtml.includes("the preview"), "the member's own bundle should render its page");
+  // The corner overlay is the member's, and only the member's: it mints shares with
+  // the session it rides on, so a page served to anyone else must not carry it.
   assert(
-    (await mine.text()).includes("the preview"),
-    "the member's own bundle should render its page",
+    mineHtml.includes("__seerLens"),
+    "a member's own bundle page should carry the Seer overlay",
   );
 
   // And the stranger is refused at the canonical URL, with or without a token in hand:
@@ -332,6 +342,10 @@ for (const [what, token] of [
   assert(
     !html.includes(`/${ws}/b/preview`),
     "a shared bundle should not print the private url it stands in for",
+  );
+  assert(
+    !html.includes("__seerLens"),
+    "a shared bundle must not carry the member overlay",
   );
   // It reloads over the token, because the workspace channel would refuse the holder.
   assert(
@@ -477,6 +491,69 @@ for (const [what, token] of [
     body: JSON.stringify({ workspace: ws, kind: "bundle", target: "preview" }),
   });
   assert(anonymous.status === 403, `an anonymous mint should 403, got ${anonymous.status}`);
+}
+
+// ---- a public bundle stays pristine for the public ----
+//
+// The overlay turns on membership, not on reachability: a public workspace serves its
+// bundles to anyone, and an anonymous reader must get the bundle exactly as uploaded.
+{
+  const pub = tinyId("ws");
+  db.run(
+    "INSERT INTO workspaces (id, name, visibility, created_at) VALUES (?, ?, 'public', ?)",
+    [pub, "Open", now],
+  );
+  db.run("INSERT INTO memberships (workspace_id, user_id, created_at) VALUES (?, ?, ?)", [
+    pub,
+    member,
+    now,
+  ]);
+  const zip = zipSync({ "index.html": strToU8("<!doctype html><body>open house</body>") });
+  const version = createVersion(pub, "open", zip.length, 1);
+  await saveZip(pub, "open", version, zip);
+
+  const anonymous = await fetch(`${base}/${pub}/b/open/`, { redirect: "manual" });
+  assert(anonymous.status === 200, `a public bundle should 200 signed out, got ${anonymous.status}`);
+  assert(
+    !(await anonymous.text()).includes("__seerLens"),
+    "an anonymous reader of a public bundle must not get the member overlay",
+  );
+
+  const asMember = await fetch(`${base}/${pub}/b/open/`, { headers: memberCookie });
+  assert(
+    (await asMember.text()).includes("__seerLens"),
+    "the same public bundle should carry the overlay for a member",
+  );
+}
+
+// ---- the workspace's own pages are members-only ----
+//
+// Under AUTH_DISABLED every request is the root user, so only this process can ask
+// what a signed-out browser and a signed-in non-member actually get.
+{
+  const signedOut = await fetch(`${base}/${ws}/bundles`, { redirect: "manual" });
+  assert(
+    signedOut.status === 302 || signedOut.status === 303,
+    `a signed-out reader should be sent to sign in, got ${signedOut.status}`,
+  );
+
+  const own = await fetch(`${base}/${ws}/bundles`, { headers: memberCookie });
+  assert(own.status === 200, `a member should reach their workspace page, got ${own.status}`);
+
+  // The root workspace ALLOWED_EMAILS bootstrapped belongs to nobody in this script's
+  // cast; the member reaching for it must meet the same 404 an unknown id gets.
+  const elsewhere = db
+    .query<{ id: string }, [string]>(
+      "SELECT w.id FROM workspaces w WHERE w.id NOT IN (SELECT workspace_id FROM memberships WHERE user_id = ?) LIMIT 1",
+    )
+    .get(member);
+  if (elsewhere) {
+    const denied = await fetch(`${base}/${elsewhere.id}/bundles`, { headers: memberCookie });
+    assert(
+      denied.status === 404,
+      `someone else's workspace page should 404 a non-member, got ${denied.status}`,
+    );
+  }
 }
 
 console.log("all assertions passed");
