@@ -933,6 +933,40 @@ function styles(): string {
     .slug { overflow-wrap: anywhere; }
     .ledger { border-radius: 12px; }
 
+    /* The switcher's panel anchors to the bar rather than its own button: the bar
+       wraps at this width and the button can land at the left edge, where a panel
+       right-aligned to it hangs off the screen. The bar spans the frame, so its
+       right edge is one the panel can actually keep. */
+    .appbar { position: relative; }
+    .wsmenu { position: static; }
+
+    /* A table this narrow stops being a table: each row becomes a short stack —
+       the title on its own line, everything else on one quiet line under it. The
+       header row goes with the columns; v2 and a date introduce themselves. */
+    table.stack, table.stack tbody { display: block; }
+    table.stack thead { display: none; }
+    table.stack tr {
+      display: grid;
+      grid-template-columns: max-content max-content minmax(0, 1fr) max-content;
+      column-gap: 0.85rem;
+      row-gap: 0.3rem;
+      align-items: baseline;
+      padding: 0.65rem 0.85rem 0.75rem;
+      border-bottom: 1px solid hsl(var(--line) / 0.6);
+    }
+    table.stack tr:last-child { border-bottom: 0; }
+    table.stack tr[hidden] { display: none; }
+    table.stack td { display: block; border: 0; padding: 0; min-width: 0; }
+    table.stack td.history { display: none; }
+    table.stack td.slug { grid-row: 1; grid-column: 1 / -1; }
+    /* the bundles row keeps its ⋯ beside the title; the title yields it the corner */
+    table.stack tr:has(td.row-actions) td.slug { grid-column: 1 / 4; }
+    table.stack td.row-actions { grid-row: 1; grid-column: 4; align-self: start; }
+    table.stack td.status-cell { white-space: normal; }
+    /* refs and tally share the one meta line instead of stacking */
+    table.stack .pr-refs { display: inline-flex; margin: 0 0.6rem 0 0; vertical-align: baseline; }
+    table.stack .tally { vertical-align: baseline; }
+
     /* The popover becomes a sheet at the bottom of the screen — a thumb reaches it,
        it needs no flipping, and it cannot be pinned into a corner by a row near the
        edge. place() clears its inline left/top on this width so these rules own the
@@ -1760,7 +1794,7 @@ export function bundlesPage(nav: NavContext, groups: LedgerGroup[], now = Date.n
     return `<details class="ledger-section" data-section="${bucket.key}" data-filter-hide${open}${hidden}>
       <summary>${chevron}<span>${bucket.label}</span><span class="section-count" data-section-count>${held.length}</span><span class="section-rule"></span></summary>
       <div class="ledger scroll-x">
-        <table>
+        <table class="stack">
           <thead><tr><th>Bundle</th><th>Latest</th><th>Updated</th><th class="col-history">History</th><th class="col-menu"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody data-section-rows>
           ${held.map((b) => row(g, b)).join("\n")}
@@ -1993,7 +2027,7 @@ export function reviewsPage(nav: NavContext, groups: ReviewLedgerGroup[]): strin
 
     return `<div data-filter-hide>${head}
     <div class="ledger scroll-x">
-      <table>
+      <table class="stack">
         <thead><tr><th>Review</th><th>Latest</th><th>Published</th><th>Pull requests</th></tr></thead>
         <tbody>
         ${g.reviews.map((r) => row(g, r)).join("\n")}
