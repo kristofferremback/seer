@@ -17,6 +17,7 @@
 
 import { escapeHtml } from "../escape";
 import { agoWords } from "../relative-time";
+import { figureSvg } from "./figure";
 import { getWorkspace, listUserWorkspaces } from "../db";
 import { sessionUser, type SessionUser } from "../auth";
 import { openAttachment, attachmentLocation } from "../store";
@@ -548,15 +549,9 @@ const STYLE = `  @font-face {
     margin-bottom: 12px;
   }
 
-  /* ---- contents ---- */
-  .contents {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: hsl(var(--muted));
-    margin: 16px 0 0;
-    line-height: 22px;
-  }
-  .contents a { display: inline-block; padding: 11px 0; }
+  /* ---- contents ----
+     The dot-separated link line this block styled is gone: the contents are drawn
+     as the reading spine, whose rules live with the structure styles below. */
 
   /* ---- inline resolved reference ----
      A chevron and an underlined file location point to the code block below. There is
@@ -1368,7 +1363,7 @@ const EVIDENCE_STYLE = `
   .prbody { margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: hsl(var(--ink-soft)); white-space: pre-wrap; }
 `;
 
-/** The reading arc and the section clarifiers.
+/** The reading arc, drawn rather than explained.
  *
  *  The overview's two accounts used to be labelled by provenance alone — "Author
  *  intent", "Witness account" — which told a reader who was speaking and never which
@@ -1377,9 +1372,12 @@ const EVIDENCE_STYLE = `
  *  question and keeps the provenance as its quiet suffix, because the two accounts
  *  disagreeing is a finding and the reader must still see whose words are whose.
  *
- *  The clarifier under a section heading is one muted line saying what the section
- *  holds. "Coverage" and "Review focus" are this product's own vocabulary, and a
- *  heading a first-time reader cannot decode is ambiguity, not economy. */
+ *  What a section holds is said by something drawn, not by a sentence under the
+ *  heading: the contents line is a spine of steps in reading order, review focus
+ *  keys its icon vocabulary beside the counts, the walkthrough heading carries the
+ *  whole diff's tally with a share bar on every group, and coverage draws its paths
+ *  converging on the change. A first draft wrote a one-line clarifier under each
+ *  heading instead, and every one of them read as a schema comment. */
 const STRUCTURE_STYLE = `
   .account-title { color: hsl(var(--ink-soft)); }
   .account-prov { color: hsl(var(--muted)); font-weight: 400; }
@@ -1388,9 +1386,22 @@ const STRUCTURE_STYLE = `
     font: 500 13px/1.35 var(--font-body); color: hsl(var(--ink-soft));
   }
   .rows-title + .rows { margin-top: 8px; }
-  .secnote { margin: -4px 0 14px; font-size: 13px; line-height: 1.55; color: hsl(var(--muted)); }
-  #notes .secnote, #walkthrough .secnote { margin: 7px 0 6px; }
-  .design-heading + .secnote { margin: -2px 0 8px; }
+  /* the contents, as the path the page is read along rather than a list of words */
+  .spine { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 5px; margin: 18px 0 0; font-family: var(--font-mono); font-size: 11.5px; }
+  .spine a { display: inline-block; padding: 6px 9px; border: 1px solid hsl(var(--line)); border-radius: 5px; text-decoration: none; color: hsl(var(--ink-soft)); }
+  .spine a:active { background: hsl(var(--ink) / 0.07); }
+  @media (hover: hover) and (pointer: fine) { .spine a:hover { border-color: hsl(var(--ink) / 0.3); color: hsl(var(--ink)); } }
+  .spine-sep { width: 11px; height: 11px; stroke-width: 2.2; color: hsl(var(--muted) / 0.65); flex: none; }
+  /* the icon vocabulary, keyed once beside its counts */
+  .focus-key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 4px; font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); }
+  .focus-key span { display: inline-flex; align-items: center; gap: 6px; }
+  /* the walkthrough heading carries the whole diff's tally at its far end */
+  .walk-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  /* a group's share of the changed lines, drawn beside its own count */
+  .gbar { display: inline-block; width: 52px; height: 4px; margin-right: 10px; vertical-align: 2px; background: hsl(var(--ink) / 0.08); border-radius: 999px; overflow: hidden; }
+  .gbar i { display: block; height: 100%; background: hsl(var(--muted) / 0.75); border-radius: 999px; }
+  /* a derived figure hugs its drawing instead of spanning the column */
+  .figbox { display: inline-block; margin: 6px 0 12px; }
 `;
 
 /** Code, taken out of the column.
@@ -2956,16 +2967,38 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
   const placement = marked(safeBlock(design.placement), d, "placement", "design", true);
   return (
     `<section id="design"><h2>Code design</h2>` +
-    `<p class="secnote">Where the change lives in the code, and why there.</p>` +
     (placement === "" ? "" : `<div class="placement">${placement}</div>`) +
     (modules === "" ? "" : `<div class="design-grid">${modules}</div>`) +
     (coverage === ""
       ? ""
       : `<h3 class="design-heading">${icon("branch")}<span>Coverage</span></h3>` +
-        `<p class="secnote">Whether every code path that needs this change actually got it.</p>` +
+        coverageFigure(design.coverage) +
         `<div class="coverage-list">${coverage}</div>`) +
     `</section>\n`
   );
+}
+
+/** What "Coverage" means, drawn instead of captioned: every conceptual path the
+ *  change must cover, converging on the change. Derived from the coverage titles
+ *  alone, so it can never claim an edge the rows below do not carry. One path draws
+ *  no figure — a single arrow into a box is not a sprawl check, it is decoration. */
+function coverageFigure(coverage: DesignCoverage[]): string {
+  if (coverage.length < 2) return "";
+  const label = (title: string) =>
+    title.length <= 40 ? title : `${title.slice(0, 39)}…`;
+  const svg = figureSvg({
+    kind: "flow",
+    nodes: [
+      ...coverage.map((c) => ({
+        id: `cov-${c.id}`,
+        label: label(c.title),
+        state: "normal" as const,
+      })),
+      { id: "change", label: "this change", state: "normal" as const },
+    ],
+    edges: coverage.map((c) => ({ from: `cov-${c.id}`, to: "change", label: "" })),
+  });
+  return `<div class="ev-figure figbox">${svg}</div>`;
 }
 
 function noteRow(n: Note, ctx: RenderCtx): string {
@@ -3161,6 +3194,46 @@ function notesInOrder(notes: Note[]): Note[] {
     ...notes.filter((n) => n.kind === "risk"),
     ...notes.filter((n) => n.kind === "note"),
   ];
+}
+
+/** The contents, drawn as the path the page is read along: each step a box, the
+ *  steps separated by the same chevron every disclosure on the page uses. A step
+ *  that would lead to nothing is not drawn. */
+function spine(
+  doc: ReviewDoc,
+  hasCodeDesign: boolean,
+  delta: DeltaIndex | null,
+): string {
+  const hasProblem = doc.authorIntent != null && doc.authorIntent.trim() !== "";
+  const hasFocus =
+    doc.notes.length > 0 || (delta?.removed("note").length ?? 0) > 0;
+  const steps: [string, string][] = [];
+  if (hasProblem) steps.push(["#problem", "the problem"]);
+  steps.push(["#solution", "the solution"], ["#changes", "what changes"]);
+  if (hasCodeDesign) steps.push(["#design", "the design"]);
+  if (hasFocus) steps.push(["#notes", "what to judge"]);
+  steps.push(["#walkthrough", "the diff"]);
+  return (
+    `<nav class="spine" aria-label="Contents, in reading order">` +
+    steps
+      .map(([href, label]) => `<a href="${href}">${label}</a>`)
+      .join(icon("chev", "spine-sep")) +
+    `</nav>`
+  );
+}
+
+/** The icon vocabulary of the rows below, keyed once beside its counts. Each icon
+ *  sits against the word it means, so the rows themselves need no explanation. */
+function focusKey(notes: Note[]): string {
+  const parts = (["decision", "risk", "note"] as const)
+    .map((kind) => ({ kind, count: notes.filter((n) => n.kind === kind).length }))
+    .filter(({ count }) => count > 0)
+    .map(
+      ({ kind, count }) =>
+        `<span>${icon(kind, `ic k-${kind}`)}${count} ${kind}${count === 1 ? "" : "s"}</span>`,
+    )
+    .join("");
+  return parts === "" ? "" : `<p class="focus-key">${parts}</p>`;
 }
 
 /** A date the colophon can hold, or nothing. A stored timestamp out of the range Date
@@ -3488,10 +3561,6 @@ export function renderReviewPage(input: RenderInput): string {
         delta.removed("coverage").length > 0);
     return current || historical;
   })();
-  const designLink = hasCodeDesign
-    ? `<span class="nb"><a href="#design">code design</a> ·</span> `
-    : "";
-
   const baseMark =
     input.baseVersion == null
       ? ""
@@ -3549,25 +3618,21 @@ export function renderReviewPage(input: RenderInput): string {
     `<section id="summary"><h2>Overview</h2>` +
     (doc.authorIntent == null || doc.authorIntent.trim() === ""
       ? ""
-      : `<div class="account"><p class="account-title">${icon("pr", "account-icon")}` +
+      : `<div class="account" id="problem"><p class="account-title">${icon("pr", "account-icon")}` +
         `<span>The problem</span> <span class="account-prov">· as the authors state it</span></p>` +
         `<div class="author-intent">${marked(safeBlock(doc.authorIntent), intentDelta, "authorIntent", "intent", true)}</div>` +
         `</div>`) +
-    `<div class="account"><p class="account-title">${icon("eye", "account-icon")}` +
+    `<div class="account" id="solution"><p class="account-title">${icon("eye", "account-icon")}` +
     `<span>The solution</span> <span class="account-prov">· as the witness verified it</span></p>` +
     `<div class="witness-account">${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary", true)}</div>` +
     `</div>` +
     questionsHere(ctx, "summary", "summary") +
-    `<p class="rows-title">What changes</p>` +
+    `<p class="rows-title" id="changes">What changes</p>` +
     `<div class="rows">${rows}</div>` +
-    `<p class="contents"><span class="nb"><a href="#summary">overview</a> ·</span> ` +
-    designLink +
-    `<span class="nb"><a href="#notes">review focus</a> ·</span> ` +
-    `<span class="nb"><a href="#walkthrough">implementation walkthrough</a></span></p>` +
+    spine(doc, hasCodeDesign, delta) +
     `</section></div>\n` +
     codeDesignSection(doc, ctx) +
-    `<section id="notes"><h2>Review focus</h2>` +
-    `<p class="secnote">Decisions to make, risks to verify, and things easy to miss.</p>` +
+    `<section id="notes"><h2>Review focus</h2>${focusKey(doc.notes)}` +
     `<div class="notes">${notes}</div></section>\n` +
     walkthroughSection(doc, delta, (type, id) => questionsHere(ctx, type, id)) +
     `\n` +

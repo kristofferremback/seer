@@ -142,7 +142,7 @@ code_design
     refs[]        at least one
 ```
 
-`modules[]` distinguishes the policy or state owner from entry adapters, consumers and presentation. `coverage[]` is the sprawl check: fresh reads, cached reads, asynchronous work, repair and other distinct paths the feature must cover. Every entry is ref-backed. The object and its lists are always present in a new publish, but may be empty for a change with no useful code-design judgment; avoiding dead prose wins over filling the section.
+`modules[]` distinguishes the policy or state owner from entry adapters, consumers and presentation. `coverage[]` is the sprawl check: fresh reads, cached reads, asynchronous work, repair and other distinct paths the feature must cover. Every entry is ref-backed. The renderer states what the sprawl check means by drawing it — the coverage titles as nodes converging on the change — derived from the titles alone so the drawing can never claim an edge the rows do not carry; a single path draws nothing, because one arrow into a box is decoration rather than a check. The object and its lists are always present in a new publish, but may be empty for a change with no useful code-design judgment; avoiding dead prose wins over filling the section.
 
 ### Group
 

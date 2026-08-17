@@ -519,6 +519,10 @@ function groupBlock(
   order: Map<string, number>,
   d: EntityDelta | null,
   here: QuestionsHere,
+  /** This group's changed lines against the largest group's, 0..1: the bar beside
+   *  its count, so where the weight of the diff sits is visible before any number
+   *  is read. */
+  share: number,
 ): string {
   const files = filesOf(group, byId, order);
   // How much of the diff this group holds. It used to be a bare hunk count, which
@@ -550,7 +554,10 @@ function groupBlock(
     `${icon(group.kind, `ic ic-lg k-${group.kind}`, KIND_LABEL[group.kind])}` +
     `<span class="gname">${marked(safeInline(group.title), d, "title", group.id)}</span>` +
     `${statusMark(d)}` +
-    `<span class="gcount">${statHtml(added, removed)}</span>` +
+    // The bar is decoration over the numbers beside it, never the only channel.
+    `<span class="gcount"><span class="gbar" aria-hidden="true">` +
+    `<i style="width:${Math.max(6, Math.round(share * 100))}%"></i></span>` +
+    `${statHtml(added, removed)}</span>` +
     `</summary>${edit.input}` +
     `<div class="grp-body">` +
     edit.label +
@@ -591,17 +598,36 @@ export function walkthroughSection(
       .join("")}</div></details>`;
   const removedBefore = (id: string | null) =>
     (delta?.removedBefore("group", id) ?? []).map(removedGroup).join("");
+  // Each group's changed lines, for the share bar beside its count. Counted off the
+  // same hunks the rows below draw, so the bar and the numbers cannot disagree.
+  const changedOf = (g: Group) =>
+    g.hunks
+      .map((id) => byId.get(id))
+      .filter((h): h is Hunk => h !== undefined)
+      .reduce((n, h) => n + h.lines.filter((l) => l.kind !== "ctx").length, 0);
+  const heaviest = Math.max(1, ...doc.groups.map(changedOf));
   const groups =
     groupsInOrder(doc.groups)
       .map(
         (g) =>
           removedBefore(g.id) +
-          groupBlock(g, byId, order, delta ? delta.get("group", g.id) : null, here),
+          groupBlock(
+            g,
+            byId,
+            order,
+            delta ? delta.get("group", g.id) : null,
+            here,
+            changedOf(g) / heaviest,
+          ),
       )
       .join("") + removedBefore(null);
+  const whole = stats(doc.hunks);
   return (
-    `<section id="walkthrough"><h2>Implementation walkthrough</h2>` +
-    `<p class="secnote">The whole diff, grouped by why it changed, most significant first.</p>` +
+    // The heading carries the whole diff's tally at its far end: this section being
+    // all of the change is the walkthrough's one guarantee, and the sum states it.
+    `<section id="walkthrough"><h2><span class="walk-head">` +
+    `<span>Implementation walkthrough</span>${statHtml(whole.added, whole.removed)}` +
+    `</span></h2>` +
     unaccountedBlock(doc.unaccounted ?? []) +
     `<div class="walk">${groups}</div></section>`
   );

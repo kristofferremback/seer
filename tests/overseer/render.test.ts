@@ -130,36 +130,67 @@ describe("the page itself", () => {
     expect(html).toContain('<section id="summary"><h2>Overview</h2>');
     expect(html).toContain('<section id="design"><h2>Code design</h2>');
     expect(html).toContain('<section id="notes"><h2>Review focus</h2>');
-    expect(html).toContain('<section id="walkthrough"><h2>Implementation walkthrough</h2>');
-    expect(html).toContain('<a href="#summary">overview</a>');
-    expect(html).toContain('<a href="#design">code design</a>');
+    expect(html).toContain('<span>Implementation walkthrough</span>');
+    // The reading spine walks every step of the arc, in order.
+    expect(html).toContain('<nav class="spine"');
+    expect(html).toContain('<a href="#problem">the problem</a>');
+    expect(html).toContain('<a href="#solution">the solution</a>');
+    expect(html).toContain('<a href="#changes">what changes</a>');
+    expect(html).toContain('<a href="#design">the design</a>');
+    expect(html).toContain('<a href="#notes">what to judge</a>');
+    expect(html).toContain('<a href="#walkthrough">the diff</a>');
     expect(html).toContain('<p class="account-title"><svg class="account-icon"');
     // The reader's questions lead; whose account each is stays as the suffix.
     expect(html).toContain("<span>The problem</span>");
     expect(html).toContain('<span class="account-prov">· as the authors state it</span>');
     expect(html).toContain("<span>The solution</span>");
     expect(html).toContain('<span class="account-prov">· as the witness verified it</span>');
-    expect(html).toContain('<p class="rows-title">What changes</p>');
+    expect(html).toContain('<p class="rows-title" id="changes">What changes</p>');
     expect(html).toContain(doc().authorIntent!);
     expect(html).not.toContain("verified against the code");
     expect(html).not.toContain('class="provenance"');
     expect(html).not.toContain('class="source-tag"');
   });
 
-  test("each named section carries its one-line clarifier", () => {
+  test("what a section holds is drawn, not captioned", () => {
     const html = page(doc());
-    expect(html).toContain(
-      '<p class="secnote">Where the change lives in the code, and why there.</p>',
+    // Review focus keys its icon vocabulary beside the counts.
+    expect(html).toContain('<p class="focus-key">');
+    expect(html).toContain("1 risk</span>");
+    // The walkthrough heading carries the whole diff's tally, and every group
+    // wears its share of the changed lines as a bar beside its count.
+    expect(html).toContain('<span class="walk-head">');
+    expect(html).toContain('<span class="gbar" aria-hidden="true">');
+    // No sentence stands under any heading to explain the page to the reader.
+    expect(html).not.toContain("secnote");
+  });
+
+  test("two or more coverage paths draw the convergence figure, one draws none", () => {
+    const two = doc();
+    two.codeDesign = {
+      ...two.codeDesign!,
+      coverage: [
+        { id: "cov_a", title: "Browser reads", body: "b", refs: [] },
+        { id: "cov_b", title: "API reads", body: "b", refs: [] },
+      ],
+    };
+    const drawn = page(two);
+    const design = drawn.slice(
+      drawn.indexOf('<section id="design"'),
+      drawn.indexOf('<div class="coverage-list">'),
     );
-    expect(html).toContain(
-      '<p class="secnote">Whether every code path that needs this change actually got it.</p>',
+    expect(design).toContain('<svg class="fig"');
+    expect(design).toContain(">this change</text>");
+    expect(design).toContain(">Browser reads</text>");
+    // One path is not a sprawl check, and gets no drawing. The golden fixture
+    // carries exactly one coverage path, which is what makes it the case.
+    expect(doc().codeDesign!.coverage.length).toBe(1);
+    const one = page(doc());
+    const oneDesign = one.slice(
+      one.indexOf('<section id="design"'),
+      one.indexOf('<div class="coverage-list">'),
     );
-    expect(html).toContain(
-      '<p class="secnote">Decisions to make, risks to verify, and things easy to miss.</p>',
-    );
-    expect(html).toContain(
-      '<p class="secnote">The whole diff, grouped by why it changed, most significant first.</p>',
-    );
+    expect(oneDesign).not.toContain('<svg class="fig"');
   });
 
   test("code design renders responsibility areas, paths, coverage, and refs", () => {
