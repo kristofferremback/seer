@@ -76,7 +76,16 @@ function group(bundles: { slug: string; at: number; versions?: number[] }[]): Le
  *  honest way to test them, since they are shipped as text inside the page. Returns the
  *  server's HTML, so a test can ask what the UTC cut did before the browser redid it. */
 function render(groups: LedgerGroup[], now: number): string {
-  const html = bundlesPage("me@example.com", groups, now);
+  const html = bundlesPage(
+    {
+      email: "me@example.com",
+      workspaces: [{ id: "ws_7g2kq4xbvm", name: "Crystal Palace" }],
+      current: null,
+      section: "bundles",
+    },
+    groups,
+    now,
+  );
   document.documentElement.innerHTML = html;
   for (const script of [...document.querySelectorAll("script")]) {
     if (!script.textContent?.includes("data-ledger-group")) continue;

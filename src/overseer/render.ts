@@ -437,6 +437,16 @@ const STYLE = `  @font-face {
     color: hsl(var(--ink));
     line-height: 1;
   }
+  /* the way back to the index, for the reader who has one. It stands beside the
+     brand rather than in the right cluster: it is navigation, not a control. */
+  .head-index {
+    font-size: 12.5px;
+    color: hsl(var(--muted));
+    text-decoration: none;
+    border-left: 1px solid hsl(var(--line));
+    padding-left: 10px;
+  }
+  .head-index:hover { color: hsl(var(--ink)); }
   .head-tag {
     margin-left: auto;
     font-family: var(--font-mono);
@@ -3319,6 +3329,10 @@ export interface RenderInput {
    *  review's own url, so a share holder and a stranger get a page with no share
    *  control and no script that could reach the mint route. */
   canShare?: boolean;
+  /** Where the reviews index is for this reader, or absent for one who has none: a
+   *  member gets the way back to the workspace's reviews, a share holder was handed
+   *  one page and the page does not advertise the rest. */
+  indexHref?: string | null;
 }
 
 /** The revision menu: every published version, what moved in it, and the two
@@ -3573,6 +3587,9 @@ export function renderReviewPage(input: RenderInput): string {
     `<header class="head">` +
     `<div class="head-row">` +
     `<span class="brand">${icon("eye", "eye", "Overseer")}<span class="wordmark">overseer</span></span>` +
+    (input.indexHref
+      ? `<a class="head-index" href="${escapeHtml(input.indexHref)}">All reviews</a>`
+      : "") +
     `<span class="head-tag">${escapeHtml(`${slug} · ${marking}`)}</span>` +
     (input.canShare
       ? `<button type="button" class="share-toggle" data-share-open aria-expanded="false" ` +
@@ -3959,6 +3976,14 @@ function reviewPage(args: {
       !shared &&
       reader !== null &&
       listUserWorkspaces(reader.id).some((w) => w.id === ws),
+    // The way back to the workspace's reviews, for the reader who may open it. A
+    // share holder was handed one page; the page does not advertise the rest.
+    indexHref:
+      !shared &&
+      reader !== null &&
+      listUserWorkspaces(reader.id).some((w) => w.id === ws)
+        ? `/${ws}/reviews`
+        : null,
   });
   // Nothing here reaches GitHub. Looking at a review used to check it; that automatic
   // check is deleted, not merely unused, so there is no path from a render to the

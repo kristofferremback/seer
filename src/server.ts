@@ -67,6 +67,7 @@ import { getReviewVersion, listReviewVersions, listReviews } from "./overseer/db
 import {
   dbWorkspaceHoldings,
   deliveryIsQuiet,
+  listReviewPrs,
   listWorkspaceInstallations,
   reviewStatusTally,
 } from "./overseer/installations";
@@ -98,6 +99,8 @@ import {
   softNotFoundPage,
   type BundleMeta,
   type LedgerGroup,
+  type NavContext,
+  type NavSection,
   type ReviewLedgerGroup,
   type SettingsReveal,
 } from "./pages";
@@ -126,6 +129,13 @@ const WS_REVIEW_CONTEXT_RE = new RegExp(
 // slug alone is ambiguous across workspaces, so the form posts the workspace with it.
 const WS_ANNOTATIONS_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/annotations/?$`,
+);
+
+// The workspace's own pages: /<ws_id> (its front door), /<ws_id>/bundles,
+// /<ws_id>/reviews, /<ws_id>/settings. Members only; anyone else meets the same
+// soft-404 an unknown workspace gives.
+const WS_PAGE_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})(?:/(bundles|reviews|settings))?/?$`,
 );
 
 // A live socket is either a bundle's reload channel or a review's freshness channel.
@@ -228,11 +238,27 @@ function fmtDateTime(ms: number): string {
   return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
 }
 
+// The app bar's data: who this is, every workspace they can switch to, and where
+// they are standing. One builder so every signed-in page draws the same chrome.
+function navFor(
+  user: SessionUser,
+  section: NavSection,
+  current: { id: string; name: string } | null,
+): NavContext {
+  return {
+    email: user.email,
+    workspaces: listUserWorkspaces(user.id).map((w) => ({ id: w.id, name: w.name })),
+    current,
+    section,
+  };
+}
+
 // Render the settings page for a member, optionally with a one-time reveal box.
 function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReveal): Response {
   const ws = getWorkspace(wsId)!;
   return html(
     settingsPage({
+      nav: navFor(user, "settings", { id: ws.id, name: ws.name }),
       wsId,
       name: ws.name,
       visibility: ws.visibility,
@@ -360,6 +386,11 @@ async function handleWorkspaceBundle(req: Request, wsId: string): Promise<Respon
   return serveBundleFile(wsId, meta, rest.slice(1), {
     live: pinned ? null : { via: "workspace", wsId, slug: slug! },
     shared: false,
+    // The way back into Seer, for members only: an anonymous reader of a public
+    // bundle, and every share holder, gets the page untouched.
+    overlay: workspaceMember(ws, req)
+      ? { wsId, slug: slug!, version, latestVersion: bundle.latest_version, pinned }
+      : undefined,
   });
 }
 
@@ -459,11 +490,41 @@ function reviewLedgerGroups(userId: string): ReviewLedgerGroup[] {
           title: latest?.doc.title ?? r.slug,
           latestVersion: r.latest_version,
           publishedAt: versions[0]?.created_at ?? r.created_at,
+          prs: listReviewPrs(ws.id, r.slug).map((p) => ({ repo: p.repo, number: p.pr_number })),
           tally: reviewStatusTally(ws.id, r.slug),
         };
       })
       .sort((a, b) => b.publishedAt - a.publishedAt),
   }));
+}
+
+// ---- workspace pages ----
+
+/**
+ * GET /<ws_id>[/bundles|/reviews|/settings]: one workspace's own view of the same
+ * ledgers. The bare id is a front door and goes to bundles; settings already has a
+ * canonical URL and keeps it. Members only, with the usual posture: an unknown
+ * workspace and someone else's workspace are the same soft-404, and a signed-out
+ * reader is asked to sign in first (the link they were sent may resolve after).
+ */
+function handleWorkspacePage(req: Request, wsId: string, section: string | undefined): Response {
+  const user = sessionUser(req);
+  if (!user) return requireSession(req)!;
+  const ws = getWorkspace(wsId);
+  if (!ws || !isMember(wsId, user.id)) return softNotFound(req);
+  if (section === undefined) return redirect(`/${wsId}/bundles`);
+  if (section === "settings") return redirect(`/settings/${wsId}`);
+
+  const nav = navFor(user, section as NavSection, { id: ws.id, name: ws.name });
+  const groups =
+    section === "bundles"
+      ? ledgerGroups(user.id).filter((g) => g.wsId === wsId)
+      : reviewLedgerGroups(user.id).filter((g) => g.wsId === wsId);
+  return html(
+    section === "bundles"
+      ? bundlesPage(nav, groups as LedgerGroup[])
+      : reviewsPage(nav, groups as ReviewLedgerGroup[]),
+  );
 }
 
 // ---- server ----
@@ -543,7 +604,17 @@ export async function startServer() {
             headers: { ...headers, "content-type": "text/markdown; charset=utf-8" },
           });
         }
-        return new Response(landingPage(!!sessionEmail(req)), {
+        // A signed-in browser is sent into the app rather than shown the pamphlet:
+        // the front door is for strangers and for machines, and both are handled
+        // above or below. 302 rather than 301 — the same URL is the pamphlet again
+        // the moment the session ends — and Vary already names Cookie for any cache.
+        if (sessionUser(req)) {
+          return new Response(null, {
+            status: 302,
+            headers: { ...headers, location: "/bundles", "cache-control": "no-store" },
+          });
+        }
+        return new Response(landingPage(false), {
           headers: { ...headers, "content-type": "text/html;charset=utf-8" },
         });
       },
@@ -572,18 +643,14 @@ export async function startServer() {
       "/bundles": (req) => {
         const user = sessionUser(req);
         if (!user) return requireSession(req)!;
-        return new Response(bundlesPage(user.email, ledgerGroups(user.id)), {
-          headers: { "content-type": "text/html;charset=utf-8" },
-        });
+        return html(bundlesPage(navFor(user, "bundles", null), ledgerGroups(user.id)));
       },
 
       // The signed-in index of published reviews, beside the bundle ledger.
       "/reviews": (req) => {
         const user = sessionUser(req);
         if (!user) return requireSession(req)!;
-        return new Response(reviewsPage(user.email, reviewLedgerGroups(user.id)), {
-          headers: { "content-type": "text/html;charset=utf-8" },
-        });
+        return html(reviewsPage(navFor(user, "reviews", null), reviewLedgerGroups(user.id)));
       },
 
       // Self-hosted type. A closed whitelist — only these five faces are ever
@@ -913,6 +980,9 @@ export async function startServer() {
       // whole tree: the remainder after the token is arbitrary, and what it means is
       // not knowable until the token says which kind of asset it opens.
       if (url.pathname.startsWith("/s/")) return handleShareRequest(req);
+
+      const wsPage = url.pathname.match(WS_PAGE_RE);
+      if (wsPage) return handleWorkspacePage(req, wsPage[1]!, wsPage[2]);
 
       const wsBundle = url.pathname.match(WS_BUNDLE_RE);
       if (wsBundle) return handleWorkspaceBundle(req, wsBundle[1]!);

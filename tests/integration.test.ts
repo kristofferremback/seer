@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { zipSync, strToU8 } from "fflate";
 
 // Env is set by tests/setup.ts (preload) before these app modules import.
+import { landingPage } from "../src/pages";
 import { startServer } from "../src/server";
 import { sweepCache } from "../src/store";
 import { config } from "../src/config";
@@ -94,11 +95,14 @@ describe("upload flow", () => {
 // ---- landing + ledger ----
 
 describe("landing page", () => {
-  test("GET / -> 200 public landing with og:title, no auth required", async () => {
-    const r = await fetch(`${base}/`);
-    expect(r.status).toBe(200);
-    expect(r.headers.get("content-type")).toContain("text/html");
-    const html = await r.text();
+  test("GET / sends a signed-in browser into the app; the pamphlet itself still says what it is", async () => {
+    // Every request in this suite is signed in (AUTH_DISABLED), so `/` answers with
+    // the door into the app. The signed-out 200 is asserted in share-privacy.script.ts.
+    const r = await fetch(`${base}/`, { redirect: "manual" });
+    expect(r.status).toBe(302);
+    expect(r.headers.get("location")).toBe("/bundles");
+
+    const html = landingPage(false);
     expect(html).toContain("Seer");
     expect(html).toContain('property="og:title"');
     expect(html).toContain('content="website"'); // og:type
@@ -162,7 +166,8 @@ describe("agent skill doc", () => {
   });
 
   test("landing HTML advertises the doc (alternate link + colophon anchor)", async () => {
-    const html = await (await fetch(`${base}/`)).text();
+    // Rendered directly — over HTTP this signed-in process is redirected into the app.
+    const html = landingPage(false);
     expect(html).toContain('<link rel="alternate" type="text/markdown" href="/skill.md">');
     expect(html).toContain('href="/skill.md"');
   });
