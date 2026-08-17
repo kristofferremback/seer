@@ -2955,7 +2955,7 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
     (coverage === ""
       ? ""
       : `<h3 class="design-heading">${icon("branch")}<span>Coverage</span></h3>` +
-        `<p class="secnote">Every path that must reach the change, each proven in code.</p>` +
+        `<p class="secnote">Whether every code path that needs this change actually got it.</p>` +
         `<div class="coverage-list">${coverage}</div>`) +
     `</section>\n`
   );

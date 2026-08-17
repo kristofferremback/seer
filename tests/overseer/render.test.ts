@@ -152,13 +152,13 @@ describe("the page itself", () => {
       '<p class="secnote">Where the change lives in the code, and why there.</p>',
     );
     expect(html).toContain(
-      '<p class="secnote">Every path that must reach the change, each proven in code.</p>',
+      '<p class="secnote">Whether every code path that needs this change actually got it.</p>',
     );
     expect(html).toContain(
       '<p class="secnote">Decisions to make, risks to verify, and things easy to miss.</p>',
     );
     expect(html).toContain(
-      '<p class="secnote">The whole diff, grouped by reason for change, most significant first.</p>',
+      '<p class="secnote">The whole diff, grouped by why it changed, most significant first.</p>',
     );
   });
 

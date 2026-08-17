@@ -601,7 +601,7 @@ export function walkthroughSection(
       .join("") + removedBefore(null);
   return (
     `<section id="walkthrough"><h2>Implementation walkthrough</h2>` +
-    `<p class="secnote">The whole diff, grouped by reason for change, most significant first.</p>` +
+    `<p class="secnote">The whole diff, grouped by why it changed, most significant first.</p>` +
     unaccountedBlock(doc.unaccounted ?? []) +
     `<div class="walk">${groups}</div></section>`
   );
