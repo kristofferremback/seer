@@ -17,7 +17,6 @@
 
 import { escapeHtml } from "../escape";
 import { agoWords } from "../relative-time";
-import { figureSvg } from "./figure";
 import { getWorkspace, listUserWorkspaces } from "../db";
 import { sessionUser, type SessionUser } from "../auth";
 import { openAttachment, attachmentLocation } from "../store";
@@ -66,7 +65,6 @@ import {
   safeBlock,
   safeInline,
   shortSha,
-  zoomButton,
   type EvidenceMarks,
   type HunkIndex,
 } from "./render-evidence";
@@ -1439,9 +1437,6 @@ const STRUCTURE_STYLE = `
   /* a group's share of the changed lines, drawn beside its own count */
   .gbar { display: inline-block; width: 52px; height: 4px; margin-right: 10px; vertical-align: 2px; background: hsl(var(--ink) / 0.08); border-radius: 999px; overflow: hidden; }
   .gbar i { display: block; height: 100%; background: hsl(var(--muted) / 0.75); border-radius: 999px; }
-  /* block, not inline-block: a shrink-wrapped box takes the drawing's floor as its
-     own width and pokes past the column, where the page's clip eats the overflow. */
-  .figbox { margin: 6px 0 12px; }
 `;
 
 /** Code, taken out of the column.
@@ -1537,6 +1532,21 @@ const ZOOM_STYLE = `
   }
   .zoom-x .mark { display: block; width: 18px; height: 18px; stroke-width: 1.6; }
   .zoom-x:active { background: hsl(var(--ink) / 0.07); }
+  /* the figure's scale controls, in the bar the close control already owns */
+  .zoom-scale { margin-left: auto; flex: none; display: inline-flex; align-items: center; }
+  .zoom-scale[hidden] { display: none; }
+  .zoom-scale + .zoom-x { margin-left: 0; }
+  .zs {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    min-width: 40px; min-height: 44px; padding: 10px 8px;
+    border: 0; border-radius: 6px; background: none;
+    font-family: var(--font-mono); font-size: 15px; line-height: 1;
+    color: hsl(var(--accent)); cursor: pointer;
+  }
+  .zs:active { background: hsl(var(--ink) / 0.07); }
+  .zs.zs-val { font-size: 11.5px; color: hsl(var(--muted)); min-width: 48px; }
+  /* while a figure is up the panel owns every touch: one finger pans, two pinch */
+  .zoomdlg.figmode .zoom-body { touch-action: none; user-select: none; -webkit-user-select: none; }
   /* the UA ring is drawn for a control the size of a thumb and reads as a slab at
      this scale. Same job, the page's own ink, and only for the keyboard. */
   .zoomdlg :focus-visible {
@@ -1560,8 +1570,9 @@ const ZOOM_STYLE = `
     border: 0; border-radius: 0; background: none; overflow: visible;
   }
   .zoom-body .snip { font-size: 12.5px; padding-bottom: 16px; }
-  /* in the panel a figure stands at its drawn size (the width/height attributes
-     the column's rules override) and the panel pans it in both axes */
+  /* in the panel a figure answers to its own width/height (attributes, then the
+     scale's inline size) rather than the column's rules; the panel pans it in
+     both axes and the scale controls resize it */
   .zoom-body .fig { width: auto; height: auto; min-width: 0; max-width: none; margin: 18px; }
   /* which hunk is being read stays said while it is being read: the range rides
      the top of the panel until the next hunk pushes it off. Opaque, because the
@@ -1801,12 +1812,51 @@ function zoomScript(basePath: string, version: number, context: boolean): string
   let consuming = false;
   let dragging = false; // a drag on the panel's own resize corner is under way
 
+  // ---- a figure's scale ----
+  //
+  // A drawing is the one surface that scales rather than reflows. It opens at fit,
+  // the whole figure on screen, and zooms from there: the bar's buttons, a pinch,
+  // or ctrl+wheel. Scaling writes an explicit width/height onto the svg (its viewBox
+  // does the geometry) and the body's own scroll does the panning, so fingers,
+  // buttons and scrollbars are all moving the same surface.
+  const FIGPAD = 18;      // the margin the panel's stylesheet puts around a figure
+  let fig = null;         // the svg in the panel, when the panel holds a figure
+  let figW = 0, figH = 0; // its drawn size, read off its own attributes
+  let scale = 1, fitScale = 1;
+  const touches = new Map(); // active pointers on the body, id -> position
+  let pinch = null;          // {dist, scale, midX, midY} where the pinch started
+
+  // The point under (ax, ay) stays under it across the scale change: its place in
+  // the drawing is (scroll + a - margin) / scale, and the new scroll puts that same
+  // place back at a.
+  const setScale = (next, ax, ay) => {
+    if (!fig) return;
+    const body = dlg.querySelector(".zoom-body");
+    next = Math.min(8, Math.max(Math.min(fitScale, 0.2), next));
+    if (ax === undefined) { ax = body.clientWidth / 2; ay = body.clientHeight / 2; }
+    const k = next / scale;
+    const left = (body.scrollLeft + ax - FIGPAD) * k + FIGPAD - ax;
+    const top = (body.scrollTop + ay - FIGPAD) * k + FIGPAD - ay;
+    scale = next;
+    fig.style.width = figW * scale + "px";
+    fig.style.height = figH * scale + "px";
+    dlg.querySelector(".zs-val").textContent = Math.round(scale * 100) + "%";
+    body.scrollLeft = left;
+    body.scrollTop = top;
+  };
+
   const build = () => {
     if (dlg) return dlg;
     dlg = document.createElement("dialog");
     dlg.className = "zoomdlg";
     dlg.innerHTML =
       '<div class="zoom-bar"><span class="zoom-title"></span>' +
+      // A drawing scales where code reflows, so only a figure gets the scale
+      // controls: step out, step in, and the readout itself resets to fit.
+      '<span class="zoom-scale" hidden>' +
+      '<button type="button" class="zs" data-zs="out" aria-label="Zoom out">\\u2212</button>' +
+      '<button type="button" class="zs zs-val" data-zs="fit" aria-label="Reset to fit">100%</button>' +
+      '<button type="button" class="zs" data-zs="in" aria-label="Zoom in">+</button></span>' +
       '<button type="button" class="zoom-x" aria-label="Close full screen">' +
       '<svg class="mark" aria-hidden="true"><use href="#i-close"/></svg></button></div>' +
       // The code takes the focus, not the cross. A modal focuses its first focusable
@@ -1819,6 +1869,11 @@ function zoomScript(basePath: string, version: number, context: boolean): string
     dlg.addEventListener("close", () => {
       document.documentElement.classList.remove("code-open");
       dlg.querySelector(".zoom-inner").textContent = "";
+      fig = null;
+      touches.clear();
+      pinch = null;
+      dlg.classList.remove("figmode");
+      dlg.querySelector(".zoom-scale").setAttribute("hidden", "");
       // Whatever the file view was still waiting for, it is waiting for a panel that
       // is not there. The token it was started under is dropped with it, so an answer
       // still in the air lands on nothing.
@@ -1861,6 +1916,66 @@ function zoomScript(basePath: string, version: number, context: boolean): string
       if (w < 480 || h < 320) return;
       try { localStorage.setItem(SIZE_KEY, w + "x" + h); } catch (e) {}
     });
+
+    dlg.querySelector(".zoom-scale").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-zs]");
+      if (!b || !fig) return;
+      const kind = b.dataset.zs;
+      setScale(kind === "in" ? scale * 1.25 : kind === "out" ? scale / 1.25 : fitScale);
+    });
+
+    // In figure mode the body's touch-action is none and these own every gesture:
+    // one pointer drags the scroll, two pinch around their midpoint, and the
+    // midpoint's own drift pans, so a pinch that wanders still follows the fingers.
+    const body = dlg.querySelector(".zoom-body");
+    body.addEventListener("pointerdown", (e) => {
+      if (!fig) return;
+      try { body.setPointerCapture(e.pointerId); } catch (err) {}
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        const [a, b] = [...touches.values()];
+        pinch = {
+          dist: Math.hypot(a.x - b.x, a.y - b.y),
+          scale,
+          midX: (a.x + b.x) / 2,
+          midY: (a.y + b.y) / 2,
+        };
+      } else {
+        pinch = null;
+      }
+    });
+    body.addEventListener("pointermove", (e) => {
+      if (!fig || !touches.has(e.pointerId)) return;
+      const prev = touches.get(e.pointerId);
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2 && pinch && pinch.dist > 0) {
+        const [a, b] = [...touches.values()];
+        const rect = body.getBoundingClientRect();
+        const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2;
+        body.scrollLeft -= midX - pinch.midX;
+        body.scrollTop -= midY - pinch.midY;
+        pinch.midX = midX;
+        pinch.midY = midY;
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (dist > 0) setScale(pinch.scale * (dist / pinch.dist), midX - rect.left, midY - rect.top);
+      } else if (touches.size === 1) {
+        body.scrollLeft -= e.clientX - prev.x;
+        body.scrollTop -= e.clientY - prev.y;
+      }
+    });
+    const lift = (e) => {
+      touches.delete(e.pointerId);
+      pinch = null;
+    };
+    body.addEventListener("pointerup", lift);
+    body.addEventListener("pointercancel", lift);
+    // A trackpad pinch arrives as ctrl+wheel, and zooms around the cursor.
+    body.addEventListener("wheel", (e) => {
+      if (!fig || !(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const rect = body.getBoundingClientRect();
+      setScale(scale * Math.exp(-e.deltaY / 220), e.clientX - rect.left, e.clientY - rect.top);
+    }, { passive: false });
     return dlg;
   };
 
@@ -2424,6 +2539,33 @@ function zoomScript(basePath: string, version: number, context: boolean): string
     const body = d.querySelector(".zoom-body");
     body.scrollTop = 0;
     body.scrollLeft = 0;
+    // A figure opens at fit: the whole drawing on screen, however large it drew,
+    // and the scale controls come out. Fit is measured against the open panel, and
+    // the inline min/max-width the column needed have no business in here.
+    const isFig = box.classList.contains("ev-figure");
+    d.classList.toggle("figmode", isFig);
+    const scaleUi = d.querySelector(".zoom-scale");
+    if (isFig) {
+      fig = clone;
+      figW = Number(clone.getAttribute("width")) || 1;
+      figH = Number(clone.getAttribute("height")) || 1;
+      fig.style.maxWidth = "none";
+      fig.style.minWidth = "0";
+      fitScale = Math.min(
+        1,
+        (body.clientWidth - 2 * FIGPAD) / figW,
+        (body.clientHeight - 2 * FIGPAD) / figH,
+      );
+      if (!(fitScale > 0)) fitScale = 1;
+      scale = 1;
+      setScale(fitScale);
+      body.scrollTop = 0;
+      body.scrollLeft = 0;
+      scaleUi.removeAttribute("hidden");
+    } else {
+      fig = null;
+      scaleUi.setAttribute("hidden", "");
+    }
     // One entry per panel, however fast they are opened: a panel that opens while the
     // last one's traversal is still in the air inherits the entry rather than stacking
     // a second one the reader would have to press back through twice.
@@ -3049,33 +3191,9 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
     (coverage === ""
       ? ""
       : `<h3 class="design-heading">${icon("branch")}<span>Coverage</span></h3>` +
-        coverageFigure(design.coverage) +
         `<div class="coverage-list">${coverage}</div>`) +
     `</section>\n`
   );
-}
-
-/** What "Coverage" means, drawn instead of captioned: every conceptual path the
- *  change must cover, converging on the change. Derived from the coverage titles
- *  alone, so it can never claim an edge the rows below do not carry. One path draws
- *  no figure — a single arrow into a box is not a sprawl check, it is decoration. */
-function coverageFigure(coverage: DesignCoverage[]): string {
-  if (coverage.length < 2) return "";
-  const label = (title: string) =>
-    title.length <= 40 ? title : `${title.slice(0, 39)}…`;
-  const svg = figureSvg({
-    kind: "flow",
-    nodes: [
-      ...coverage.map((c) => ({
-        id: `cov-${c.id}`,
-        label: label(c.title),
-        state: "normal" as const,
-      })),
-      { id: "change", label: "this change", state: "normal" as const },
-    ],
-    edges: coverage.map((c) => ({ from: `cov-${c.id}`, to: "change", label: "" })),
-  });
-  return `<div class="ev-figure figbox">${zoomButton("coverage")}<div class="figscroll">${svg}</div></div>`;
 }
 
 function noteRow(n: Note, ctx: RenderCtx): string {
