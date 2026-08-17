@@ -653,6 +653,8 @@ describe("the page itself", () => {
       }),
     );
     expect(html).toContain('class="ev ev-figure"');
+    // The box pans a figure wider than its legibility floor instead of shrinking it.
+    expect(html).toContain("background: hsl(var(--paper-sunk)); overflow-x: auto; }");
     const svg = html.match(/<svg class="fig"[\s\S]*?<\/svg>/)![0];
     expect(svg).toContain(">request</text>");
     expect(svg).toContain('class="dim"');

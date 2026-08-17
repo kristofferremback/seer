@@ -1376,7 +1376,9 @@ const EVIDENCE_STYLE = `
   /* a stub carries its former file list without the .gfiles wrapper, so the paths
      take that wrapper's size and ink here. */
   .dpb .gfile { font-size: 12px; color: hsl(var(--muted)); margin-right: 8px; }
-  .ev-figure { border: 1px solid hsl(var(--line)); border-radius: 6px; padding: 11px 13px; background: hsl(var(--paper-sunk)); }
+  /* the box scrolls sideways when the drawing's legibility floor is wider than the
+     column, so a phone pans a wide figure instead of reading 4px labels. */
+  .ev-figure { border: 1px solid hsl(var(--line)); border-radius: 6px; padding: 11px 13px; background: hsl(var(--paper-sunk)); overflow-x: auto; }
   /* the drawing is laid out server-side, so the only thing left to say here is what
      its ink is: one weight of line, one type size, and a muted state that steps back
      without changing hue. It scales with its box rather than fixing a pixel size. */
