@@ -593,7 +593,7 @@ describe("the marks on the page", () => {
     });
     const html = page(after, before);
     const design = html.slice(html.indexOf('<section id="design"'), html.indexOf('<section id="notes"'));
-    expect(html).toContain('<a href="#design">the design</a>');
+    expect(html).toContain('<section id="design"');
     expect(design).toContain("Code design");
     expect(design).toContain("The workspace session boundary");
     expect(design).toContain("Every review read route");

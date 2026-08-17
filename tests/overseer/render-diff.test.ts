@@ -259,8 +259,8 @@ describe("the walkthrough", () => {
       expect(tag).toContain('class="zoom"');
     }
     expect(section).toContain('data-zoom="src/auth.ts"');
-    // The reading spine points at it.
-    expect(html).toContain('<a href="#walkthrough">the diff</a>');
+    // The section keeps the stable id navigation points at.
+    expect(html).toContain('<section id="walkthrough"');
   });
 
   test("a group naming a hunk the document has no facts for draws the rest", () => {

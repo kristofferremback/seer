@@ -550,8 +550,9 @@ const STYLE = `  @font-face {
   }
 
   /* ---- contents ----
-     The dot-separated link line this block styled is gone: the contents are drawn
-     as the reading spine, whose rules live with the structure styles below. */
+     The dot-separated link line this block styled is gone. Navigation is a chrome
+     concern rather than a mid-column one; the sections carry stable ids for
+     whatever chrome points at them. */
 
   /* ---- inline resolved reference ----
      A chevron and an underlined file location point to the code block below. There is
@@ -1373,11 +1374,14 @@ const EVIDENCE_STYLE = `
  *  disagreeing is a finding and the reader must still see whose words are whose.
  *
  *  What a section holds is said by something drawn, not by a sentence under the
- *  heading: the contents line is a spine of steps in reading order, review focus
- *  keys its icon vocabulary beside the counts, the walkthrough heading carries the
- *  whole diff's tally with a share bar on every group, and coverage draws its paths
- *  converging on the change. A first draft wrote a one-line clarifier under each
- *  heading instead, and every one of them read as a schema comment. */
+ *  heading: review focus keys its icon vocabulary beside the counts, the walkthrough
+ *  heading carries the whole diff's tally with a share bar on every group, and
+ *  coverage draws its paths converging on the change. A first draft wrote a one-line
+ *  clarifier under each heading instead, and every one of them read as a schema
+ *  comment. The blocks carry stable ids — problem, solution, changes — because they
+ *  are the stations any navigation of this page points at; the in-content contents
+ *  line that used to point at them is gone, navigation being a chrome concern, not
+ *  a mid-column one. */
 const STRUCTURE_STYLE = `
   .account-title { color: hsl(var(--ink-soft)); }
   .account-prov { color: hsl(var(--muted)); font-weight: 400; }
@@ -1386,12 +1390,6 @@ const STRUCTURE_STYLE = `
     font: 500 13px/1.35 var(--font-body); color: hsl(var(--ink-soft));
   }
   .rows-title + .rows { margin-top: 8px; }
-  /* the contents, as the path the page is read along rather than a list of words */
-  .spine { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 5px; margin: 18px 0 0; font-family: var(--font-mono); font-size: 11.5px; }
-  .spine a { display: inline-block; padding: 6px 9px; border: 1px solid hsl(var(--line)); border-radius: 5px; text-decoration: none; color: hsl(var(--ink-soft)); }
-  .spine a:active { background: hsl(var(--ink) / 0.07); }
-  @media (hover: hover) and (pointer: fine) { .spine a:hover { border-color: hsl(var(--ink) / 0.3); color: hsl(var(--ink)); } }
-  .spine-sep { width: 11px; height: 11px; stroke-width: 2.2; color: hsl(var(--muted) / 0.65); flex: none; }
   /* the icon vocabulary, keyed once beside its counts */
   .focus-key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 4px; font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); }
   .focus-key span { display: inline-flex; align-items: center; gap: 6px; }
@@ -3196,32 +3194,6 @@ function notesInOrder(notes: Note[]): Note[] {
   ];
 }
 
-/** The contents, drawn as the path the page is read along: each step a box, the
- *  steps separated by the same chevron every disclosure on the page uses. A step
- *  that would lead to nothing is not drawn. */
-function spine(
-  doc: ReviewDoc,
-  hasCodeDesign: boolean,
-  delta: DeltaIndex | null,
-): string {
-  const hasProblem = doc.authorIntent != null && doc.authorIntent.trim() !== "";
-  const hasFocus =
-    doc.notes.length > 0 || (delta?.removed("note").length ?? 0) > 0;
-  const steps: [string, string][] = [];
-  if (hasProblem) steps.push(["#problem", "the problem"]);
-  steps.push(["#solution", "the solution"], ["#changes", "what changes"]);
-  if (hasCodeDesign) steps.push(["#design", "the design"]);
-  if (hasFocus) steps.push(["#notes", "what to judge"]);
-  steps.push(["#walkthrough", "the diff"]);
-  return (
-    `<nav class="spine" aria-label="Contents, in reading order">` +
-    steps
-      .map(([href, label]) => `<a href="${href}">${label}</a>`)
-      .join(icon("chev", "spine-sep")) +
-    `</nav>`
-  );
-}
-
 /** The icon vocabulary of the rows below, keyed once beside its counts. Each icon
  *  sits against the word it means, so the rows themselves need no explanation. */
 function focusKey(notes: Note[]): string {
@@ -3629,7 +3601,6 @@ export function renderReviewPage(input: RenderInput): string {
     questionsHere(ctx, "summary", "summary") +
     `<p class="rows-title" id="changes">What changes</p>` +
     `<div class="rows">${rows}</div>` +
-    spine(doc, hasCodeDesign, delta) +
     `</section></div>\n` +
     codeDesignSection(doc, ctx) +
     `<section id="notes"><h2>Review focus</h2>${focusKey(doc.notes)}` +

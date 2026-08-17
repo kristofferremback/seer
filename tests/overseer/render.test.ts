@@ -131,14 +131,13 @@ describe("the page itself", () => {
     expect(html).toContain('<section id="design"><h2>Code design</h2>');
     expect(html).toContain('<section id="notes"><h2>Review focus</h2>');
     expect(html).toContain('<span>Implementation walkthrough</span>');
-    // The reading spine walks every step of the arc, in order.
-    expect(html).toContain('<nav class="spine"');
-    expect(html).toContain('<a href="#problem">the problem</a>');
-    expect(html).toContain('<a href="#solution">the solution</a>');
-    expect(html).toContain('<a href="#changes">what changes</a>');
-    expect(html).toContain('<a href="#design">the design</a>');
-    expect(html).toContain('<a href="#notes">what to judge</a>');
-    expect(html).toContain('<a href="#walkthrough">the diff</a>');
+    // The arc's stations carry stable ids, for whatever navigation points at them.
+    // Nothing navigational sits inside the column itself.
+    expect(html).toContain('<div class="account" id="problem">');
+    expect(html).toContain('<div class="account" id="solution">');
+    expect(html).toContain('<p class="rows-title" id="changes">');
+    expect(html).not.toContain('class="spine"');
+    expect(html).not.toContain('class="contents"');
     expect(html).toContain('<p class="account-title"><svg class="account-icon"');
     // The reader's questions lead; whose account each is stays as the suffix.
     expect(html).toContain("<span>The problem</span>");
