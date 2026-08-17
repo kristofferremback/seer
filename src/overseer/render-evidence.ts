@@ -21,8 +21,8 @@ import { escapeHtml } from "../escape";
 import { lineDiff } from "./diff";
 import { figureSvg } from "./figure";
 import { render as renderMarkdown, renderInline } from "./markdown";
-import { codeHtml, langOfName, langOfPath } from "./render-diff";
-import type { Evidence, Figure, Payload, Ref } from "./types";
+import { codeHtml, langOfName, langOfPath, newSpan, prFilesUrl } from "./render-diff";
+import type { Evidence, Figure, Hunk, HunkLine, Payload, Ref } from "./types";
 
 /** One sprite mark. `label` makes it an image with a name; without one it is decoration. */
 export function icon(id: string, cls = "ic", label?: string): string {
@@ -141,6 +141,94 @@ function githubBlobUrl(ref: Ref): string {
   );
 }
 
+// ---- refs into changed code draw the change ----
+
+/** Every hunk of the document, keyed by the (sha, path) a ref would quote it at.
+ *  Built once per page: it is how a citation into changed code is recognised and
+ *  drawn as the diff it cites rather than as the file standing where the diff was. */
+export type HunkIndex = Map<string, Hunk[]>;
+
+export function indexHunks(hunks: Hunk[]): HunkIndex {
+  const index: HunkIndex = new Map();
+  for (const h of hunks) {
+    // Lowercased the way ref shas are on the way in: two spellings of one commit
+    // must not become two keys.
+    const key = `${h.sha.toLowerCase()}:${h.path}`;
+    const at = index.get(key);
+    if (at) at.push(h);
+    else index.set(key, [h]);
+  }
+  return index;
+}
+
+/** The hunks that changed any of the lines this ref quotes: the same file at the same
+ *  commit, with new-side lines inside the quoted range. A ref pinned at a commit the
+ *  hunks do not count against gets none, deliberately — its line numbers count a
+ *  different tree, and laying a diff over them would mark the wrong lines. */
+function hunksBehind(ref: Ref, index: HunkIndex | undefined): Hunk[] {
+  const at = index?.get(`${ref.sha.toLowerCase()}:${ref.path}`);
+  if (!at) return [];
+  return at.filter((h) => {
+    const span = newSpan(h);
+    // A hunk that only deletes draws no new-side line; its seam sits after `to`, and
+    // the seam is in range when it falls between the quoted lines or just above them.
+    if (span.to < span.from) return span.to >= ref.startLine - 1 && span.to <= ref.endLine;
+    return span.from <= ref.endLine && span.to >= ref.startLine;
+  });
+}
+
+/** The quoted range as the diff that produced it. New-side lines come from the hunks
+ *  where the hunks drew them and from the snippet where they did not; deleted lines
+ *  are laid back between the new-side numbers they vanished at. Clipped to the ref's
+ *  own range: the citation stays the bounded view, now honest about which of its
+ *  lines the change wrote. */
+function diffSnippetLines(ref: Ref, hunks: Hunk[]): string {
+  const lang = langOfPath(ref.path);
+  const highlight = new Set(ref.highlight);
+  const news = new Map<number, HunkLine>();
+  const dels = new Map<number, HunkLine[]>();
+  for (const h of hunks) {
+    let lastNew = h.newStart - 1;
+    for (const line of h.lines) {
+      if (line.kind === "del") {
+        const at = dels.get(lastNew);
+        if (at) at.push(line);
+        else dels.set(lastNew, [line]);
+        continue;
+      }
+      if (line.newNo !== null) {
+        news.set(line.newNo, line);
+        lastNew = line.newNo;
+      }
+    }
+  }
+  const snippet = ref.snippet.split("\n");
+  if (snippet.length > 1 && snippet[snippet.length - 1] === "") snippet.pop();
+  const out: string[] = [];
+  const emitDels = (anchor: number) => {
+    for (const line of dels.get(anchor) ?? []) {
+      out.push(
+        `<span class="l del"><span class="n">${line.oldNo ?? ""}</span>` +
+          `<span class="g">-</span>${codeHtml(line.content, lang, line.wordRanges)}</span>`,
+      );
+    }
+  };
+  for (let no = ref.startLine; no <= ref.endLine; no++) {
+    emitDels(no - 1);
+    const changed = news.get(no);
+    const kind = changed?.kind === "add" ? "add" : null;
+    const cls = kind ? `l ${kind}` : highlight.has(no) ? "l hl" : "l";
+    const content = changed ? changed.content : (snippet[no - ref.startLine] ?? "");
+    out.push(
+      `<span class="${cls}"><span class="n">${no}</span>` +
+        `<span class="g">${kind ? "+" : " "}</span>` +
+        `${codeHtml(content, lang, changed ? changed.wordRanges : [])}</span>`,
+    );
+  }
+  emitDels(ref.endLine);
+  return out.join("");
+}
+
 /** The quoted lines, numbered from the pointer's own start. Highlighted lines are the
  *  ones the pointer named, counted in the file's numbering rather than the panel's. */
 function snippetLines(ref: Ref): string {
@@ -162,9 +250,34 @@ function snippetLines(ref: Ref): string {
 }
 
 /** A ref, folded. The head names the file, the commit it is quoted at, the line range
- *  and whether those lines belong to a pull request in this review. */
-export function refFold(ownerId: string, ref: Ref, suffix = ""): string {
+ *  and whether those lines belong to a pull request in this review.
+ *
+ *  A ref whose lines a hunk of this review wrote is drawn as that diff — washes,
+ *  glyphs, the deleted lines laid back in — because the claim it backs is about the
+ *  change, and the file standing where the change was asks the reader to find it
+ *  again. The snippet stays for everything else: code outside the change, and a ref
+ *  pinned at a commit whose numbering the hunks do not share. */
+export function refFold(
+  ownerId: string,
+  ref: Ref,
+  suffix = "",
+  hunks?: HunkIndex,
+): string {
   const origin = ref.origin === "in_stack" ? "in this stack" : "outside this stack";
+  const behind = hunksBehind(ref, hunks);
+  const lines = behind.length > 0 ? diffSnippetLines(ref, behind) : snippetLines(ref);
+  // The way out. Lines the review changed link to the pull request that changed
+  // them, landed on this file in its Files tab; the sha-pinned quote stays one tap
+  // away. Everything else keeps the blob permalink, which is the only address
+  // unchanged code has.
+  const out =
+    behind.length > 0
+      ? `<a href="${escapeHtml(
+          prFilesUrl(ref.repo, behind[0]!.prNumber, ref.path, ref.startLine),
+        )}">${escapeHtml(`${ref.repo}#${behind[0]!.prNumber}`)}</a> · ` +
+        `<a href="${escapeHtml(githubBlobUrl(ref))}">${escapeHtml(`at ${shortSha(ref.sha)}`)}</a>`
+      : `<a href="${escapeHtml(githubBlobUrl(ref))}">` +
+        `${escapeHtml(`${ref.repo} at ${shortSha(ref.sha)}`)}</a>`;
   return (
     `<details class="fold" id="${escapeHtml(foldId(ownerId, ref, suffix))}">` +
     `<summary>${icon("chev", "tick")}<span class="fh">` +
@@ -185,9 +298,8 @@ export function refFold(ownerId: string, ref: Ref, suffix = ""): string {
     `<pre class="snip scroll-x" data-path="${escapeHtml(ref.path)}" data-sha="${escapeHtml(ref.sha)}" ` +
     `data-ref-from="${ref.startLine}" data-ref-to="${ref.endLine}"` +
     (ref.highlight.length === 0 ? "" : ` data-ref-hl="${ref.highlight.join(",")}"`) +
-    `><code>${snippetLines(ref)}</code></pre>` +
-    `<p class="fold-out"><a href="${escapeHtml(githubBlobUrl(ref))}">` +
-    `${escapeHtml(`${ref.repo} at ${shortSha(ref.sha)}`)}</a></p>` +
+    `><code>${lines}</code></pre>` +
+    `<p class="fold-out">${out}</p>` +
     `</div></details>`
   );
 }
@@ -343,7 +455,7 @@ const whenMoved = (marks: EvidenceMarks | null, field: string, html: string): st
 export function renderEvidence(
   evidence: Evidence[],
   ownerId: string,
-  ctx: { wsId: string; basePath: string },
+  ctx: { wsId: string; basePath: string; hunks?: HunkIndex },
   marks: EvidenceMarks | null = null,
   names: string[] = [],
 ): string {
@@ -352,7 +464,7 @@ export function renderEvidence(
       const p = `ev-${i}`;
       switch (e.type) {
         case "ref":
-          return refFold(ownerId, e.ref, `ev${i}-`);
+          return refFold(ownerId, e.ref, `ev${i}-`, ctx.hunks);
         case "payload":
           return payloadBlock(e.payload);
         case "example":

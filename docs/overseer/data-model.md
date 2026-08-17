@@ -54,7 +54,7 @@ review
 
 `kind` is derived, not declared: one pull request is `single`, several where each is the base of the next is `stack`, anything else is `set`. The renderer draws the same chain either way; the difference is only whether the chain has edges or is a list.
 
-`author_intent` and `summary` are the forest with provenance kept visible. `author_intent` paraphrases only the problem and reason stated in the pull request descriptions. `summary` is the witness's independent account of what the code accomplishes, its important implication and high-level mechanism. A mismatch between them is a finding, not something the witness silently resolves by replacing the author's account. For a stack both describe the completed feature, fix or implementation, not the pull requests in sequence. File names, test counts and minor edge cases stay out. The first rendering of this very document buried its own purpose and read, for a moment, as if the tool were the reviewer. That is the failure this split exists to prevent, and the skill gets graded on it.
+`author_intent` and `summary` are the forest with provenance kept visible. `author_intent` paraphrases only the problem and reason stated in the pull request descriptions. `summary` is the witness's independent account of what the code accomplishes, its important implication and high-level mechanism. The renderer titles them by the reader's question — the problem, the solution — and keeps the provenance as each label's quiet suffix, so the arc reads in order and whose words are whose stays visible. A mismatch between them is a finding, not something the witness silently resolves by replacing the author's account. For a stack both describe the completed feature, fix or implementation, not the pull requests in sequence. File names, test counts and minor edge cases stay out. The first rendering of this very document buried its own purpose and read, for a moment, as if the tool were the reviewer. That is the failure this split exists to prevent, and the skill gets graded on it.
 
 ### PullRequest
 
@@ -76,7 +76,7 @@ pr
   kinds[]         derived: the distinct kinds of the statements attributed to this pr
 ```
 
-`kinds[]` is derived on purpose. The marks on a pull request card are then provably tied to real claims, instead of being a second thing the skill can get out of step with the first.
+`kinds[]` is derived on purpose. The marks on a pull request card are then provably tied to real claims, instead of being a second thing the skill can get out of step with the first. The card goes further and draws the realizing statements themselves, each behind its kind mark, each a jump to the claim — because the most important thing a card can point at is what the pull request is on the page for, not a window into its code. `detail_ref` remains the mandatory pointer behind the card's detail, but the card does not wear it as a code panel: one quoted stretch cannot back a whole pull request, and rendering it as evidence gave an arbitrary snippet the most prominent code surface in the stack view.
 
 Every pull request in the review is realized by at least one statement. A pull request that warrants no statement warrants a question, namely why it is in the review at all. Its `gist` names the part of the whole change that this pull request contributes. Its `detail` gives the reason for that slice and its high-level mechanism, rather than repeating the GitHub title or listing files. Both are mandatory; this closes the other gap, a card the overview never mentions.
 
@@ -142,7 +142,7 @@ code_design
     refs[]        at least one
 ```
 
-`modules[]` distinguishes the policy or state owner from entry adapters, consumers and presentation. `coverage[]` is the sprawl check: fresh reads, cached reads, asynchronous work, repair and other distinct paths the feature must cover. Every entry is ref-backed. The object and its lists are always present in a new publish, but may be empty for a change with no useful code-design judgment; avoiding dead prose wins over filling the section.
+`modules[]` distinguishes the policy or state owner from entry adapters, consumers and presentation. `coverage[]` is the sprawl check: fresh reads, cached reads, asynchronous work, repair and other distinct paths the feature must cover. Every entry is ref-backed. The renderer states what the sprawl check means by drawing it — the coverage titles as nodes converging on the change — derived from the titles alone so the drawing can never claim an edge the rows do not carry; a single path draws nothing, because one arrow into a box is decoration rather than a check. The object and its lists are always present in a new publish, but may be empty for a change with no useful code-design judgment; avoiding dead prose wins over filling the section.
 
 ### Group
 
@@ -201,7 +201,7 @@ The remaining way to be wrong is to quote a changed file at a SHA the review doe
 
 Refs are SHA-pinned, so a force push cannot rot them.
 
-A ref renders its snippet and links out to GitHub at the pinned SHA. The snippet is the bounded view and the link is the unbounded one; Overseer never grows a code browser. The point of the page is that the reader should not have to read code to review, and the point of the evidence is that they always can: every claim stays one tap from the lines it stands on, which is what keeps the skill honest even on the days nobody taps.
+A ref whose lines a hunk of the review wrote renders as that diff — the deleted lines laid back in, the added lines washed — and links to the pull request's files view, because the claim it backs is about the change and the file standing where the change was asks the reader to find it again. Every other ref renders its snippet and links out to GitHub at the pinned SHA. Either way the snippet is the bounded view and the link is the unbounded one; Overseer never grows a code browser. The point of the page is that the reader should not have to read code to review, and the point of the evidence is that they always can: every claim stays one tap from the lines it stands on, which is what keeps the skill honest even on the days nobody taps.
 
 ### Figure
 

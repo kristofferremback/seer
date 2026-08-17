@@ -17,6 +17,7 @@
 
 import { escapeHtml } from "../escape";
 import { agoWords } from "../relative-time";
+import { figureSvg } from "./figure";
 import { getWorkspace, listUserWorkspaces } from "../db";
 import { sessionUser, type SessionUser } from "../auth";
 import { openAttachment, attachmentLocation } from "../store";
@@ -57,6 +58,7 @@ import {
 } from "./render-diff";
 import {
   icon,
+  indexHunks,
   refLink,
   refLinks,
   refFold,
@@ -65,6 +67,7 @@ import {
   safeInline,
   shortSha,
   type EvidenceMarks,
+  type HunkIndex,
 } from "./render-evidence";
 import {
   OBSERVATION_STALE_MS,
@@ -546,15 +549,10 @@ const STYLE = `  @font-face {
     margin-bottom: 12px;
   }
 
-  /* ---- contents ---- */
-  .contents {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: hsl(var(--muted));
-    margin: 16px 0 0;
-    line-height: 22px;
-  }
-  .contents a { display: inline-block; padding: 11px 0; }
+  /* ---- contents ----
+     The dot-separated link line this block styled is gone. Navigation is a chrome
+     concern rather than a mid-column one; the sections carry stable ids for
+     whatever chrome points at them. */
 
   /* ---- inline resolved reference ----
      A chevron and an underlined file location point to the code block below. There is
@@ -1001,6 +999,24 @@ const STYLE = `  @font-face {
   /* the marks are the first thing a tap reveals, so they get room to land in
      rather than butting against the line they opened from */
   .c-kinds { display: flex; align-items: center; gap: 9px; margin: 4px 0 7px; }
+  /* the claims this pull request realizes: each behind its kind mark, each a jump
+     to the statement itself. The card's pointer is the overview, not a code panel. */
+  .c-claims { display: grid; gap: 5px; margin: 8px 0 2px; }
+  .c-claims a {
+    display: inline-flex; align-items: flex-start; gap: 8px;
+    font-size: 13px; line-height: 1.5;
+    text-decoration: none; min-width: 0;
+  }
+  .c-claims a .ic { margin-top: 3px; }
+  .c-claims a > span {
+    min-width: 0;
+    text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px;
+  }
+  .c-claims a:active { background: none; }
+  .c-claims a:active > span { text-decoration-thickness: 2px; }
+  @media (hover: hover) and (pointer: fine) {
+    .c-claims a:hover > span { text-decoration-thickness: 2px; }
+  }
   .c-more > summary {
     display: flex; align-items: center; gap: 7px;
     margin-top: 10px; padding: 0;
@@ -1322,6 +1338,12 @@ const SPRITE = `<svg class="sprite" aria-hidden="true" focusable="false">
  *  apart from the transcribed block above so the prototype stays diffable against it. */
 const EVIDENCE_STYLE = `
   .fold-out { margin: 0; padding: 8px 12px 10px; font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); border-top: 1px solid hsl(var(--line)); }
+  /* a ref into changed code is drawn as the diff it cites, in the walkthrough's own
+     grammar. The line washes and gutter glyphs come with the .snip rules; the word
+     marks are scoped to .filediff there, so the fold carries its own copy. */
+  .fold .snip .l.add .w { background: var(--word-add); border-radius: 2px; }
+  .fold .snip .l.del .w { background: var(--word-rem); border-radius: 2px; }
+  .fold .snip .l .w:empty { display: inline-block; width: 3px; }
   .ev { margin: 12px 0 14px; }
   .ev-example .snipbox { margin: 0; }
   .ev figcaption { margin-top: 7px; font-size: 13px; line-height: 1.5; color: hsl(var(--muted)); }
@@ -1349,8 +1371,53 @@ const EVIDENCE_STYLE = `
   .fig .fig-edge { fill: none; stroke: hsl(var(--ink-soft) / 0.45); stroke-width: 1.4; stroke-linecap: round; }
   .fig .fig-box.fig-dim { stroke: hsl(var(--muted)); }
   .fig .fig-edge.fig-dim { stroke: hsl(var(--muted) / 0.55); stroke-dasharray: 3 5; }
+  /* the arrowhead is a shade stronger than its line, because it is the one part of
+     the line that carries meaning on its own; a dimmed edge's tip dims with it but
+     never dashes, or a chevron becomes two dots. */
+  .fig .fig-tip { fill: none; stroke: hsl(var(--ink-soft) / 0.75); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  .fig .fig-tip.fig-dim { stroke: hsl(var(--muted) / 0.75); }
+  /* the patch of surface a run label sits on, so the line passes beneath the words */
+  .fig .fig-mat { fill: hsl(var(--paper-sunk)); }
   .prbody-body { padding: 10px 12px 1px; }
   .prbody { margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: hsl(var(--ink-soft)); white-space: pre-wrap; }
+`;
+
+/** The reading arc, drawn rather than explained.
+ *
+ *  The overview's two accounts used to be labelled by provenance alone — "Author
+ *  intent", "Witness account" — which told a reader who was speaking and never which
+ *  question was being answered. The page's own arc is the reader's three questions in
+ *  order: what problem, what solution, how implemented. So each label leads with the
+ *  question and keeps the provenance as its quiet suffix, because the two accounts
+ *  disagreeing is a finding and the reader must still see whose words are whose.
+ *
+ *  What a section holds is said by something drawn, not by a sentence under the
+ *  heading: review focus keys its icon vocabulary beside the counts, the walkthrough
+ *  heading carries the whole diff's tally with a share bar on every group, and
+ *  coverage draws its paths converging on the change. A first draft wrote a one-line
+ *  clarifier under each heading instead, and every one of them read as a schema
+ *  comment. The blocks carry stable ids — problem, solution, changes — because they
+ *  are the stations any navigation of this page points at; the in-content contents
+ *  line that used to point at them is gone, navigation being a chrome concern, not
+ *  a mid-column one. */
+const STRUCTURE_STYLE = `
+  .account-title { color: hsl(var(--ink-soft)); }
+  .account-prov { color: hsl(var(--muted)); font-weight: 400; }
+  .rows-title {
+    display: flex; align-items: center; gap: 7px; margin: 20px 0 0;
+    font: 500 13px/1.35 var(--font-body); color: hsl(var(--ink-soft));
+  }
+  .rows-title + .rows { margin-top: 8px; }
+  /* the icon vocabulary, keyed once beside its counts */
+  .focus-key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 4px; font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted)); }
+  .focus-key span { display: inline-flex; align-items: center; gap: 6px; }
+  /* the walkthrough heading carries the whole diff's tally at its far end */
+  .walk-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  /* a group's share of the changed lines, drawn beside its own count */
+  .gbar { display: inline-block; width: 52px; height: 4px; margin-right: 10px; vertical-align: 2px; background: hsl(var(--ink) / 0.08); border-radius: 999px; overflow: hidden; }
+  .gbar i { display: block; height: 100%; background: hsl(var(--muted) / 0.75); border-radius: 999px; }
+  /* a derived figure hugs its drawing instead of spanning the column */
+  .figbox { display: inline-block; margin: 6px 0 12px; }
 `;
 
 /** Code, taken out of the column.
@@ -2594,22 +2661,6 @@ function prBody(ownerId: string, body: string, d: EntityDelta | null): string {
   );
 }
 
-/** Every ref the document carries, by id. `detail_ref` is stored as an id alone, so the
- *  snippet it names is found here; a version whose only mention of that ref was on a
- *  statement that has since been rewritten simply grows no fold. */
-function refsById(doc: ReviewDoc): Map<string, Ref> {
-  const byId = new Map<string, Ref>();
-  const take = (refs: Ref[], evidence: Evidence[]) => {
-    for (const r of refs) byId.set(r.id, r);
-    for (const e of evidence) if (e.type === "ref") byId.set(e.ref.id, e.ref);
-  };
-  for (const s of doc.statements) take(s.refs, s.evidence);
-  for (const n of doc.notes) take(n.refs, n.evidence);
-  for (const m of doc.codeDesign?.modules ?? []) take(m.refs, []);
-  for (const c of doc.codeDesign?.coverage ?? []) take(c.refs, []);
-  return byId;
-}
-
 /** What one pull request changed, counted off the hunks the document carries for it
  *  rather than off anything authored or fetched a second time. The chain and the
  *  walkthrough therefore cannot disagree: they add up the same lines. A pull request
@@ -2642,20 +2693,14 @@ function statusGlyph(status: PrStatusWord | undefined): string {
 
 function card(
   pr: Pr,
-  refs: Map<string, Ref>,
+  claims: Statement[],
   hunks: Hunk[],
   ctx: RenderCtx,
 ): string {
-  const kinds = pr.kinds
-    .map((k) => icon(k, `ic k-${k}`, KIND_LABEL[k] ?? k))
-    .join("");
   const owner = `pr-${pr.number}`;
-  const detailRef = refs.get(pr.detailRef);
-  const detailFold = detailRef ? refFold(owner, detailRef) : "";
   const d = ctx.delta ? ctx.delta.get("pr", prKey(pr.repo, pr.number)) : null;
   const edit = entityEditControl(d, owner);
-  const hasMore =
-    pr.detail.trim() !== "" || detailFold !== "" || pr.body.trim() !== "";
+  const hasMore = pr.detail.trim() !== "" || pr.body.trim() !== "";
   // Three readings, each earned by a tap. Closed is the title and what it cost,
   // which is what a stack is scanned for. Open adds the clean one-line gist and an
   // explicit edit control when needed. The nested fold holds the author's own account, which is the longest
@@ -2665,10 +2710,24 @@ function card(
       `<span class="c-morelabel">${escapeHtml(prLabel(pr))} on GitHub</span></summary>` +
       `<div class="card-body">` +
       marked(safeBlock(pr.detail), d, "detail", owner) +
-      detailFold +
       prBody(owner, pr.body, d) +
       `</div></details>`
     : "";
+  // What this pull request is on the page for: the statements that realize it,
+  // each behind its own kind mark, each a jump to the claim itself. Derived from
+  // `statement.prs[]`, so a card can never advertise a claim the overview does not
+  // make. This is where the card used to draw its detail ref as a code panel; a
+  // single quoted window cannot back a whole pull request, and the most important
+  // thing a card can point at is the claims, not one arbitrary stretch of code.
+  // The detail ref stays in the document as the pointer behind the detail prose;
+  // the card simply stops wearing it as evidence.
+  const realized = claims
+    .map(
+      (s) =>
+        `<a href="#${escapeHtml(s.id)}">${icon(s.kind, `ic k-${s.kind}`, KIND_LABEL[s.kind] ?? s.kind)}` +
+        `<span>${safeInline(s.text)}</span></a>`,
+    )
+    .join("");
   return (
     `<details class="card" id="${escapeHtml(owner)}">` +
     `<summary>` +
@@ -2686,9 +2745,10 @@ function card(
     `</span>` +
     `</summary>${edit.input}` +
     `<div class="c-open">` +
-    `<span class="c-kinds">${kinds}${statusMark(d)}</span>` +
+    (statusMark(d) === "" ? "" : `<span class="c-kinds">${statusMark(d)}</span>`) +
     edit.label +
     `<span class="c-line">${marked(safeInline(pr.gist), d, "gist", owner)}</span>` +
+    (realized === "" ? "" : `<div class="c-claims">${realized}</div>`) +
     more +
     `</div></details>`
   );
@@ -2741,9 +2801,15 @@ function chain(doc: ReviewDoc, ctx: RenderCtx): string {
         `<span class="sha">${escapeHtml(shortSha(root.baseSha))}</span></p>`
       : "";
   const arrow = `${icon("arrow", "arw")}`;
-  const refs = refsById(doc);
   const cards = prs
-    .map((pr) => card(pr, refs, doc.hunks, ctx))
+    .map((pr) =>
+      card(
+        pr,
+        doc.statements.filter((s) => s.prs.includes(prKey(pr.repo, pr.number))),
+        doc.hunks,
+        ctx,
+      ),
+    )
     .join(stack ? arrow : "");
   // A pull request the base version carried and this one does not stays in the
   // chain as a stub. A link that quietly leaves the stack is the one change a
@@ -2789,7 +2855,7 @@ function evidenceMarks(
 function statementRow(s: Statement, ctx: RenderCtx): string {
   const refs = uniqueRefs(s.refs);
   const links = refLinks(s.id, refs);
-  const folds = refs.map((r) => refFold(s.id, r)).join("");
+  const folds = refs.map((r) => refFold(s.id, r, "", ctx.hunks)).join("");
   const d = ctx.delta ? ctx.delta.get("statement", s.id) : null;
   const edit = entityEditControl(d, s.id);
   return (
@@ -2852,7 +2918,7 @@ function removedStubsBefore(
 function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
   const refs = uniqueRefs(m.refs);
   const links = refLinks(m.id, refs);
-  const folds = refs.map((r) => refFold(m.id, r)).join("");
+  const folds = refs.map((r) => refFold(m.id, r, "", ctx.hunks)).join("");
   const d = ctx.delta ? ctx.delta.get("module", m.id) : null;
   const edit = entityEditControl(d, m.id);
   return (
@@ -2870,7 +2936,7 @@ function designModuleBlock(m: DesignModule, ctx: RenderCtx): string {
 function designCoverageBlock(c: DesignCoverage, ctx: RenderCtx): string {
   const refs = uniqueRefs(c.refs);
   const links = refLinks(c.id, refs);
-  const folds = refs.map((r) => refFold(c.id, r)).join("");
+  const folds = refs.map((r) => refFold(c.id, r, "", ctx.hunks)).join("");
   const d = ctx.delta ? ctx.delta.get("coverage", c.id) : null;
   const edit = entityEditControl(d, c.id);
   return (
@@ -2921,15 +2987,39 @@ function codeDesignSection(doc: ReviewDoc, ctx: RenderCtx): string {
     (coverage === ""
       ? ""
       : `<h3 class="design-heading">${icon("branch")}<span>Coverage</span></h3>` +
+        coverageFigure(design.coverage) +
         `<div class="coverage-list">${coverage}</div>`) +
     `</section>\n`
   );
 }
 
+/** What "Coverage" means, drawn instead of captioned: every conceptual path the
+ *  change must cover, converging on the change. Derived from the coverage titles
+ *  alone, so it can never claim an edge the rows below do not carry. One path draws
+ *  no figure — a single arrow into a box is not a sprawl check, it is decoration. */
+function coverageFigure(coverage: DesignCoverage[]): string {
+  if (coverage.length < 2) return "";
+  const label = (title: string) =>
+    title.length <= 40 ? title : `${title.slice(0, 39)}…`;
+  const svg = figureSvg({
+    kind: "flow",
+    nodes: [
+      ...coverage.map((c) => ({
+        id: `cov-${c.id}`,
+        label: label(c.title),
+        state: "normal" as const,
+      })),
+      { id: "change", label: "this change", state: "normal" as const },
+    ],
+    edges: coverage.map((c) => ({ from: `cov-${c.id}`, to: "change", label: "" })),
+  });
+  return `<div class="ev-figure figbox">${svg}</div>`;
+}
+
 function noteRow(n: Note, ctx: RenderCtx): string {
   const refs = uniqueRefs(n.refs);
   const links = refLinks(n.id, refs);
-  const folds = refs.map((r) => refFold(n.id, r)).join("");
+  const folds = refs.map((r) => refFold(n.id, r, "", ctx.hunks)).join("");
   const d = ctx.delta ? ctx.delta.get("note", n.id) : null;
   const edit = entityEditControl(d, n.id);
   // A check the base version carried and this one dropped keeps its place in the
@@ -3121,6 +3211,20 @@ function notesInOrder(notes: Note[]): Note[] {
   ];
 }
 
+/** The icon vocabulary of the rows below, keyed once beside its counts. Each icon
+ *  sits against the word it means, so the rows themselves need no explanation. */
+function focusKey(notes: Note[]): string {
+  const parts = (["decision", "risk", "note"] as const)
+    .map((kind) => ({ kind, count: notes.filter((n) => n.kind === kind).length }))
+    .filter(({ count }) => count > 0)
+    .map(
+      ({ kind, count }) =>
+        `<span>${icon(kind, `ic k-${kind}`)}${count} ${kind}${count === 1 ? "" : "s"}</span>`,
+    )
+    .join("");
+  return parts === "" ? "" : `<p class="focus-key">${parts}</p>`;
+}
+
 /** A date the colophon can hold, or nothing. A stored timestamp out of the range Date
  *  can name is cosmetic, and a readable page beats a 500 over the line under it. */
 function publishedOn(updatedAt: number): string {
@@ -3133,6 +3237,9 @@ interface RenderCtx {
   wsId: string;
   /** The path this page is served under, which is what an attachment hangs off. */
   basePath: string;
+  /** Every hunk of the document by (sha, path), so a ref into changed code is drawn
+   *  as the diff it cites. */
+  hunks: HunkIndex;
   /** What moved since the base version, or null when this page has no base. */
   delta: DeltaIndex | null;
   /** Every annotation on the review, by `${targetType}:${targetId}`. Annotations
@@ -3386,6 +3493,7 @@ export function renderReviewPage(input: RenderInput): string {
   const ctx: RenderCtx = {
     wsId,
     basePath: input.basePath ?? `/${wsId}/r/${slug}`,
+    hunks: indexHunks(doc.hunks),
     delta,
     annotations: byTarget,
     status: input.status ?? {},
@@ -3442,10 +3550,6 @@ export function renderReviewPage(input: RenderInput): string {
         delta.removed("coverage").length > 0);
     return current || historical;
   })();
-  const designLink = hasCodeDesign
-    ? `<span class="nb"><a href="#design">code design</a> ·</span> `
-    : "";
-
   const baseMark =
     input.baseVersion == null
       ? ""
@@ -3461,7 +3565,7 @@ export function renderReviewPage(input: RenderInput): string {
     `<link rel="icon" type="image/svg+xml" href="${FAVICON}">\n` +
     `<link rel="preload" href="/fonts/switzer.woff2" as="font" type="font/woff2" crossorigin>\n` +
     `<link rel="preload" href="/fonts/commit-mono-400.woff2" as="font" type="font/woff2" crossorigin>\n` +
-    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${ZOOM_STYLE}${DELTA_STYLE}${QUESTION_STYLE}` +
+    `<style>\n${STYLE}\n${EVIDENCE_STYLE}${STRUCTURE_STYLE}${ZOOM_STYLE}${DELTA_STYLE}${QUESTION_STYLE}` +
     `${input.canShare ? SHARE_STYLE : ""}</style>\n` +
     `</head>\n<body>\n` +
     SPRITE +
@@ -3503,23 +3607,21 @@ export function renderReviewPage(input: RenderInput): string {
     `<section id="summary"><h2>Overview</h2>` +
     (doc.authorIntent == null || doc.authorIntent.trim() === ""
       ? ""
-      : `<div class="account"><p class="account-title">${icon("pr", "account-icon")}` +
-        `<span>Author intent</span></p>` +
+      : `<div class="account" id="problem"><p class="account-title">${icon("pr", "account-icon")}` +
+        `<span>The problem</span> <span class="account-prov">· as the authors state it</span></p>` +
         `<div class="author-intent">${marked(safeBlock(doc.authorIntent), intentDelta, "authorIntent", "intent", true)}</div>` +
         `</div>`) +
-    `<div class="account"><p class="account-title">${icon("eye", "account-icon")}` +
-    `<span>Witness account</span></p>` +
+    `<div class="account" id="solution"><p class="account-title">${icon("eye", "account-icon")}` +
+    `<span>The solution</span> <span class="account-prov">· as the witness verified it</span></p>` +
     `<div class="witness-account">${marked(safeBlock(doc.summary), summaryDelta, "summary", "summary", true)}</div>` +
     `</div>` +
     questionsHere(ctx, "summary", "summary") +
+    `<p class="rows-title" id="changes">What changes</p>` +
     `<div class="rows">${rows}</div>` +
-    `<p class="contents"><span class="nb"><a href="#summary">overview</a> ·</span> ` +
-    designLink +
-    `<span class="nb"><a href="#notes">review focus</a> ·</span> ` +
-    `<span class="nb"><a href="#walkthrough">implementation walkthrough</a></span></p>` +
     `</section></div>\n` +
     codeDesignSection(doc, ctx) +
-    `<section id="notes"><h2>Review focus</h2><div class="notes">${notes}</div></section>\n` +
+    `<section id="notes"><h2>Review focus</h2>${focusKey(doc.notes)}` +
+    `<div class="notes">${notes}</div></section>\n` +
     walkthroughSection(doc, delta, (type, id) => questionsHere(ctx, type, id)) +
     `\n` +
     questionsSection(input, annotations, ctx.basePath) +

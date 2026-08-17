@@ -130,17 +130,66 @@ describe("the page itself", () => {
     expect(html).toContain('<section id="summary"><h2>Overview</h2>');
     expect(html).toContain('<section id="design"><h2>Code design</h2>');
     expect(html).toContain('<section id="notes"><h2>Review focus</h2>');
-    expect(html).toContain('<section id="walkthrough"><h2>Implementation walkthrough</h2>');
-    expect(html).toContain('<a href="#summary">overview</a>');
-    expect(html).toContain('<a href="#design">code design</a>');
+    expect(html).toContain('<span>Implementation walkthrough</span>');
+    // The arc's stations carry stable ids, for whatever navigation points at them.
+    // Nothing navigational sits inside the column itself.
+    expect(html).toContain('<div class="account" id="problem">');
+    expect(html).toContain('<div class="account" id="solution">');
+    expect(html).toContain('<p class="rows-title" id="changes">');
+    expect(html).not.toContain('class="spine"');
+    expect(html).not.toContain('class="contents"');
     expect(html).toContain('<p class="account-title"><svg class="account-icon"');
-    expect(html).toContain("<span>Author intent</span>");
-    expect(html).toContain("<span>Witness account</span>");
+    // The reader's questions lead; whose account each is stays as the suffix.
+    expect(html).toContain("<span>The problem</span>");
+    expect(html).toContain('<span class="account-prov">· as the authors state it</span>');
+    expect(html).toContain("<span>The solution</span>");
+    expect(html).toContain('<span class="account-prov">· as the witness verified it</span>');
+    expect(html).toContain('<p class="rows-title" id="changes">What changes</p>');
     expect(html).toContain(doc().authorIntent!);
-    expect(html).not.toContain("from pull request descriptions");
     expect(html).not.toContain("verified against the code");
     expect(html).not.toContain('class="provenance"');
     expect(html).not.toContain('class="source-tag"');
+  });
+
+  test("what a section holds is drawn, not captioned", () => {
+    const html = page(doc());
+    // Review focus keys its icon vocabulary beside the counts.
+    expect(html).toContain('<p class="focus-key">');
+    expect(html).toContain("1 risk</span>");
+    // The walkthrough heading carries the whole diff's tally, and every group
+    // wears its share of the changed lines as a bar beside its count.
+    expect(html).toContain('<span class="walk-head">');
+    expect(html).toContain('<span class="gbar" aria-hidden="true">');
+    // No sentence stands under any heading to explain the page to the reader.
+    expect(html).not.toContain("secnote");
+  });
+
+  test("two or more coverage paths draw the convergence figure, one draws none", () => {
+    const two = doc();
+    two.codeDesign = {
+      ...two.codeDesign!,
+      coverage: [
+        { id: "cov_a", title: "Browser reads", body: "b", refs: [] },
+        { id: "cov_b", title: "API reads", body: "b", refs: [] },
+      ],
+    };
+    const drawn = page(two);
+    const design = drawn.slice(
+      drawn.indexOf('<section id="design"'),
+      drawn.indexOf('<div class="coverage-list">'),
+    );
+    expect(design).toContain('<svg class="fig"');
+    expect(design).toContain(">this change</text>");
+    expect(design).toContain(">Browser reads</text>");
+    // One path is not a sprawl check, and gets no drawing. The golden fixture
+    // carries exactly one coverage path, which is what makes it the case.
+    expect(doc().codeDesign!.coverage.length).toBe(1);
+    const one = page(doc());
+    const oneDesign = one.slice(
+      one.indexOf('<section id="design"'),
+      one.indexOf('<div class="coverage-list">'),
+    );
+    expect(oneDesign).not.toContain('<svg class="fig"');
   });
 
   test("code design renders responsibility areas, paths, coverage, and refs", () => {
@@ -168,7 +217,7 @@ describe("the page itself", () => {
     const html = page(legacy);
     expect(html).not.toContain('<section id="design"');
     expect(html).not.toContain('<a href="#design">');
-    expect(html).not.toContain("<span>Author intent</span>");
+    expect(html).not.toContain("<span>The problem</span>");
     expect(html).toContain("Reviews carry private source");
   });
 
@@ -247,6 +296,51 @@ describe("the page itself", () => {
       `https://github.com/${GOLDEN_REPO}/blob/${"4".repeat(40)}/src/auth.ts#L40-L42`,
     );
     expect(html).toContain("in this stack");
+  });
+
+  describe("a ref into changed code is drawn as the change", () => {
+    const fold = (html: string, id: string): string => {
+      const start = html.indexOf(`<details class="fold" id="${id}"`);
+      expect(start).toBeGreaterThan(-1);
+      return html.slice(start, html.indexOf("</details>", start));
+    };
+
+    test("the quoted range renders the diff that produced it", () => {
+      // The golden statement's ref quotes src/auth.ts at the head sha whose hunk
+      // rewrote line 41, so the citation is the change, not the file after it.
+      const html = page(doc());
+      const block = fold(html, "st_gate-ref_st_gate");
+      // The deleted line is laid back in with its old-file number and glyph.
+      expect(block).toContain(
+        '<span class="l del"><span class="n">41</span><span class="g">-</span>',
+      );
+      // The deleted text itself, syntax-classed like every other line of code.
+      expect(block).toContain('<span class="kw">true</span>;');
+      // The added line keeps its wash and its word marks.
+      expect(block).toContain(
+        '<span class="l add"><span class="n">41</span><span class="g">+</span>',
+      );
+      expect(block).toContain('class="w"');
+      // Lines the change did not write still come from the snippet, numbered on,
+      // and the line the ref singles out keeps its mark.
+      expect(block).toContain('<span class="l hl"><span class="n">42</span>');
+      expect(block).toContain('<span class="n">48</span>');
+      // The way out leads to the pull request that wrote these lines, with the
+      // sha-pinned quote still one tap away.
+      expect(block).toContain(`https://github.com/${GOLDEN_REPO}/pull/12/files#diff-`);
+      expect(block).toContain(`${GOLDEN_REPO}#12</a>`);
+      expect(block).toContain(">at 2222222</a>");
+    });
+
+    test("a ref at a commit the hunks do not count against keeps the snippet", () => {
+      // ref() pins at 44…4, a sha no hunk counts against: its numbering names a
+      // different tree, so no diff may be laid over it.
+      const html = page(doc({ statements: [statement()] }));
+      const block = fold(html, "st_x-ref_a");
+      expect(block).not.toContain('class="l del"');
+      expect(block).not.toContain("/pull/");
+      expect(block).toContain(`blob/${"4".repeat(40)}/src/auth.ts#L40-L42`);
+    });
   });
 
   test("payload, attachment and bundle evidence render as themselves", () => {
@@ -474,20 +568,32 @@ describe("the page itself", () => {
     expect(html).not.toContain("[the plan]");
   });
 
-  test("a card folds the ref its detail names", () => {
+  test("a card points at the claims that realize it, never at a code panel", () => {
     const base = doc();
-    const r = ref("ref_detail", "src/session.ts", 12);
-    const st = statement({ id: "st_a", refs: [r] });
-    const prs = base.prs.map((pr) => ({ ...pr, detailRef: r.id }));
-    const html = page({ ...base, prs, statements: [st] });
-    expect(html).toContain(`<details class="fold" id="pr-12-ref_detail"`);
-    // A detail ref no version of the document carries grows no fold at all.
-    const orphan = page({
-      ...base,
-      prs: base.prs.map((pr) => ({ ...pr, detailRef: "ref_gone" })),
-      statements: [st],
+    const mine = statement({
+      id: "st_mine",
+      text: "The gate moves to the session helper",
+      prs: [`${GOLDEN_REPO}#12`],
     });
-    expect(orphan).not.toContain("ref_gone");
+    const other = statement({
+      id: "st_other",
+      text: "A claim another pull request realizes",
+      prs: [`${GOLDEN_REPO}#13`],
+    });
+    const html = page(doc({ statements: [mine, other] }));
+    const cardBlock = html.slice(
+      html.indexOf('<details class="card" id="pr-12"'),
+      html.indexOf('<details class="card" id="pr-13"'),
+    );
+    // Each realizing statement, behind its kind mark, as a jump to the claim.
+    expect(cardBlock).toContain('<div class="c-claims">');
+    expect(cardBlock).toContain('<a href="#st_mine">');
+    expect(cardBlock).toContain("The gate moves to the session helper");
+    // Only its own: a card cannot advertise a claim the overview ties elsewhere.
+    expect(cardBlock).not.toContain('href="#st_other"');
+    // The detail ref stays in the document as the pointer behind the detail; the
+    // card no longer wears it as a code panel.
+    expect(html).not.toContain(`id="pr-12-${base.prs[0]!.detailRef}"`);
   });
 
   test("a row citing one pointer twice draws it once", () => {

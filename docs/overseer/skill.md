@@ -393,11 +393,15 @@ satisfied wherever you put the pointer. A statement whose refs are enough sends
 - **ref**: the default. A SHA-pinned pointer,
   `{ repo, sha, path, startLine, endLine, highlight[] }`, camelCase like every other
   authored field, with optional `highlight[]`. Overseer resolves the snippet and derives whether the ref
-  is `in_stack` or `outside`. A ref into untouched code is often the most useful thing
-  on the page, because it shows what the change reuses.
-  Pin a ref into changed code at the head sha of the pull request that changes it; its
-  base sha shows the file as it was, and any commit inside it counts too. Code the
-  review does not touch is yours to pin wherever you read it.
+  is `in_stack` or `outside`.
+  Cite the changed code first. A claim about this change points into the lines the
+  change wrote, pinned at the head sha of the pull request that wrote them, and the
+  page draws that citation as the diff itself, which is what the reader wants under
+  the claim. The base sha shows the file as it was, and any commit inside the pull
+  request counts too, but only a ref whose sha the hunks count against can be drawn
+  as a diff; the rest render as plain quotes. A ref into untouched code is the
+  deliberate exception, not the default: it shows what the change reuses or leans
+  on. Code the review does not touch is yours to pin wherever you read it.
   What a ref is checked for: the file exists at that sha, and the range lies inside it,
   so a range past the end of the file is a 422; and a file some pull request in the
   review changes, quoted at a commit the review does not carry, is a 422 naming the sha

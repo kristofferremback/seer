@@ -325,6 +325,22 @@ function sourceOf(hunk: Hunk): string {
   return `#${hunk.prNumber} ${shortSha(hunk.sha)}`;
 }
 
+/** These same lines on GitHub's own review surface: the pull request's Files tab,
+ *  landed on this file. GitHub keys each file's anchor by the SHA-256 of its path,
+ *  and `R<line>` lands on a new-side line within it. */
+export function prFilesUrl(
+  repo: string,
+  prNumber: number,
+  path: string,
+  line?: number,
+): string {
+  const anchor = new Bun.CryptoHasher("sha256").update(path).digest("hex");
+  return (
+    `https://github.com/${repo}/pull/${prNumber}/files#diff-${anchor}` +
+    (line === undefined ? "" : `R${line}`)
+  );
+}
+
 /** The id a hunk's element carries, so a question filed against a hunk has somewhere
  *  to point. The hunk's own id holds characters a fragment reads badly, so the anchor
  *  is the escaped form both sides derive the same way. */
@@ -384,7 +400,13 @@ function hunkBlock(
     ` data-path="${escapeHtml(hunk.path)}" data-sha="${escapeHtml(hunk.sha)}"` +
     ` data-new-from="${span.from}" data-new-to="${span.to}"${broke ? " data-src-break" : ""}>` +
     `<div class="hh"><span class="hh-at">${escapeHtml(hunkRange(hunk))}</span>` +
-    `<span class="hh-src">${escapeHtml(sourceOf(hunk))}</span></div>` +
+    // The source is a link to these very lines on the pull request's Files tab: the
+    // walkthrough is the better view of the diff, not a wall between the reader and
+    // where they comment on it. A hunk that only deletes has no new-side line to
+    // land on, so its link lands on the file.
+    `<span class="hh-src"><a href="${escapeHtml(
+      prFilesUrl(hunk.repo, hunk.prNumber, hunk.path, span.to >= span.from ? span.from : undefined),
+    )}">${escapeHtml(sourceOf(hunk))}</a></span></div>` +
     `<pre class="snip scroll-x"><code>${lines}</code></pre>` +
     here("hunk", hunk.id) +
     `</div>`
@@ -497,6 +519,10 @@ function groupBlock(
   order: Map<string, number>,
   d: EntityDelta | null,
   here: QuestionsHere,
+  /** This group's changed lines against the largest group's, 0..1: the bar beside
+   *  its count, so where the weight of the diff sits is visible before any number
+   *  is read. */
+  share: number,
 ): string {
   const files = filesOf(group, byId, order);
   // How much of the diff this group holds. It used to be a bare hunk count, which
@@ -528,7 +554,10 @@ function groupBlock(
     `${icon(group.kind, `ic ic-lg k-${group.kind}`, KIND_LABEL[group.kind])}` +
     `<span class="gname">${marked(safeInline(group.title), d, "title", group.id)}</span>` +
     `${statusMark(d)}` +
-    `<span class="gcount">${statHtml(added, removed)}</span>` +
+    // The bar is decoration over the numbers beside it, never the only channel.
+    `<span class="gcount"><span class="gbar" aria-hidden="true">` +
+    `<i style="width:${Math.max(6, Math.round(share * 100))}%"></i></span>` +
+    `${statHtml(added, removed)}</span>` +
     `</summary>${edit.input}` +
     `<div class="grp-body">` +
     edit.label +
@@ -569,16 +598,36 @@ export function walkthroughSection(
       .join("")}</div></details>`;
   const removedBefore = (id: string | null) =>
     (delta?.removedBefore("group", id) ?? []).map(removedGroup).join("");
+  // Each group's changed lines, for the share bar beside its count. Counted off the
+  // same hunks the rows below draw, so the bar and the numbers cannot disagree.
+  const changedOf = (g: Group) =>
+    g.hunks
+      .map((id) => byId.get(id))
+      .filter((h): h is Hunk => h !== undefined)
+      .reduce((n, h) => n + h.lines.filter((l) => l.kind !== "ctx").length, 0);
+  const heaviest = Math.max(1, ...doc.groups.map(changedOf));
   const groups =
     groupsInOrder(doc.groups)
       .map(
         (g) =>
           removedBefore(g.id) +
-          groupBlock(g, byId, order, delta ? delta.get("group", g.id) : null, here),
+          groupBlock(
+            g,
+            byId,
+            order,
+            delta ? delta.get("group", g.id) : null,
+            here,
+            changedOf(g) / heaviest,
+          ),
       )
       .join("") + removedBefore(null);
+  const whole = stats(doc.hunks);
   return (
-    `<section id="walkthrough"><h2>Implementation walkthrough</h2>` +
+    // The heading carries the whole diff's tally at its far end: this section being
+    // all of the change is the walkthrough's one guarantee, and the sum states it.
+    `<section id="walkthrough"><h2><span class="walk-head">` +
+    `<span>Implementation walkthrough</span>${statHtml(whole.added, whole.removed)}` +
+    `</span></h2>` +
     unaccountedBlock(doc.unaccounted ?? []) +
     `<div class="walk">${groups}</div></section>`
   );
