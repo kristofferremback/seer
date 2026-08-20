@@ -350,14 +350,14 @@ function groups(): LedgerGroup[] {
       name: "Crystal Palace",
       visibility: "private",
       bundles: [
-        { slug: "onboarding-report", latestVersion: 3, updatedAt: daysAgo(18), versions: [3, 2, 1] },
+        { slug: "onboarding-report", kind: "bundle" as const, latestVersion: 3, updatedAt: daysAgo(18), versions: [3, 2, 1] },
       ],
     },
     {
       wsId: "ws_4n8rp2wcfd",
       name: "Pierre's bench",
       visibility: "public",
-      bundles: [{ slug: "recipe-box", latestVersion: 2, updatedAt: daysAgo(19), versions: [2, 1] }],
+      bundles: [{ slug: "recipe-box", kind: "bundle" as const, latestVersion: 2, updatedAt: daysAgo(19), versions: [2, 1] }],
     },
   ];
 }
@@ -409,6 +409,7 @@ describe("bundles grouping", () => {
 function dated(): LedgerGroup[] {
   const at = (slug: string, days: number): LedgerBundle => ({
     slug,
+    kind: "bundle",
     latestVersion: 1,
     updatedAt: daysAgo(days),
     versions: [1],
@@ -484,7 +485,7 @@ describe("bundles recency sections", () => {
     const one = bundlesPage(
       nav(),
       [{ wsId: "ws_7g2kq4xbvm", name: "One", visibility: "public", bundles: [
-        { slug: "solo", latestVersion: 1, updatedAt: daysAgo(0), versions: [1] },
+        { slug: "solo", kind: "bundle" as const, latestVersion: 1, updatedAt: daysAgo(0), versions: [1] },
       ] }],
       NOW,
     );
@@ -553,7 +554,7 @@ describe("the bundle row menu", () => {
     const html = bundlesPage(
       nav(),
       [{ wsId: "ws_7g2kq4xbvm", name: "Five", visibility: "public", bundles: [
-        { slug: "five", latestVersion: 5, updatedAt: daysAgo(0), versions: [5, 4, 3, 2, 1] },
+        { slug: "five", kind: "bundle" as const, latestVersion: 5, updatedAt: daysAgo(0), versions: [5, 4, 3, 2, 1] },
       ] }],
       NOW,
     );
@@ -568,7 +569,7 @@ describe("the bundle row menu", () => {
     const html = bundlesPage(
       nav(),
       [{ wsId: "ws_7g2kq4xbvm", name: "Many", visibility: "public", bundles: [
-        { slug: "many", latestVersion: 12, updatedAt: daysAgo(0), versions },
+        { slug: "many", kind: "bundle" as const, latestVersion: 12, updatedAt: daysAgo(0), versions },
       ] }],
       NOW,
     );
@@ -931,6 +932,7 @@ function projectData(over: Partial<ProjectPageData> = {}): ProjectPageData {
     description: "The whole effort, with `code` in it.",
     descriptionHtml: "<p>The whole effort, with <code>code</code> in it.</p>",
     children: [{ slug: "video", title: "Video", status: "done", bundles: 1, reviews: 0 }],
+    plans: [],
     bundles: [
       { slug: "call-prototype", latestVersion: 3, updatedAt: NOW, url: "https://seer.test/ws_7g2kq4xbvm/b/call-prototype/" },
     ],

@@ -64,6 +64,8 @@ export interface ProjectState {
   project: ProjectRow;
   parent: { slug: string; title: string; status: ProjectStatus } | null;
   children: ProjectChildSummary[];
+  /** Bundles of kind plan, first: the project's documents to read. */
+  plans: ProjectBundleEntry[];
   bundles: ProjectBundleEntry[];
   reviews: ProjectReviewEntry[];
 }
@@ -78,12 +80,13 @@ export function projectState(project: ProjectRow): ProjectState {
   const ws = project.workspace_id;
   const parentRow = project.parent_id ? getProjectById(project.parent_id) : null;
 
+  const plans: ProjectBundleEntry[] = [];
   const bundles: ProjectBundleEntry[] = [];
   for (const slug of listProjectBundleSlugs(project.id)) {
     const bundle = getBundle(ws, slug);
     if (!bundle) continue;
     const versions = listVersions(ws, slug);
-    bundles.push({
+    (bundle.kind === "plan" ? plans : bundles).push({
       slug,
       latestVersion: bundle.latest_version,
       updatedAt: versions[0]?.created_at ?? bundle.created_at,
@@ -120,6 +123,7 @@ export function projectState(project: ProjectRow): ProjectState {
         reviews: counts.reviews,
       };
     }),
+    plans,
     bundles,
     reviews,
   };
@@ -142,6 +146,12 @@ function stateJson(state: ProjectState): unknown {
     createdAt: new Date(p.created_at).toISOString(),
     updatedAt: new Date(p.updated_at).toISOString(),
     children: state.children,
+    plans: state.plans.map((b) => ({
+      slug: b.slug,
+      latestVersion: b.latestVersion,
+      updatedAt: new Date(b.updatedAt).toISOString(),
+      url: b.url,
+    })),
     bundles: state.bundles.map((b) => ({
       slug: b.slug,
       latestVersion: b.latestVersion,
