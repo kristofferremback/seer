@@ -114,8 +114,8 @@ import {
   type SettingsReveal,
 } from "./pages";
 import { escapeHtml } from "./escape";
-import { getProject, listProjects, projectCounts, type ProjectRow } from "./projects/db";
-import { projectState } from "./projects/api";
+import { getProject, listNotesTail, listProjects, projectCounts, type ProjectRow } from "./projects/db";
+import { NOTES_TAIL, projectState, projectTrail } from "./projects/api";
 import { render as renderConstrainedMarkdown } from "./overseer/markdown";
 
 // Workspace-scoped bundle path: /<ws_id>/b/<slug>[/v/N][/rest]. Anything under a
@@ -612,6 +612,23 @@ function handleProjectPage(req: Request, wsId: string, slug: string): Response {
     plans: state.plans,
     bundles: state.bundles,
     reviews: state.reviews,
+    // The record's tail: notes and derived status events, oldest first. Note bodies
+    // render through the same constrained renderer, same corruption fallback.
+    trail: projectTrail(project, listNotesTail(project.id, NOTES_TAIL)).map((e) => {
+      if (e.kind === "event") return e;
+      let bodyHtml = "";
+      try {
+        bodyHtml = renderConstrainedMarkdown(e.body);
+      } catch (err) {
+        console.error(`[seer] note ${e.id}: stored body failed to render:`, err);
+        bodyHtml = `<p>${escapeHtml(e.body)}</p>`;
+      }
+      return { ...e, bodyHtml };
+    }),
+    noteCount: state.noteCount,
+    // Self-attribution is noise in a workspace of one; names earn their place when
+    // there is a second member to tell apart.
+    showAuthors: listMembers(wsId).length > 1,
   };
 
   // Vary names Accept on both representations: without it a cache that saw one would

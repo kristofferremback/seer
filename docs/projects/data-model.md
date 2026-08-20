@@ -13,9 +13,9 @@ This model was settled in a design session on 2026-08-20, against the vocabulary
 dividing line the review model established. It follows `docs/overseer/data-model.md` in
 shape and shares its rules where they apply.
 
-It ships in slices. The project entity, nesting, membership, the read pages, the plan
-kind with its reading surface, tasks, and the `projects[]` field on a review document
-are live; notes are settled here but not yet served.
+It shipped in slices and everything below is live: the project entity, nesting,
+membership, the read pages, the plan kind with its reading surface, tasks, the
+`projects[]` field on a review document, and notes with the derived trail.
 
 ## The dividing line
 

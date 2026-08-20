@@ -814,6 +814,24 @@ function styles(): string {
   /* The description is the project's own prose, so it gets a reading measure wider
      than the interface default. */
   .proj-desc { max-width: 65ch; margin: 1.2rem 0 0.4rem; }
+  /* The record: authored notes carry a rule and a body; derived events are one muted
+     line, unbordered, so the split is visible before a word is read. */
+  .trail { max-width: 65ch; }
+  .trail-note {
+    border-left: 2px solid hsl(var(--line));
+    padding: 2px 0 2px 14px;
+    margin: 14px 0;
+  }
+  .trail-meta { margin: 0 0 4px; color: hsl(var(--muted)); font-size: 12.5px; }
+  .trail-meta a { color: hsl(var(--accent-soft)); }
+  .trail-body > p { margin: 0 0 8px; }
+  .trail-body > :last-child { margin-bottom: 0; }
+  .trail-event {
+    margin: 10px 0;
+    color: hsl(var(--muted));
+    font-size: 13.5px;
+  }
+  .trail-event a { color: hsl(var(--muted)); }
 
   /* ---- tasks on the project page ---- */
   .task-list { display: grid; gap: 6px; margin: 0 0 8px; }
@@ -1487,7 +1505,7 @@ export function projectsSkillDoc(): string {
   return `# Seer — grouping work into projects as an agent
 
 A project groups the work around one thing being built: the bundles you publish, the
-reviews you dispatch, the tasks you work through, and (in time) notes. It lives in Seer, outside any
+reviews you dispatch, the tasks you work through, and the notes you keep. It lives in Seer, outside any
 repo, and persists across sessions — create one when you and the human plan a piece of
 work, attach what you produce as you go, and the next session resumes by reading one
 URL. Every part is optional except the grouping itself.
@@ -1508,6 +1526,8 @@ PUT    /api/projects/<slug>/reviews/<review>      attach a review    (DELETE det
 PUT    /api/bundles/<bundle>?project=<slug>       publish a bundle straight into a project
 POST   /api/projects/<slug>/tasks                 create: {title, body?, gates?, prs?}
 PATCH  /api/projects/<slug>/tasks/<tsk_id>        any of: title, body, status, gates, prs
+POST   /api/projects/<slug>/notes                 append: {body, task?}
+GET    /api/projects/<slug>/notes                 the whole record: notes + status events
 \`\`\`
 
 \`\`\`bash
@@ -1545,6 +1565,30 @@ curl -s -X POST -H "Authorization: Bearer $SEER_API_TOKEN" \\
        "prs": [{"repo": "threahq/threa", "number": 1730}]}' \\
   ${base}/api/projects/calling/tasks
 \`\`\`
+
+## Notes
+
+A note is what you were thinking while you worked, written as you work: a decision, a
+dead end, a thing the next session needs to know. Notes are append-only — there is no
+edit and no delete, ever; correcting a note means writing another. \`task\` ties a
+note to one of the project's tasks (its \`tsk_…\` id); without it the note belongs to
+the project itself. The body is constrained markdown, at most 2000 characters.
+
+In the markdown projection, derived status lines (the \`—\` grammar) are meaningful
+only inside the Notes section; matching that shape elsewhere in authored text carries
+no authority.
+
+\`\`\`bash
+curl -s -X POST -H "Authorization: Bearer $SEER_API_TOKEN" \\
+  -H "content-type: application/json" \\
+  -d '{"body": "Chose the worker route: the main thread stutters past 2 tracks."}' \\
+  ${base}/api/projects/calling/notes
+\`\`\`
+
+The project state carries the most recent 20 notes; \`GET
+${base}/api/projects/<slug>/notes\` is the full record, every note merged with every
+status transition Seer recorded, oldest first. Reading it front to back is reading
+the project's history.
 
 A review can also name projects as it publishes: a \`projects\`: \`["calling"]\` field
 in the review document attaches the review on landing. See ${base}/overseer/skill.md.
@@ -2659,6 +2703,32 @@ export interface ProjectPageData {
   plans: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   bundles: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   reviews: { slug: string; title: string; latestVersion: number; publishedAt: number; url: string }[];
+  /** The bounded tail of the record: authored notes (body rendered by the server)
+   *  interleaved with derived status events, oldest first. */
+  trail: (
+    | {
+        kind: "note";
+        id: string;
+        task: string | null;
+        taskTitle: string | null;
+        body: string;
+        bodyHtml: string;
+        author: string | null;
+        createdAt: number;
+      }
+    | {
+        kind: "event";
+        task: string | null;
+        taskTitle: string | null;
+        from: string;
+        to: string;
+        createdAt: number;
+      }
+  )[];
+  /** Every note the project holds; the trail carries at most the tail of them. */
+  noteCount: number;
+  /** Authors matter only when there is more than one member to tell apart. */
+  showAuthors: boolean;
 }
 
 export function projectPage(d: ProjectPageData): string {
@@ -2740,7 +2810,7 @@ export function projectPage(d: ProjectPageData): string {
             .join("")}</ul>`;
     const drift = t.drift ? `<p class="drift">${escapeHtml(t.drift)}</p>` : "";
     const body = t.bodyHtml || gateList || drift;
-    return `<details class="task" data-filter="${escapeHtml(`${t.title} ${t.prs.map((pr) => `${pr.repo}#${pr.number}`).join(" ")}`.toLowerCase())}">
+    return `<details class="task" id="${t.id}" data-filter="${escapeHtml(`${t.title} ${t.prs.map((pr) => `${pr.repo}#${pr.number}`).join(" ")}`.toLowerCase())}">
       <summary>${statusWord(t.status)}<span class="task-title">${escapeHtml(t.title)}</span>${gatesTally}${refs}</summary>
       ${body ? `<div class="task-body">${t.bodyHtml}${gateList}${drift}</div>` : ""}
     </details>`;
@@ -2796,12 +2866,42 @@ export function projectPage(d: ProjectPageData): string {
       </table>
     </div>`;
 
+  // The record, drawn as the split it is: notes are authored and carry a body;
+  // events are derived, muted, and read as one line nobody wrote.
+  const trailEntry = (e: ProjectPageData["trail"][number]) => {
+    const when = `<time class="mono-id" datetime="${new Date(e.createdAt).toISOString()}">${fmtInstant(e.createdAt)}</time>`;
+    if (e.kind === "event") {
+      const subject = e.taskTitle
+        ? `<a href="#${escapeHtml(e.task ?? "")}">${escapeHtml(e.taskTitle)}</a>`
+        : "";
+      return `<p class="trail-event">${when} ${subject}${subject ? " " : ""}${escapeHtml(e.from)} &rarr; ${escapeHtml(e.to)}</p>`;
+    }
+    const taskRef = e.taskTitle
+      ? ` &middot; <a href="#${escapeHtml(e.task ?? "")}">${escapeHtml(e.taskTitle)}</a>`
+      : "";
+    const author = d.showAuthors && e.author ? ` &middot; ${escapeHtml(e.author)}` : "";
+    return `<div class="trail-note">
+      <p class="trail-meta">${when}${taskRef}${author}</p>
+      <div class="trail-body">${e.bodyHtml}</div>
+    </div>`;
+  };
+  const withheld = d.noteCount - d.trail.filter((e) => e.kind === "note").length;
+  const notesSection =
+    d.trail.length === 0
+      ? ""
+      : `${sectionHead("Notes")}
+    <div class="trail">
+    ${d.trail.map(trailEntry).join("\n")}
+    ${withheld > 0 ? `<p class="trail-event">${withheld} earlier ${withheld === 1 ? "note" : "notes"} not shown</p>` : ""}
+    </div>`;
+
   const empty =
     d.children.length === 0 &&
     d.tasks.length === 0 &&
     d.plans.length === 0 &&
     d.bundles.length === 0 &&
-    d.reviews.length === 0
+    d.reviews.length === 0 &&
+    d.trail.length === 0
       ? `<p class="empty">Nothing here yet. Attach bundles and reviews, create tasks, or create sub-projects.</p>`
       : "";
 
@@ -2836,6 +2936,7 @@ ${head(title, og)}
     ${tasksSection}
     ${bundlesSection}
     ${reviewsSection}
+    ${notesSection}
     ${empty}
   </div>
 </div>
@@ -2846,6 +2947,12 @@ ${head(title, og)}
 </div>
 ${themeToggleScript()}
 ${appScript()}
+<script>(()=>{
+// A note's task link lands on a <details> row; scrolling to a closed row shows a
+// summary line and nothing else, so the anchor opens what it points at.
+const open=()=>{const el=location.hash&&document.getElementById(location.hash.slice(1));if(el&&el.tagName==="DETAILS")el.open=true};
+addEventListener("hashchange",open);open();
+})();</script>
 </body>
 </html>`;
 }
@@ -2891,6 +2998,28 @@ export function projectMarkdown(d: ProjectPageData): string {
   if (d.reviews.length > 0) {
     lines.push("", "## Reviews", "");
     for (const r of d.reviews) lines.push(`- ${r.title} (${r.slug}) v${r.latestVersion}: ${r.url}`);
+  }
+  if (d.trail.length > 0) {
+    lines.push("", "## Notes", "");
+    for (const e of d.trail) {
+      const iso = new Date(e.createdAt).toISOString();
+      if (e.kind === "event") {
+        lines.push(`\u2014 ${e.taskTitle ?? "project"}: ${e.from} \u2192 ${e.to} (${iso})`);
+        continue;
+      }
+      const taskBit = e.taskTitle ? ` (${e.taskTitle})` : "";
+      const [first, ...rest] = e.body.split("\n");
+      lines.push(`- ${iso}${taskBit}: ${first ?? ""}`);
+      for (const line of rest) lines.push(`  ${line}`);
+    }
+    const withheldNotes = d.noteCount - d.trail.filter((e) => e.kind === "note").length;
+    if (withheldNotes > 0) {
+      lines.push(
+        "",
+        `The full record (${d.noteCount} notes and every status event): ` +
+          `\`GET ${base}/api/projects/${d.slug}/notes\``,
+      );
+    }
   }
   lines.push(
     "",

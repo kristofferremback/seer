@@ -505,3 +505,84 @@ export function repoIdForTaskPr(
     .get(wsId, taskId, repo.toLowerCase(), prNumber);
   return row?.repo_id ?? null;
 }
+
+// ---- notes ----
+
+// Append-only. There is no updateNote and no deleteNote, and there must never be:
+// the notes are the record of what the agent was thinking while it worked, and a
+// journal you can edit afterwards is testimony you can revise. Correcting a note
+// means writing another.
+
+export interface NoteRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  task_id: string | null;
+  body: string;
+  author_user_id: string | null;
+  created_at: number;
+}
+
+export const createNote = db.transaction(
+  (
+    wsId: string,
+    projectId: string,
+    taskId: string | null,
+    body: string,
+    authorUserId: string | null,
+  ): NoteRow => {
+    if (taskId !== null) {
+      const task = getTask(wsId, taskId);
+      // A foreign task and a missing one are the same refusal: the pointer must name
+      // this project's own content.
+      if (!task || task.project_id !== projectId) {
+        throw new ProjectWriteError(404, "No such task in this project");
+      }
+    }
+    const id = tinyId("note");
+    db.run(
+      "INSERT INTO project_notes (id, workspace_id, project_id, task_id, body, author_user_id, created_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [id, wsId, projectId, taskId, body, authorUserId, Date.now()],
+    );
+    return db.query<NoteRow, [string]>("SELECT * FROM project_notes WHERE id = ?").get(id)!;
+  },
+) as (
+  wsId: string,
+  projectId: string,
+  taskId: string | null,
+  body: string,
+  authorUserId: string | null,
+) => NoteRow;
+
+/** The whole record, oldest first: reading it front to back is reading the history. */
+export function listNotes(projectId: string): NoteRow[] {
+  return db
+    .query<NoteRow, [string]>(
+      "SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at ASC, rowid ASC",
+    )
+    .all(projectId);
+}
+
+export function countNotes(projectId: string): number {
+  return (
+    db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM project_notes WHERE project_id = ?",
+      )
+      .get(projectId)?.n ?? 0
+  );
+}
+
+/** The most recent `limit` notes, still oldest first, so a bounded tail reads
+ *  chronologically like the full record does. */
+export function listNotesTail(projectId: string, limit: number): NoteRow[] {
+  return db
+    .query<NoteRow, [string, number]>(
+      // rowid, not the random tiny id: within one millisecond the id is no order at
+      // all, and the tail must be the LAST notes in the order they were written.
+      "SELECT * FROM (SELECT *, rowid AS rid FROM project_notes WHERE project_id = ? " +
+        "ORDER BY created_at DESC, rid DESC LIMIT ?) ORDER BY created_at ASC, rid ASC",
+    )
+    .all(projectId, limit);
+}
