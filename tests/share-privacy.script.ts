@@ -576,6 +576,88 @@ for (const [what, token] of [
   }
 }
 
+// ---- projects are members-only, in both representations ----
+//
+// Same posture as the workspace pages, asked here for the same reason. The markdown
+// negotiation is the extra question: an agent asking for text/markdown with no
+// session must meet the same refusal as a browser, or the projection is a leak.
+{
+  const { createProject } = await import("../src/projects/db");
+  createProject(ws, "secret-plans", "Secret plans", "The description a stranger must never read.", null);
+
+  for (const path of [`/${ws}/projects`, `/${ws}/p/secret-plans`]) {
+    const signedOut = await fetch(`${base}${path}`, { redirect: "manual" });
+    assert(
+      signedOut.status === 302 || signedOut.status === 303,
+      `a signed-out reader of ${path} should be sent to sign in, got ${signedOut.status}`,
+    );
+    const asMarkdown = await fetch(`${base}${path}`, {
+      headers: { accept: "text/markdown" },
+      redirect: "manual",
+    });
+    assert(
+      asMarkdown.status === 302 || asMarkdown.status === 303,
+      `asking ${path} for markdown without a session should still redirect, got ${asMarkdown.status}`,
+    );
+    assert(
+      !(await asMarkdown.text()).includes("Secret plans"),
+      `the markdown refusal for ${path} must not carry the project`,
+    );
+  }
+
+  const ledger = await fetch(`${base}/${ws}/projects`, { headers: memberCookie });
+  assert(ledger.status === 200, `a member should reach their projects ledger, got ${ledger.status}`);
+  assert(
+    (await ledger.text()).includes("Secret plans"),
+    "the member's ledger should hold the project the stranger was refused",
+  );
+
+  const page = await fetch(`${base}/${ws}/p/secret-plans`, { headers: memberCookie });
+  assert(page.status === 200, `a member should reach the project page, got ${page.status}`);
+  assert(
+    (await page.text()).includes("never read"),
+    "the member's page should render the description the stranger was refused",
+  );
+
+  // A member of one workspace is a stranger to another: the same soft-404 an unknown
+  // id gets, whatever slug they guess.
+  const elsewhere = db
+    .query<{ id: string }, [string]>(
+      "SELECT w.id FROM workspaces w WHERE w.id NOT IN (SELECT workspace_id FROM memberships WHERE user_id = ?) LIMIT 1",
+    )
+    .get(member);
+  if (elsewhere) {
+    for (const path of [`/${elsewhere.id}/projects`, `/${elsewhere.id}/p/secret-plans`]) {
+      const denied = await fetch(`${base}${path}`, { headers: memberCookie });
+      assert(denied.status === 404, `someone else's ${path} should 404 a non-member, got ${denied.status}`);
+    }
+  }
+
+  // The API read path holds the same line as the review API: an anonymous caller and
+  // one waving a key that does not authenticate get the identical generic 404. A 401
+  // here would be a key-validity oracle on the one shared read address.
+  const anonymous = await fetch(`${base}/api/projects/secret-plans`);
+  const badKey = await fetch(`${base}/api/projects/secret-plans`, {
+    headers: { authorization: "Bearer seer_sk_000000000000000000000000000000ab" },
+  });
+  for (const [who, res] of [
+    ["an anonymous caller", anonymous],
+    ["a bad bearer key", badKey],
+  ] as const) {
+    assert(res.status === 404, `${who} on the project API should meet 404, got ${res.status}`);
+  }
+  const anonymousBody = await anonymous.text();
+  const badKeyBody = await badKey.text();
+  assert(
+    anonymousBody === badKeyBody,
+    "the bad-key refusal must be byte-identical to the anonymous one",
+  );
+  assert(
+    !anonymousBody.includes("Secret"),
+    "the API refusal must not carry the project",
+  );
+}
+
 console.log("all assertions passed");
 server.stop(true);
 process.exit(0);

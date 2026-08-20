@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 7 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 8 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -32,6 +32,9 @@ import { hashKey, tinyId } from "./ids";
 // v6 adds github_user_credentials: a GitHub credential belonging to a person rather than
 // to a workspace, and the first table here whose secret is encrypted rather than hashed,
 // because it is the first one Seer has to read back. Purely additive.
+//
+// v8 adds the projects tables (projects, the bundle/review membership joins, and the
+// status-transition events). Purely additive. See docs/projects/data-model.md.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -503,8 +506,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 7) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 7`);
+  if (uv > 8) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 8`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -513,6 +516,7 @@ export function migrate(): void {
   if (userVersion() < 5) migrateToV5();
   if (userVersion() < 6) migrateToV6();
   if (userVersion() < 7) migrateToV7();
+  if (userVersion() < 8) migrateToV8();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -573,6 +577,72 @@ function migrateToV7(): void {
     db.run("PRAGMA user_version = 7");
   })();
   console.log("[seer] migrated to schema v7 (GitHub user OAuth claims).");
+}
+
+// Projects. A project is workspace-scoped and slugged exactly like a bundle or a
+// review, and groups both: the membership joins carry which bundles and reviews a
+// project holds, many-to-many, keyed by the same (workspace_id, slug) pair those
+// tables key themselves by. `parent_id` nests projects one level deep — the depth is
+// enforced on write, not here, so lifting it is an application change.
+//
+// `project_events` is the derived transition trail: a status change writes a row in
+// the same transaction as the change, so "when did this move" is answerable without
+// anyone journaling it. `task_id` is nullable and unused until the tasks slice lands;
+// it is in the shape now so task transitions join the same trail rather than growing
+// a second table that has to be read in step with this one.
+const V8_PROJECTS = `
+  CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    parent_id TEXT,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','closed')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_ws_slug ON projects (workspace_id, slug);
+  CREATE INDEX IF NOT EXISTS idx_projects_parent ON projects (parent_id);
+
+  CREATE TABLE IF NOT EXISTS project_bundles (
+    project_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, slug)
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_bundles_bundle ON project_bundles (workspace_id, slug);
+
+  CREATE TABLE IF NOT EXISTS project_reviews (
+    project_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, slug)
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_reviews_review ON project_reviews (workspace_id, slug);
+
+  CREATE TABLE IF NOT EXISTS project_events (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    task_id TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('status')),
+    from_status TEXT NOT NULL,
+    to_status TEXT NOT NULL,
+    actor_user_id TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_events_project ON project_events (project_id);
+`;
+
+function migrateToV8(): void {
+  db.transaction(() => {
+    db.exec(V8_PROJECTS);
+    db.run("PRAGMA user_version = 8");
+  })();
+  console.log("[seer] migrated to schema v8 (projects).");
 }
 
 /**

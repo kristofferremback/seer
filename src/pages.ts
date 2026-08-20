@@ -800,6 +800,39 @@ function styles(): string {
     text-transform: uppercase; color: hsl(var(--muted));
   }
   .tally-none { color: hsl(var(--muted)); font-size: 12px; }
+
+  /* ---- the projects ledger and page ----
+     Status is a plain word, never a pill: open in ink, done and closed muted, because
+     the open work is what the reader came to find. A child row indents its title,
+     which is the whole of how nesting is drawn. */
+  .status-word { font-size: 12.5px; }
+  .status-word.quiet { color: hsl(var(--muted)); }
+  tr.row-child td.slug { padding-left: 1.5rem; }
+  /* The description is the project's own prose, so it gets a reading measure wider
+     than the interface default. */
+  .proj-desc { max-width: 65ch; margin: 1.2rem 0 0.4rem; }
+  .proj-desc p { max-width: 65ch; }
+  .proj-desc ul, .proj-desc ol { margin: 0 0 0.85rem; padding-left: 1.3rem; }
+  .proj-desc pre {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.55;
+    background: hsl(var(--paper-sunk));
+    border: 1px solid hsl(var(--line));
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+  }
+  .proj-desc code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    background: hsl(var(--paper-sunk));
+    border: 1px solid hsl(var(--line));
+    border-radius: 4px;
+    padding: 0 4px;
+  }
+  .proj-desc pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+  .part-of { font-size: 0.9rem; color: hsl(var(--muted)); margin: 0 0 0.35rem; }
   @media (hover: hover) and (pointer: fine) {
     .ledger-section > summary:hover { color: hsl(var(--accent)); }
     .ledger-section > summary:hover .section-chevron { color: hsl(var(--accent)); }
@@ -966,6 +999,9 @@ function styles(): string {
     /* refs and tally share the one meta line instead of stacking */
     table.stack .pr-refs { display: inline-flex; margin: 0 0.6rem 0 0; vertical-align: baseline; }
     table.stack .tally { vertical-align: baseline; }
+    /* the padding reset above would flatten the child indent, and the indent is the
+       whole of how nesting is drawn, so it is restated at stack width */
+    table.stack tr.row-child td.slug { padding-left: 1.1rem; }
 
     /* The popover becomes a sheet at the bottom of the screen — a thumb reaches it,
        it needs no flipping, and it cannot be pinned into a corner by a row near the
@@ -1079,7 +1115,7 @@ export interface NavWorkspace {
   name: string;
 }
 
-export type NavSection = "bundles" | "reviews" | "settings";
+export type NavSection = "bundles" | "reviews" | "projects" | "settings";
 
 export interface NavContext {
   email: string;
@@ -1092,7 +1128,11 @@ export interface NavContext {
 /** Where a section lives, scoped or not. Settings has no all-workspaces page, so its
  *  unscoped answer is the bundles ledger, where every workspace's settings link is. */
 function sectionHref(section: NavSection, wsId: string | null): string {
-  if (wsId === null) return section === "reviews" ? "/reviews" : "/bundles";
+  if (wsId === null) {
+    if (section === "reviews") return "/reviews";
+    if (section === "projects") return "/projects";
+    return "/bundles";
+  }
   if (section === "settings") return `/settings/${wsId}`;
   return `/${wsId}/${section}`;
 }
@@ -1123,6 +1163,7 @@ export function appBar(nav: NavContext): string {
     <div class="appnav">
       ${link("bundles", "Bundles")}
       ${link("reviews", "Reviews")}
+      ${link("projects", "Projects")}
     </div>
     <span class="bar-spacer"></span>
     <details class="wsmenu">
@@ -1218,6 +1259,7 @@ for everything below. A human mints it at \`${base}/settings/<workspace>\`.
 |---|---|
 | publish a page, dashboard, report or small app | \`${base}/bundles/skill.md\` |
 | review a pull request, or a stack of them | \`${base}/overseer/agent.md\` |
+| group work into a project, keep it, or resume one | \`${base}/projects/skill.md\` |
 
 Fetch the one that matches and follow it. Do not guess at an API from this page: each
 document carries the exact calls, and they are the current ones.
@@ -1226,6 +1268,7 @@ document carries the exact calls, and they are the current ones.
 # whichever fits the request
 curl -s ${base}/bundles/skill.md
 curl -s ${base}/overseer/agent.md
+curl -s ${base}/projects/skill.md
 \`\`\`
 
 ## One thing worth knowing before you route
@@ -1235,6 +1278,78 @@ change, or watched it get built, you will describe what it was meant to do rathe
 what the diff says. \`${base}/overseer/agent.md\` is the document that tells you how to
 dispatch one correctly; \`${base}/overseer/skill.md\` is what that sub-agent reads, and
 you do not need it yourself.
+`;
+}
+
+/**
+ * The projects instructions, at /projects/skill.md: what a project is, the calls that
+ * keep one, and the one-URL resume. Same contract as the bundle document: written for
+ * an agent holding this deployment's base URL and a key.
+ */
+export function projectsSkillDoc(): string {
+  const base = config.baseUrl;
+  return `# Seer — grouping work into projects as an agent
+
+A project groups the work around one thing being built: the bundles you publish, the
+reviews you dispatch, and (in time) tasks and notes. It lives in Seer, outside any
+repo, and persists across sessions — create one when you and the human plan a piece of
+work, attach what you produce as you go, and the next session resumes by reading one
+URL. Every part is optional except the grouping itself.
+
+You need the same two things as for bundles: this deployment's base URL (\`${base}\`)
+and an API key (\`$SEER_API_TOKEN\` below, a \`seer_sk_…\` token). The key belongs to one
+workspace and every project it touches lives there.
+
+## The calls
+
+\`\`\`
+POST   /api/projects                              create: {slug, title, description?, parent?}
+GET    /api/projects                              every project in the key's workspace
+GET    /api/projects/<slug>                       everything one project holds, one call
+PATCH  /api/projects/<slug>                       any of: title, description, status, parent
+PUT    /api/projects/<slug>/bundles/<bundle>      attach a bundle    (DELETE detaches)
+PUT    /api/projects/<slug>/reviews/<review>      attach a review    (DELETE detaches)
+PUT    /api/bundles/<bundle>?project=<slug>       publish a bundle straight into a project
+\`\`\`
+
+\`\`\`bash
+# create a project, then publish a bundle into it
+curl -s -X POST -H "Authorization: Bearer $SEER_API_TOKEN" \\
+  -H "content-type: application/json" \\
+  -d '{"slug": "calling", "title": "Calling functionality"}' \\
+  ${base}/api/projects
+
+curl -s -X PUT --data-binary @bundle.zip \\
+  -H "Authorization: Bearer $SEER_API_TOKEN" \\
+  "${base}/api/bundles/call-prototype?project=calling"
+\`\`\`
+
+## The fields
+
+- \`slug\`: \`[a-z0-9][a-z0-9-]{0,63}\`, unique per workspace, permanent.
+- \`title\`: at most 80 characters.
+- \`description\`: constrained markdown — emphasis, inline code, links, lists, fenced
+  code. Headings, tables, raw HTML and inline images are refused with a 422 naming the
+  construct. Write the short account of what is being pursued and why; the human reads
+  it at the top of the project page.
+- \`status\`: \`open\`, \`done\` (finished), or \`closed\` (stopped without finishing).
+  Transitions are recorded by Seer with their timestamps; you never journal them.
+- \`parent\`: another project's slug nests this one under it, one level deep — a parent
+  of a parent is refused. \`parent: null\` detaches. Use a sub-project for a strand of
+  work with assets of its own; the parent's page rolls its children up.
+
+## Resuming
+
+\`GET ${base}/api/projects/<slug>\` returns the whole state in one response: the
+description, sub-projects, every attached bundle and review with their URLs. Read it
+before continuing work you did not just do. The \`url\` field in every response is the
+human page, and it answers this same state as markdown to \`Accept: text/markdown\`, so
+you and the human are reading one address.
+
+Attach late rather than never: if you published something before creating the project,
+\`PUT /api/projects/<slug>/bundles/<bundle>\` picks it up afterwards. Attachment is
+many-to-many — a bundle can belong to several projects — and idempotent, so repeating
+an attach is safe and says \`"attached": false\`.
 `;
 }
 
@@ -2082,6 +2197,323 @@ ${themeToggleScript()}
 ${appScript()}
 </body>
 </html>`;
+}
+
+// ---- the projects ledger and page ----
+//
+// A project groups the work: bundles, reviews, sub-projects. The ledger reads like the
+// reviews index; the project page is the human end of the same state the API returns
+// in one call, and the markdown projection below it IS that page for an agent.
+
+export type ProjectStatusWord = "open" | "done" | "closed";
+
+export interface ProjectLedgerRow {
+  slug: string;
+  title: string;
+  status: ProjectStatusWord;
+  updatedAt: number;
+  bundles: number;
+  reviews: number;
+  /** One level deep; a child's own children is always empty. */
+  children: ProjectLedgerRow[];
+}
+
+export interface ProjectLedgerGroup {
+  wsId: string;
+  name: string;
+  visibility: "public" | "private";
+  projects: ProjectLedgerRow[];
+}
+
+/** Open in ink, done and closed muted: the open work is what the reader came for. */
+function statusWord(status: ProjectStatusWord): string {
+  return `<span class="status-word${status === "open" ? "" : " quiet"}">${status}</span>`;
+}
+
+/** What a project holds, in the tally grammar. Zero parts are skipped; nothing at all
+ *  is a quiet dash rather than three zeros. */
+function holdsCell(bundles: number, reviews: number, children: number): string {
+  const parts: string[] = [];
+  const part = (n: number, one: string, many: string) => {
+    if (n === 0) return;
+    parts.push(
+      `<span class="tally-part"><span class="tally-n">${n}</span>` +
+        `<span class="tally-w">${n === 1 ? one : many}</span></span>`,
+    );
+  };
+  part(bundles, "bundle", "bundles");
+  part(reviews, "review", "reviews");
+  part(children, "sub-project", "sub-projects");
+  if (parts.length === 0) return `<span class="tally-none">&mdash;</span>`;
+  return `<span class="tally">${parts.join("")}</span>`;
+}
+
+export function projectsPage(nav: NavContext, groups: ProjectLedgerGroup[]): string {
+  const scoped = nav.current !== null;
+  const title = scoped ? `Projects · ${nav.current!.name} · Seer` : "Projects · Seer";
+  const og = { "og:title": title, "og:type": "website", robots: "noindex" };
+
+  const row = (g: ProjectLedgerGroup, p: ProjectLedgerRow, parent: ProjectLedgerRow | null) => {
+    const url = `/${g.wsId}/p/${encodeURIComponent(p.slug)}`;
+    // A child's haystack carries its parent's slug, so filtering by the parent keeps
+    // the family together on screen.
+    const haystack = [p.title, p.slug, ...(parent ? [parent.slug] : []), ...p.children.map((c) => c.slug)]
+      .join(" ")
+      .toLowerCase();
+    return `<tr${parent ? ` class="row-child"` : ""} data-filter="${escapeHtml(haystack)}">
+          <td class="slug"><a href="${url}">${escapeHtml(p.title)}</a>
+            <span class="row-sub mono">${escapeHtml(p.slug)}</span></td>
+          <td>${statusWord(p.status)}</td>
+          <td class="mono"><time datetime="${new Date(p.updatedAt).toISOString()}">${fmtInstant(p.updatedAt)}</time></td>
+          <td class="status-cell">${holdsCell(p.bundles, p.reviews, p.children.length)}</td>
+        </tr>`;
+  };
+
+  const groupBlock = (g: ProjectLedgerGroup, withHead: boolean) => {
+    const pill = `<span class="pill${g.visibility === "public" ? " public" : ""}"><span class="bead"></span>${g.visibility}</span>`;
+    const head = withHead
+      ? `<div class="ws-head">
+      <h2><a href="/${g.wsId}/projects">${escapeHtml(g.name)}</a></h2>
+      <span class="mono-id">${escapeHtml(g.wsId)}</span>
+      ${pill}
+      <span class="spacer"></span>
+      <a class="nav-action" href="/settings/${g.wsId}">settings</a>
+    </div>`
+      : "";
+
+    if (g.projects.length === 0) {
+      return `<div data-filter-hide>${head}
+      <p class="empty">No projects here yet.</p></div>`;
+    }
+
+    return `<div data-filter-hide>${head}
+    <div class="ledger scroll-x">
+      <table class="stack">
+        <thead><tr><th>Project</th><th>Status</th><th>Updated</th><th>Holds</th></tr></thead>
+        <tbody>
+        ${g.projects.flatMap((p) => [row(g, p, null), ...p.children.map((c) => row(g, c, p))]).join("\n")}
+        </tbody>
+      </table>
+    </div></div>`;
+  };
+
+  const body =
+    groups.length === 0
+      ? `<p class="empty">No workspaces yet.</p>`
+      : groups.map((g) => groupBlock(g, !scoped)).join("\n");
+
+  const masthead = scoped
+    ? `<div class="scope-row">
+      <span class="scope-ws">${escapeHtml(nav.current!.name)}</span>
+      <span class="mono-id">${escapeHtml(nav.current!.id)}</span>
+      <span class="pill${groups[0]?.visibility === "public" ? " public" : ""}"><span class="bead"></span>${groups[0]?.visibility ?? "private"}</span>
+      <a class="nav-action" href="/settings/${escapeHtml(nav.current!.id)}">settings</a>
+    </div>
+    <h1 class="h-section">Projects</h1>`
+    : `<h1 class="h-section">Projects</h1>
+    <p class="subtitle">The work being pursued, workspace by workspace.</p>`;
+
+  return `<!doctype html>
+<html lang="en">
+${head(title, og)}
+<body>
+<div class="frame warm">
+  <div class="shell spine">
+    ${appBar(nav)}
+    ${masthead}
+    ${filterRow("Filter projects")}
+  </div>
+</div>
+<div class="frame grow">
+  <div class="shell spine">
+    ${body}
+    <p class="aside stack-gap">A project is created and kept by an agent through the API;
+    this page is the reading end. Sub-projects sit under their parent, and the counts say
+    what each holds.</p>
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/bundles">bundles</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+${appScript()}
+</body>
+</html>`;
+}
+
+export interface ProjectPageData {
+  nav: NavContext;
+  wsId: string;
+  slug: string;
+  title: string;
+  status: ProjectStatusWord;
+  updatedAt: number;
+  parent: { slug: string; title: string } | null;
+  /** The authored markdown, verbatim — the markdown projection serves it back. */
+  description: string;
+  /** The same field rendered to HTML by the server; "" renders nothing. */
+  descriptionHtml: string;
+  children: { slug: string; title: string; status: ProjectStatusWord; bundles: number; reviews: number }[];
+  bundles: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
+  reviews: { slug: string; title: string; latestVersion: number; publishedAt: number; url: string }[];
+}
+
+export function projectPage(d: ProjectPageData): string {
+  const title = `${d.title} · ${d.nav.current?.name ?? "Seer"} · Seer`;
+  const og = { "og:title": title, "og:type": "website", robots: "noindex" };
+
+  const sectionHead = (label: string) => `<div class="ws-head"><h2>${escapeHtml(label)}</h2></div>`;
+
+  const childrenSection =
+    d.children.length === 0
+      ? ""
+      : `${sectionHead("Sub-projects")}
+    <div class="ledger scroll-x">
+      <table class="stack">
+        <thead><tr><th>Project</th><th>Status</th><th>Holds</th></tr></thead>
+        <tbody>
+        ${d.children
+          .map(
+            (c) => `<tr data-filter="${escapeHtml(`${c.title} ${c.slug}`.toLowerCase())}">
+          <td class="slug"><a href="/${d.wsId}/p/${encodeURIComponent(c.slug)}">${escapeHtml(c.title)}</a>
+            <span class="row-sub mono">${escapeHtml(c.slug)}</span></td>
+          <td>${statusWord(c.status)}</td>
+          <td class="status-cell">${holdsCell(c.bundles, c.reviews, 0)}</td>
+        </tr>`,
+          )
+          .join("\n")}
+        </tbody>
+      </table>
+    </div>`;
+
+  const bundlesSection =
+    d.bundles.length === 0
+      ? ""
+      : `${sectionHead("Bundles")}
+    <div class="ledger scroll-x">
+      <table class="stack">
+        <thead><tr><th>Bundle</th><th>Latest</th><th>Updated</th></tr></thead>
+        <tbody>
+        ${d.bundles
+          .map(
+            (b) => `<tr data-filter="${escapeHtml(b.slug.toLowerCase())}">
+          <td class="slug"><a href="${b.url}">${escapeHtml(b.slug)}</a></td>
+          <td class="mono">v${b.latestVersion}</td>
+          <td class="mono"><time datetime="${new Date(b.updatedAt).toISOString()}">${fmtInstant(b.updatedAt)}</time></td>
+        </tr>`,
+          )
+          .join("\n")}
+        </tbody>
+      </table>
+    </div>`;
+
+  const reviewsSection =
+    d.reviews.length === 0
+      ? ""
+      : `${sectionHead("Reviews")}
+    <div class="ledger scroll-x">
+      <table class="stack">
+        <thead><tr><th>Review</th><th>Latest</th><th>Published</th></tr></thead>
+        <tbody>
+        ${d.reviews
+          .map(
+            (r) => `<tr data-filter="${escapeHtml(`${r.title} ${r.slug}`.toLowerCase())}">
+          <td class="slug"><a href="${r.url}">${escapeHtml(r.title)}</a>
+            <span class="row-sub mono">${escapeHtml(r.slug)}</span></td>
+          <td class="mono">v${r.latestVersion}</td>
+          <td class="mono"><time datetime="${new Date(r.publishedAt).toISOString()}">${fmtInstant(r.publishedAt)}</time></td>
+        </tr>`,
+          )
+          .join("\n")}
+        </tbody>
+      </table>
+    </div>`;
+
+  const empty =
+    d.children.length === 0 && d.bundles.length === 0 && d.reviews.length === 0
+      ? `<p class="empty">Nothing here yet. Attach bundles and reviews, or create sub-projects.</p>`
+      : "";
+
+  const partOf = d.parent
+    ? `<p class="part-of">Part of <a href="/${d.wsId}/p/${encodeURIComponent(d.parent.slug)}">${escapeHtml(d.parent.title)}</a></p>`
+    : "";
+
+  return `<!doctype html>
+<html lang="en">
+${head(title, og)}
+<body>
+<div class="frame warm">
+  <div class="shell spine">
+    ${appBar(d.nav)}
+    <div class="scope-row">
+      <span class="scope-ws">${escapeHtml(d.nav.current?.name ?? "")}</span>
+      <span class="mono-id">${escapeHtml(d.wsId)}</span>
+      <span class="spacer"></span>
+      <a class="nav-action" href="/${d.wsId}/projects">All projects</a>
+    </div>
+    ${partOf}
+    <h1 class="h-section">${escapeHtml(d.title)}</h1>
+    <p class="part-of"><span class="mono-id">${escapeHtml(d.slug)}</span> · ${statusWord(d.status)} ·
+      <time class="mono-id" datetime="${new Date(d.updatedAt).toISOString()}">${fmtInstant(d.updatedAt)}</time></p>
+  </div>
+</div>
+<div class="frame grow">
+  <div class="shell spine">
+    ${d.descriptionHtml ? `<div class="proj-desc">${d.descriptionHtml}</div>` : ""}
+    ${childrenSection}
+    ${bundlesSection}
+    ${reviewsSection}
+    ${empty}
+  </div>
+</div>
+<div class="frame night">
+  <div class="shell">
+    ${footer([`<a href="/projects">projects</a>`, `<a href="/skill.md"><code>skill.md</code></a>`])}
+  </div>
+</div>
+${themeToggleScript()}
+${appScript()}
+</body>
+</html>`;
+}
+
+/**
+ * The same page, for a caller that would rather have markdown: the agent's re-entry
+ * point at the human URL. The description is authored markdown and passes through
+ * verbatim; everything else is a projection of the same state the HTML drew.
+ */
+export function projectMarkdown(d: ProjectPageData): string {
+  const base = config.baseUrl;
+  const lines: string[] = [
+    `# ${d.title}`,
+    ``,
+    `- status: ${d.status}`,
+    `- slug: ${d.slug}, workspace: ${d.wsId}`,
+    ...(d.parent ? [`- parent: ${d.parent.slug}`] : []),
+    `- updated: ${new Date(d.updatedAt).toISOString()}`,
+  ];
+  if (d.description.trim() !== "") lines.push("", d.description.trim());
+  if (d.children.length > 0) {
+    lines.push("", "## Sub-projects", "");
+    for (const c of d.children) lines.push(`- ${c.title} (${c.slug}), ${c.status}`);
+  }
+  if (d.bundles.length > 0) {
+    lines.push("", "## Bundles", "");
+    for (const b of d.bundles) lines.push(`- ${b.slug} v${b.latestVersion}: ${b.url}`);
+  }
+  if (d.reviews.length > 0) {
+    lines.push("", "## Reviews", "");
+    for (const r of d.reviews) lines.push(`- ${r.title} (${r.slug}) v${r.latestVersion}: ${r.url}`);
+  }
+  lines.push(
+    "",
+    `Read or write this project via the API: \`GET ${base}/api/projects/${d.slug}\` with a`,
+    `bearer key returns this state as JSON; \`${base}/skill.md\` routes to the full API.`,
+    "",
+  );
+  return lines.join("\n");
 }
 
 /**

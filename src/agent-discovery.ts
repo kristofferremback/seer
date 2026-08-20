@@ -17,7 +17,7 @@
 
 import { openApiPaths } from "./api";
 import { config } from "./config";
-import { skillDoc, skillRouter } from "./pages";
+import { projectsSkillDoc, skillDoc, skillRouter } from "./pages";
 import { overseerAgentText, overseerSkillText } from "./overseer/skill";
 
 /** The documents that are public by intent — the front page and the four an agent reads
@@ -29,6 +29,7 @@ const PUBLIC_DOCS: readonly { path: string; changefreq: string; priority: string
   { path: "/skill.md", changefreq: "weekly", priority: "0.9" },
   { path: "/llms.txt", changefreq: "weekly", priority: "0.9" },
   { path: "/bundles/skill.md", changefreq: "weekly", priority: "0.8" },
+  { path: "/projects/skill.md", changefreq: "weekly", priority: "0.8" },
   { path: "/overseer/agent.md", changefreq: "weekly", priority: "0.8" },
   { path: "/overseer/skill.md", changefreq: "weekly", priority: "0.8" },
   { path: "/auth.md", changefreq: "monthly", priority: "0.5" },
@@ -66,6 +67,7 @@ Allow: /llms.txt
 Allow: /auth.md
 Allow: /openapi.json
 Allow: /bundles/skill.md
+Allow: /projects/skill.md
 Allow: /overseer/skill.md
 Allow: /overseer/agent.md
 Allow: /.well-known/
@@ -105,6 +107,7 @@ Allow: /llms.txt
 Allow: /auth.md
 Allow: /openapi.json
 Allow: /bundles/skill.md
+Allow: /projects/skill.md
 Allow: /overseer/skill.md
 Allow: /overseer/agent.md
 Allow: /.well-known/
@@ -174,6 +177,7 @@ export function apiCatalog(): unknown {
         "service-doc": [
           { href: `${base}/skill.md`, type: "text/markdown", title: "What Seer does, and which document to read next" },
           { href: `${base}/bundles/skill.md`, type: "text/markdown", title: "Publishing an HTML bundle" },
+          { href: `${base}/projects/skill.md`, type: "text/markdown", title: "Grouping work into projects" },
           { href: `${base}/overseer/agent.md`, type: "text/markdown", title: "Dispatching a pull request review" },
         ],
         "service-meta": [
@@ -338,6 +342,15 @@ export async function agentSkillsIndex(): Promise<unknown> {
         "live-reloads when you push the next build.",
       url: `${base}/bundles/skill.md`,
       digest: sha256(skillDoc()),
+    },
+    {
+      name: "seer-projects",
+      type: "skill-md",
+      description:
+        "Group the work around one thing being built — bundles, reviews, sub-projects — into a " +
+        "project that outlives the session, and resume it by reading one URL.",
+      url: `${base}/projects/skill.md`,
+      digest: sha256(projectsSkillDoc()),
     },
   ];
 

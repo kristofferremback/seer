@@ -45,6 +45,7 @@ export const REV_ID_RE = new RegExp(`^rev_${TINY}$`);
 export const ANN_ID_RE = new RegExp(`^ann_${TINY}$`);
 export const ATT_ID_RE = new RegExp(`^att_${TINY}$`);
 export const SHR_ID_RE = new RegExp(`^shr_${TINY}$`);
+export const PRJ_ID_RE = new RegExp(`^prj_${TINY}$`);
 export const API_KEY_RE = /^seer_sk_[A-Za-z0-9_-]{32}$/;
 export const SHARE_TOKEN_RE = /^seer_sh_[A-Za-z0-9_-]{32}$/;
 
