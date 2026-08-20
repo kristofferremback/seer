@@ -755,7 +755,12 @@ function renderBlocks(blocks: Block[], starts: number[]): string {
   return out.join("\n");
 }
 
-function normalize(source: string): string {
+// Exported for the write paths that STORE authored markdown: storing the normalized
+// text is what keeps storage and validation the same document. A bare \r passed the
+// validator as a line break but stored as one line, and a downstream consumer that
+// honors \r as a newline then saw lines the validator never judged — which is how a
+// note body once forged a derived-looking line in the markdown projection.
+export function normalize(source: string): string {
   // Leading tabs become four spaces so the block guards, which are anchored on spaces,
   // see the indentation an author wrote with a tab. Without this a tab is a hole in the
   // reject-by-name contract: `\t# h` would come out as a paragraph.

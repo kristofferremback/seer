@@ -231,6 +231,27 @@ describe("a required field is one the handler requires", () => {
     });
   });
 
+  test("POST /api/projects/{slug}/notes refuses a body missing `body`, naming it", async () => {
+    const branch = requiredFields(operation("/api/projects/{slug}/notes", "post"))[0]!;
+    expect(branch.required).toEqual(["body"]);
+    // The project must exist, or the 404 answers before the field is judged.
+    await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: auth({ "content-type": "application/json" }),
+      body: JSON.stringify({ slug: "contract-notes", title: "Contract notes" }),
+    });
+    const res = await fetch(`${base}/api/projects/contract-notes/notes`, {
+      method: "POST",
+      headers: auth({ "content-type": "application/json" }),
+      body: JSON.stringify({}),
+    });
+    const said = JSON.stringify(await readJson(res));
+    expect({ refused: res.status >= 400, named: said.includes("body") }).toEqual({
+      refused: true,
+      named: true,
+    });
+  });
+
   test("POST /api/projects refuses a body missing `slug` or `title`, naming it", async () => {
     const branch = requiredFields(operation("/api/projects", "post"))[0]!;
     expect(branch.required).toEqual(["slug", "title"]);
@@ -465,6 +486,16 @@ describe("a 200 matches the schema the document declares for it", () => {
         body: JSON.stringify({ gates: [{ text: "the walk passes", met: true }] }),
       }),
     );
+
+    await check("createNote", () =>
+      fetch(
+        `${base}/api/projects/contract-parent/notes`,
+        json({ body: "A contract note.", task: taskId }),
+      ),
+    );
+    await check("listNotes", () =>
+      fetch(`${base}/api/projects/contract-parent/notes`, { headers: auth() }),
+    );
   });
 
   test("createShare, listShares and revokeShare", async () => {
@@ -506,6 +537,8 @@ describe("a 200 matches the schema the document declares for it", () => {
       "detachProjectReview",
       "createTask",
       "updateTask",
+      "createNote",
+      "listNotes",
     ]);
     const ids = Object.values((openApiSpec() as any).paths as Record<string, Record<string, any>>)
       .flatMap((ops) => Object.values(ops))

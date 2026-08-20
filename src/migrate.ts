@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 10 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 11 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -41,6 +41,10 @@ import { hashKey, tinyId } from "./ids";
 // which is true of every bundle that existed before plans did.
 //
 // v10 adds the task tables (project_tasks and project_task_prs). Purely additive.
+//
+// v11 adds project_notes: the append-only record of what the agent was thinking while
+// it worked. Nothing in src updates or deletes a row here, on purpose — a journal you
+// can edit afterwards is testimony you can revise. Purely additive.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -512,8 +516,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 10) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 10`);
+  if (uv > 11) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 11`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -525,6 +529,7 @@ export function migrate(): void {
   if (userVersion() < 8) migrateToV8();
   if (userVersion() < 9) migrateToV9();
   if (userVersion() < 10) migrateToV10();
+  if (userVersion() < 11) migrateToV11();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -715,6 +720,30 @@ function migrateToV10(): void {
     db.run("PRAGMA user_version = 10");
   })();
   console.log("[seer] migrated to schema v10 (tasks).");
+}
+
+// The append-only record. No UPDATE and no DELETE anywhere in src for this table:
+// notes are what the agent was thinking at the time, and correcting one means
+// writing another.
+const V11_NOTES = `
+  CREATE TABLE IF NOT EXISTS project_notes (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    task_id TEXT,
+    body TEXT NOT NULL,
+    author_user_id TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_notes_project ON project_notes (project_id);
+`;
+
+function migrateToV11(): void {
+  db.transaction(() => {
+    db.exec(V11_NOTES);
+    db.run("PRAGMA user_version = 11");
+  })();
+  console.log("[seer] migrated to schema v11 (notes).");
 }
 
 /**

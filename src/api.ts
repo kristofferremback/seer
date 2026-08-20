@@ -38,8 +38,10 @@ import { handleReadReview } from "./overseer/read";
 import { handlePublishReview } from "./overseer/routes";
 import { handleGithubWebhook } from "./overseer/webhook";
 import {
+  handleCreateNote,
   handleCreateProject,
   handleCreateTask,
+  handleListProjectNotes,
   handleListProjects,
   handleProjectMembership,
   handleReadProject,
@@ -434,11 +436,24 @@ const taskSchema = {
 
 /** The state object: what create, read and update all answer with, and the reason one
  *  call is enough to resume — the whole project comes back every time it changes. */
+const noteSchema = {
+  type: "object",
+  required: ["id", "task", "body", "author", "createdAt"],
+  properties: {
+    id: { type: "string" },
+    task: { type: ["string", "null"], description: "The task the note hangs off, or null." },
+    body: { type: "string", description: "Constrained markdown, as authored. Append-only: notes are never edited or deleted." },
+    author: { type: ["string", "null"], description: "The key holder's email at write time." },
+    createdAt: { type: "string", format: "date-time" },
+  },
+};
+
 const projectStateSchema = {
   type: "object",
   required: [
     "slug", "title", "description", "status", "parent", "workspace", "url",
     "createdAt", "updatedAt", "children", "tasks", "plans", "bundles", "reviews",
+    "notes", "noteCount",
   ],
   properties: {
     slug: { type: "string" },
@@ -455,13 +470,14 @@ const projectStateSchema = {
       description: "Shallow summaries, never recursive.",
       items: {
         type: "object",
-        required: ["slug", "title", "status", "bundles", "reviews"],
+        required: ["slug", "title", "status", "bundles", "reviews", "tasks"],
         properties: {
           slug: { type: "string" },
           title: { type: "string" },
           status: PROJECT_STATUS_ENUM,
           bundles: { type: "integer" },
           reviews: { type: "integer" },
+          tasks: { type: "integer" },
         },
       },
     },
@@ -511,6 +527,14 @@ const projectStateSchema = {
         },
       },
     },
+    notes: {
+      type: "array",
+      description:
+        "The most recent 20 notes, oldest first so they read chronologically. " +
+        "The full record, with status events interleaved, is GET /api/projects/{slug}/notes.",
+      items: noteSchema,
+    },
+    noteCount: { type: "integer", description: "Every note the project holds." },
   },
 };
 
@@ -977,6 +1001,111 @@ export const API_ROUTES: readonly ApiRoute[] = [
         },
       },
       run: (req) => handleUpdateTask(req, req.params.slug, req.params.id),
+    },
+  }),
+
+  route("/api/projects/:slug/notes", {
+    POST: {
+      doc: {
+        operationId: "createNote",
+        summary: "Append a note to a project",
+        description:
+          "Notes are append-only: no edit, no delete, ever — a correction is another " +
+          "note. `task` ties the note to one of the project's tasks; without it the " +
+          "note belongs to the project itself.",
+        security: "key",
+        parameters: [slugParam],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["body"],
+                properties: {
+                  body: {
+                    type: "string",
+                    maxLength: 2000,
+                    description: "Constrained markdown, at most 2000 characters.",
+                  },
+                  task: {
+                    type: ["string", "null"],
+                    description: "A task id (tsk_…) in this project, or null.",
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "The note as stored.",
+            content: { "application/json": { schema: noteSchema } },
+          },
+          "400": errorResponse,
+          "401": errorResponse,
+          "404": errorResponse,
+          "422": errorResponse,
+        },
+      },
+      run: (req) => handleCreateNote(req, req.params.slug),
+    },
+    GET: {
+      doc: {
+        operationId: "listNotes",
+        summary: "The project's whole record: every note and every status transition",
+        description:
+          "Merged chronologically, oldest first. Notes are authored; events are " +
+          "derived by Seer and cannot be written, which is what makes the record " +
+          "worth reading.",
+        security: "keyOrSession",
+        parameters: [slugParam],
+        responses: {
+          "200": {
+            description: "The trail.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "array",
+                  items: {
+                    oneOf: [
+                      {
+                        title: "A note",
+                        type: "object",
+                        required: ["kind", "id", "task", "taskTitle", "body", "author", "createdAt"],
+                        properties: {
+                          kind: { type: "string", enum: ["note"] },
+                          id: { type: "string" },
+                          task: { type: ["string", "null"] },
+                          taskTitle: { type: ["string", "null"] },
+                          body: { type: "string" },
+                          author: { type: ["string", "null"] },
+                          createdAt: { type: "string", format: "date-time" },
+                        },
+                      },
+                      {
+                        title: "A status event",
+                        type: "object",
+                        required: ["kind", "task", "taskTitle", "from", "to", "createdAt"],
+                        properties: {
+                          kind: { type: "string", enum: ["event"] },
+                          task: { type: ["string", "null"] },
+                          taskTitle: { type: ["string", "null"] },
+                          from: { type: "string" },
+                          to: { type: "string" },
+                          createdAt: { type: "string", format: "date-time" },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+          "404": errorResponse,
+        },
+      },
+      run: (req) => handleListProjectNotes(req, req.params.slug),
     },
   }),
 

@@ -3,11 +3,11 @@
 // src/api.ts carries the documentation; this file carries the behavior.
 
 import { config } from "../config";
-import { getBundle, isMember, listUserWorkspaces, listVersions } from "../db";
+import { getBundle, getUser, isMember, listUserWorkspaces, listVersions } from "../db";
 import { json } from "../http";
 import { SLUG_RE, TSK_ID_RE } from "../ids";
 import { requireApiKey, sessionUser } from "../auth";
-import { validate as validateMarkdown } from "../overseer/markdown";
+import { normalize as normalizeMarkdown, validate as validateMarkdown } from "../overseer/markdown";
 import { getReview, getReviewVersion } from "../overseer/db";
 import {
   ANONYMOUS_OBSERVER,
@@ -22,10 +22,16 @@ import { githubClientFor } from "../overseer/github-app";
 import {
   attachBundle,
   attachReview,
+  countNotes,
+  createNote,
   createProject,
   createTask,
   getTask,
+  listNotes,
+  listNotesTail,
+  listProjectEvents,
   listTasks,
+  type NoteRow,
   repoIdForTaskPr,
   updateTask,
   type TaskGate,
@@ -89,6 +95,77 @@ export interface ProjectState {
   plans: ProjectBundleEntry[];
   bundles: ProjectBundleEntry[];
   reviews: ProjectReviewEntry[];
+  /** The most recent NOTES_TAIL notes, oldest first so they read chronologically. */
+  notes: NoteView[];
+  /** Every note the project holds, so a bounded tail says what it withheld. */
+  noteCount: number;
+}
+
+/** How many notes the one-call state carries. The full record stays one call away
+ *  (GET /api/projects/:slug/notes); the tail keeps the resume read bounded. */
+export const NOTES_TAIL = 20;
+
+export interface NoteView {
+  id: string;
+  /** The task the note hangs off, when it does. */
+  task: string | null;
+  taskTitle: string | null;
+  body: string;
+  /** The key holder's email at write time, or null when unknown. */
+  author: string | null;
+  createdAt: number;
+}
+
+function noteView(note: NoteRow): NoteView {
+  const task = note.task_id ? getTask(note.workspace_id, note.task_id) : null;
+  return {
+    id: note.id,
+    task: note.task_id,
+    taskTitle: task?.title ?? null,
+    body: note.body,
+    author: note.author_user_id ? (getUser(note.author_user_id)?.email ?? null) : null,
+    createdAt: note.created_at,
+  };
+}
+
+/** One entry of the merged record: an authored note, or a derived status event. The
+ *  two kinds carry the split the whole model runs on, and every consumer keeps them
+ *  visually and structurally distinct. */
+export type TrailEntry =
+  | ({ kind: "note" } & NoteView)
+  | {
+      kind: "event";
+      task: string | null;
+      taskTitle: string | null;
+      from: string;
+      to: string;
+      createdAt: number;
+    };
+
+/** Notes and status events, one chronological list. `notes` is passed in rather than
+ *  queried so the caller chooses the tail or the whole record. */
+export function projectTrail(project: ProjectRow, notes: NoteRow[]): TrailEntry[] {
+  const entries: TrailEntry[] = notes.map((n) => ({ kind: "note" as const, ...noteView(n) }));
+  for (const e of listProjectEvents(project.id)) {
+    const task = e.task_id ? getTask(project.workspace_id, e.task_id) : null;
+    entries.push({
+      kind: "event",
+      task: e.task_id,
+      taskTitle: task?.title ?? null,
+      from: e.from_status,
+      to: e.to_status,
+      createdAt: e.created_at,
+    });
+  }
+  // Within one millisecond the order across two tables is genuinely unknowable, so
+  // the tie-break states the authoring order that produces ties: an agent flips the
+  // status and then writes the note explaining it, and the explanation must not
+  // precede the thing it explains.
+  return entries.sort(
+    (a, b) =>
+      a.createdAt - b.createdAt ||
+      (a.kind === b.kind ? 0 : a.kind === "event" ? -1 : 1),
+  );
 }
 
 /**
@@ -149,6 +226,8 @@ export function projectState(project: ProjectRow): ProjectState {
     plans,
     bundles,
     reviews,
+    notes: listNotesTail(project.id, NOTES_TAIL).map(noteView),
+    noteCount: countNotes(project.id),
   };
 }
 
@@ -200,6 +279,18 @@ function stateJson(state: ProjectState): unknown {
       publishedAt: new Date(r.publishedAt).toISOString(),
       url: r.url,
     })),
+    notes: state.notes.map(noteJson),
+    noteCount: state.noteCount,
+  };
+}
+
+function noteJson(n: NoteView): unknown {
+  return {
+    id: n.id,
+    task: n.task,
+    body: n.body,
+    author: n.author,
+    createdAt: new Date(n.createdAt).toISOString(),
   };
 }
 
@@ -228,21 +319,29 @@ function checkTitle(title: unknown): string | FieldError {
   return trimmed;
 }
 
-/** A multi-line authored field: the constrained subset, under the shared budget.
- *  The field name travels so the refusal names what the caller sent. */
-function checkMarkdownField(field: string, value: unknown): string | FieldError {
+function checkMarkdownField(field: string, value: unknown, cap = DESCRIPTION_MAX): string | FieldError {
   if (typeof value !== "string") {
     return badField(`\`${field}\` must be a string of constrained markdown`);
   }
-  if (value.length > DESCRIPTION_MAX) {
+  // Validate and STORE the same document: the validator normalizes line endings
+  // before judging, so storing the raw text would keep lines it never saw. A bare
+  // \r read as a newline downstream is exactly how a body forges lines only Seer
+  // may write. The exotic separators (NEL, LS, PS, vertical tab, form feed) have no
+  // legitimate markdown use and are refused outright, the same class the one-line
+  // title rule closes.
+  const text = normalizeMarkdown(value);
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u0085\u2028\u2029]/.test(text)) {
+    return badField(`\`${field}\` carries control characters; write plain lines`, 422);
+  }
+  if (text.length > cap) {
     return badField(
-      `\`${field}\` is over budget: ${value.length} of at most ${DESCRIPTION_MAX} characters`,
+      `\`${field}\` is over budget: ${text.length} of at most ${cap} characters`,
       422,
     );
   }
-  const result = validateMarkdown(value);
+  const result = validateMarkdown(text);
   if (!result.ok) return badField(`\`${field}\`: ${result.message}`, 422);
-  return value;
+  return text;
 }
 
 function checkDescription(description: unknown): string | FieldError {
@@ -746,6 +845,72 @@ export async function handleUpdateTask(req: Request, slug: string, taskId: strin
   } catch (err) {
     return refusal(err);
   }
+}
+
+// ---- notes ----
+
+export const NOTE_BODY_MAX = 2_000;
+
+export async function handleCreateNote(req: Request, slug: string): Promise<Response> {
+  const auth = requireApiKey(req);
+  if (auth instanceof Response) return auth;
+  if (!SLUG_RE.test(slug)) return json({ error: "Not found" }, 404);
+  const project = getProject(auth.workspaceId, slug);
+  if (!project) return json({ error: `No project "${slug}" in this workspace` }, 404);
+  const body = await readJsonBody(req);
+  if (body instanceof Response) return body;
+
+  const noteBody = checkMarkdownField("body", body.body, NOTE_BODY_MAX);
+  if (typeof noteBody !== "string") return json({ error: noteBody.error }, noteBody.status);
+  if (noteBody.trim() === "") {
+    return json({ error: "`body` is required: a note says something" }, 400);
+  }
+  let taskId: string | null = null;
+  if (body.task !== undefined && body.task !== null) {
+    if (typeof body.task !== "string" || !TSK_ID_RE.test(body.task)) {
+      return json({ error: "`task` must be a task id (tsk_…), or null" }, 400);
+    }
+    taskId = body.task;
+  }
+
+  try {
+    const note = createNote(auth.workspaceId, project.id, taskId, noteBody, auth.userId);
+    return json(noteJson(noteView(note)));
+  } catch (err) {
+    return refusal(err);
+  }
+}
+
+/** The whole record, notes and status events merged chronologically. Same resolve
+ *  posture as reading the project: a key that does not authenticate contributes
+ *  nothing, and every denial is the same generic 404. */
+export function handleListProjectNotes(req: Request, slug: string): Response {
+  if (!SLUG_RE.test(slug)) return json({ error: "Not found" }, 404);
+  const project = resolveProjectForRead(req, slug);
+  if (project instanceof Response) return project;
+  const trail = projectTrail(project, listNotes(project.id));
+  return json(
+    trail.map((entry) =>
+      entry.kind === "note"
+        ? {
+            kind: "note",
+            id: entry.id,
+            task: entry.task,
+            taskTitle: entry.taskTitle,
+            body: entry.body,
+            author: entry.author,
+            createdAt: new Date(entry.createdAt).toISOString(),
+          }
+        : {
+            kind: "event",
+            task: entry.task,
+            taskTitle: entry.taskTitle,
+            from: entry.from,
+            to: entry.to,
+            createdAt: new Date(entry.createdAt).toISOString(),
+          },
+    ),
+  );
 }
 
 /**

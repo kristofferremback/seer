@@ -942,6 +942,9 @@ function projectData(over: Partial<ProjectPageData> = {}): ProjectPageData {
     reviews: [
       { slug: "call-review", title: "The call, reviewed", latestVersion: 1, publishedAt: NOW, url: "https://seer.test/ws_7g2kq4xbvm/r/call-review/" },
     ],
+    trail: [],
+    noteCount: 0,
+    showAuthors: false,
     ...over,
   };
 }

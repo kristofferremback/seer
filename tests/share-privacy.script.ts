@@ -656,6 +656,21 @@ for (const [what, token] of [
     !anonymousBody.includes("Secret"),
     "the API refusal must not carry the project",
   );
+
+  // The notes trail holds the same line: it is the project's private record, and an
+  // anonymous caller or a bad bearer meets the identical generic 404.
+  const anonNotes = await fetch(`${base}/api/projects/secret-plans/notes`);
+  const badKeyNotes = await fetch(`${base}/api/projects/secret-plans/notes`, {
+    headers: { authorization: "Bearer seer_sk_000000000000000000000000000000ab" },
+  });
+  assert(anonNotes.status === 404, `anonymous notes read should 404, got ${anonNotes.status}`);
+  assert(badKeyNotes.status === 404, `bad-key notes read should 404, got ${badKeyNotes.status}`);
+  const anonNotesBody = await anonNotes.text();
+  assert(
+    anonNotesBody === (await badKeyNotes.text()),
+    "the notes refusal must be byte-identical for anonymous and bad-key callers",
+  );
+  assert(!anonNotesBody.includes("Secret"), "the notes refusal must not carry the project");
 }
 
 console.log("all assertions passed");
