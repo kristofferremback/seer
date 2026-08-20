@@ -210,6 +210,26 @@ describe("a required field is one the handler requires", () => {
     }
   });
 
+  test("POST /api/projects refuses a body missing `slug` or `title`, naming it", async () => {
+    const branch = requiredFields(operation("/api/projects", "post"))[0]!;
+    expect(branch.required).toEqual(["slug", "title"]);
+    const sample = { slug: "contract-probe-project", title: "Contract probe" };
+
+    for (const omit of branch.required) {
+      const res = await fetch(`${base}/api/projects`, {
+        method: "POST",
+        headers: auth({ "content-type": "application/json" }),
+        body: JSON.stringify(bodyMissing(branch.body, omit, sample)),
+      });
+      const said = JSON.stringify(await readJson(res));
+      expect({ omit, refused: res.status >= 400, named: said.includes(omit) }).toEqual({
+        omit,
+        refused: true,
+        named: true,
+      });
+    }
+  });
+
   test("POST /api/shares refuses a body missing `kind` or `target`, naming it", async () => {
     const branch = requiredFields(operation("/api/shares", "post"))[0]!;
     expect(branch.required).toEqual(["kind", "target"]);
@@ -364,6 +384,51 @@ describe("a 200 matches the schema the document declares for it", () => {
     await check("readReviewVersion", () => fetch(`${base}/api/reviews/${SLUG}/v/1`, { headers: auth() }));
   });
 
+  test("the projects operations, end to end", async () => {
+    // One walk drives all eight: parent and child created, listed, read, updated,
+    // then the bundle and review attached and detached again. The walk leaves the
+    // projects standing — later assertions read the same workspace.
+    const json = (body: unknown) => ({
+      method: "POST",
+      headers: auth({ "content-type": "application/json" }),
+      body: JSON.stringify(body),
+    });
+    await check("createProject", () =>
+      fetch(`${base}/api/projects`, json({ slug: "contract-parent", title: "Contract parent" })),
+    );
+    await check("listProjects", async () => {
+      // The child exists before the list is checked, so the listing covers a row
+      // whose `parent` is a slug rather than always null.
+      await fetch(
+        `${base}/api/projects`,
+        json({ slug: "contract-child", title: "Contract child", parent: "contract-parent" }),
+      );
+      return fetch(`${base}/api/projects`, { headers: auth() });
+    });
+    await check("readProject", () =>
+      fetch(`${base}/api/projects/contract-parent`, { headers: auth() }),
+    );
+    await check("updateProject", () =>
+      fetch(`${base}/api/projects/contract-parent`, {
+        method: "PATCH",
+        headers: auth({ "content-type": "application/json" }),
+        body: JSON.stringify({ status: "done" }),
+      }),
+    );
+    await check("attachProjectBundle", () =>
+      fetch(`${base}/api/projects/contract-parent/bundles/${BUNDLE}`, { method: "PUT", headers: auth() }),
+    );
+    await check("detachProjectBundle", () =>
+      fetch(`${base}/api/projects/contract-parent/bundles/${BUNDLE}`, { method: "DELETE", headers: auth() }),
+    );
+    await check("attachProjectReview", () =>
+      fetch(`${base}/api/projects/contract-parent/reviews/${SLUG}`, { method: "PUT", headers: auth() }),
+    );
+    await check("detachProjectReview", () =>
+      fetch(`${base}/api/projects/contract-parent/reviews/${SLUG}`, { method: "DELETE", headers: auth() }),
+    );
+  });
+
   test("createShare, listShares and revokeShare", async () => {
     let minted = "";
     await check("createShare", async () => {
@@ -393,6 +458,14 @@ describe("a 200 matches the schema the document declares for it", () => {
       "createShare",
       "listShares",
       "revokeShare",
+      "createProject",
+      "listProjects",
+      "readProject",
+      "updateProject",
+      "attachProjectBundle",
+      "detachProjectBundle",
+      "attachProjectReview",
+      "detachProjectReview",
     ]);
     const ids = Object.values((openApiSpec() as any).paths as Record<string, Record<string, any>>)
       .flatMap((ops) => Object.values(ops))

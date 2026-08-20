@@ -8,6 +8,9 @@ import {
   utcDay,
   landingPage,
   reviewsPage,
+  projectsPage,
+  projectPage,
+  projectMarkdown,
   settingsPage,
   githubClaimPage,
   invitePage,
@@ -15,6 +18,8 @@ import {
   type LedgerBundle,
   type LedgerGroup,
   type NavContext,
+  type ProjectLedgerGroup,
+  type ProjectPageData,
   type ReviewLedgerGroup,
   type SettingsData,
   type InviteData,
@@ -879,4 +884,136 @@ test("the landing page says the deployment reads pull requests, and where to sta
   // The two claims that make it different from a diff, in the reader's language.
   expect(html).toContain("instead of the diff");
   expect(html).toContain("did not write the change");
+});
+
+// ---- projects: the grouping's two pages and its markdown projection ----
+
+function projectGroups(): ProjectLedgerGroup[] {
+  return [
+    {
+      wsId: "ws_7g2kq4xbvm",
+      name: "Crystal Palace",
+      visibility: "private",
+      projects: [
+        {
+          slug: "calling",
+          title: "Calling <functionality>",
+          status: "open",
+          updatedAt: NOW,
+          bundles: 2,
+          reviews: 1,
+          children: [
+            {
+              slug: "video",
+              title: "Video",
+              status: "done",
+              updatedAt: NOW,
+              bundles: 1,
+              reviews: 0,
+              children: [],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+function projectData(over: Partial<ProjectPageData> = {}): ProjectPageData {
+  return {
+    nav: nav({ section: "projects", current: { id: "ws_7g2kq4xbvm", name: "Crystal Palace" } }),
+    wsId: "ws_7g2kq4xbvm",
+    slug: "calling",
+    title: "Calling <functionality>",
+    status: "open",
+    updatedAt: NOW,
+    parent: null,
+    description: "The whole effort, with `code` in it.",
+    descriptionHtml: "<p>The whole effort, with <code>code</code> in it.</p>",
+    children: [{ slug: "video", title: "Video", status: "done", bundles: 1, reviews: 0 }],
+    bundles: [
+      { slug: "call-prototype", latestVersion: 3, updatedAt: NOW, url: "https://seer.test/ws_7g2kq4xbvm/b/call-prototype/" },
+    ],
+    reviews: [
+      { slug: "call-review", title: "The call, reviewed", latestVersion: 1, publishedAt: NOW, url: "https://seer.test/ws_7g2kq4xbvm/r/call-review/" },
+    ],
+    ...over,
+  };
+}
+
+describe("the projects ledger", () => {
+  test("a child row rides under its parent, indented and filterable by the family", () => {
+    const html = projectsPage(nav({ section: "projects" }), projectGroups());
+    expect(html).toContain('class="row-child"');
+    // The child's haystack carries the parent's slug, so filtering by parent keeps them.
+    expect(html).toContain('data-filter="video video calling"');
+    expect(html).toContain("Calling &lt;functionality&gt;");
+    expect(html).toContain('href="/ws_7g2kq4xbvm/p/calling"');
+  });
+
+  test("status is a plain word, muted once the work stops being open", () => {
+    const html = projectsPage(nav({ section: "projects" }), projectGroups());
+    expect(html).toContain('<span class="status-word">open</span>');
+    expect(html).toContain('<span class="status-word quiet">done</span>');
+    expect(html).not.toContain('class="pill">open');
+  });
+
+  test("the holds cell counts in the tally grammar and skips zeros", () => {
+    const html = projectsPage(nav({ section: "projects" }), projectGroups());
+    expect(html).toContain('<span class="tally-n">2</span><span class="tally-w">bundles</span>');
+    expect(html).toContain('<span class="tally-w">sub-project</span>');
+    // The child holds no reviews, so the word never appears for it.
+    expect(html).toContain('<span class="tally-n">1</span><span class="tally-w">bundle</span>');
+  });
+
+  test("the app bar carries the third section and marks it current", () => {
+    const html = projectsPage(nav({ section: "projects" }), projectGroups());
+    expect(html).toContain('href="/projects" aria-current="page">Projects</a>');
+    expect(html).toContain(">Bundles</a>");
+  });
+});
+
+describe("the project page", () => {
+  test("escapes the title everywhere it draws it", () => {
+    const html = projectPage(projectData());
+    expect(html).toContain("Calling &lt;functionality&gt;");
+    expect(html).not.toContain("Calling <functionality>");
+  });
+
+  test("draws its sections only when they hold something", () => {
+    const html = projectPage(projectData());
+    expect(html).toContain("Sub-projects");
+    expect(html).toContain("Bundles");
+    expect(html).toContain("Reviews");
+    expect(html).not.toContain("Nothing here yet");
+
+    const bare = projectPage(projectData({ children: [], bundles: [], reviews: [], descriptionHtml: "" }));
+    expect(bare).not.toContain("Sub-projects");
+    expect(bare).toContain("Nothing here yet");
+  });
+
+  test("names its parent when it has one", () => {
+    const html = projectPage(projectData({ parent: { slug: "platform", title: "Platform" } }));
+    expect(html).toContain("Part of");
+    expect(html).toContain('href="/ws_7g2kq4xbvm/p/platform"');
+  });
+});
+
+describe("the project markdown projection", () => {
+  test("carries the state, the description verbatim, and the way back into the API", () => {
+    const md = projectMarkdown(projectData());
+    expect(md).toContain("# Calling <functionality>");
+    expect(md).toContain("- status: open");
+    expect(md).toContain("The whole effort, with `code` in it.");
+    expect(md).toContain("## Sub-projects");
+    expect(md).toContain("- call-prototype v3: https://seer.test/ws_7g2kq4xbvm/b/call-prototype/");
+    expect(md).toContain(`GET ${config.baseUrl}/api/projects/calling`);
+  });
+
+  test("omits what is absent rather than printing empty sections", () => {
+    const md = projectMarkdown(projectData({ children: [], bundles: [], reviews: [], description: "" }));
+    expect(md).not.toContain("## Sub-projects");
+    expect(md).not.toContain("## Bundles");
+    expect(md).not.toContain("## Reviews");
+  });
 });

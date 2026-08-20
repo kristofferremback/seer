@@ -92,18 +92,29 @@ import {
   landingMarkdown,
   bundlesPage,
   reviewsPage,
+  projectsPage,
+  projectPage,
+  projectMarkdown,
   invitePage,
   settingsPage,
   skillDoc,
+  projectsSkillDoc,
   skillRouter,
   softNotFoundPage,
   type BundleMeta,
   type LedgerGroup,
   type NavContext,
   type NavSection,
+  type ProjectLedgerGroup,
+  type ProjectLedgerRow,
+  type ProjectPageData,
   type ReviewLedgerGroup,
   type SettingsReveal,
 } from "./pages";
+import { escapeHtml } from "./escape";
+import { getProject, listProjects, projectCounts, type ProjectRow } from "./projects/db";
+import { projectState } from "./projects/api";
+import { render as renderConstrainedMarkdown } from "./overseer/markdown";
 
 // Workspace-scoped bundle path: /<ws_id>/b/<slug>[/v/N][/rest]. Anything under a
 // well-formed /<ws_id>/b/ that doesn't resolve becomes a soft-404. The ws id class
@@ -132,10 +143,17 @@ const WS_ANNOTATIONS_RE = new RegExp(
 );
 
 // The workspace's own pages: /<ws_id> (its front door), /<ws_id>/bundles,
-// /<ws_id>/reviews, /<ws_id>/settings. Members only; anyone else meets the same
-// soft-404 an unknown workspace gives.
+// /<ws_id>/reviews, /<ws_id>/projects, /<ws_id>/settings. Members only; anyone else
+// meets the same soft-404 an unknown workspace gives.
 const WS_PAGE_RE = new RegExp(
-  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})(?:/(bundles|reviews|settings))?/?$`,
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})(?:/(bundles|reviews|projects|settings))?/?$`,
+);
+
+// One project's page: /<ws_id>/p/<slug>. Members only, the same posture as the
+// workspace pages: a stranger cannot tell a project that is not theirs from one that
+// does not exist.
+const WS_PROJECT_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/p/([^/]+)/?$`,
 );
 
 // A live socket is either a bundle's reload channel or a review's freshness channel.
@@ -498,10 +516,105 @@ function reviewLedgerGroups(userId: string): ReviewLedgerGroup[] {
   }));
 }
 
+// The projects ledger, grouped the same way: top-level projects carrying their
+// children, both in the builder so the page stays presentational. `listProjects`
+// answers most recently touched first, and that order survives the split.
+function projectLedgerGroups(userId: string): ProjectLedgerGroup[] {
+  return listUserWorkspaces(userId).map((ws) => {
+    const rows = listProjects(ws.id);
+    const byParent = new Map<string, ProjectRow[]>();
+    for (const p of rows) {
+      if (p.parent_id === null) continue;
+      const held = byParent.get(p.parent_id);
+      if (held) held.push(p);
+      else byParent.set(p.parent_id, [p]);
+    }
+    const toRow = (p: ProjectRow, children: ProjectLedgerRow[]): ProjectLedgerRow => {
+      const counts = projectCounts(p.id);
+      return {
+        slug: p.slug,
+        title: p.title,
+        status: p.status,
+        updatedAt: p.updated_at,
+        bundles: counts.bundles,
+        reviews: counts.reviews,
+        children,
+      };
+    };
+    return {
+      wsId: ws.id,
+      name: ws.name,
+      visibility: ws.visibility,
+      projects: rows
+        .filter((p) => p.parent_id === null)
+        .map((p) => toRow(p, (byParent.get(p.id) ?? []).map((c) => toRow(c, [])))),
+    };
+  });
+}
+
+/**
+ * GET /<ws_id>/p/<slug>: one project's page, and — under `Accept: text/markdown` —
+ * the same state as markdown, so the human entry point and the agent context are one
+ * address. Members only, soft-404 posture throughout.
+ */
+function handleProjectPage(req: Request, wsId: string, slug: string): Response {
+  const user = sessionUser(req);
+  if (!user) return requireSession(req)!;
+  const ws = getWorkspace(wsId);
+  if (!ws || !isMember(wsId, user.id)) return softNotFound(req);
+  if (!SLUG_RE.test(slug)) return softNotFound(req);
+  const project = getProject(wsId, slug);
+  if (!project) return softNotFound(req);
+
+  const state = projectState(project);
+
+  // The stored description passed the write-side validator, so a rejection here is
+  // corruption of some kind: log it and show the text escaped rather than a 500.
+  let descriptionHtml = "";
+  if (project.description.trim() !== "") {
+    try {
+      descriptionHtml = renderConstrainedMarkdown(project.description);
+    } catch (err) {
+      console.error(`[seer] project ${wsId}/${slug}: stored description failed to render:`, err);
+      descriptionHtml = `<p>${escapeHtml(project.description)}</p>`;
+    }
+  }
+
+  const data: ProjectPageData = {
+    nav: navFor(user, "projects", { id: ws.id, name: ws.name }),
+    wsId,
+    slug: project.slug,
+    title: project.title,
+    status: project.status,
+    updatedAt: project.updated_at,
+    parent: state.parent ? { slug: state.parent.slug, title: state.parent.title } : null,
+    description: project.description,
+    descriptionHtml,
+    children: state.children,
+    bundles: state.bundles,
+    reviews: state.reviews,
+  };
+
+  // Vary names Accept on both representations: without it a cache that saw one would
+  // serve it to a caller that asked for the other.
+  if (prefersMarkdown(req)) {
+    return new Response(projectMarkdown(data), {
+      headers: {
+        "content-type": "text/markdown; charset=utf-8",
+        vary: "Accept",
+        "cache-control": "no-cache",
+      },
+    });
+  }
+  return new Response(projectPage(data), {
+    headers: { "content-type": "text/html;charset=utf-8", vary: "Accept", "cache-control": "no-cache" },
+  });
+}
+
 // ---- workspace pages ----
 
 /**
- * GET /<ws_id>[/bundles|/reviews|/settings]: one workspace's own view of the same
+ * GET /<ws_id>[/bundles|/reviews|/projects|/settings]: one workspace's own view of the same
  * ledgers. The bare id is a front door and goes to bundles; settings already has a
  * canonical URL and keeps it. Members only, with the usual posture: an unknown
  * workspace and someone else's workspace are the same soft-404, and a signed-out
@@ -516,15 +629,13 @@ function handleWorkspacePage(req: Request, wsId: string, section: string | undef
   if (section === "settings") return redirect(`/settings/${wsId}`);
 
   const nav = navFor(user, section as NavSection, { id: ws.id, name: ws.name });
-  const groups =
-    section === "bundles"
-      ? ledgerGroups(user.id).filter((g) => g.wsId === wsId)
-      : reviewLedgerGroups(user.id).filter((g) => g.wsId === wsId);
-  return html(
-    section === "bundles"
-      ? bundlesPage(nav, groups as LedgerGroup[])
-      : reviewsPage(nav, groups as ReviewLedgerGroup[]),
-  );
+  if (section === "bundles") {
+    return html(bundlesPage(nav, ledgerGroups(user.id).filter((g) => g.wsId === wsId)));
+  }
+  if (section === "projects") {
+    return html(projectsPage(nav, projectLedgerGroups(user.id).filter((g) => g.wsId === wsId)));
+  }
+  return html(reviewsPage(nav, reviewLedgerGroups(user.id).filter((g) => g.wsId === wsId)));
 }
 
 // ---- server ----
@@ -638,6 +749,7 @@ export async function startServer() {
       "/skill.md": () => markdown(skillRouter()),
       "/llms.txt": () => markdown(skillRouter()),
       "/bundles/skill.md": () => markdown(skillDoc()),
+      "/projects/skill.md": () => markdown(projectsSkillDoc()),
 
       // The signed-in ledger of held bundles, grouped by the user's workspaces.
       "/bundles": (req) => {
@@ -651,6 +763,13 @@ export async function startServer() {
         const user = sessionUser(req);
         if (!user) return requireSession(req)!;
         return html(reviewsPage(navFor(user, "reviews", null), reviewLedgerGroups(user.id)));
+      },
+
+      // The signed-in projects ledger, third of the three.
+      "/projects": (req) => {
+        const user = sessionUser(req);
+        if (!user) return requireSession(req)!;
+        return html(projectsPage(navFor(user, "projects", null), projectLedgerGroups(user.id)));
       },
 
       // Self-hosted type. A closed whitelist — only these five faces are ever
@@ -983,6 +1102,9 @@ export async function startServer() {
 
       const wsPage = url.pathname.match(WS_PAGE_RE);
       if (wsPage) return handleWorkspacePage(req, wsPage[1]!, wsPage[2]);
+
+      const wsProject = url.pathname.match(WS_PROJECT_RE);
+      if (wsProject) return handleProjectPage(req, wsProject[1]!, wsProject[2]!);
 
       const wsBundle = url.pathname.match(WS_BUNDLE_RE);
       if (wsBundle) return handleWorkspaceBundle(req, wsBundle[1]!);

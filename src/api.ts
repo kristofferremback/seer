@@ -29,10 +29,19 @@ import { handleRefreshReview } from "./overseer/freshness";
 import { handleReadReview } from "./overseer/read";
 import { handlePublishReview } from "./overseer/routes";
 import { handleGithubWebhook } from "./overseer/webhook";
+import {
+  handleCreateProject,
+  handleListProjects,
+  handleProjectMembership,
+  handleReadProject,
+  handleUpdateProject,
+  resolveUploadProject,
+} from "./projects/api";
+import { attachBundle, listProjectsForBundle } from "./projects/db";
 
 // ---- the shape of an entry ----
 
-export type Method = "GET" | "POST" | "PUT" | "DELETE";
+export type Method = "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
 
 /** Which credentials open a route. Projected into the document's `security`, so the
  *  answer there cannot drift from the answer here — though what actually enforces it is
@@ -126,8 +135,15 @@ async function uploadBundle(req: Request, slug: string, publish: Publisher): Pro
 
   // The key resolves the workspace: the upload lands wherever the key belongs.
   const ws = auth.workspaceId;
+
+  // `?project=` is resolved BEFORE the version is created: a typo'd project must fail
+  // the whole upload rather than land the bundle and silently lose the grouping.
+  const project = resolveUploadProject(req, ws);
+  if (project instanceof Response) return project;
+
   const version = createVersion(ws, slug, body.length, files.length);
   await saveZip(ws, slug, version, body);
+  if (project) attachBundle(project, slug);
   publish.publish(`bundle:${ws}:${slug}`, "reload");
 
   return json({
@@ -139,6 +155,7 @@ async function uploadBundle(req: Request, slug: string, publish: Publisher): Pro
     bytes: body.length,
     files: files.length,
     hasIndexHtml: files.includes("index.html"),
+    projects: listProjectsForBundle(ws, slug).map((p) => p.slug),
   });
 }
 
@@ -147,9 +164,19 @@ const uploadBundleDoc: Omit<Operation, "operationId"> = {
   description:
     "The body is the raw zip, not multipart. It must contain a root index.html. The key " +
     "resolves the workspace, so the upload lands wherever the key belongs. PUT and POST " +
-    "are identical.",
+    "are identical. `?project=<slug>` attaches the bundle to that project in the same " +
+    "breath; a project the workspace does not hold refuses the whole upload.",
   security: "key",
-  parameters: [slugParam],
+  parameters: [
+    slugParam,
+    {
+      name: "project",
+      in: "query",
+      required: false,
+      schema: { type: "string", pattern: SLUG_RE.source },
+      description: "A project in this workspace to attach the bundle to.",
+    },
+  ],
   requestBody: {
     required: true,
     content: { "application/zip": { schema: { type: "string", format: "binary" } } },
@@ -171,6 +198,11 @@ const uploadBundleDoc: Omit<Operation, "operationId"> = {
               bytes: { type: "integer" },
               files: { type: "integer" },
               hasIndexHtml: { type: "boolean" },
+              projects: {
+                type: "array",
+                items: { type: "string" },
+                description: "Every project holding this bundle, after any `?project=` attach.",
+              },
             },
           },
         },
@@ -178,6 +210,7 @@ const uploadBundleDoc: Omit<Operation, "operationId"> = {
     },
     "400": errorResponse,
     "401": errorResponse,
+    "404": errorResponse,
     "413": errorResponse,
   },
 };
@@ -284,6 +317,120 @@ const uploadImageDoc: Omit<Operation, "operationId"> = {
     "413": errorResponse,
   },
 };
+
+// ---- projects ----
+
+const PROJECT_STATUS_ENUM = { type: "string", enum: ["open", "done", "closed"] };
+
+/** The state object: what create, read and update all answer with, and the reason one
+ *  call is enough to resume — the whole project comes back every time it changes. */
+const projectStateSchema = {
+  type: "object",
+  required: [
+    "slug", "title", "description", "status", "parent", "workspace", "url",
+    "createdAt", "updatedAt", "children", "bundles", "reviews",
+  ],
+  properties: {
+    slug: { type: "string" },
+    title: { type: "string" },
+    description: { type: "string", description: "Constrained markdown, as authored." },
+    status: PROJECT_STATUS_ENUM,
+    parent: { type: ["string", "null"], description: "The parent project's slug, or null." },
+    workspace: { type: "string" },
+    url: { type: "string", format: "uri", description: "The human page; it answers markdown to Accept: text/markdown." },
+    createdAt: { type: "string", format: "date-time" },
+    updatedAt: { type: "string", format: "date-time" },
+    children: {
+      type: "array",
+      description: "Shallow summaries, never recursive.",
+      items: {
+        type: "object",
+        required: ["slug", "title", "status", "bundles", "reviews"],
+        properties: {
+          slug: { type: "string" },
+          title: { type: "string" },
+          status: PROJECT_STATUS_ENUM,
+          bundles: { type: "integer" },
+          reviews: { type: "integer" },
+        },
+      },
+    },
+    bundles: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["slug", "latestVersion", "updatedAt", "url"],
+        properties: {
+          slug: { type: "string" },
+          latestVersion: { type: "integer" },
+          updatedAt: { type: "string", format: "date-time" },
+          url: { type: "string", format: "uri" },
+        },
+      },
+    },
+    reviews: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["slug", "title", "latestVersion", "publishedAt", "url"],
+        properties: {
+          slug: { type: "string" },
+          title: { type: "string" },
+          latestVersion: { type: "integer" },
+          publishedAt: { type: "string", format: "date-time" },
+          url: { type: "string", format: "uri" },
+        },
+      },
+    },
+  },
+};
+
+const projectStateResponse = {
+  description: "The project's whole state, one call.",
+  content: { "application/json": { schema: projectStateSchema } },
+};
+
+/** One membership operation's doc. The four share everything but their nouns, and a
+ *  builder keeps the four descriptions from drifting apart one edit at a time. */
+function membershipDoc(kind: "bundle" | "review", act: "attach" | "detach"): Omit<Operation, "operationId"> {
+  const flag = act === "attach" ? "attached" : "detached";
+  return {
+    summary: `${act === "attach" ? "Attach" : "Detach"} one ${kind}`,
+    description:
+      `Idempotent: \`${flag}\` says whether this call changed anything, and repeating ` +
+      `it changes nothing and says so. The ${kind} must live in the key's workspace.`,
+    security: "key",
+    parameters: [
+      slugParam,
+      {
+        name: kind,
+        in: "path",
+        required: true,
+        schema: { type: "string", pattern: SLUG_RE.source },
+      },
+    ],
+    responses: {
+      "200": {
+        description: `The membership, after this call.`,
+        content: {
+          "application/json": {
+            schema: {
+              type: "object",
+              required: ["project", kind, flag],
+              properties: {
+                project: { type: "string" },
+                [kind]: { type: "string" },
+                [flag]: { type: "boolean" },
+              },
+            },
+          },
+        },
+      },
+      "401": errorResponse,
+      "404": errorResponse,
+    },
+  };
+}
 
 // ---- the table ----
 
@@ -426,6 +573,171 @@ export const API_ROUTES: readonly ApiRoute[] = [
     POST: {
       doc: { operationId: "publishImageViaPost", ...uploadImageDoc },
       run: (req) => uploadImage(req, req.params.filename),
+    },
+  }),
+
+  // Projects: the grouping. Agent-first writes behind the key; reads answer to a key
+  // or a session, because the page and the agent hold the same slug.
+  route("/api/projects", {
+    POST: {
+      doc: {
+        operationId: "createProject",
+        summary: "Create a project",
+        description:
+          "A project groups the work: bundles, reviews, and later tasks and notes, " +
+          "outside any repo. `parent` nests it one level under another project. The " +
+          "model is docs/projects/data-model.md in the source tree.",
+        security: "key",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["slug", "title"],
+                properties: {
+                  slug: { type: "string", pattern: SLUG_RE.source },
+                  title: { type: "string", maxLength: 80 },
+                  description: {
+                    type: "string",
+                    description: "Constrained markdown: emphasis, inline code, links, lists, fenced code.",
+                  },
+                  parent: {
+                    type: ["string", "null"],
+                    description: "Slug of an existing top-level project to nest under.",
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": projectStateResponse,
+          "400": errorResponse,
+          "401": errorResponse,
+          "404": errorResponse,
+          "409": errorResponse,
+          "422": errorResponse,
+        },
+      },
+      run: (req) => handleCreateProject(req),
+    },
+    GET: {
+      doc: {
+        operationId: "listProjects",
+        summary: "The projects in this key's workspace",
+        security: "key",
+        responses: {
+          "200": {
+            description: "Every project, most recently touched first, with its counts.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    required: [
+                      "slug", "title", "status", "parent", "workspace", "url",
+                      "updatedAt", "bundles", "reviews", "children",
+                    ],
+                    properties: {
+                      slug: { type: "string" },
+                      title: { type: "string" },
+                      status: PROJECT_STATUS_ENUM,
+                      parent: { type: ["string", "null"] },
+                      workspace: { type: "string" },
+                      url: { type: "string", format: "uri" },
+                      updatedAt: { type: "string", format: "date-time" },
+                      bundles: { type: "integer" },
+                      reviews: { type: "integer" },
+                      children: { type: "integer" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "401": errorResponse,
+        },
+      },
+      run: (req) => handleListProjects(req),
+    },
+  }),
+
+  route("/api/projects/:slug", {
+    GET: {
+      doc: {
+        operationId: "readProject",
+        summary: "Everything one project holds, in one call",
+        description:
+          "The re-entry point: description, sub-projects, bundles, reviews. An agent " +
+          "resuming a project reads this one URL. A key reads its own workspace; a " +
+          "session reads across the caller's memberships.",
+        security: "keyOrSession",
+        parameters: [slugParam],
+        responses: {
+          "200": projectStateResponse,
+          "404": errorResponse,
+        },
+      },
+      run: (req) => handleReadProject(req, req.params.slug),
+    },
+    PATCH: {
+      doc: {
+        operationId: "updateProject",
+        summary: "Update a project's title, description, status, or parent",
+        description:
+          "Send only what changes. Status is one of open, done, closed; transitions " +
+          "are recorded by Seer with their timestamps. `parent: null` detaches.",
+        security: "key",
+        parameters: [slugParam],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  title: { type: "string", maxLength: 80 },
+                  description: { type: "string" },
+                  status: PROJECT_STATUS_ENUM,
+                  parent: { type: ["string", "null"] },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": projectStateResponse,
+          "400": errorResponse,
+          "401": errorResponse,
+          "404": errorResponse,
+          "422": errorResponse,
+        },
+      },
+      run: (req) => handleUpdateProject(req, req.params.slug),
+    },
+  }),
+
+  route("/api/projects/:slug/bundles/:bundle", {
+    PUT: {
+      doc: { operationId: "attachProjectBundle", ...membershipDoc("bundle", "attach") },
+      run: (req) => handleProjectMembership(req, req.params.slug, "bundle", req.params.bundle, "attach"),
+    },
+    DELETE: {
+      doc: { operationId: "detachProjectBundle", ...membershipDoc("bundle", "detach") },
+      run: (req) => handleProjectMembership(req, req.params.slug, "bundle", req.params.bundle, "detach"),
+    },
+  }),
+
+  route("/api/projects/:slug/reviews/:review", {
+    PUT: {
+      doc: { operationId: "attachProjectReview", ...membershipDoc("review", "attach") },
+      run: (req) => handleProjectMembership(req, req.params.slug, "review", req.params.review, "attach"),
+    },
+    DELETE: {
+      doc: { operationId: "detachProjectReview", ...membershipDoc("review", "detach") },
+      run: (req) => handleProjectMembership(req, req.params.slug, "review", req.params.review, "detach"),
     },
   }),
 

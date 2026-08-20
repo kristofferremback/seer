@@ -248,7 +248,7 @@ describe("the documents an agent discovers", () => {
       skills: { name: string; type: string; description: string; url: string; digest: string }[];
     };
     expect(body.$schema).toBe("https://schemas.agentskills.io/discovery/0.2.0/schema.json");
-    expect(body.skills.length).toBe(4);
+    expect(body.skills.length).toBe(5);
 
     for (const skill of body.skills) {
       expect(skill.name).toMatch(/^[a-z0-9][a-z0-9-]*$/);
