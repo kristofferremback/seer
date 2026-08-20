@@ -44,6 +44,24 @@ export function zipPath(wsId: string, slug: string, version: number): string {
   return join(zipsDir, wsId, slug, `${version}.zip`);
 }
 
+/** One entry's text, or null when the zip does not carry it. The lookup matches by
+ *  NORMALIZED name, the same view inspectZip and extraction hold — some producers
+ *  write `./index.html`, and matching raw names would miss what the served bundle
+ *  carries. The filter also keeps fflate from decompressing every other entry a
+ *  second time. Decoded as UTF-8; the caller only substring-searches, so a stray
+ *  byte sequence is harmless. Null on a malformed archive rather than a throw: the
+ *  caller treats it as absent, and the archive already passed inspectZip. */
+export function readZipEntry(data: Uint8Array, name: string): string | null {
+  try {
+    const entries = unzipSync(data, { filter: (file) => normalize(file.name) === name });
+    const key = Object.keys(entries)[0];
+    if (key === undefined) return null;
+    return new TextDecoder().decode(entries[key]!);
+  } catch {
+    return null;
+  }
+}
+
 /** Validates zip contents and returns the sanitized file list. Throws on bad archives. */
 export function inspectZip(data: Uint8Array): string[] {
   const entries = unzipSync(data);

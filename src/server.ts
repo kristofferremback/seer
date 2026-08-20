@@ -92,6 +92,8 @@ import {
   landingMarkdown,
   bundlesPage,
   reviewsPage,
+  planCss,
+  planThemeJs,
   projectsPage,
   projectPage,
   projectMarkdown,
@@ -478,6 +480,7 @@ function ledgerGroups(userId: string): LedgerGroup[] {
         const versions = listVersions(ws.id, b.slug);
         return {
           slug: b.slug,
+          kind: b.kind,
           latestVersion: b.latest_version,
           updatedAt: versions[0]?.created_at ?? b.created_at,
           versions: versions.map((v) => v.version),
@@ -591,6 +594,7 @@ function handleProjectPage(req: Request, wsId: string, slug: string): Response {
     description: project.description,
     descriptionHtml,
     children: state.children,
+    plans: state.plans,
     bundles: state.bundles,
     reviews: state.reviews,
   };
@@ -771,6 +775,24 @@ export async function startServer() {
         if (!user) return requireSession(req)!;
         return html(projectsPage(navFor(user, "projects", null), projectLedgerGroups(user.id)));
       },
+
+      // The plan reading surface: tokens, type and theme for a bundle of kind plan.
+      // Fetched live rather than vendored — a redesign restyles every published
+      // plan — with a five-minute cache bounding how long that takes to land.
+      "/plan.css": () =>
+        new Response(planCss(), {
+          headers: {
+            "content-type": "text/css;charset=utf-8",
+            "cache-control": "public, max-age=300",
+          },
+        }),
+      "/theme.js": () =>
+        new Response(planThemeJs(), {
+          headers: {
+            "content-type": "text/javascript;charset=utf-8",
+            "cache-control": "public, max-age=300",
+          },
+        }),
 
       // Self-hosted type. A closed whitelist — only these five faces are ever
       // served, so a slug like "../secret" can never traverse out of assets/fonts.

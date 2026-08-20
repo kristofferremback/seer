@@ -17,12 +17,20 @@
 // answerable against the running server rather than by reading.
 
 import { config } from "./config";
-import { createImage, createVersion, listBundles, listImages, listVersions } from "./db";
+import {
+  createImage,
+  createVersion,
+  getBundle,
+  listBundles,
+  listImages,
+  listVersions,
+  type BundleKind,
+} from "./db";
 import { json, originOk } from "./http";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
 import { SLUG_RE } from "./ids";
 import { requireApiKey } from "./auth";
-import { inspectZip, saveImage, saveZip } from "./store";
+import { inspectZip, readZipEntry, saveImage, saveZip } from "./store";
 import { handleCreateShare, handleListShares, handleRevokeShare } from "./shares";
 import { handleAnnotation } from "./overseer/annotations";
 import { handleRefreshReview } from "./overseer/freshness";
@@ -136,12 +144,54 @@ async function uploadBundle(req: Request, slug: string, publish: Publisher): Pro
   // The key resolves the workspace: the upload lands wherever the key belongs.
   const ws = auth.workspaceId;
 
+  // `?kind=` is settled at first upload and immutable after. A later upload naming a
+  // different kind than the stored one is refused whole: a slug that changes species
+  // breaks its own history. An absent param inherits.
+  const kindParam = new URL(req.url).searchParams.get("kind");
+  if (kindParam !== null && kindParam !== "bundle" && kindParam !== "plan") {
+    return json({ error: "`kind` must be `bundle` or `plan`" }, 400);
+  }
+  const existing = getBundle(ws, slug);
+  if (existing && kindParam !== null && kindParam !== existing.kind) {
+    return json(
+      { error: `"${slug}" is a ${existing.kind} and a slug never changes kind; use a new slug` },
+      409,
+    );
+  }
+  const kind: BundleKind = existing?.kind ?? (kindParam as BundleKind | null) ?? "bundle";
+
   // `?project=` is resolved BEFORE the version is created: a typo'd project must fail
   // the whole upload rather than land the bundle and silently lose the grouping.
   const project = resolveUploadProject(req, ws);
   if (project instanceof Response) return project;
 
-  const version = createVersion(ws, slug, body.length, files.length);
+  const version = createVersion(ws, slug, body.length, files.length, kind);
+  // The stored row is the authority on kind, re-read after the transaction: the
+  // computed value above can only drift from it if an await ever lands between the
+  // 409 check and createVersion, and echoing storage means that future edit shows up
+  // as a wrong-looking response in tests rather than as a silent lie to the caller.
+  const storedKind = getBundle(ws, slug)!.kind;
+
+  // A plan should read like Seer: its index.html links the hosted reading surface.
+  // A deliberately custom plan is legitimate, so a missing link is a warning naming
+  // what is missing, never a refusal — a silent drift is the one wrong answer.
+  const warnings: string[] = [];
+  if (storedKind === "plan" && files.includes("index.html")) {
+    const index = readZipEntry(body, "index.html") ?? "";
+    if (!index.includes("/plan.css")) {
+      warnings.push(
+        "index.html does not link /plan.css: plans read in the house style through it, " +
+          "and without it this plan will not follow the reader's theme",
+      );
+    }
+    if (!index.includes("/theme.js")) {
+      warnings.push(
+        "index.html does not load /theme.js: without it this plan cannot follow the " +
+          "reader's light/dark choice or the system setting",
+      );
+    }
+  }
+
   await saveZip(ws, slug, version, body);
   if (project) attachBundle(project, slug);
   publish.publish(`bundle:${ws}:${slug}`, "reload");
@@ -149,6 +199,7 @@ async function uploadBundle(req: Request, slug: string, publish: Publisher): Pro
   return json({
     slug,
     version,
+    kind: storedKind,
     workspace: ws,
     url: `${config.baseUrl}/${ws}/b/${slug}/`,
     versionUrl: `${config.baseUrl}/${ws}/b/${slug}/v/${version}/`,
@@ -156,8 +207,10 @@ async function uploadBundle(req: Request, slug: string, publish: Publisher): Pro
     files: files.length,
     hasIndexHtml: files.includes("index.html"),
     projects: listProjectsForBundle(ws, slug).map((p) => p.slug),
+    warnings,
   });
 }
+
 
 const uploadBundleDoc: Omit<Operation, "operationId"> = {
   summary: "Publish a bundle, creating its next version",
@@ -165,7 +218,10 @@ const uploadBundleDoc: Omit<Operation, "operationId"> = {
     "The body is the raw zip, not multipart. It must contain a root index.html. The key " +
     "resolves the workspace, so the upload lands wherever the key belongs. PUT and POST " +
     "are identical. `?project=<slug>` attaches the bundle to that project in the same " +
-    "breath; a project the workspace does not hold refuses the whole upload.",
+    "breath; a project the workspace does not hold refuses the whole upload. " +
+    "`?kind=plan` on the FIRST upload makes the slug a plan — a document that should " +
+    "link /plan.css and /theme.js to read in the house style; the kind is immutable " +
+    "and a later upload naming a different one is a 409.",
   security: "key",
   parameters: [
     slugParam,
@@ -175,6 +231,13 @@ const uploadBundleDoc: Omit<Operation, "operationId"> = {
       required: false,
       schema: { type: "string", pattern: SLUG_RE.source },
       description: "A project in this workspace to attach the bundle to.",
+    },
+    {
+      name: "kind",
+      in: "query",
+      required: false,
+      schema: { type: "string", enum: ["bundle", "plan"] },
+      description: "Set at first upload, immutable after. Default bundle.",
     },
   ],
   requestBody: {
@@ -188,10 +251,11 @@ const uploadBundleDoc: Omit<Operation, "operationId"> = {
         "application/json": {
           schema: {
             type: "object",
-            required: ["slug", "version", "workspace", "url", "versionUrl", "bytes", "files", "hasIndexHtml"],
+            required: ["slug", "version", "kind", "workspace", "url", "versionUrl", "bytes", "files", "hasIndexHtml", "warnings"],
             properties: {
               slug: { type: "string" },
               version: { type: "integer" },
+              kind: { type: "string", enum: ["bundle", "plan"] },
               workspace: { type: "string" },
               url: { type: "string", format: "uri", description: "Always the latest version." },
               versionUrl: { type: "string", format: "uri", description: "Pinned to this version." },
@@ -203,6 +267,11 @@ const uploadBundleDoc: Omit<Operation, "operationId"> = {
                 items: { type: "string" },
                 description: "Every project holding this bundle, after any `?project=` attach.",
               },
+              warnings: {
+                type: "array",
+                items: { type: "string" },
+                description: "Non-fatal problems, e.g. a plan whose index.html links no reading surface.",
+              },
             },
           },
         },
@@ -211,6 +280,7 @@ const uploadBundleDoc: Omit<Operation, "operationId"> = {
     "400": errorResponse,
     "401": errorResponse,
     "404": errorResponse,
+    "409": errorResponse,
     "413": errorResponse,
   },
 };
@@ -328,7 +398,7 @@ const projectStateSchema = {
   type: "object",
   required: [
     "slug", "title", "description", "status", "parent", "workspace", "url",
-    "createdAt", "updatedAt", "children", "bundles", "reviews",
+    "createdAt", "updatedAt", "children", "plans", "bundles", "reviews",
   ],
   properties: {
     slug: { type: "string" },
@@ -352,6 +422,20 @@ const projectStateSchema = {
           status: PROJECT_STATUS_ENUM,
           bundles: { type: "integer" },
           reviews: { type: "integer" },
+        },
+      },
+    },
+    plans: {
+      type: "array",
+      description: "Bundles of kind plan: the project's documents to read, first.",
+      items: {
+        type: "object",
+        required: ["slug", "latestVersion", "updatedAt", "url"],
+        properties: {
+          slug: { type: "string" },
+          latestVersion: { type: "integer" },
+          updatedAt: { type: "string", format: "date-time" },
+          url: { type: "string", format: "uri" },
         },
       },
     },
@@ -450,10 +534,11 @@ export const API_ROUTES: readonly ApiRoute[] = [
                   type: "array",
                   items: {
                     type: "object",
-                    required: ["slug", "latestVersion", "workspace", "url", "versions"],
+                    required: ["slug", "latestVersion", "kind", "workspace", "url", "versions"],
                     properties: {
                       slug: { type: "string" },
                       latestVersion: { type: "integer" },
+                      kind: { type: "string", enum: ["bundle", "plan"] },
                       workspace: { type: "string" },
                       url: { type: "string", format: "uri" },
                       versions: {
@@ -486,6 +571,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
           listBundles(ws).map((b) => ({
             slug: b.slug,
             latestVersion: b.latest_version,
+            kind: b.kind,
             workspace: ws,
             url: `${config.baseUrl}/${ws}/b/${b.slug}/`,
             versions: listVersions(ws, b.slug).map((v) => ({

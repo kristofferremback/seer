@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 8 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 9 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -35,6 +35,10 @@ import { hashKey, tinyId } from "./ids";
 //
 // v8 adds the projects tables (projects, the bundle/review membership joins, and the
 // status-transition events). Purely additive. See docs/projects/data-model.md.
+//
+// v9 adds `kind` to bundles: 'bundle' | 'plan', set at first upload and immutable
+// after. ADD COLUMN with a constant default, so every pre-v9 row reads 'bundle',
+// which is true of every bundle that existed before plans did.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -506,8 +510,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 8) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 8`);
+  if (uv > 9) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 9`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -517,6 +521,7 @@ export function migrate(): void {
   if (userVersion() < 6) migrateToV6();
   if (userVersion() < 7) migrateToV7();
   if (userVersion() < 8) migrateToV8();
+  if (userVersion() < 9) migrateToV9();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -643,6 +648,24 @@ function migrateToV8(): void {
     db.run("PRAGMA user_version = 8");
   })();
   console.log("[seer] migrated to schema v8 (projects).");
+}
+
+function migrateToV9(): void {
+  db.transaction(() => {
+    // SQLite accepts a CHECK on ADD COLUMN; existing rows satisfy it through the
+    // default. The enum is also enforced in code, but the row should refuse a bad
+    // kind even from a path that forgot to. Guarded on the column because ADD COLUMN
+    // has no IF NOT EXISTS and the repair paths re-enter this ladder on databases
+    // whose stamp lags their shape.
+    if (!hasColumn("bundles", "kind")) {
+      db.run(
+        "ALTER TABLE bundles ADD COLUMN kind TEXT NOT NULL DEFAULT 'bundle' " +
+          "CHECK (kind IN ('bundle','plan'))",
+      );
+    }
+    db.run("PRAGMA user_version = 9");
+  })();
+  console.log("[seer] migrated to schema v9 (bundle kind).");
 }
 
 /**

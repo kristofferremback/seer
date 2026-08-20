@@ -58,7 +58,12 @@ export interface Bundle {
   slug: string;
   created_at: number;
   latest_version: number;
+  /** 'bundle' | 'plan'. Set at first upload, immutable after: a slug that changes
+   *  species breaks its own history. */
+  kind: BundleKind;
 }
+
+export type BundleKind = "bundle" | "plan";
 
 export interface Version {
   workspace_id: string;
@@ -102,11 +107,12 @@ export function listVersions(wsId: string, slug: string): Version[] {
 }
 
 export const createVersion = db.transaction(
-  (wsId: string, slug: string, bytes: number, fileCount: number): number => {
+  (wsId: string, slug: string, bytes: number, fileCount: number, kind: BundleKind = "bundle"): number => {
     const now = Date.now();
     const existing = getBundle(wsId, slug);
     const version = (existing?.latest_version ?? 0) + 1;
     if (existing) {
+      // `kind` is deliberately not in this UPDATE: it is set at birth and never after.
       db.run("UPDATE bundles SET latest_version = ? WHERE workspace_id = ? AND slug = ?", [
         version,
         wsId,
@@ -114,8 +120,8 @@ export const createVersion = db.transaction(
       ]);
     } else {
       db.run(
-        "INSERT INTO bundles (workspace_id, slug, created_at, latest_version) VALUES (?, ?, ?, ?)",
-        [wsId, slug, now, version],
+        "INSERT INTO bundles (workspace_id, slug, created_at, latest_version, kind) VALUES (?, ?, ?, ?, ?)",
+        [wsId, slug, now, version, kind],
       );
     }
     db.run(

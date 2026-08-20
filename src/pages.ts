@@ -135,6 +135,8 @@ function styles(): string {
     font-weight: 700; font-display: swap; font-style: normal;
   }
 
+  /* KEEP IN STEP with planCss(): the plan stylesheet carries a standalone copy of
+     these tokens, and a value changed here without changing there forks the look. */
   :root {
     color-scheme: light;
     --paper: 40 22% 98%;
@@ -1041,6 +1043,172 @@ function styles(): string {
 }
 
 
+// ---- the plan reading surface ----
+//
+// A plan is a bundle whose kind says "document to read", and these two files are how
+// it reads like Seer without giving up the bundle's freedom: the author writes
+// semantic HTML and links them; Seer owns the tokens, the type and the theme. They
+// are fetched live rather than vendored, so a redesign here restyles every plan ever
+// published. Served with a five-minute cache: live is the point, five minutes bounds
+// how long a redesign takes to reach an open reader's next load.
+
+/** A standalone stylesheet for a semantic-HTML document in the house style. Both
+ *  themes fully defined; system dark works with no script via the media fallback,
+ *  and /theme.js upgrades it to follow the app's stored choice. */
+// KEEP IN STEP with the token sets in styles(): these are the same paper, ink and
+// oxblood values, copied rather than shared because a plan stylesheet must stand
+// alone. Drift here silently unstyles every published plan.
+export function planCss(): string {
+  return `@font-face {
+  font-family: "Switzer";
+  src: url("/fonts/switzer.woff2") format("woff2");
+  font-weight: 100 900; font-display: swap; font-style: normal;
+}
+@font-face {
+  font-family: "Cabinet Grotesk";
+  src: url("/fonts/cabinet-grotesk.woff2") format("woff2");
+  font-weight: 100 900; font-display: swap; font-style: normal;
+}
+@font-face {
+  font-family: "Commit Mono";
+  src: url("/fonts/commit-mono-400.woff2") format("woff2");
+  font-weight: 400; font-display: swap; font-style: normal;
+}
+@font-face {
+  font-family: "Commit Mono";
+  src: url("/fonts/commit-mono-500.woff2") format("woff2");
+  font-weight: 500; font-display: swap; font-style: normal;
+}
+
+:root {
+  color-scheme: light;
+  --paper: 40 22% 98%;
+  --paper-warm: 38 16% 94%;
+  --paper-sunk: 40 14% 90%;
+  --ink: 30 10% 12%;
+  --ink-soft: 30 9% 26%;
+  --line: 35 14% 84%;
+  --muted: 30 8% 45%;
+  --accent: 356 55% 27%;
+  --accent-soft: 356 40% 42%;
+  --font-display: "Cabinet Grotesk", "Switzer", system-ui, -apple-system, sans-serif;
+  --font-body: "Switzer", system-ui, -apple-system, sans-serif;
+  --font-mono: "Commit Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: 356 24% 11%;
+  --paper-warm: 356 28% 8.5%;
+  --paper-sunk: 356 32% 6.5%;
+  --ink: 20 20% 91%;
+  --ink-soft: 16 14% 77%;
+  --line: 356 14% 23%;
+  --muted: 8 9% 62%;
+  --accent: 356 48% 64%;
+  --accent-soft: 356 38% 54%;
+}
+/* No data-theme means no script ran: follow the system. theme.js sets the attribute
+   pre-paint, after which the block above and its light default carry the choice. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --paper: 356 24% 11%;
+    --paper-warm: 356 28% 8.5%;
+    --paper-sunk: 356 32% 6.5%;
+    --ink: 20 20% 91%;
+    --ink-soft: 16 14% 77%;
+    --line: 356 14% 23%;
+    --muted: 8 9% 62%;
+    --accent: 356 48% 64%;
+    --accent-soft: 356 38% 54%;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0 auto;
+  max-width: 46rem;
+  padding: 48px 24px 96px;
+  background: hsl(var(--paper-warm));
+  color: hsl(var(--ink));
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: hsl(var(--accent) / 0.22); }
+h1, h2, h3 {
+  font-family: var(--font-display);
+  font-weight: 300;
+  line-height: 1.15;
+  margin: 2.2em 0 0.5em;
+}
+h1 { font-size: clamp(28px, 6vw, 40px); margin-top: 0; letter-spacing: -0.01em; }
+h2 { font-size: 24px; font-weight: 400; }
+h3 { font-size: 18px; font-weight: 500; font-family: var(--font-body); }
+p, li { color: hsl(var(--ink)); }
+p { margin: 0 0 1em; }
+ul, ol { margin: 0 0 1em; padding-left: 1.3em; }
+li { margin: 0 0 0.35em; }
+a { color: hsl(var(--accent-soft)); text-decoration-color: hsl(var(--accent) / 0.4); }
+a:hover { color: hsl(var(--accent)); }
+code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: hsl(var(--paper-sunk));
+  border: 1px solid hsl(var(--line));
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+pre {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  background: hsl(var(--paper-sunk));
+  border: 1px solid hsl(var(--line));
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 0 0 1.1em;
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+table { border-collapse: collapse; width: 100%; margin: 0 0 1.1em; }
+th, td { text-align: left; padding: 6px 12px 6px 0; border-bottom: 1px solid hsl(var(--line)); }
+th { font-weight: 500; color: hsl(var(--ink-soft)); }
+blockquote {
+  margin: 0 0 1em;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid hsl(var(--accent) / 0.55);
+  color: hsl(var(--ink-soft));
+}
+hr { border: none; border-top: 1px solid hsl(var(--line)); margin: 2.2em 0; }
+img { max-width: 100%; height: auto; }
+`;
+}
+
+/** The app's three-state theme resolution, for a plan page: the stored choice wins,
+ *  its absence follows the system live, and a toggle flipped in the app re-themes an
+ *  open plan tab through the storage event. Bundles serve on the app's origin, which
+ *  is what makes the shared localStorage key work. */
+export function planThemeJs(): string {
+  return `(() => {
+  const KEY = "seer:theme";
+  const mq = matchMedia("(prefers-color-scheme: dark)");
+  const resolve = () => {
+    let stored = null;
+    try { stored = localStorage.getItem(KEY); } catch (e) {}
+    const choice = stored === "dark" || stored === "light" ? stored : null;
+    document.documentElement.dataset.theme = choice ?? (mq.matches ? "dark" : "light");
+  };
+  mq.addEventListener("change", resolve);
+  addEventListener("storage", (e) => { if (e.key === KEY || e.key === null) resolve(); });
+  resolve();
+})();
+`;
+}
+
 function head(title: string, og: Record<string, string>, extra = ""): string {
   const tags = Object.entries(og)
     .map(([k, v]) => {
@@ -1338,10 +1506,48 @@ curl -s -X PUT --data-binary @bundle.zip \\
   of a parent is refused. \`parent: null\` detaches. Use a sub-project for a strand of
   work with assets of its own; the parent's page rolls its children up.
 
+## Plans
+
+A plan is a bundle of kind \`plan\`: same upload, same versioning (republish to revise,
+open readers live-reload), but the pages seat it as a document to read rather than a
+thing being hosted. Publish one with \`?kind=plan\` on the FIRST upload — the kind is
+immutable after, a later upload naming a different kind is a 409:
+
+\`\`\`bash
+curl -s -X PUT --data-binary @plan.zip \\
+  -H "Authorization: Bearer $SEER_API_TOKEN" \\
+  "${base}/api/bundles/calling-plan?kind=plan&project=calling"
+\`\`\`
+
+Write the plan as semantic HTML and link the hosted reading surface, so it follows the
+reader's theme (light, dark, system) and the house style without you writing any CSS:
+
+\`\`\`html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The plan's title</title>
+  <link rel="stylesheet" href="/plan.css">
+  <script src="/theme.js"></script>
+</head>
+<body>
+  <h1>The plan's title</h1>
+  <p>Sections, lists, tables, code blocks — plain semantic HTML.</p>
+</body>
+</html>
+\`\`\`
+
+A plan that links neither file is accepted with a warning naming what is missing;
+full custom HTML stays legitimate when the plan needs it (figures, interactivity,
+its own layout). Anything beyond the skeleton — embedded prototypes, diagrams — is
+yours to add; it is still a bundle.
+
 ## Resuming
 
 \`GET ${base}/api/projects/<slug>\` returns the whole state in one response: the
-description, sub-projects, every attached bundle and review with their URLs. Read it
+description, plans, sub-projects, every attached bundle and review with their URLs. Read it
 before continuing work you did not just do. The \`url\` field in every response is the
 human page, and it answers this same state as markdown to \`Accept: text/markdown\`, so
 you and the human are reading one address.
@@ -1445,6 +1651,10 @@ exceeds the size limit).
 Upload the same slug again to publish a new version. Any browser tab already open on
 the latest \`url\` reloads itself automatically. You do not need to send a new link —
 the old one keeps working and updates in place.
+
+A bundle that is a plan — a document to read rather than a thing to host — is
+published with \`?kind=plan\` on its first upload; \`${base}/projects/skill.md\` covers
+plans, the hosted reading surface they link, and the projects that group them.
 
 ## 5. Listing what is published
 
@@ -1786,6 +1996,7 @@ ${webMcpScript()}
 
 export interface LedgerBundle {
   slug: string;
+  kind: "bundle" | "plan";
   latestVersion: number;
   updatedAt: number; // epoch ms of the newest version's upload
   versions: number[];
@@ -1887,7 +2098,7 @@ export function bundlesPage(nav: NavContext, groups: LedgerGroup[], now = Date.n
         ? `<button type="button" class="more-versions" data-menu-more` +
           ` aria-label="All ${b.versions.length} versions of ${escapeHtml(b.slug)}">+${rest}</button>`
         : "");
-    return `<tr data-at="${b.updatedAt}" data-filter="${escapeHtml(b.slug.toLowerCase())}">
+    return `<tr data-at="${b.updatedAt}" data-filter="${escapeHtml(`${b.slug} ${b.kind === "plan" ? "plan" : ""}`.trim().toLowerCase())}">
           <td class="slug"><a href="${url}">${escapeHtml(b.slug)}</a></td>
           <td class="mono">v${b.latestVersion}</td>
           <td class="mono"><time datetime="${new Date(b.updatedAt).toISOString()}">${fmtInstant(b.updatedAt)}</time></td>
@@ -1901,9 +2112,11 @@ export function bundlesPage(nav: NavContext, groups: LedgerGroup[], now = Date.n
   };
 
   // Every bucket is drawn, empty ones hidden rather than omitted: the browser re-dates
-  // rows in local time on load and needs somewhere to move them to.
-  const section = (g: LedgerGroup, bucket: (typeof LEDGER_BUCKETS)[number]) => {
-    const held = g.bundles.filter((b) => bucketFor(utcDay(b.updatedAt), today) === bucket.key);
+  // rows in local time on load and needs somewhere to move them to. Only plain
+  // bundles ride the buckets: plans are few and are documents, so they sit in one
+  // flat section above, outside the re-dating group.
+  const section = (g: LedgerGroup, bucket: (typeof LEDGER_BUCKETS)[number], held0: LedgerBundle[]) => {
+    const held = held0.filter((b) => bucketFor(utcDay(b.updatedAt), today) === bucket.key);
     const open = bucket.key === "older" ? "" : " open";
     const hidden = held.length === 0 ? " hidden" : "";
     return `<details class="ledger-section" data-section="${bucket.key}" data-filter-hide${open}${hidden}>
@@ -1939,10 +2152,36 @@ export function bundlesPage(nav: NavContext, groups: LedgerGroup[], now = Date.n
       <p class="empty">No bundles here yet.</p></div>`;
     }
 
+    // Plans first, one flat section: a workspace holds few, and they are documents
+    // to read rather than uploads to date. They stay outside the re-dating group so
+    // the browser's local-time pass never moves them.
+    const plans = g.bundles.filter((b) => b.kind === "plan");
+    const rest = g.bundles.filter((b) => b.kind !== "plan");
+    const plansBlock =
+      plans.length === 0
+        ? ""
+        : `<details class="ledger-section" data-plans data-filter-hide open>
+      <summary>${chevron}<span>Plans</span><span class="section-count">${plans.length}</span><span class="section-rule"></span></summary>
+      <div class="ledger scroll-x">
+        <table class="stack">
+          <thead><tr><th>Plan</th><th>Latest</th><th>Updated</th><th class="col-history">History</th><th class="col-menu"><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>
+          ${plans.map((b) => row(g, b)).join("\n")}
+          </tbody>
+        </table>
+      </div>
+    </details>`;
+
+    const bucketed =
+      rest.length === 0
+        ? ""
+        : `<div data-ledger-group>
+      ${LEDGER_BUCKETS.map((bucket) => section(g, bucket, rest)).join("\n")}
+    </div>`;
+
     return `<div data-filter-hide>${head}
-    <div data-ledger-group>
-      ${LEDGER_BUCKETS.map((bucket) => section(g, bucket)).join("\n")}
-    </div></div>`;
+    ${plansBlock}
+    ${bucketed}</div>`;
   };
 
   const body =
@@ -2356,6 +2595,7 @@ export interface ProjectPageData {
   /** The same field rendered to HTML by the server; "" renders nothing. */
   descriptionHtml: string;
   children: { slug: string; title: string; status: ProjectStatusWord; bundles: number; reviews: number }[];
+  plans: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   bundles: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   reviews: { slug: string; title: string; latestVersion: number; publishedAt: number; url: string }[];
 }
@@ -2387,6 +2627,26 @@ export function projectPage(d: ProjectPageData): string {
         </tbody>
       </table>
     </div>`;
+
+  const planRows = (rows: ProjectPageData["plans"], label: string) => `${sectionHead(label)}
+    <div class="ledger scroll-x">
+      <table class="stack">
+        <thead><tr><th>${escapeHtml(label === "Plans" ? "Plan" : label)}</th><th>Latest</th><th>Updated</th></tr></thead>
+        <tbody>
+        ${rows
+          .map(
+            (b) => `<tr data-filter="${escapeHtml(`${b.slug} plan`.toLowerCase())}">
+          <td class="slug"><a href="${b.url}">${escapeHtml(b.slug)}</a></td>
+          <td class="mono">v${b.latestVersion}</td>
+          <td class="mono"><time datetime="${new Date(b.updatedAt).toISOString()}">${fmtInstant(b.updatedAt)}</time></td>
+        </tr>`,
+          )
+          .join("\n")}
+        </tbody>
+      </table>
+    </div>`;
+
+  const plansSection = d.plans.length === 0 ? "" : planRows(d.plans, "Plans");
 
   const bundlesSection =
     d.bundles.length === 0
@@ -2432,7 +2692,7 @@ export function projectPage(d: ProjectPageData): string {
     </div>`;
 
   const empty =
-    d.children.length === 0 && d.bundles.length === 0 && d.reviews.length === 0
+    d.children.length === 0 && d.plans.length === 0 && d.bundles.length === 0 && d.reviews.length === 0
       ? `<p class="empty">Nothing here yet. Attach bundles and reviews, or create sub-projects.</p>`
       : "";
 
@@ -2462,6 +2722,7 @@ ${head(title, og)}
 <div class="frame grow">
   <div class="shell spine">
     ${d.descriptionHtml ? `<div class="proj-desc">${d.descriptionHtml}</div>` : ""}
+    ${plansSection}
     ${childrenSection}
     ${bundlesSection}
     ${reviewsSection}
@@ -2495,6 +2756,10 @@ export function projectMarkdown(d: ProjectPageData): string {
     `- updated: ${new Date(d.updatedAt).toISOString()}`,
   ];
   if (d.description.trim() !== "") lines.push("", d.description.trim());
+  if (d.plans.length > 0) {
+    lines.push("", "## Plans", "");
+    for (const b of d.plans) lines.push(`- ${b.slug} v${b.latestVersion}: ${b.url}`);
+  }
   if (d.children.length > 0) {
     lines.push("", "## Sub-projects", "");
     for (const c of d.children) lines.push(`- ${c.title} (${c.slug}), ${c.status}`);
@@ -2552,6 +2817,13 @@ function bundlesScript(): string {
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
       ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   };
+
+  // Plan rows sit outside the re-dating groups on purpose (they never move between
+  // buckets), but their stamps still owe the reader local time: one column, one clock.
+  for (const row of document.querySelectorAll('[data-plans] tr[data-at]')) {
+    const time = row.querySelector('time');
+    if (time) time.textContent = stamp(Number(row.dataset.at));
+  }
 
   const today = localDay(Date.now());
   for (const group of document.querySelectorAll('[data-ledger-group]')) {

@@ -64,6 +64,7 @@ function group(bundles: { slug: string; at: number; versions?: number[] }[]): Le
       visibility: "private",
       bundles: bundles.map((b) => ({
         slug: b.slug,
+        kind: "bundle" as const,
         latestVersion: b.versions?.[0] ?? 1,
         updatedAt: b.at,
         versions: b.versions ?? [1],
