@@ -453,6 +453,11 @@ curl -X POST https://seer.build/api/reviews \
 
 The document is `{ slug, title, authorIntent, summary, prs[], statements[], notes[],
 codeDesign, groups[], attachments[] }`. `slug` matches `[a-z0-9][a-z0-9-]{0,63}`.
+
+The document may also carry `projects[]`: slugs of projects in the same workspace to
+attach this review to as it lands. Use it when whoever dispatched you named a project.
+An unknown slug refuses the whole publish, naming the entry; the field only ever
+attaches, so a republish that omits it detaches nothing.
 Statements, notes, design modules, coverage paths, groups and attachments carry an `id`
 you author, unique within the document and stable across versions. A pull request is
 identified by its `repo` and `number` instead:

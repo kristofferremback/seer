@@ -8,7 +8,7 @@ import { zipSync, strToU8 } from "fflate";
 import { startServer } from "../../src/server";
 import { config } from "../../src/config";
 import { createVersion, createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
-import { getAttachment, getReviewVersion, listAttachments } from "../../src/overseer/db";
+import { getAttachment, getReview, getReviewVersion, listAttachments } from "../../src/overseer/db";
 import { attachmentPath } from "../../src/store";
 import {
   GithubError,
@@ -379,6 +379,28 @@ describe("POST /api/reviews", () => {
     expect(getReviewVersion(wsA, "golden", 2)!.doc.version).toBe(2);
     // createdAt survives the republish; updatedAt moves.
     expect(json.document.createdAt).toBe(getReviewVersion(wsA, "golden", 1)!.doc.createdAt);
+  });
+
+  test("a publish naming projects[] attaches the review; an unknown slug refuses it", async () => {
+    const { createProject, listProjectReviewSlugs } = await import("../../src/projects/db");
+    const project = createProject(wsA, "grouping", "The grouping", "", null);
+
+    const named = { ...noAttachments(), projects: ["grouping"] } as PublishPayload;
+    expect((await publish("grouped", named)).status).toBe(200);
+    expect(listProjectReviewSlugs(project.id)).toContain("grouped");
+
+    // Republishing without the field detaches nothing: publish only ever attaches.
+    expect((await publish("grouped", noAttachments())).status).toBe(200);
+    expect(listProjectReviewSlugs(project.id)).toContain("grouped");
+
+    const unknown = { ...noAttachments(), projects: ["nope"] } as PublishPayload;
+    const refused = await publish("grouped-bad", unknown);
+    expect(refused.status).toBe(422);
+    const said = JSON.stringify(await refused.json());
+    expect(said).toContain("projects[0]");
+    expect(said).toContain("nope");
+    // Refused whole: no version landed under the slug.
+    expect(getReview(wsA, "grouped-bad")).toBeNull();
   });
 
   test("the same slug in two workspaces is two reviews", async () => {

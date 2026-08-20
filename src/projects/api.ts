@@ -5,14 +5,33 @@
 import { config } from "../config";
 import { getBundle, isMember, listUserWorkspaces, listVersions } from "../db";
 import { json } from "../http";
-import { SLUG_RE } from "../ids";
+import { SLUG_RE, TSK_ID_RE } from "../ids";
 import { requireApiKey, sessionUser } from "../auth";
 import { validate as validateMarkdown } from "../overseer/markdown";
 import { getReview, getReviewVersion } from "../overseer/db";
 import {
+  ANONYMOUS_OBSERVER,
+  findPrStatus,
+  getPrStatus,
+  healTaskPrRepoId,
+  statusOf,
+  upsertPrStatus,
+} from "../overseer/installations";
+import { parseUpdatedAt } from "../overseer/derive";
+import { githubClientFor } from "../overseer/github-app";
+import {
   attachBundle,
   attachReview,
   createProject,
+  createTask,
+  getTask,
+  listTasks,
+  repoIdForTaskPr,
+  updateTask,
+  type TaskGate,
+  type TaskPatch,
+  type TaskPrPointer,
+  type TaskRow,
   detachBundle,
   detachReview,
   getProject,
@@ -43,6 +62,7 @@ export interface ProjectChildSummary {
   status: ProjectStatus;
   bundles: number;
   reviews: number;
+  tasks: number;
 }
 
 export interface ProjectBundleEntry {
@@ -64,6 +84,7 @@ export interface ProjectState {
   project: ProjectRow;
   parent: { slug: string; title: string; status: ProjectStatus } | null;
   children: ProjectChildSummary[];
+  tasks: TaskView[];
   /** Bundles of kind plan, first: the project's documents to read. */
   plans: ProjectBundleEntry[];
   bundles: ProjectBundleEntry[];
@@ -121,8 +142,10 @@ export function projectState(project: ProjectRow): ProjectState {
         status: child.status,
         bundles: counts.bundles,
         reviews: counts.reviews,
+        tasks: counts.tasks,
       };
     }),
+    tasks: listTasks(project.id).map(taskView),
     plans,
     bundles,
     reviews,
@@ -146,6 +169,18 @@ function stateJson(state: ProjectState): unknown {
     createdAt: new Date(p.created_at).toISOString(),
     updatedAt: new Date(p.updated_at).toISOString(),
     children: state.children,
+    tasks: state.tasks.map((t) => ({
+      id: t.id,
+      title: t.title,
+      body: t.body,
+      status: t.status,
+      gates: t.gates,
+      prs: t.prs,
+      drift: t.drift,
+      createdAt: new Date(t.createdAt).toISOString(),
+      updatedAt: new Date(t.updatedAt).toISOString(),
+      doneAt: t.doneAt === null ? null : new Date(t.doneAt).toISOString(),
+    })),
     plans: state.plans.map((b) => ({
       slug: b.slug,
       latestVersion: b.latestVersion,
@@ -193,19 +228,25 @@ function checkTitle(title: unknown): string | FieldError {
   return trimmed;
 }
 
-function checkDescription(description: unknown): string | FieldError {
-  if (typeof description !== "string") {
-    return badField("`description` must be a string of constrained markdown");
+/** A multi-line authored field: the constrained subset, under the shared budget.
+ *  The field name travels so the refusal names what the caller sent. */
+function checkMarkdownField(field: string, value: unknown): string | FieldError {
+  if (typeof value !== "string") {
+    return badField(`\`${field}\` must be a string of constrained markdown`);
   }
-  if (description.length > DESCRIPTION_MAX) {
+  if (value.length > DESCRIPTION_MAX) {
     return badField(
-      `\`description\` is over budget: ${description.length} of at most ${DESCRIPTION_MAX} characters`,
+      `\`${field}\` is over budget: ${value.length} of at most ${DESCRIPTION_MAX} characters`,
       422,
     );
   }
-  const result = validateMarkdown(description);
-  if (!result.ok) return badField(`\`description\`: ${result.message}`, 422);
-  return description;
+  const result = validateMarkdown(value);
+  if (!result.ok) return badField(`\`${field}\`: ${result.message}`, 422);
+  return value;
+}
+
+function checkDescription(description: unknown): string | FieldError {
+  return checkMarkdownField("description", description);
 }
 
 function checkStatus(status: unknown): ProjectStatus | FieldError {
@@ -381,6 +422,330 @@ export function handleProjectMembership(
       ? (kind === "bundle" ? attachBundle : attachReview)(project, target)
       : (kind === "bundle" ? detachBundle : detachReview)(project, target);
   return json({ project: slug, [kind]: target, [act === "attach" ? "attached" : "detached"]: changed });
+}
+
+// ---- tasks ----
+
+export const TASK_TITLE_MAX = 120;
+export const GATE_TEXT_MAX = 120;
+export const MAX_GATES = 8;
+export const MAX_TASK_PRS = 16;
+
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+export interface TaskPrView {
+  repo: string;
+  number: number;
+  /** Best-effort at write time; null when GitHub could not be asked. */
+  title: string | null;
+  /** Read off github_pr_status at answer time; "unchecked" when no observation. */
+  state: "merged" | "closed" | "draft" | "open" | "unchecked";
+  url: string;
+}
+
+export interface TaskView {
+  id: string;
+  title: string;
+  body: string;
+  status: ProjectStatus;
+  gates: TaskGate[];
+  prs: TaskPrView[];
+  /** Derived, never authored: the page states the drift, it never fixes the status. */
+  drift: string | null;
+  createdAt: number;
+  updatedAt: number;
+  doneAt: number | null;
+}
+
+/** One task with its derived facts attached: PR state words off the observations the
+ *  webhooks and publishes have landed, and the drift line when every named pull
+ *  request is merged while the task still says open. */
+export function taskView(task: TaskRow): TaskView {
+  const ws = task.workspace_id;
+  const prs: TaskPrView[] = task.prs.map((p) => {
+    const repoId = repoIdForTaskPr(ws, task.id, p.repo, p.number);
+    const row = repoId !== null ? getPrStatus(ws, repoId, p.number) : findPrStatus(ws, p.repo, p.number);
+    return {
+      repo: p.repo,
+      number: p.number,
+      title: p.title,
+      state: row ? statusOf(row) : "unchecked",
+      url: `https://github.com/${p.repo}/pull/${p.number}`,
+    };
+  });
+  const drift =
+    task.status === "open" && prs.length > 0 && prs.every((p) => p.state === "merged")
+      ? "all pull requests merged"
+      : null;
+  return {
+    id: task.id,
+    title: task.title,
+    body: task.body,
+    status: task.status,
+    gates: task.gates,
+    prs,
+    drift,
+    createdAt: task.created_at,
+    updatedAt: task.updated_at,
+    doneAt: task.done_at,
+  };
+}
+
+function checkTaskTitle(title: unknown): string | FieldError {
+  if (typeof title !== "string" || title.trim() === "") {
+    return badField("`title` is required: a non-empty string of at most 120 characters");
+  }
+  const trimmed = title.trim();
+  if (/[\u0000-\u001f]/.test(trimmed)) {
+    return badField("`title` is one line: no newlines or control characters", 422);
+  }
+  if (trimmed.length > TASK_TITLE_MAX) {
+    return badField(`\`title\` is over budget: ${trimmed.length} of at most ${TASK_TITLE_MAX} characters`, 422);
+  }
+  return trimmed;
+}
+
+function checkGates(gates: unknown): TaskGate[] | FieldError {
+  if (!Array.isArray(gates)) return badField("`gates` must be an array of { text, met }");
+  if (gates.length > MAX_GATES) {
+    return badField(`\`gates\` is over budget: ${gates.length} of at most ${MAX_GATES}`, 422);
+  }
+  const checked: TaskGate[] = [];
+  for (const [i, gate] of gates.entries()) {
+    const g = gate as { text?: unknown; met?: unknown };
+    if (typeof g !== "object" || g === null || typeof g.text !== "string" || g.text.trim() === "") {
+      return badField(`\`gates[${i}]\` needs a non-empty \`text\``);
+    }
+    const text = g.text.trim();
+    if (/[\u0000-\u001f]/.test(text)) {
+      return badField(`\`gates[${i}].text\` is one line: no newlines or control characters`, 422);
+    }
+    if (text.length > GATE_TEXT_MAX) {
+      return badField(
+        `\`gates[${i}].text\` is over budget: ${text.length} of at most ${GATE_TEXT_MAX} characters`,
+        422,
+      );
+    }
+    if (g.met !== undefined && typeof g.met !== "boolean") {
+      return badField(`\`gates[${i}].met\` must be a boolean`);
+    }
+    checked.push({ text, met: g.met === true });
+  }
+  return checked;
+}
+
+function checkPrPointers(prs: unknown): { repo: string; number: number }[] | FieldError {
+  if (!Array.isArray(prs)) return badField("`prs` must be an array of { repo, number }");
+  if (prs.length > MAX_TASK_PRS) {
+    return badField(`\`prs\` is over budget: ${prs.length} of at most ${MAX_TASK_PRS}`, 422);
+  }
+  const checked: { repo: string; number: number }[] = [];
+  const seen = new Set<string>();
+  for (const [i, pr] of prs.entries()) {
+    const p = pr as { repo?: unknown; number?: unknown };
+    if (typeof p !== "object" || p === null || typeof p.repo !== "string" || !REPO_RE.test(p.repo)) {
+      return badField(`\`prs[${i}].repo\` must be "owner/name"`);
+    }
+    // Refuse what the GitHub plumbing refuses (assertRepo): a "." or ".." segment
+    // would store a pointer no client can ever resolve and render a nonsense link.
+    if (p.repo.split("/").some((segment) => segment === "." || segment === "..")) {
+      return badField(`\`prs[${i}].repo\` must be "owner/name"`);
+    }
+    if (!Number.isInteger(p.number) || (p.number as number) < 1) {
+      return badField(`\`prs[${i}].number\` must be a positive integer`);
+    }
+    const key = `${p.repo.toLowerCase()}#${p.number}`;
+    if (seen.has(key)) {
+      return badField(`\`prs[${i}]\` names ${p.repo}#${p.number} more than once`, 422);
+    }
+    seen.add(key);
+    checked.push({ repo: p.repo, number: p.number as number });
+  }
+  return checked;
+}
+
+/** How long a task write waits on GitHub for a title before shrugging. The fetch is
+ *  a courtesy, not a dependency: on timeout or refusal the pointer stores a null
+ *  title and the write proceeds. */
+export const TITLE_FETCH_TIMEOUT_MS = 4_000;
+
+/** What one successful write-time fetch observed, kept so the task does not have to
+ *  wait for a webhook that may never come: a pointer at an already-merged pull
+ *  request has no future deliveries, and the seed is the only thing that gives it a
+ *  state word — the same reason review publish seeds (src/overseer/routes.ts). */
+interface TaskPrSeed {
+  repo: string;
+  number: number;
+  repoId: number | null;
+  installationId: number | null;
+  state: string;
+  merged: boolean;
+  draft: boolean;
+  headSha: string;
+  updatedAt: number;
+}
+
+/**
+ * Best-effort derived facts for pointers this write introduces. Pointers the task
+ * already carries keep the title they have, fetched or null; only new (repo, number)
+ * pairs cost a request. Every failure path is the same answer: a null title and no
+ * seed — the write never waits on GitHub beyond the timeout and never fails over it.
+ */
+async function withDerivedPrFacts(
+  wsId: string,
+  userId: string,
+  prs: { repo: string; number: number }[],
+  existing: TaskPrPointer[],
+): Promise<{ prs: TaskPrPointer[]; seeds: TaskPrSeed[] }> {
+  const known = new Map<string, string | null>(
+    existing.map((p) => [`${p.repo.toLowerCase()}#${p.number}`, p.title]),
+  );
+  const seeds: TaskPrSeed[] = [];
+  const pointers = await Promise.all(
+    prs.map(async (p): Promise<TaskPrPointer> => {
+      const key = `${p.repo.toLowerCase()}#${p.number}`;
+      if (known.has(key)) return { ...p, title: known.get(key) ?? null };
+      try {
+        const client = githubClientFor(wsId, userId);
+        const pull = await Promise.race([
+          client.getPull(p.repo, p.number),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("title fetch timed out")), TITLE_FETCH_TIMEOUT_MS),
+          ),
+        ]);
+        seeds.push({
+          repo: p.repo,
+          number: p.number,
+          repoId: pull.base?.repo?.id ?? null,
+          // Same attribution rule as the review derivation: a client with no notion
+          // of installations keeps the seed away; a routing client answering
+          // "nobody's" still made the observation, and it is worth keeping.
+          installationId: client.installationFor
+            ? ((await client.installationFor(p.repo)) ?? ANONYMOUS_OBSERVER)
+            : null,
+          state: pull.state === "closed" ? "closed" : "open",
+          merged: pull.merged === true,
+          draft: pull.draft === true,
+          headSha: pull.head.sha,
+          updatedAt: parseUpdatedAt(pull.updated_at),
+        });
+        return { ...p, title: typeof pull.title === "string" ? pull.title : null };
+      } catch {
+        return { ...p, title: null };
+      }
+    }),
+  );
+  return { prs: pointers, seeds };
+}
+
+/** Land what the write-time fetch observed, after the task row exists: heal the
+ *  pointer's numeric id, and put the state through the same conditional upsert every
+ *  other writer uses, so a seed that raced a webhook cannot roll a newer fact back. */
+function applyPrSeeds(wsId: string, taskId: string, seeds: TaskPrSeed[]): void {
+  for (const seed of seeds) {
+    if (seed.repoId === null) continue;
+    healTaskPrRepoId(wsId, taskId, seed.repo, seed.number, seed.repoId);
+    if (seed.installationId === null) continue;
+    upsertPrStatus(wsId, seed.installationId, {
+      repoId: seed.repoId,
+      repo: seed.repo,
+      prNumber: seed.number,
+      state: seed.state,
+      merged: seed.merged,
+      draft: seed.draft,
+      headSha: seed.headSha,
+      updatedAt: seed.updatedAt,
+    });
+  }
+}
+
+function taskJsonOf(task: TaskRow): unknown {
+  const view = taskView(task);
+  return {
+    ...view,
+    createdAt: new Date(view.createdAt).toISOString(),
+    updatedAt: new Date(view.updatedAt).toISOString(),
+    doneAt: view.doneAt === null ? null : new Date(view.doneAt).toISOString(),
+  };
+}
+
+export async function handleCreateTask(req: Request, slug: string): Promise<Response> {
+  const auth = requireApiKey(req);
+  if (auth instanceof Response) return auth;
+  if (!SLUG_RE.test(slug)) return json({ error: "Not found" }, 404);
+  const project = getProject(auth.workspaceId, slug);
+  if (!project) return json({ error: `No project "${slug}" in this workspace` }, 404);
+  const body = await readJsonBody(req);
+  if (body instanceof Response) return body;
+
+  const title = checkTaskTitle(body.title);
+  if (typeof title !== "string") return json({ error: title.error }, title.status);
+  const taskBody = checkMarkdownField("body", body.body ?? "");
+  if (typeof taskBody !== "string") return json({ error: taskBody.error }, taskBody.status);
+  const gates = checkGates(body.gates ?? []);
+  if (!Array.isArray(gates)) return json({ error: gates.error }, gates.status);
+  const pointers = checkPrPointers(body.prs ?? []);
+  if (!Array.isArray(pointers)) return json({ error: pointers.error }, pointers.status);
+
+  const derived = await withDerivedPrFacts(auth.workspaceId, auth.userId, pointers, []);
+  const task = createTask(auth.workspaceId, project.id, {
+    title,
+    body: taskBody,
+    gates,
+    prs: derived.prs,
+  });
+  applyPrSeeds(auth.workspaceId, task.id, derived.seeds);
+  return json(taskJsonOf(task));
+}
+
+export async function handleUpdateTask(req: Request, slug: string, taskId: string): Promise<Response> {
+  const auth = requireApiKey(req);
+  if (auth instanceof Response) return auth;
+  if (!SLUG_RE.test(slug) || !TSK_ID_RE.test(taskId)) return json({ error: "Not found" }, 404);
+  const project = getProject(auth.workspaceId, slug);
+  if (!project) return json({ error: `No project "${slug}" in this workspace` }, 404);
+  const existing = getTask(auth.workspaceId, taskId);
+  if (!existing || existing.project_id !== project.id) return json({ error: "Not found" }, 404);
+  const body = await readJsonBody(req);
+  if (body instanceof Response) return body;
+
+  const patch: TaskPatch = {};
+  if (body.title !== undefined) {
+    const title = checkTaskTitle(body.title);
+    if (typeof title !== "string") return json({ error: title.error }, title.status);
+    patch.title = title;
+  }
+  if (body.body !== undefined) {
+    const taskBody = checkMarkdownField("body", body.body);
+    if (typeof taskBody !== "string") return json({ error: taskBody.error }, taskBody.status);
+    patch.body = taskBody;
+  }
+  if (body.status !== undefined) {
+    const status = checkStatus(body.status);
+    if (typeof status !== "string") return json({ error: status.error }, status.status);
+    patch.status = status;
+  }
+  if (body.gates !== undefined) {
+    const gates = checkGates(body.gates);
+    if (!Array.isArray(gates)) return json({ error: gates.error }, gates.status);
+    patch.gates = gates;
+  }
+  let seeds: TaskPrSeed[] = [];
+  if (body.prs !== undefined) {
+    const pointers = checkPrPointers(body.prs);
+    if (!Array.isArray(pointers)) return json({ error: pointers.error }, pointers.status);
+    const derived = await withDerivedPrFacts(auth.workspaceId, auth.userId, pointers, existing.prs);
+    patch.prs = derived.prs;
+    seeds = derived.seeds;
+  }
+
+  try {
+    const task = updateTask(auth.workspaceId, taskId, patch, auth.userId);
+    applyPrSeeds(auth.workspaceId, taskId, seeds);
+    return json(taskJsonOf(task));
+  } catch (err) {
+    return refusal(err);
+  }
 }
 
 /**

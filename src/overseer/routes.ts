@@ -18,6 +18,7 @@ import { tinyId } from "../ids";
 import { requireApiKey } from "../auth";
 import { createAttachment, createReviewVersion, getReview, getReviewVersion, type ReviewDoc } from "./db";
 import { setReviewPrs, sweepOrphanPrStatus, upsertPrStatus } from "./installations";
+import { attachReview, getProject, type ProjectRow } from "../projects/db";
 import {
   derivePrs,
   PrPointerError,
@@ -685,6 +686,32 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   const slug = body.slug;
   const payload = body.payload;
 
+  // The optional projects[] the document rides in on. Validated with the cheap rules,
+  // before any GitHub call: an unknown slug is refused naming the entry, never
+  // silently dropped, because a grouping the witness thinks it recorded and the page
+  // never shows is the kind of quiet loss this API refuses everywhere else. Publish
+  // attaches; it never detaches — taking a review out of a project is the DELETE
+  // route's explicit act.
+  const projectsField = (payload as unknown as { projects?: unknown }).projects;
+  let namedProjects: ProjectRow[] = [];
+  if (projectsField !== undefined) {
+    if (!Array.isArray(projectsField) || projectsField.some((entry) => typeof entry !== "string")) {
+      return json({ error: "projects must be an array of project slugs" }, 400);
+    }
+    const projectErrors: ValidationError[] = [];
+    for (const [i, projectSlug] of (projectsField as string[]).entries()) {
+      if (!SLUG_RE.test(projectSlug) || getProject(ws, projectSlug) === null) {
+        projectErrors.push({
+          field: `projects[${i}]`,
+          rule: "unknown_project",
+          message: `no project "${projectSlug}" in this workspace`,
+        });
+      }
+    }
+    if (projectErrors.length > 0) return unprocessable(projectErrors, []);
+    namedProjects = (projectsField as string[]).map((projectSlug) => getProject(ws, projectSlug)!);
+  }
+
   const bundleExists = (bundleSlug: string, version: number | null): boolean => {
     const bundle = getBundle(ws, bundleSlug);
     if (!bundle) return false;
@@ -874,6 +901,9 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     for (const a of resolved.attachments) {
       createAttachment(ws, slug, v, a.mediaType, a.bytes.length, a.alt, a.caption, a.id);
     }
+    // The grouping the document named, attached in the same transaction the version
+    // lands in. Idempotent, so a republish naming the same projects is a no-op.
+    for (const project of namedProjects) attachReview(project, slug);
     return v;
   })();
   for (const a of resolved.attachments) {
