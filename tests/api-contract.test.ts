@@ -210,6 +210,27 @@ describe("a required field is one the handler requires", () => {
     }
   });
 
+  test("POST /api/projects/{slug}/tasks refuses a body missing `title`, naming it", async () => {
+    const branch = requiredFields(operation("/api/projects/{slug}/tasks", "post"))[0]!;
+    expect(branch.required).toEqual(["title"]);
+    // The project must exist first, or its 404 answers before the field is judged.
+    await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: auth({ "content-type": "application/json" }),
+      body: JSON.stringify({ slug: "contract-tasks", title: "Contract tasks" }),
+    });
+    const res = await fetch(`${base}/api/projects/contract-tasks/tasks`, {
+      method: "POST",
+      headers: auth({ "content-type": "application/json" }),
+      body: JSON.stringify({}),
+    });
+    const said = JSON.stringify(await readJson(res));
+    expect({ refused: res.status >= 400, named: said.includes("title") }).toEqual({
+      refused: true,
+      named: true,
+    });
+  });
+
   test("POST /api/projects refuses a body missing `slug` or `title`, naming it", async () => {
     const branch = requiredFields(operation("/api/projects", "post"))[0]!;
     expect(branch.required).toEqual(["slug", "title"]);
@@ -427,6 +448,23 @@ describe("a 200 matches the schema the document declares for it", () => {
     await check("detachProjectReview", () =>
       fetch(`${base}/api/projects/contract-parent/reviews/${SLUG}`, { method: "DELETE", headers: auth() }),
     );
+
+    let taskId = "";
+    await check("createTask", async () => {
+      const res = await fetch(
+        `${base}/api/projects/contract-parent/tasks`,
+        json({ title: "Contract task", gates: [{ text: "the walk passes" }] }),
+      );
+      taskId = ((await res.clone().json()) as { id: string }).id;
+      return res;
+    });
+    await check("updateTask", () =>
+      fetch(`${base}/api/projects/contract-parent/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: auth({ "content-type": "application/json" }),
+        body: JSON.stringify({ gates: [{ text: "the walk passes", met: true }] }),
+      }),
+    );
   });
 
   test("createShare, listShares and revokeShare", async () => {
@@ -466,6 +504,8 @@ describe("a 200 matches the schema the document declares for it", () => {
       "detachProjectBundle",
       "attachProjectReview",
       "detachProjectReview",
+      "createTask",
+      "updateTask",
     ]);
     const ids = Object.values((openApiSpec() as any).paths as Record<string, Record<string, any>>)
       .flatMap((ops) => Object.values(ops))

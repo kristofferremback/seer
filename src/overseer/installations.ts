@@ -519,12 +519,66 @@ export function matchReviewPrs(
 /** Every pull request any review in this workspace names, optionally narrowed to a set
  *  of repositories. What reconciliation walks: bounded by the reviews that exist, not
  *  by a clock, and it stops when it has been round them once. */
+/** A task's authored pointer in its queryable form. Same transitional shape as
+ *  ReviewPrRow: repo_id is null until the first observation heals it. */
+export interface TaskPrRow {
+  workspace_id: string;
+  task_id: string;
+  repo_id: number | null;
+  pr_number: number;
+  repo: string;
+}
+
+/** The task-side twin of matchReviewPrs, same join grammar and the same retiring
+ *  fallback: id when healed, lower(repo) while the row is transitional. */
+export function matchTaskPrs(
+  repoId: number,
+  repoFullName: string,
+  prNumber: number,
+): TaskPrRow[] {
+  return db
+    .query<TaskPrRow, [number, number, string]>(
+      "SELECT * FROM project_task_prs WHERE pr_number = ? AND " +
+        "(repo_id = ? OR (repo_id IS NULL AND lower(repo) = ?))",
+    )
+    .all(prNumber, repoId, repoFullName.toLowerCase());
+}
+
+/** Heal a task pointer the first time an observation names its numeric id — the same
+ *  ending path healReviewPrRepoId walks, for the same reason. */
+export function healTaskPrRepoId(
+  wsId: string,
+  taskId: string,
+  matchedRepoName: string,
+  prNumber: number,
+  repoId: number,
+): void {
+  db.run(
+    "UPDATE project_task_prs SET repo_id = ? " +
+      "WHERE workspace_id = ? AND task_id = ? AND pr_number = ? AND repo_id IS NULL AND lower(repo) = ?",
+    [repoId, wsId, taskId, prNumber, matchedRepoName.toLowerCase()],
+  );
+}
+
 /** Every pull request any review in the workspace names. Deliberately unfiltered: the
  *  stored `repo` is frozen at publication, so any narrowing done here by name would
  *  silently drop the renamed rows — callers that narrow must match by numeric id too. */
 export function listWorkspacePrs(wsId: string): ReviewPrRow[] {
   return db
     .query<ReviewPrRow, [string]>("SELECT * FROM review_prs WHERE workspace_id = ?")
+    .all(wsId);
+}
+
+/** Every pull request any task in the workspace names, on the same terms and for the
+ *  same caller: reconciliation walks tasks beside reviews, or a missed webhook would
+ *  leave a task's state stale forever while a review's healed. */
+export function listWorkspaceTaskPrs(
+  wsId: string,
+): { repo: string; pr_number: number; repo_id: number | null }[] {
+  return db
+    .query<{ repo: string; pr_number: number; repo_id: number | null }, [string]>(
+      "SELECT repo, pr_number, repo_id FROM project_task_prs WHERE workspace_id = ?",
+    )
     .all(wsId);
 }
 
@@ -719,14 +773,23 @@ export function observePullRequest(installationId: number, obs: PrObservation): 
   if (!install || install.workspace_id === null) return 0;
   const wsId = install.workspace_id;
 
+  // Reviews and tasks both name pull requests, and either naming keeps the
+  // observation; a pull request neither mentions is acknowledged and dropped, which
+  // is the growth bound the comment above promises.
   const named = matchReviewPrs(obs.repoId, obs.repo, obs.prNumber).filter(
     (row) => row.workspace_id === wsId,
   );
-  if (named.length === 0) return 0;
+  const namedByTasks = matchTaskPrs(obs.repoId, obs.repo, obs.prNumber).filter(
+    (row) => row.workspace_id === wsId,
+  );
+  if (named.length === 0 && namedByTasks.length === 0) return 0;
   for (const row of named) {
     healReviewPrRepoId(row.workspace_id, row.slug, obs.repo, obs.prNumber, obs.repoId);
   }
-  return upsertPrStatus(wsId, installationId, obs) ? named.length : 0;
+  for (const row of namedByTasks) {
+    healTaskPrRepoId(row.workspace_id, row.task_id, obs.repo, obs.prNumber, obs.repoId);
+  }
+  return upsertPrStatus(wsId, installationId, obs) ? named.length + namedByTasks.length : 0;
 }
 
 /**
@@ -739,11 +802,17 @@ export function observePullRequest(installationId: number, obs: PrObservation): 
  * runs inside the publish transaction that changed the answer.
  */
 export function sweepOrphanPrStatus(wsId: string): number {
+  // Tasks name pull requests too, so a status row survives as long as EITHER table
+  // names it: sweeping on reviews alone would delete the fact a task still renders.
   return db.run(
     "DELETE FROM github_pr_status WHERE workspace_id = ? AND NOT EXISTS (" +
       "SELECT 1 FROM review_prs r WHERE r.workspace_id = github_pr_status.workspace_id " +
       "AND r.pr_number = github_pr_status.pr_number " +
-      "AND (r.repo_id = github_pr_status.repo_id OR lower(r.repo) = lower(github_pr_status.repo)))",
+      "AND (r.repo_id = github_pr_status.repo_id OR lower(r.repo) = lower(github_pr_status.repo))) " +
+      "AND NOT EXISTS (" +
+      "SELECT 1 FROM project_task_prs t WHERE t.workspace_id = github_pr_status.workspace_id " +
+      "AND t.pr_number = github_pr_status.pr_number " +
+      "AND (t.repo_id = github_pr_status.repo_id OR lower(t.repo) = lower(github_pr_status.repo)))",
     [wsId],
   ).changes;
 }

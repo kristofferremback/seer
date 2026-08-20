@@ -13,11 +13,9 @@ This model was settled in a design session on 2026-08-20, against the vocabulary
 dividing line the review model established. It follows `docs/overseer/data-model.md` in
 shape and shares its rules where they apply.
 
-It ships in slices. The project entity, nesting, membership and the read pages are
-live; the plan kind (`?kind=plan` and the reading surface), tasks, notes, and the
-`projects[]` field on a review document are settled here but not yet served — a
-route or field below that names them is contract for its slice, not a description of
-today's deployment.
+It ships in slices. The project entity, nesting, membership, the read pages, the plan
+kind with its reading surface, tasks, and the `projects[]` field on a review document
+are live; notes are settled here but not yet served.
 
 ## The dividing line
 
@@ -127,7 +125,7 @@ task
   body       authored markdown
   status     authored: open | done | closed
   gates[]    0..8 { text <= 120 chars, met: bool }
-  prs[]      authored pointers { repo, number }; title, state, merged derived
+  prs[]      authored pointers { repo, number }; title and state derived
   created_at, updated_at, done_at    derived
 ```
 
@@ -202,8 +200,9 @@ contract test cover it, and the hosted skill docs grow with each slice.
 - `kind` is set on first upload only; a later upload naming a different kind is a 409
 - status is one of `open | done | closed`; a task refusing `done` over an unmet gate is
   a 422 naming the gate
-- caps: title 80 (project) / 120 (task), gate text 120, at most 8 gates, note body
-  2000, project description 16384; titles are one line, control characters refused
+- caps: title 80 (project) / 120 (task), gate text 120, at most 8 gates, task body
+  16384, at most 16 PR pointers per task, note body 2000, project description 16384;
+  titles and gate texts are one line, control characters refused
 - authored markdown outside the allowed subset is a 422 naming the construct
 - notes are append-only: no update, no delete
 

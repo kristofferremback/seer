@@ -31,6 +31,7 @@ import {
   deletePrStatusForRepo,
   getLiveInstallation,
   listWorkspacePrs,
+  listWorkspaceTaskPrs,
   markInstallationRemoved,
   observePullRequest,
   recordInstallationDelivery,
@@ -433,7 +434,11 @@ export async function reconcileInstallation(
 
   const seen = new Set<string>();
   const touched = new Set<string>();
-  for (const row of listWorkspacePrs(wsId)) {
+  // Tasks name pull requests on the same terms as reviews, so the sweep walks both:
+  // a missed delivery is just as missed for a task, and observePullRequest heals and
+  // filters for both tables in one call. The loop reads only the fields the two row
+  // shapes share.
+  for (const row of [...listWorkspacePrs(wsId), ...listWorkspaceTaskPrs(wsId)]) {
     if (
       wantedIds &&
       wantedNames &&

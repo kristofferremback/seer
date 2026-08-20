@@ -541,6 +541,7 @@ function projectLedgerGroups(userId: string): ProjectLedgerGroup[] {
         updatedAt: p.updated_at,
         bundles: counts.bundles,
         reviews: counts.reviews,
+        tasks: counts.tasks,
         children,
       };
     };
@@ -594,6 +595,20 @@ function handleProjectPage(req: Request, wsId: string, slug: string): Response {
     description: project.description,
     descriptionHtml,
     children: state.children,
+    // Task bodies render through the same constrained renderer as the description,
+    // with the same corruption fallback: escaped text over a 500, and a log line.
+    tasks: state.tasks.map((t) => {
+      let bodyHtml = "";
+      if (t.body.trim() !== "") {
+        try {
+          bodyHtml = renderConstrainedMarkdown(t.body);
+        } catch (err) {
+          console.error(`[seer] task ${t.id}: stored body failed to render:`, err);
+          bodyHtml = `<p>${escapeHtml(t.body)}</p>`;
+        }
+      }
+      return { ...t, bodyHtml };
+    }),
     plans: state.plans,
     bundles: state.bundles,
     reviews: state.reviews,

@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 9 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 10 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -39,6 +39,8 @@ import { hashKey, tinyId } from "./ids";
 // v9 adds `kind` to bundles: 'bundle' | 'plan', set at first upload and immutable
 // after. ADD COLUMN with a constant default, so every pre-v9 row reads 'bundle',
 // which is true of every bundle that existed before plans did.
+//
+// v10 adds the task tables (project_tasks and project_task_prs). Purely additive.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -510,8 +512,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 9) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 9`);
+  if (uv > 10) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 10`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -522,6 +524,7 @@ export function migrate(): void {
   if (userVersion() < 7) migrateToV7();
   if (userVersion() < 8) migrateToV8();
   if (userVersion() < 9) migrateToV9();
+  if (userVersion() < 10) migrateToV10();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -666,6 +669,52 @@ function migrateToV9(): void {
     db.run("PRAGMA user_version = 9");
   })();
   console.log("[seer] migrated to schema v9 (bundle kind).");
+}
+
+// Tasks. A task belongs to one project; its gates and its authored PR pointers live
+// as JSON on the row, because both are small bounded lists read whole and written
+// whole. `project_task_prs` is the queryable copy of the pointers and mirrors
+// `review_prs` deliberately, including the null repo_id transitional shape: the agent
+// writes only "owner/name" and a number, so every row starts unresolved and the first
+// webhook observation heals the numeric id, exactly as a backfilled review row is
+// healed. The delivery filter and the orphan sweep read both tables, so a pull
+// request only a task names is kept and one nothing names is dropped.
+const V10_TASKS = `
+  CREATE TABLE IF NOT EXISTS project_tasks (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','closed')),
+    gates TEXT NOT NULL DEFAULT '[]',
+    prs TEXT NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    done_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks (project_id);
+
+  CREATE TABLE IF NOT EXISTS project_task_prs (
+    workspace_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    repo_id INTEGER,
+    pr_number INTEGER NOT NULL,
+    repo TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, task_id, repo_id, pr_number)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_project_task_prs_unresolved
+    ON project_task_prs (workspace_id, task_id, lower(repo), pr_number) WHERE repo_id IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_project_task_prs_lookup
+    ON project_task_prs (workspace_id, pr_number);
+`;
+
+function migrateToV10(): void {
+  db.transaction(() => {
+    db.exec(V10_TASKS);
+    db.run("PRAGMA user_version = 10");
+  })();
+  console.log("[seer] migrated to schema v10 (tasks).");
 }
 
 /**

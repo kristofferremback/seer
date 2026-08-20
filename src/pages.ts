@@ -1,4 +1,5 @@
 import { config } from "./config";
+import type { TaskView } from "./projects/api";
 import { escapeHtml } from "./escape";
 
 export { escapeHtml };
@@ -813,6 +814,33 @@ function styles(): string {
   /* The description is the project's own prose, so it gets a reading measure wider
      than the interface default. */
   .proj-desc { max-width: 65ch; margin: 1.2rem 0 0.4rem; }
+
+  /* ---- tasks on the project page ---- */
+  .task-list { display: grid; gap: 6px; margin: 0 0 8px; }
+  details.task {
+    border: 1px solid hsl(var(--line));
+    border-radius: 8px;
+    background: hsl(var(--paper));
+  }
+  details.task > summary {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    padding: 10px 14px; cursor: pointer; list-style: none;
+  }
+  details.task > summary::-webkit-details-marker { display: none; }
+  .task-title { font-weight: 500; }
+  .task-body { padding: 0 14px 12px; border-top: 1px solid hsl(var(--line) / 0.6); }
+  .task-body > :first-child { margin-top: 10px; }
+  .gates { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+  .gates li { display: flex; gap: 8px; align-items: baseline; }
+  .gate-mark { font-family: var(--font-mono); color: hsl(var(--muted)); }
+  .gate-mark.met { color: hsl(var(--accent-soft)); }
+  .pr-state {
+    font-family: var(--font-mono); font-size: 11.5px; color: hsl(var(--muted));
+    margin: 0 8px 0 3px;
+  }
+  .drift {
+    margin: 8px 0 0; color: hsl(var(--muted)); font-size: 13.5px; font-style: italic;
+  }
   .proj-desc p { max-width: 65ch; }
   .proj-desc ul, .proj-desc ol { margin: 0 0 0.85rem; padding-left: 1.3rem; }
   .proj-desc pre {
@@ -1459,7 +1487,7 @@ export function projectsSkillDoc(): string {
   return `# Seer — grouping work into projects as an agent
 
 A project groups the work around one thing being built: the bundles you publish, the
-reviews you dispatch, and (in time) tasks and notes. It lives in Seer, outside any
+reviews you dispatch, the tasks you work through, and (in time) notes. It lives in Seer, outside any
 repo, and persists across sessions — create one when you and the human plan a piece of
 work, attach what you produce as you go, and the next session resumes by reading one
 URL. Every part is optional except the grouping itself.
@@ -1478,6 +1506,8 @@ PATCH  /api/projects/<slug>                       any of: title, description, st
 PUT    /api/projects/<slug>/bundles/<bundle>      attach a bundle    (DELETE detaches)
 PUT    /api/projects/<slug>/reviews/<review>      attach a review    (DELETE detaches)
 PUT    /api/bundles/<bundle>?project=<slug>       publish a bundle straight into a project
+POST   /api/projects/<slug>/tasks                 create: {title, body?, gates?, prs?}
+PATCH  /api/projects/<slug>/tasks/<tsk_id>        any of: title, body, status, gates, prs
 \`\`\`
 
 \`\`\`bash
@@ -1491,6 +1521,33 @@ curl -s -X PUT --data-binary @bundle.zip \\
   -H "Authorization: Bearer $SEER_API_TOKEN" \\
   "${base}/api/bundles/call-prototype?project=calling"
 \`\`\`
+
+## Tasks
+
+A task is a line of work inside a project: a one-line title, an optional
+constrained-markdown body, gates, and pull request pointers.
+
+- **Gates** are the conditions the task must pass: \`[{"text": "...", "met": false}]\`,
+  at most 8. Author them unmet and flip \`met\` as work proves them. A task cannot be
+  set \`done\` while a gate is unmet; the 422 names the gate. Setting \`closed\`
+  (stopped without finishing) needs no proof.
+- **PR pointers** are \`[{"repo": "owner/name", "number": 123}]\`, at most 16. You write
+  the pointer; Seer derives the title and state and keeps them fresh, and a task whose
+  pull requests are all merged while it still says open carries a derived drift line.
+- **Status** is \`open | done | closed\`. Transitions are recorded by Seer; never
+  journal them yourself.
+- Gates and prs replace whole on PATCH: send the full array as you want it stored.
+
+\`\`\`bash
+curl -s -X POST -H "Authorization: Bearer $SEER_API_TOKEN" \\
+  -H "content-type: application/json" \\
+  -d '{"title": "Video pipeline", "gates": [{"text": "loopback works", "met": false}],
+       "prs": [{"repo": "threahq/threa", "number": 1730}]}' \\
+  ${base}/api/projects/calling/tasks
+\`\`\`
+
+A review can also name projects as it publishes: a \`projects\`: \`["calling"]\` field
+in the review document attaches the review on landing. See ${base}/overseer/skill.md.
 
 ## The fields
 
@@ -2453,6 +2510,7 @@ export interface ProjectLedgerRow {
   updatedAt: number;
   bundles: number;
   reviews: number;
+  tasks: number;
   /** One level deep; a child's own children is always empty. */
   children: ProjectLedgerRow[];
 }
@@ -2471,7 +2529,7 @@ function statusWord(status: ProjectStatusWord): string {
 
 /** What a project holds, in the tally grammar. Zero parts are skipped; nothing at all
  *  is a quiet dash rather than three zeros. */
-function holdsCell(bundles: number, reviews: number, children: number): string {
+function holdsCell(bundles: number, reviews: number, children: number, tasks = 0): string {
   const parts: string[] = [];
   const part = (n: number, one: string, many: string) => {
     if (n === 0) return;
@@ -2480,6 +2538,7 @@ function holdsCell(bundles: number, reviews: number, children: number): string {
         `<span class="tally-w">${n === 1 ? one : many}</span></span>`,
     );
   };
+  part(tasks, "task", "tasks");
   part(bundles, "bundle", "bundles");
   part(reviews, "review", "reviews");
   part(children, "sub-project", "sub-projects");
@@ -2504,7 +2563,7 @@ export function projectsPage(nav: NavContext, groups: ProjectLedgerGroup[]): str
             <span class="row-sub mono">${escapeHtml(p.slug)}</span></td>
           <td>${statusWord(p.status)}</td>
           <td class="mono"><time datetime="${new Date(p.updatedAt).toISOString()}">${fmtInstant(p.updatedAt)}</time></td>
-          <td class="status-cell">${holdsCell(p.bundles, p.reviews, p.children.length)}</td>
+          <td class="status-cell">${holdsCell(p.bundles, p.reviews, p.children.length, p.tasks)}</td>
         </tr>`;
   };
 
@@ -2594,7 +2653,9 @@ export interface ProjectPageData {
   description: string;
   /** The same field rendered to HTML by the server; "" renders nothing. */
   descriptionHtml: string;
-  children: { slug: string; title: string; status: ProjectStatusWord; bundles: number; reviews: number }[];
+  children: { slug: string; title: string; status: ProjectStatusWord; bundles: number; reviews: number; tasks: number }[];
+  /** Derived views plus the body rendered by the server; reading order is the list order. */
+  tasks: (TaskView & { bodyHtml: string })[];
   plans: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   bundles: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   reviews: { slug: string; title: string; latestVersion: number; publishedAt: number; url: string }[];
@@ -2620,7 +2681,7 @@ export function projectPage(d: ProjectPageData): string {
           <td class="slug"><a href="/${d.wsId}/p/${encodeURIComponent(c.slug)}">${escapeHtml(c.title)}</a>
             <span class="row-sub mono">${escapeHtml(c.slug)}</span></td>
           <td>${statusWord(c.status)}</td>
-          <td class="status-cell">${holdsCell(c.bundles, c.reviews, 0)}</td>
+          <td class="status-cell">${holdsCell(c.bundles, c.reviews, 0, c.tasks)}</td>
         </tr>`,
           )
           .join("\n")}
@@ -2647,6 +2708,50 @@ export function projectPage(d: ProjectPageData): string {
     </div>`;
 
   const plansSection = d.plans.length === 0 ? "" : planRows(d.plans, "Plans");
+
+  // One task, one disclosure row: the summary is the glance (status, title, gate
+  // tally, PR refs with their derived state words), the body is the opt-in (the
+  // authored markdown, the gate list, the drift line when the facts disagree with
+  // the status).
+  const gateMark = (met: boolean) =>
+    `<span class="gate-mark${met ? " met" : ""}" aria-hidden="true">${met ? "\u2713" : "\u25cb"}</span>`;
+  const taskRow = (t: ProjectPageData["tasks"][number]) => {
+    const met = t.gates.filter((g) => g.met).length;
+    const gatesTally =
+      t.gates.length === 0
+        ? ""
+        : `<span class="tally-part"><span class="tally-n">${met}/${t.gates.length}</span><span class="tally-w">gates</span></span>`;
+    const refs =
+      t.prs.length === 0
+        ? ""
+        : `<span class="pr-refs">${t.prs
+            .map(
+              (pr) =>
+                `<a href="${pr.url}" title="${escapeHtml(pr.title ?? `${pr.repo}#${pr.number}`)}">` +
+                `${escapeHtml(pr.repo.split("/")[1] ?? pr.repo)}#${pr.number}</a>` +
+                `<span class="pr-state">${pr.state}</span>`,
+            )
+            .join("")}</span>`;
+    const gateList =
+      t.gates.length === 0
+        ? ""
+        : `<ul class="gates">${t.gates
+            .map((g) => `<li>${gateMark(g.met)}${escapeHtml(g.text)}</li>`)
+            .join("")}</ul>`;
+    const drift = t.drift ? `<p class="drift">${escapeHtml(t.drift)}</p>` : "";
+    const body = t.bodyHtml || gateList || drift;
+    return `<details class="task" data-filter="${escapeHtml(`${t.title} ${t.prs.map((pr) => `${pr.repo}#${pr.number}`).join(" ")}`.toLowerCase())}">
+      <summary>${statusWord(t.status)}<span class="task-title">${escapeHtml(t.title)}</span>${gatesTally}${refs}</summary>
+      ${body ? `<div class="task-body">${t.bodyHtml}${gateList}${drift}</div>` : ""}
+    </details>`;
+  };
+  const tasksSection =
+    d.tasks.length === 0
+      ? ""
+      : `${sectionHead("Tasks")}
+    <div class="task-list">
+    ${d.tasks.map(taskRow).join("\n")}
+    </div>`;
 
   const bundlesSection =
     d.bundles.length === 0
@@ -2692,8 +2797,12 @@ export function projectPage(d: ProjectPageData): string {
     </div>`;
 
   const empty =
-    d.children.length === 0 && d.plans.length === 0 && d.bundles.length === 0 && d.reviews.length === 0
-      ? `<p class="empty">Nothing here yet. Attach bundles and reviews, or create sub-projects.</p>`
+    d.children.length === 0 &&
+    d.tasks.length === 0 &&
+    d.plans.length === 0 &&
+    d.bundles.length === 0 &&
+    d.reviews.length === 0
+      ? `<p class="empty">Nothing here yet. Attach bundles and reviews, create tasks, or create sub-projects.</p>`
       : "";
 
   const partOf = d.parent
@@ -2724,6 +2833,7 @@ ${head(title, og)}
     ${d.descriptionHtml ? `<div class="proj-desc">${d.descriptionHtml}</div>` : ""}
     ${plansSection}
     ${childrenSection}
+    ${tasksSection}
     ${bundlesSection}
     ${reviewsSection}
     ${empty}
@@ -2759,6 +2869,16 @@ export function projectMarkdown(d: ProjectPageData): string {
   if (d.plans.length > 0) {
     lines.push("", "## Plans", "");
     for (const b of d.plans) lines.push(`- ${b.slug} v${b.latestVersion}: ${b.url}`);
+  }
+  if (d.tasks.length > 0) {
+    lines.push("", "## Tasks", "");
+    for (const t of d.tasks) {
+      const refs = t.prs
+        .map((pr) => `${pr.repo}#${pr.number} (${pr.state})`)
+        .join(", ");
+      lines.push(`- ${t.title} (${t.id}), ${t.status}${refs ? `; ${refs}` : ""}${t.drift ? `; drift: ${t.drift}` : ""}`);
+      for (const g of t.gates) lines.push(`  - [${g.met ? "x" : " "}] ${g.text}`);
+    }
   }
   if (d.children.length > 0) {
     lines.push("", "## Sub-projects", "");

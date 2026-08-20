@@ -903,6 +903,7 @@ function projectGroups(): ProjectLedgerGroup[] {
           updatedAt: NOW,
           bundles: 2,
           reviews: 1,
+          tasks: 0,
           children: [
             {
               slug: "video",
@@ -911,6 +912,7 @@ function projectGroups(): ProjectLedgerGroup[] {
               updatedAt: NOW,
               bundles: 1,
               reviews: 0,
+              tasks: 0,
               children: [],
             },
           ],
@@ -931,7 +933,8 @@ function projectData(over: Partial<ProjectPageData> = {}): ProjectPageData {
     parent: null,
     description: "The whole effort, with `code` in it.",
     descriptionHtml: "<p>The whole effort, with <code>code</code> in it.</p>",
-    children: [{ slug: "video", title: "Video", status: "done", bundles: 1, reviews: 0 }],
+    children: [{ slug: "video", title: "Video", status: "done", bundles: 1, reviews: 0, tasks: 0 }],
+    tasks: [],
     plans: [],
     bundles: [
       { slug: "call-prototype", latestVersion: 3, updatedAt: NOW, url: "https://seer.test/ws_7g2kq4xbvm/b/call-prototype/" },

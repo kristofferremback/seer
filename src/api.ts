@@ -39,10 +39,12 @@ import { handlePublishReview } from "./overseer/routes";
 import { handleGithubWebhook } from "./overseer/webhook";
 import {
   handleCreateProject,
+  handleCreateTask,
   handleListProjects,
   handleProjectMembership,
   handleReadProject,
   handleUpdateProject,
+  handleUpdateTask,
   resolveUploadProject,
 } from "./projects/api";
 import { attachBundle, listProjectsForBundle } from "./projects/db";
@@ -392,13 +394,51 @@ const uploadImageDoc: Omit<Operation, "operationId"> = {
 
 const PROJECT_STATUS_ENUM = { type: "string", enum: ["open", "done", "closed"] };
 
+/** One task as the API answers it, shared by the task routes and the state object. */
+const taskSchema = {
+  type: "object",
+  required: ["id", "title", "body", "status", "gates", "prs", "drift", "createdAt", "updatedAt", "doneAt"],
+  properties: {
+    id: { type: "string" },
+    title: { type: "string" },
+    body: { type: "string", description: "Constrained markdown, as authored." },
+    status: PROJECT_STATUS_ENUM,
+    gates: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["text", "met"],
+        properties: { text: { type: "string" }, met: { type: "boolean" } },
+      },
+    },
+    prs: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["repo", "number", "title", "state", "url"],
+        properties: {
+          repo: { type: "string" },
+          number: { type: "integer" },
+          title: { type: ["string", "null"], description: "Fetched best-effort at write; null when GitHub could not be asked." },
+          state: { type: "string", enum: ["merged", "closed", "draft", "open", "unchecked"], description: "Derived from observations, never authored." },
+          url: { type: "string", format: "uri" },
+        },
+      },
+    },
+    drift: { type: ["string", "null"], description: "Derived: named when the facts contradict the authored status." },
+    createdAt: { type: "string", format: "date-time" },
+    updatedAt: { type: "string", format: "date-time" },
+    doneAt: { type: ["string", "null"], format: "date-time" },
+  },
+};
+
 /** The state object: what create, read and update all answer with, and the reason one
  *  call is enough to resume — the whole project comes back every time it changes. */
 const projectStateSchema = {
   type: "object",
   required: [
     "slug", "title", "description", "status", "parent", "workspace", "url",
-    "createdAt", "updatedAt", "children", "plans", "bundles", "reviews",
+    "createdAt", "updatedAt", "children", "tasks", "plans", "bundles", "reviews",
   ],
   properties: {
     slug: { type: "string" },
@@ -424,6 +464,11 @@ const projectStateSchema = {
           reviews: { type: "integer" },
         },
       },
+    },
+    tasks: {
+      type: "array",
+      description: "Open first, then done, then closed; created order within each.",
+      items: taskSchema,
     },
     plans: {
       type: "array",
@@ -827,6 +872,114 @@ export const API_ROUTES: readonly ApiRoute[] = [
     },
   }),
 
+  route("/api/projects/:slug/tasks", {
+    POST: {
+      doc: {
+        operationId: "createTask",
+        summary: "Create a task in a project",
+        description:
+          "Gates are the conditions the task must pass, authored unmet and flipped as " +
+          "work proves them; a task cannot be done while a gate is unmet. PR pointers " +
+          "are owner/name plus number; Seer derives their state and keeps it fresh.",
+        security: "key",
+        parameters: [slugParam],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["title"],
+                properties: {
+                  title: { type: "string", maxLength: 120 },
+                  body: { type: "string", description: "Constrained markdown." },
+                  gates: {
+                    type: "array",
+                    maxItems: 8,
+                    items: {
+                      type: "object",
+                      required: ["text"],
+                      properties: { text: { type: "string", maxLength: 120 }, met: { type: "boolean" } },
+                    },
+                  },
+                  prs: {
+                    type: "array",
+                    maxItems: 16,
+                    items: {
+                      type: "object",
+                      required: ["repo", "number"],
+                      properties: {
+                        repo: { type: "string", description: "owner/name" },
+                        number: { type: "integer", minimum: 1 },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "The task, with its derived PR facts.",
+            content: { "application/json": { schema: taskSchema } },
+          },
+          "400": errorResponse,
+          "401": errorResponse,
+          "404": errorResponse,
+          "422": errorResponse,
+        },
+      },
+      run: (req) => handleCreateTask(req, req.params.slug),
+    },
+  }),
+
+  route("/api/projects/:slug/tasks/:id", {
+    PATCH: {
+      doc: {
+        operationId: "updateTask",
+        summary: "Update a task",
+        description:
+          "Any of title, body, status, gates, prs; gates and prs replace whole. Entering " +
+          "done with an unmet gate is a 422 naming the gate. Status transitions are " +
+          "recorded by Seer; done_at is derived from them.",
+        security: "key",
+        parameters: [
+          slugParam,
+          { name: "id", in: "path", required: true, schema: { type: "string", pattern: "^tsk_" } },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  title: { type: "string", maxLength: 120 },
+                  body: { type: "string" },
+                  status: PROJECT_STATUS_ENUM,
+                  gates: { type: "array", items: {} },
+                  prs: { type: "array", items: {} },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "The task as patched.",
+            content: { "application/json": { schema: taskSchema } },
+          },
+          "400": errorResponse,
+          "401": errorResponse,
+          "404": errorResponse,
+          "422": errorResponse,
+        },
+      },
+      run: (req) => handleUpdateTask(req, req.params.slug, req.params.id),
+    },
+  }),
+
   // Overseer: a review is authored in one shot, so publishing is one POST.
   route("/api/reviews", {
     POST: {
@@ -854,6 +1007,14 @@ export const API_ROUTES: readonly ApiRoute[] = [
                     type: "array",
                     description: "Pull request pointers, as owner/repo#number or an equivalent object.",
                     items: {},
+                  },
+                  projects: {
+                    type: "array",
+                    description:
+                      "Optional project slugs to attach this review to on publish. An " +
+                      "unknown slug refuses the publish; attach-only, detaching is the " +
+                      "membership DELETE route's explicit act.",
+                    items: { type: "string", pattern: SLUG_RE.source },
                   },
                 },
                 additionalProperties: true,
