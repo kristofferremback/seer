@@ -321,3 +321,34 @@ export function listProjectStageSlugs(workspaceId: string, projectId: string): s
     "SELECT slug FROM project_stages WHERE workspace_id = ? AND project_id = ? ORDER BY created_at ASC",
   ).all(workspaceId, projectId).map((row) => row.slug);
 }
+
+export function listStageReadChangeIds(
+  workspaceId: string,
+  stageVersionId: string,
+  userId: string,
+): Set<string> {
+  return new Set(db.query<{ change_id: string }, [string, string, string]>(
+    "SELECT change_id FROM stage_change_reads WHERE workspace_id = ? AND stage_version_id = ? AND user_id = ?",
+  ).all(workspaceId, stageVersionId, userId).map((row) => row.change_id));
+}
+
+/** The route verifies that the immutable version owns the change before this write. */
+export const setStageChangeRead = db.transaction((
+  workspaceId: string,
+  stageVersionId: string,
+  userId: string,
+  changeId: string,
+  read: boolean,
+): void => {
+  if (read) {
+    db.run(
+      "INSERT INTO stage_change_reads (workspace_id, stage_version_id, user_id, change_id, read_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(workspace_id, stage_version_id, user_id, change_id) DO UPDATE SET read_at = excluded.read_at",
+      [workspaceId, stageVersionId, userId, changeId, Date.now()],
+    );
+    return;
+  }
+  db.run(
+    "DELETE FROM stage_change_reads WHERE workspace_id = ? AND stage_version_id = ? AND user_id = ? AND change_id = ?",
+    [workspaceId, stageVersionId, userId, changeId],
+  );
+});

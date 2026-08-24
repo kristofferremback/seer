@@ -1595,9 +1595,8 @@ the project's history.
 
 A review can also name projects as it publishes: a \`projects\`: \`["calling"]\` field
 in the review document attaches the review on landing. A staged walkthrough can name the
-same field when it publishes; the project state carries its title and version, but this
-slice does not make a stage page link. See ${base}/overseer/skill.md and
-${base}/stage/agent.md.
+same field when it publishes; the project state carries its title, version and page.
+See ${base}/overseer/skill.md and ${base}/stage/agent.md.
 
 ## The fields
 
@@ -2709,8 +2708,7 @@ export interface ProjectPageData {
   plans: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   bundles: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   reviews: { slug: string; title: string; latestVersion: number; publishedAt: number; url: string }[];
-  /** Stages are carried for the API and markdown projection. The human row waits for task 3's page URL. */
-  stages?: { slug: string; title: string; latestVersion: number; updatedAt: number; apiUrl: string }[];
+  stages?: { slug: string; title: string; latestVersion: number; updatedAt: number; url: string; versionUrl: string; apiUrl: string; apiVersionUrl: string }[];
   /** The bounded tail of the record: authored notes (body rendered by the server)
    *  interleaved with derived status events, oldest first. */
   trail: (
@@ -2852,6 +2850,24 @@ export function projectPage(d: ProjectPageData): string {
       </table>
     </div>`;
 
+  const stagesSection =
+    (d.stages ?? []).length === 0
+      ? ""
+      : `${sectionHead("Stages")}
+    <div class="ledger scroll-x">
+      <table class="stack">
+        <thead><tr><th>Stage</th><th>Latest</th><th>Published</th></tr></thead>
+        <tbody>
+        ${(d.stages ?? []).map((s) => `<tr data-filter="${escapeHtml(`${s.title} ${s.slug}`.toLowerCase())}">
+          <td class="slug"><a href="${s.url}">${escapeHtml(s.title)}</a>
+            <span class="row-sub mono">${escapeHtml(s.slug)}</span></td>
+          <td class="mono">v${s.latestVersion}</td>
+          <td class="mono"><time datetime="${new Date(s.updatedAt).toISOString()}">${fmtInstant(s.updatedAt)}</time></td>
+        </tr>`).join("\n")}
+        </tbody>
+      </table>
+    </div>`;
+
   const reviewsSection =
     d.reviews.length === 0
       ? ""
@@ -2908,6 +2924,7 @@ export function projectPage(d: ProjectPageData): string {
     d.tasks.length === 0 &&
     d.plans.length === 0 &&
     d.bundles.length === 0 &&
+    (d.stages ?? []).length === 0 &&
     d.reviews.length === 0 &&
     d.trail.length === 0
       ? `<p class="empty">Nothing here yet. Attach bundles and reviews, create tasks, or create sub-projects.</p>`
@@ -2943,6 +2960,7 @@ ${head(title, og)}
     ${childrenSection}
     ${tasksSection}
     ${bundlesSection}
+    ${stagesSection}
     ${reviewsSection}
     ${notesSection}
     ${empty}
@@ -3009,7 +3027,7 @@ export function projectMarkdown(d: ProjectPageData): string {
   }
   if ((d.stages ?? []).length > 0) {
     lines.push("", "## Stages", "");
-    for (const s of d.stages ?? []) lines.push(`- ${s.title} (${s.slug}) v${s.latestVersion}`);
+    for (const s of d.stages ?? []) lines.push(`- [${s.title}](${s.url}) (${s.slug}) v${s.latestVersion}`);
   }
   if (d.trail.length > 0) {
     lines.push("", "## Notes", "");

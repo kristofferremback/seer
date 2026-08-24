@@ -49,6 +49,8 @@ export const PRJ_ID_RE = new RegExp(`^prj_${TINY}$`);
 export const TSK_ID_RE = new RegExp(`^tsk_${TINY}$`);
 export const STG_ID_RE = new RegExp(`^stg_${TINY}$`);
 export const STA_ID_RE = new RegExp(`^sta_${TINY}$`);
+export const STF_ID_RE = new RegExp(`^stf_${TINY}$`);
+export const STAGE_CHANGE_ID_RE = /^chg_[a-f0-9]{64}$/;
 export const API_KEY_RE = /^seer_sk_[A-Za-z0-9_-]{32}$/;
 export const SHARE_TOKEN_RE = /^seer_sh_[A-Za-z0-9_-]{32}$/;
 

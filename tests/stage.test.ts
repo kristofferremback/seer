@@ -703,11 +703,12 @@ describe("stage captures", () => {
     expect(read.status).toBe(200);
     expect((await read.json() as any).document.identity.version).toBe(1);
     const project = await (await fetch(`${base}/api/projects/stage-project`, { headers: auth() })).json() as any;
-    expect(project.stages).toEqual([{ slug: capture.slug, title: "Pinned branch walkthrough", latestVersion: 1, updatedAt: project.stages[0].updatedAt, apiUrl: `${config.baseUrl}/api/stages/${capture.slug}` }]);
+    expect(project.stages).toEqual([{ slug: capture.slug, title: "Pinned branch walkthrough", latestVersion: 1, updatedAt: project.stages[0].updatedAt, url: `${config.baseUrl}/${ws}/st/${capture.slug}`, versionUrl: `${config.baseUrl}/${ws}/st/${capture.slug}/v/1`, apiUrl: `${config.baseUrl}/api/stages/${capture.slug}`, apiVersionUrl: `${config.baseUrl}/api/stages/${capture.slug}/v/1` }]);
     const projectMarkdown = await fetch(`${base}/${ws}/p/stage-project`, { headers: { ...auth(), accept: "text/markdown" } });
     const projectMarkdownText = await projectMarkdown.text();
-    expect(projectMarkdownText).toContain("Pinned branch walkthrough (publish-stage) v1");
-    expect(projectMarkdownText).not.toContain(`/st/${capture.slug}`);
+    expect(projectMarkdownText).toContain(`[Pinned branch walkthrough](${config.baseUrl}/${ws}/st/${capture.slug}) (publish-stage) v1`);
+    const projectHtml = await (await fetch(`${base}/${ws}/p/stage-project`, { headers: auth() })).text();
+    expect(projectHtml).toContain(`<a href="${config.baseUrl}/${ws}/st/${capture.slug}">Pinned branch walkthrough</a>`);
     const script = join(import.meta.dir, "stage-privacy.script.ts");
     const proc = Bun.spawn(["bun", "run", script], {
       stdout: "pipe", stderr: "pipe",

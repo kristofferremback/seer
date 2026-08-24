@@ -226,11 +226,20 @@ async function treeAt(client: StageClient, repo: string, sha: string, sideName: 
 }
 
 function message(err: unknown): string { return err instanceof Error ? err.message : String(err); }
-function isText(bytes: Uint8Array): boolean {
-  try { return !new TextDecoder("utf-8", { fatal: true }).decode(bytes).slice(0, 8000).includes("\u0000"); }
-  catch { return false; }
+export function decodeStageText(bytes: Uint8Array): string | null {
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return decoded.slice(0, 8000).includes("\u0000") ? null : decoded;
+  } catch {
+    return null;
+  }
 }
-function text(bytes: Uint8Array): string { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+function isText(bytes: Uint8Array): boolean { return decodeStageText(bytes) !== null; }
+function text(bytes: Uint8Array): string {
+  const decoded = decodeStageText(bytes);
+  if (decoded === null) throw new Error("Retained bytes are not text.");
+  return decoded;
+}
 function linesOf(value: string): string[] {
   const lines = value.split("\n");
   if (lines.length > 1 && lines.at(-1) === "") lines.pop();
@@ -604,28 +613,102 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
   return result;
 }
 
-/** Re-derive canonical anchors using only the stored patch and retained blobs. The
- * loader is the storage seam, so callers can prove this function with a GitHub client
- * that throws on every method. */
+/** One renderer hunk paired to the persisted identity it must reproduce. */
+export interface MaterializedStageChange {
+  change: StageCaptureInventory["changes"][number];
+  hunk: Hunk;
+}
+
+export class StageMaterializationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StageMaterializationError";
+  }
+}
+
+function sameCanonicalChange(
+  stored: StageCaptureInventory["changes"][number],
+  derived: ReturnType<typeof canonicalChanges>[number],
+): boolean {
+  return stored.id === derived.id && stored.file_id === derived.file_id &&
+    stored.old_start === derived.old_start && stored.old_lines === derived.old_lines &&
+    stored.new_start === derived.new_start && stored.new_lines === derived.new_lines &&
+    stored.old_fingerprint === derived.old_fingerprint &&
+    stored.new_fingerprint === derived.new_fingerprint &&
+    stored.context_fingerprint === derived.context_fingerprint && stored.source === derived.source;
+}
+
+/** Materialize the renderer lines and prove they reproduce every persisted identity.
+ * The loader is the durable-storage seam; GitHub is not an allowed input. */
+export async function materializeCanonicalChanges(
+  inventory: StageCaptureInventory,
+  loadBlob: (sha256: string) => Promise<Uint8Array | null>,
+): Promise<MaterializedStageChange[]> {
+  const changedFileIds = new Set(inventory.changes.map((change) => change.file_id));
+  const reconstructedFileIds = new Set(inventory.changes.filter((change) => change.source === "reconstructed").map((change) => change.file_id));
+  const changedFiles = inventory.files.filter((file) => changedFileIds.has(file.id));
+  const patches = new Map<string, string>();
+  if (inventory.capture.patch_sha256) {
+    const bytes = await loadBlob(inventory.capture.patch_sha256);
+    if (!bytes) throw new StageMaterializationError(`Retained canonical patch ${inventory.capture.patch_sha256} is missing.`);
+    try {
+      for (const [path, patch] of splitUnifiedDiff(text(bytes))) patches.set(path, patch);
+    } catch (err) {
+      throw new StageMaterializationError(`Retained canonical patch is corrupt: ${message(err)}`);
+    }
+  }
+
+  const needsBytes = new Set(changedFiles.filter((file) =>
+    !patches.has(file.path) || reconstructedFileIds.has(file.id)
+  ).map((file) => file.id));
+  const digests = [...new Set(changedFiles.filter((file) => needsBytes.has(file.id))
+    .flatMap((file) => [file.old_blob_sha, file.new_blob_sha])
+    .filter((digest): digest is string => digest !== null))];
+  const retained = new Map<string, Uint8Array | null>();
+  let next = 0;
+  const worker = async () => {
+    while (next < digests.length) {
+      const digest = digests[next++]!;
+      retained.set(digest, await loadBlob(digest));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(16, digests.length) }, worker));
+
+  const made = new Map<string, MaterializedStageChange>();
+  for (const file of changedFiles) {
+    const oldBytes = file.old_blob_sha && needsBytes.has(file.id) ? retained.get(file.old_blob_sha) ?? null : null;
+    const newBytes = file.new_blob_sha && needsBytes.has(file.id) ? retained.get(file.new_blob_sha) ?? null : null;
+    if (needsBytes.has(file.id) && file.old_blob_sha && !oldBytes) throw new StageMaterializationError(`Retained old blob for ${file.path} is missing.`);
+    if (needsBytes.has(file.id) && file.new_blob_sha && !newBytes) throw new StageMaterializationError(`Retained new blob for ${file.path} is missing.`);
+    let decision: ChangeDecision;
+    try {
+      decision = chooseChange({ status: file.status, old_kind: file.old_kind, new_kind: file.new_kind, old_availability: file.old_availability, new_availability: file.new_availability, old_mode: file.old_mode, new_mode: file.new_mode, additions: file.additions, deletions: file.deletions }, file.path, patches.get(file.path), oldBytes, newBytes, inventory.capture.repo, inventory.capture.source_head_sha);
+    } catch (err) {
+      throw new StageMaterializationError(`Retained material for ${file.path} is corrupt: ${message(err)}`);
+    }
+    if (!decision.source) throw new StageMaterializationError(`Retained material no longer produces the changes stored for ${file.path}.`);
+    const identities = canonicalChanges(file.id, file.path, decision.hunks, decision.source);
+    for (let index = 0; index < identities.length; index++) {
+      const identity = identities[index]!;
+      const stored = inventory.changes.find((change) => change.id === identity.id);
+      if (!stored || !sameCanonicalChange(stored, identity)) {
+        throw new StageMaterializationError(`Retained material does not reproduce canonical change ${identity.id}.`);
+      }
+      made.set(stored.id, { change: stored, hunk: decision.hunks[index]! });
+    }
+  }
+  if (made.size !== inventory.changes.length) {
+    throw new StageMaterializationError("Retained material does not reproduce every canonical change.");
+  }
+  return inventory.changes.map((change) => made.get(change.id)!);
+}
+
+/** Re-derive canonical anchors using only the stored patch and retained blobs. */
 export async function rederiveCanonicalChanges(
   inventory: StageCaptureInventory,
   loadBlob: (sha256: string) => Promise<Uint8Array | null>,
-): Promise<ReturnType<typeof canonicalChanges>[number][]> {
-  let patches: { path: string; patch?: string }[] = [];
-  if (inventory.capture.patch_sha256) {
-    const patchBytes = await loadBlob(inventory.capture.patch_sha256);
-    if (!patchBytes) throw new Error(`Retained canonical patch ${inventory.capture.patch_sha256} is missing.`);
-    patches = [...splitUnifiedDiff(text(patchBytes))].map(([path, patch]) => ({ path, patch }));
-  }
-  const out: ReturnType<typeof canonicalChanges>[number][] = [];
-  for (const file of inventory.files) {
-    const oldBytes = file.old_blob_sha ? await loadBlob(file.old_blob_sha) : null;
-    const newBytes = file.new_blob_sha ? await loadBlob(file.new_blob_sha) : null;
-    const patch = patches.find((item) => item.path === file.path)?.patch;
-    const decision = chooseChange({ status: file.status, old_kind: file.old_kind, new_kind: file.new_kind, old_availability: file.old_availability, new_availability: file.new_availability, old_mode: file.old_mode, new_mode: file.new_mode, additions: file.additions, deletions: file.deletions }, file.path, patch, oldBytes, newBytes, inventory.capture.repo, inventory.capture.source_head_sha);
-    if (decision.source) out.push(...canonicalChanges(file.id, file.path, decision.hunks, decision.source).map((change) => ({ ...change, workspace_id: inventory.capture.workspace_id, capture_id: inventory.capture.id })));
-  }
-  return out;
+): Promise<StageCaptureInventory["changes"]> {
+  return (await materializeCanonicalChanges(inventory, loadBlob)).map(({ change }) => change);
 }
 
 export async function handleCreateStageCapture(req: Request): Promise<Response> {

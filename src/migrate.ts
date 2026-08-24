@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 13 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 14 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -52,6 +52,9 @@ import { hashKey, tinyId } from "./ids";
 //
 // v13 adds builder packets, immutable stage identity and version rows, and Project stage
 // membership. Existing captures stay readable; captures without a packet cannot publish.
+//
+// v14 adds per-member read state for canonical changes in an immutable stage version.
+// It never changes the capture or StageDoc.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -523,8 +526,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 13) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 13`);
+  if (uv > 14) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 14`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -539,6 +542,7 @@ export function migrate(): void {
   if (userVersion() < 11) migrateToV11();
   if (userVersion() < 12) migrateToV12();
   if (userVersion() < 13) migrateToV13();
+  if (userVersion() < 14) migrateToV14();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -909,6 +913,27 @@ function migrateToV13(): void {
     db.run("PRAGMA user_version = 13");
   })();
   console.log("[seer] migrated to schema v13 (stage publication).");
+}
+
+const V14_STAGE_READS = `
+  CREATE TABLE IF NOT EXISTS stage_change_reads (
+    workspace_id TEXT NOT NULL,
+    stage_version_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    change_id TEXT NOT NULL,
+    read_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, stage_version_id, user_id, change_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_stage_change_reads_member
+    ON stage_change_reads (workspace_id, stage_version_id, user_id);
+`;
+
+function migrateToV14(): void {
+  db.transaction(() => {
+    db.exec(V14_STAGE_READS);
+    db.run("PRAGMA user_version = 14");
+  })();
+  console.log("[seer] migrated to schema v14 (stage read state).");
 }
 
 /**
