@@ -288,33 +288,69 @@ interface ChangeFileFacts {
   new_availability: Availability;
   old_mode: string | null;
   new_mode: string | null;
+  additions: number | null;
+  deletions: number | null;
+}
+
+function compareLineChanges(file: ChangeFileFacts): boolean {
+  return (file.additions ?? 0) > 0 || (file.deletions ?? 0) > 0;
+}
+
+function missingLineChangesReason(file: ChangeFileFacts): string {
+  return `GitHub compare reports ${file.additions ?? 0} additions and ${file.deletions ?? 0} deletions, but the canonical patch and retained textual sides could not represent those line changes.`;
+}
+
+function isMissingLineChangesReason(reason: string | null): boolean {
+  return reason?.startsWith("GitHub compare reports ") ?? false;
+}
+
+function combineReason(sideReason: string | null, decisionReason: string | null, lineChangesUnrepresented: boolean): string | null {
+  if (!sideReason || !decisionReason || !lineChangesUnrepresented) return sideReason ?? decisionReason;
+  return sideReason.includes(decisionReason) ? sideReason : `${sideReason} ${decisionReason}`;
 }
 
 /** The one rule used at capture and re-derivation. It never guesses a line change
  * for a side that was not retained, and it bounds the quadratic line alignment. */
 function chooseChange(file: ChangeFileFacts, path: string, patch: string | undefined, oldBytes: Uint8Array | null, newBytes: Uint8Array | null, repo: string, headSha: string): ChangeDecision {
-  if (file.status === "renamed") return { hunks: [], source: null, reason: null };
   if (file.status === "mode_changed") return { hunks: [], source: null, reason: "Only the file mode changed, so there are no line changes." };
   if (file.old_mode === "120000" || file.new_mode === "120000") {
-    return { hunks: [], source: null, reason: "The symlink target is retained, but line changes are not represented for symlinks." };
+    return { hunks: [], source: null, reason: null };
+  }
+  if (file.old_kind === "commit" || file.new_kind === "commit") {
+    return { hunks: [], source: null, reason: null };
   }
   if (patch !== undefined && file.new_kind === "blob") {
-    return { hunks: parsePatch(patch, { repo, prNumber: 0, path, sha: headSha }), source: "patch", reason: null };
+    const hunks = parsePatch(patch, { repo, prNumber: 0, path, sha: headSha });
+    if (hunks.length > 0 || !compareLineChanges(file)) return { hunks, source: "patch", reason: null };
+    return { hunks: [], source: null, reason: missingLineChangesReason(file) };
   }
+  if (file.status === "renamed" && !compareLineChanges(file)) return { hunks: [], source: null, reason: null };
   const oldText = oldBytes && isText(oldBytes) ? text(oldBytes) : null;
   const newText = newBytes && isText(newBytes) ? text(newBytes) : null;
-  if (file.status === "modified" && oldText !== null && newText !== null) {
-    if (oldBytes!.byteLength === newBytes!.byteLength && oldBytes!.every((byte, index) => byte === newBytes![index])) return { hunks: [], source: null, reason: null };
-    if (linesOf(oldText).length + linesOf(newText).length > MAX_RECONSTRUCTED_LINES) return { hunks: [], source: null, reason: `Text reconstruction exceeds the ${MAX_RECONSTRUCTED_LINES}-line alignment limit.` };
+  if ((file.status === "modified" || file.status === "renamed") && oldText !== null && newText !== null) {
+    if (oldBytes!.byteLength === newBytes!.byteLength && oldBytes!.every((byte, index) => byte === newBytes![index])) {
+      return compareLineChanges(file)
+        ? { hunks: [], source: null, reason: missingLineChangesReason(file) }
+        : { hunks: [], source: null, reason: null };
+    }
+    if (linesOf(oldText).length + linesOf(newText).length > MAX_RECONSTRUCTED_LINES) {
+      return { hunks: [], source: null, reason: compareLineChanges(file)
+        ? `${missingLineChangesReason(file)} Text reconstruction exceeds the ${MAX_RECONSTRUCTED_LINES}-line alignment limit.`
+        : `Text reconstruction exceeds the ${MAX_RECONSTRUCTED_LINES}-line alignment limit.` };
+    }
     return { hunks: reconstructedHunks(repo, path, headSha, oldText, newText), source: "reconstructed", reason: null };
   }
   if (file.status === "added" && newText !== null && oldBytes === null) return { hunks: reconstructedHunks(repo, path, headSha, null, newText), source: "reconstructed", reason: null };
   if (file.status === "removed" && oldText !== null && newBytes === null) return { hunks: reconstructedHunks(repo, path, headSha, oldText, null), source: "reconstructed", reason: null };
-  return { hunks: [], source: null, reason: "Retained textual sides were not sufficient to reconstruct line changes." };
+  return { hunks: [], source: null, reason: compareLineChanges(file)
+    ? missingLineChangesReason(file)
+    : "Retained textual sides were not sufficient to reconstruct line changes." };
 }
 
 function compareFor(cmp: GithubCompare, path: string, oldPath: string | null): GithubFile | null {
-  return cmp.files.find((file) => file.filename === path || (oldPath !== null && file.filename === oldPath) || file.previous_filename === path || file.previous_filename === oldPath) ?? null;
+  return cmp.files.find((file) => file.filename === path) ??
+    cmp.files.find((file) => (oldPath !== null && file.filename === oldPath) || file.previous_filename === path || file.previous_filename === oldPath) ??
+    null;
 }
 
 /** 64 blob requests consume 1.28% of GitHub's shared 5,000-request hourly
@@ -366,9 +402,9 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
   }
   const paths = new Set([...oldByPath.keys(), ...newByPath.keys()]);
   for (const path of [...paths].sort(compareCodePoints)) {
-    if (usedOld.has(path) || usedNew.has(path)) continue;
-    const old = oldByPath.get(path) ?? null;
-    const newer = newByPath.get(path) ?? null;
+    const old = usedOld.has(path) ? null : oldByPath.get(path) ?? null;
+    const newer = usedNew.has(path) ? null : newByPath.get(path) ?? null;
+    if (!old && !newer) continue;
     if (old && newer && old.sha === newer.sha && old.mode === newer.mode && old.type === newer.type) continue;
     candidates.push({ path, oldPath: null, old, newer, compare: compareFor(comparison, path, null) });
   }
@@ -505,14 +541,18 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
     const oldSide = makeSide(candidate.old, "old"), newSide = makeSide(candidate.newer, "new");
     const oldBytes = candidate.old?.type === "blob" && oldSide.availability === "retained" ? objectState.get(candidate.old.sha)!.bytes : null;
     const newBytes = candidate.newer?.type === "blob" && newSide.availability === "retained" ? objectState.get(candidate.newer.sha)!.bytes : null;
-    const patch = patchSha ? rawPatches.get(candidate.path) ?? (candidate.oldPath ? rawPatches.get(candidate.oldPath) : undefined) : undefined;
-    const decision = chooseChange({ status, old_kind: candidate.old?.type ?? null, new_kind: candidate.newer?.type ?? null, old_availability: oldSide.availability, new_availability: newSide.availability, old_mode: candidate.old?.mode ?? null, new_mode: candidate.newer?.mode ?? null }, candidate.path, patch, oldBytes, newBytes, request.repo, sourceRef.sha);
+    const patch = patchSha ? rawPatches.get(candidate.path) : undefined;
+    const facts: ChangeFileFacts = { status, old_kind: candidate.old?.type ?? null, new_kind: candidate.newer?.type ?? null, old_availability: oldSide.availability, new_availability: newSide.availability, old_mode: candidate.old?.mode ?? null, new_mode: candidate.newer?.mode ?? null, additions: compare?.additions ?? null, deletions: compare?.deletions ?? null };
+    const decision = chooseChange(facts, candidate.path, patch, oldBytes, newBytes, request.repo, sourceRef.sha);
     const hunks = decision.hunks;
     const source = decision.source;
     const derivedAdds = hunks.reduce((n, h) => n + h.lines.filter((line) => line.kind === "add").length, 0);
     const derivedDels = hunks.reduce((n, h) => n + h.lines.filter((line) => line.kind === "del").length, 0);
-    const oldReason = oldSide.reason ?? (candidate.old?.mode === "120000" ? "The symlink target is retained, but line changes are not represented for symlinks." : candidate.old?.type === "blob" && objectState.get(candidate.old.sha)?.bytes && !isText(objectState.get(candidate.old.sha)!.bytes!) ? "Binary bytes are retained, but line changes are unavailable." : decision.reason);
-    const newReason = newSide.reason ?? (candidate.newer?.mode === "120000" ? "The symlink target is retained, but line changes are not represented for symlinks." : candidate.newer?.type === "blob" && objectState.get(candidate.newer.sha)?.bytes && !isText(objectState.get(candidate.newer.sha)!.bytes!) ? "Binary bytes are retained, but line changes are unavailable." : decision.reason);
+    const oldSideReason = oldSide.reason ?? (candidate.old?.mode === "120000" ? "The symlink target is retained, but line changes are not represented for symlinks." : candidate.old?.type === "blob" && objectState.get(candidate.old.sha)?.bytes && !isText(objectState.get(candidate.old.sha)!.bytes!) ? "Binary bytes are retained, but line changes are unavailable." : null);
+    const newSideReason = newSide.reason ?? (candidate.newer?.mode === "120000" ? "The symlink target is retained, but line changes are not represented for symlinks." : candidate.newer?.type === "blob" && objectState.get(candidate.newer.sha)?.bytes && !isText(objectState.get(candidate.newer.sha)!.bytes!) ? "Binary bytes are retained, but line changes are unavailable." : null);
+    const lineChangesUnrepresented = compareLineChanges(facts) && isMissingLineChangesReason(decision.reason);
+    const oldReason = combineReason(oldSideReason, decision.reason, lineChangesUnrepresented);
+    const newReason = combineReason(newSideReason, decision.reason, lineChangesUnrepresented);
     const additions = compare?.additions ?? derivedAdds;
     const deletions = compare?.deletions ?? derivedDels;
     fileRows.push({ id: fileId, path: candidate.path, old_path: candidate.oldPath, status, old_object_id: candidate.old?.sha ?? null, new_object_id: candidate.newer?.sha ?? null, old_mode: candidate.old?.mode ?? null, new_mode: candidate.newer?.mode ?? null, old_kind: candidate.old?.type ?? null, new_kind: candidate.newer?.type ?? null, additions, deletions, old_availability: oldSide.availability, new_availability: newSide.availability, old_blob_sha: oldSide.blob, new_blob_sha: newSide.blob, old_reason: oldReason, new_reason: newReason });
@@ -554,8 +594,8 @@ export async function rederiveCanonicalChanges(
   for (const file of inventory.files) {
     const oldBytes = file.old_blob_sha ? await loadBlob(file.old_blob_sha) : null;
     const newBytes = file.new_blob_sha ? await loadBlob(file.new_blob_sha) : null;
-    const patch = patches.find((item) => item.path === file.path || item.path === file.old_path)?.patch;
-    const decision = chooseChange({ status: file.status, old_kind: file.old_kind, new_kind: file.new_kind, old_availability: file.old_availability, new_availability: file.new_availability, old_mode: file.old_mode, new_mode: file.new_mode }, file.path, patch, oldBytes, newBytes, inventory.capture.repo, inventory.capture.source_head_sha);
+    const patch = patches.find((item) => item.path === file.path)?.patch;
+    const decision = chooseChange({ status: file.status, old_kind: file.old_kind, new_kind: file.new_kind, old_availability: file.old_availability, new_availability: file.new_availability, old_mode: file.old_mode, new_mode: file.new_mode, additions: file.additions, deletions: file.deletions }, file.path, patch, oldBytes, newBytes, inventory.capture.repo, inventory.capture.source_head_sha);
     if (decision.source) out.push(...canonicalChanges(file.id, file.path, decision.hunks, decision.source).map((change) => ({ ...change, workspace_id: inventory.capture.workspace_id, capture_id: inventory.capture.id })));
   }
   return out;

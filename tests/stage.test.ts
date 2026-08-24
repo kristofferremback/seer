@@ -27,6 +27,72 @@ const bytes: Record<string, Uint8Array> = {
   [N]: new TextEncoder().encode("added\n"),
 };
 
+function renameFixtureClient(options: { changed?: boolean; aggregate?: boolean; includeAdded?: boolean; addedFirst?: boolean; renameBytesUnavailable?: boolean } = {}): GithubClient {
+  const changed = options.changed ?? true;
+  const aggregate = options.aggregate ?? true;
+  const oldBytes = new TextEncoder().encode("old\n");
+  const movedBytes = changed ? new TextEncoder().encode("new\n") : oldBytes;
+  const addedBytes = new TextEncoder().encode("added\n");
+  const oldSha = id(30), movedSha = changed ? id(31) : oldSha, addedSha = id(32);
+  const blobBytes = new Map([[oldSha, oldBytes], [movedSha, movedBytes], [addedSha, addedBytes]]);
+  const rename = { filename: "0-moved.txt", previous_filename: "a.txt", status: "renamed", additions: changed ? 1 : 0, deletions: changed ? 1 : 0, changes: changed ? 2 : 0 } as const;
+  const added = { filename: "a.txt", status: "added", additions: 1, deletions: 0, changes: 1 } as const;
+  const compareFiles = options.includeAdded
+    ? options.addedFirst ? [added, rename] : [rename, added]
+    : [rename];
+  const renamePatch = [
+    "diff --git a/a.txt b/0-moved.txt",
+    changed ? "similarity index 50%" : "similarity index 100%",
+    "rename from a.txt",
+    "rename to 0-moved.txt",
+    ...(changed ? [
+      "--- a/a.txt",
+      "+++ b/0-moved.txt",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new",
+    ] : []),
+    "",
+  ].join("\n");
+  const addedPatch = [
+    "diff --git a/a.txt b/a.txt",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/a.txt",
+    "@@ -0,0 +1,1 @@",
+    "+added",
+    "",
+  ].join("\n");
+  const patch = options.includeAdded && options.addedFirst
+    ? addedPatch + renamePatch
+    : renamePatch + (options.includeAdded ? addedPatch : "");
+  return {
+    getPull: async () => { throw new Error("unused"); },
+    listCommits: async () => [], listFiles: async () => [], listReviewComments: async () => [],
+    getFileAtSha: async () => { throw new Error("unused"); }, getPullDiff: async () => "",
+    getRepository: async () => ({ id: 987, full_name: "Acme/Repo", default_branch: "main" }),
+    getRef: async (_repo, ref) => ({ ref: `refs/heads/${ref}`, sha: ref === "main" ? BASE : HEAD, type: "commit" as const }),
+    getTree: async (_repo, sha) => {
+      const tree = sha === HEAD
+        ? [
+            { path: "0-moved.txt", mode: "100644", type: "blob" as const, sha: movedSha },
+            ...(options.includeAdded ? [{ path: "a.txt", mode: "100644", type: "blob" as const, sha: addedSha }] : []),
+          ]
+        : [{ path: "a.txt", mode: "100644", type: "blob" as const, sha: oldSha }];
+      return { sha, truncated: false, tree: tree.map((entry) => ({ ...entry, size: blobBytes.get(entry.sha)!.byteLength })) };
+    },
+    getBlobBytes: async (_repo, sha) => {
+      if (options.renameBytesUnavailable && (sha === oldSha || sha === movedSha)) throw new Error("rename bytes unavailable");
+      return blobBytes.get(sha)!;
+    },
+    compare: async () => ({ merge_base_commit: { sha: MERGE }, files: compareFiles }),
+    compareDiff: async () => {
+      if (!aggregate) throw new Error("diff unavailable");
+      return patch;
+    },
+  };
+}
+
 function fixtureClient(calls: { count: number; truncated?: boolean; failTree?: string; compareArgs?: [string, string]; blobCalls?: string[] } = { count: 0 }): GithubClient {
   return {
     getPull: async () => { throw new Error("unused"); },
@@ -63,7 +129,7 @@ function fixtureClient(calls: { count: number; truncated?: boolean; failTree?: s
       { filename: "new-name.txt", previous_filename: "old-name.txt", status: "renamed", additions: 0, deletions: 0, changes: 0 },
       { filename: "mode.txt", status: "modified", additions: 0, deletions: 0, changes: 0 },
       { filename: "link", status: "modified", additions: 1, deletions: 1, changes: 2, patch: "@@ -1,1 +1,1 @@\n-target\n+target-new\n" },
-      { filename: "module", status: "modified", additions: 0, deletions: 0, changes: 0 },
+      { filename: "module", status: "modified", additions: 1, deletions: 1, changes: 2 },
       { filename: "image.bin", status: "modified", additions: 0, deletions: 0, changes: 0 },
       { filename: "new.txt", status: "added", additions: 1, deletions: 0, changes: 1 },
     ] }; },
@@ -77,6 +143,13 @@ let key: string;
 let ws: string;
 const body = { slug: "branch-snapshot", repo: "Acme/Repo", branch: "feature/blue" };
 const auth = (extra: Record<string, string> = {}) => ({ authorization: `Bearer ${key}`, ...extra });
+
+async function rederiveStored(inventory: NonNullable<ReturnType<typeof getStageCapture>>) {
+  return rederiveCanonicalChanges(inventory, async (sha) => {
+    const file = await openStageBlob(inventory.capture.workspace_id, sha);
+    return file ? new Uint8Array(await new Response(file).arrayBuffer()) : null;
+  });
+}
 
 beforeAll(async () => {
   server = await startServer();
@@ -117,13 +190,24 @@ describe("stage captures", () => {
     const mode = capture.files.find((file: any) => file.path === "mode.txt");
     expect(mode.old.reason).toContain("mode changed");
     const symlink = capture.files.find((file: any) => file.path === "link");
-    expect(symlink.new.reason).toContain("symlink");
+    const symlinkReason = "The symlink target is retained, but line changes are not represented for symlinks.";
+    expect(symlink.old.reason).toBe(symlinkReason);
+    expect(symlink.new.reason).toBe(symlinkReason);
+    expect(capture.incomplete.filter((item: any) => item.path === "link").map((item: any) => item.reason)).toEqual([symlinkReason, symlinkReason]);
     expect(symlink.changes).toEqual([]);
     const added = capture.files.find((file: any) => file.path === "new.txt");
     expect(added.changes[0].source).toBe("reconstructed");
-    expect(capture.incomplete.some((item: any) => item.reason.includes("submodule"))).toBe(true);
-    expect(capture.files.find((file: any) => file.path === "module").old.availability).toBe("not_applicable");
-    expect(capture.incomplete.some((item: any) => item.reason.includes("Binary"))).toBe(true);
+    const submodule = capture.files.find((file: any) => file.path === "module");
+    const submoduleReason = "The submodule commit id is retained, but line changes are not represented for submodules.";
+    expect(submodule.old.reason).toBe(submoduleReason);
+    expect(submodule.new.reason).toBe(submoduleReason);
+    expect(capture.incomplete.filter((item: any) => item.path === "module").map((item: any) => item.reason)).toEqual([submoduleReason, submoduleReason]);
+    expect(submodule.old.availability).toBe("not_applicable");
+    const binary = capture.files.find((file: any) => file.path === "image.bin");
+    const binaryReason = "Binary bytes are retained, but line changes are unavailable.";
+    expect(binary.old.reason).toBe(binaryReason);
+    expect(binary.new.reason).toBe(binaryReason);
+    expect(capture.incomplete.filter((item: any) => item.path === "image.bin").map((item: any) => item.reason)).toEqual([binaryReason, binaryReason]);
     expect(calls.count).toBe(1);
 
     setGithubClientFactory(() => { throw new Error("GitHub must not be called while reading"); });
@@ -150,6 +234,85 @@ describe("stage captures", () => {
     if (code !== 0) console.error("stage privacy stderr:", error);
     expect(code).toBe(0);
     expect(output).toContain("all assertions passed");
+  });
+
+  test("prefers the exact current path when a rename's old path is also newly added", async () => {
+    const { captureSource } = await import("../src/stage/source");
+    for (const [suffix, addedFirst] of [["rename-first", false], ["added-first", true]] as const) {
+      const result = await captureSource(ws, { slug: `rename-path-${suffix}`, repo: "Acme/Repo", branch: "feature/blue" }, {
+        client: renameFixtureClient({ includeAdded: true, addedFirst }), idempotencyKey: `rename-path-${suffix}`,
+      });
+      const inventory = getStageCapture(result.captureId, ws)!;
+      const added = inventory.files.find((file) => file.path === "a.txt")!;
+      expect(added.status).toBe("added");
+      expect(added.additions).toBe(1);
+      expect(added.deletions).toBe(0);
+      expect(inventory.changes.filter((change) => change.file_id === added.id)).toHaveLength(1);
+      expect(inventory.changes.find((change) => change.file_id === added.id)?.source).toBe("patch");
+      const renamed = inventory.files.find((file) => file.path === "0-moved.txt")!;
+      expect(inventory.changes.filter((change) => change.file_id === renamed.id)).toHaveLength(1);
+      expect(inventory.changes.find((change) => change.file_id === renamed.id)?.source).toBe("patch");
+      expect(await rederiveStored(inventory)).toEqual(inventory.changes);
+    }
+  });
+
+  test("keeps patch-backed edited renames as patch-sourced changes", async () => {
+    const { captureSource } = await import("../src/stage/source");
+    const result = await captureSource(ws, { slug: "edited-rename-patch", repo: "Acme/Repo", branch: "feature/blue" }, {
+      client: renameFixtureClient(), idempotencyKey: "edited-rename-patch",
+    });
+    const inventory = getStageCapture(result.captureId, ws)!;
+    const renamed = inventory.files.find((file) => file.path === "0-moved.txt")!;
+    expect(renamed.status).toBe("renamed");
+    expect(inventory.changes.filter((change) => change.file_id === renamed.id).map((change) => change.source)).toEqual(["patch"]);
+    expect(await rederiveStored(inventory)).toEqual(inventory.changes);
+  });
+
+  test("reconstructs an edited rename when the aggregate patch is unavailable", async () => {
+    const { captureSource } = await import("../src/stage/source");
+    const result = await captureSource(ws, { slug: "edited-rename-reconstructed", repo: "Acme/Repo", branch: "feature/blue" }, {
+      client: renameFixtureClient({ aggregate: false }), idempotencyKey: "edited-rename-reconstructed",
+    });
+    const inventory = getStageCapture(result.captureId, ws)!;
+    const renamed = inventory.files.find((file) => file.path === "0-moved.txt")!;
+    expect(inventory.changes.filter((change) => change.file_id === renamed.id).map((change) => change.source)).toEqual(["reconstructed"]);
+    expect(inventory.incomplete.some((item) => item.kind === "patch_unavailable")).toBe(true);
+    expect(inventory.incomplete.some((item) => item.path === "0-moved.txt" && item.kind === "lines_unavailable")).toBe(false);
+    expect(await rederiveStored(inventory)).toEqual(inventory.changes);
+  });
+
+  test("leaves a pure rename unchanged when its old path is recreated and rename bytes are unavailable", async () => {
+    const { captureSource } = await import("../src/stage/source");
+    const result = await captureSource(ws, { slug: "pure-rename", repo: "Acme/Repo", branch: "feature/blue" }, {
+      client: renameFixtureClient({ changed: false, includeAdded: true, renameBytesUnavailable: true }), idempotencyKey: "pure-rename",
+    });
+    const inventory = getStageCapture(result.captureId, ws)!;
+    const renamed = inventory.files.find((file) => file.path === "0-moved.txt")!;
+    const added = inventory.files.find((file) => file.path === "a.txt")!;
+    expect(renamed.status).toBe("renamed");
+    expect(renamed.additions).toBe(0);
+    expect(renamed.deletions).toBe(0);
+    expect(renamed.old_availability).toBe("unavailable");
+    expect(renamed.new_availability).toBe("unavailable");
+    expect(inventory.changes.filter((change) => change.file_id === renamed.id)).toEqual([]);
+    expect(inventory.changes.filter((change) => change.file_id === added.id)).toHaveLength(1);
+    expect(inventory.incomplete.filter((item) => item.path === "0-moved.txt" && item.kind === "bytes_unavailable")).toHaveLength(2);
+    expect(await rederiveStored(inventory)).toEqual(inventory.changes);
+  });
+
+  test("names compare line loss for an edited rename without retained sides", async () => {
+    const { captureSource } = await import("../src/stage/source");
+    const result = await captureSource(ws, { slug: "edited-rename-unavailable", repo: "Acme/Repo", branch: "feature/blue" }, {
+      client: renameFixtureClient({ aggregate: false }), idempotencyKey: "edited-rename-unavailable", maxLogicalBytes: 0,
+    });
+    const inventory = getStageCapture(result.captureId, ws)!;
+    const renamed = inventory.files.find((file) => file.path === "0-moved.txt")!;
+    expect(inventory.changes.filter((change) => change.file_id === renamed.id)).toEqual([]);
+    const reasons = inventory.incomplete.filter((item) => item.path === "0-moved.txt").map((item) => item.reason).join(" ");
+    expect(reasons).toContain("compare reports 1 additions and 1 deletions");
+    expect(reasons).toContain("retained logical-byte budget");
+    expect(inventory.incomplete.filter((item) => item.path === "0-moved.txt" && item.kind === "bytes_unavailable")).toHaveLength(2);
+    expect(await rederiveStored(inventory)).toEqual(inventory.changes);
   });
 
   test("replays one key, rejects a changed request, and gives all misses one soft 404", async () => {
