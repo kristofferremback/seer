@@ -248,7 +248,7 @@ describe("the documents an agent discovers", () => {
       skills: { name: string; type: string; description: string; url: string; digest: string }[];
     };
     expect(body.$schema).toBe("https://schemas.agentskills.io/discovery/0.2.0/schema.json");
-    expect(body.skills.length).toBe(5);
+    expect(body.skills.length).toBe(7);
 
     for (const skill of body.skills) {
       expect(skill.name).toMatch(/^[a-z0-9][a-z0-9-]*$/);
@@ -257,7 +257,7 @@ describe("the documents an agent discovers", () => {
       const served = await fetch(skill.url.replace(config.baseUrl, base));
       expect({ url: skill.url, status: served.status }).toEqual({ url: skill.url, status: 200 });
       // The digest is over what this deployment serves, not over the committed file:
-      // two of the four have their host substituted on the way out.
+      // the documents on disk have their host substituted on the way out.
       expect({ url: skill.url, digest: sha256(await served.text()) }).toEqual({
         url: skill.url,
         digest: skill.digest,
@@ -266,7 +266,7 @@ describe("the documents an agent discovers", () => {
   });
 
   test("a skill document missing from the deployment is left out rather than listed broken", async () => {
-    // The two generated documents are always there; the two on disk are conditional,
+    // The three generated documents are always there; the four on disk are conditional,
     // and the index's contract is that it never points at a 500.
     const body = (await agentSkillsIndex()) as { skills: { name: string; digest: string }[] };
     const byName = new Map(body.skills.map((s) => [s.name, s.digest]));

@@ -19,6 +19,7 @@ import {
 } from "../overseer/installations";
 import { parseUpdatedAt } from "../overseer/derive";
 import { githubClientFor } from "../overseer/github-app";
+import { getStage, getStageVersion, listProjectStageSlugs } from "../stage/db";
 import {
   attachBundle,
   attachReview,
@@ -68,6 +69,7 @@ export interface ProjectChildSummary {
   status: ProjectStatus;
   bundles: number;
   reviews: number;
+  stages: number;
   tasks: number;
 }
 
@@ -86,6 +88,14 @@ export interface ProjectReviewEntry {
   url: string;
 }
 
+export interface ProjectStageEntry {
+  slug: string;
+  title: string;
+  latestVersion: number;
+  updatedAt: number;
+  apiUrl: string;
+}
+
 export interface ProjectState {
   project: ProjectRow;
   parent: { slug: string; title: string; status: ProjectStatus } | null;
@@ -95,6 +105,7 @@ export interface ProjectState {
   plans: ProjectBundleEntry[];
   bundles: ProjectBundleEntry[];
   reviews: ProjectReviewEntry[];
+  stages: ProjectStageEntry[];
   /** The most recent NOTES_TAIL notes, oldest first so they read chronologically. */
   notes: NoteView[];
   /** Every note the project holds, so a bounded tail says what it withheld. */
@@ -192,6 +203,21 @@ export function projectState(project: ProjectRow): ProjectState {
     });
   }
 
+  const stages: ProjectStageEntry[] = [];
+  for (const slug of listProjectStageSlugs(ws, project.id)) {
+    const stage = getStage(ws, slug);
+    if (!stage) continue;
+    const latest = getStageVersion(ws, slug, stage.latest_version);
+    if (!latest) continue;
+    stages.push({
+      slug,
+      title: latest.doc.identity.title,
+      latestVersion: stage.latest_version,
+      updatedAt: latest.created_at,
+      apiUrl: `${config.baseUrl}/api/stages/${slug}`,
+    });
+  }
+
   const reviews: ProjectReviewEntry[] = [];
   for (const slug of listProjectReviewSlugs(project.id)) {
     const review = getReview(ws, slug);
@@ -219,6 +245,7 @@ export function projectState(project: ProjectRow): ProjectState {
         status: child.status,
         bundles: counts.bundles,
         reviews: counts.reviews,
+        stages: counts.stages,
         tasks: counts.tasks,
       };
     }),
@@ -226,6 +253,7 @@ export function projectState(project: ProjectRow): ProjectState {
     plans,
     bundles,
     reviews,
+    stages,
     notes: listNotesTail(project.id, NOTES_TAIL).map(noteView),
     noteCount: countNotes(project.id),
   };
@@ -271,6 +299,13 @@ function stateJson(state: ProjectState): unknown {
       latestVersion: b.latestVersion,
       updatedAt: new Date(b.updatedAt).toISOString(),
       url: b.url,
+    })),
+    stages: state.stages.map((s) => ({
+      slug: s.slug,
+      title: s.title,
+      latestVersion: s.latestVersion,
+      updatedAt: new Date(s.updatedAt).toISOString(),
+      apiUrl: s.apiUrl,
     })),
     reviews: state.reviews.map((r) => ({
       slug: r.slug,
@@ -419,6 +454,7 @@ export function handleListProjects(req: Request): Response {
         updatedAt: new Date(p.updated_at).toISOString(),
         bundles: counts.bundles,
         reviews: counts.reviews,
+        stages: counts.stages,
         children: counts.children,
       };
     }),

@@ -19,6 +19,7 @@ import { openApiPaths } from "./api";
 import { config } from "./config";
 import { projectsSkillDoc, skillDoc, skillRouter } from "./pages";
 import { overseerAgentText, overseerSkillText } from "./overseer/skill";
+import { stageAgentText, stageSkillText } from "./stage/skill";
 
 /** The documents that are public by intent — the front page and the four an agent reads
  *  before it publishes anything. The sitemap lists these and nothing else: every other
@@ -32,6 +33,8 @@ const PUBLIC_DOCS: readonly { path: string; changefreq: string; priority: string
   { path: "/projects/skill.md", changefreq: "weekly", priority: "0.8" },
   { path: "/overseer/agent.md", changefreq: "weekly", priority: "0.8" },
   { path: "/overseer/skill.md", changefreq: "weekly", priority: "0.8" },
+  { path: "/stage/agent.md", changefreq: "weekly", priority: "0.8" },
+  { path: "/stage/skill.md", changefreq: "weekly", priority: "0.8" },
   { path: "/auth.md", changefreq: "monthly", priority: "0.5" },
 ];
 
@@ -70,6 +73,8 @@ Allow: /bundles/skill.md
 Allow: /projects/skill.md
 Allow: /overseer/skill.md
 Allow: /overseer/agent.md
+Allow: /stage/skill.md
+Allow: /stage/agent.md
 Allow: /.well-known/
 Disallow: /api/
 Disallow: /auth/
@@ -110,6 +115,8 @@ Allow: /bundles/skill.md
 Allow: /projects/skill.md
 Allow: /overseer/skill.md
 Allow: /overseer/agent.md
+Allow: /stage/skill.md
+Allow: /stage/agent.md
 Allow: /.well-known/
 Disallow: /
 
@@ -179,6 +186,8 @@ export function apiCatalog(): unknown {
           { href: `${base}/bundles/skill.md`, type: "text/markdown", title: "Publishing an HTML bundle" },
           { href: `${base}/projects/skill.md`, type: "text/markdown", title: "Grouping work into projects" },
           { href: `${base}/overseer/agent.md`, type: "text/markdown", title: "Dispatching a pull request review" },
+          { href: `${base}/stage/agent.md`, type: "text/markdown", title: "Dispatching a staged walkthrough" },
+          { href: `${base}/stage/skill.md`, type: "text/markdown", title: "Authoring a staged walkthrough" },
         ],
         "service-meta": [
           { href: `${base}/auth.md`, type: "text/markdown", title: "How an agent gets a credential" },
@@ -369,6 +378,15 @@ export async function agentSkillsIndex(): Promise<unknown> {
       digest: sha256(overseerAgent),
     });
   }
+  const stageAgent = await stageAgentText();
+  if (stageAgent !== null) {
+    skills.push({ name: "seer-stage", type: "skill-md", description: "Dispatch a fresh witness to publish a pinned staged walkthrough.", url: `${base}/stage/agent.md`, digest: sha256(stageAgent) });
+  }
+  const stageSkill = await stageSkillText();
+  if (stageSkill !== null) {
+    skills.push({ name: "seer-stage-witness", type: "skill-md", description: "Author the staged walkthrough over a completed capture.", url: `${base}/stage/skill.md`, digest: sha256(stageSkill) });
+  }
+
   const overseerSkill = await overseerSkillText();
   if (overseerSkill !== null) {
     skills.push({

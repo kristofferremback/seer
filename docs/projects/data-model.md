@@ -1,7 +1,7 @@
 # Projects data model
 
 A project groups the work. One entity gathers everything produced around one piece of
-work: prototypes, plans, reviews, tasks, notes. It lives in Seer, outside any repo, and
+work: prototypes, plans, reviews, staged walkthroughs, tasks, notes. It lives in Seer, outside any repo, and
 persists across sessions. Agents write it, humans read it, and every part of it is
 optional except the grouping itself.
 
@@ -14,8 +14,8 @@ dividing line the review model established. It follows `docs/overseer/data-model
 shape and shares its rules where they apply.
 
 It shipped in slices and everything below is live: the project entity, nesting,
-membership, the read pages, the plan kind with its reading surface, tasks, the
-`projects[]` field on a review document, and notes with the derived trail.
+membership, the read pages, the plan kind with its reading surface, staged walkthroughs,
+tasks, the `projects[]` field on a review document, and notes with the derived trail.
 
 ## The dividing line
 
@@ -67,13 +67,13 @@ sub-project. That migration is creating one and moving pointers, not a schema ev
 
 ### Membership
 
-A bundle or review can belong to any number of projects; a join row carries each
+A bundle, review, or staged walkthrough can belong to any number of projects; a join row carries each
 membership. The project holds no authored list on itself. Its page derives the contents
 by query, so there is one source of truth and nothing to drift.
 
 Memberships are written at upload or publish (`PUT /api/bundles/:slug?project=<slug>`,
-a `projects[]` field in a review document) and attachable or detachable later, because
-agents forget and late attachment has to work.
+a `projects[]` field in a review or stage document). Bundle and review memberships are
+attachable or detachable later; stage membership is publication-only in this slice.
 
 Tasks and notes are the exception: each belongs to exactly one project, because they
 are the project's own content rather than assets that visit it.
@@ -164,7 +164,7 @@ and reviews: different table, different place, context disambiguates.
 
 `GET /api/projects/:slug` returns the whole state in one response: the description,
 plans with their latest versions, tasks with gates and PR freshness, bundles, reviews,
-the notes tail. Children appear as shallow summaries (id, title, status, counts), never
+staged walkthroughs, and the notes tail. Children appear as shallow summaries (id, title, status, counts), never
 recursively, so a parent's response stays bounded. An agent resuming after a month
 reads one URL.
 
@@ -184,6 +184,7 @@ PATCH  /api/projects/:slug/tasks/:id
 POST   /api/projects/:slug/notes
 PUT    /api/projects/:slug/bundles/:bundleSlug    attach   (DELETE detaches)
 PUT    /api/projects/:slug/reviews/:reviewSlug    attach   (DELETE detaches)
+POST   /api/stages                               publish with optional projects
 PUT    /api/bundles/:slug?project=&kind=plan      attach at upload
 ```
 

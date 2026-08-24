@@ -37,8 +37,14 @@ test("v0-with-data migrates losslessly and is idempotent", async () => {
   expect(out).toContain("all assertions passed");
 });
 
-test("a populated v11 database gains only the additive v12 capture tables", async () => {
+test("a populated v11 database gains the additive capture and publication tables", async () => {
   const { code, out } = await runScenario("v11");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
+test("a populated v12 capture survives the additive v13 publication migration", async () => {
+  const { code, out } = await runScenario("v12");
   expect(code).toBe(0);
   expect(out).toContain("all assertions passed");
 });

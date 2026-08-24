@@ -1,7 +1,8 @@
 // Stage capture persistence. Captures are completed workflow records, separate from
 // stages and versions that later slices will add. Every query carries workspace scope.
 import { db } from "../db";
-import { tinyId } from "../ids";
+import { SLUG_RE, STA_ID_RE, STG_ID_RE, tinyId } from "../ids";
+import type { StageDoc } from "./types";
 
 export type Availability = "retained" | "unavailable" | "not_applicable";
 export type MaterialKind = "snapshot_incomplete" | "bytes_unavailable" | "lines_unavailable" | "patch_unavailable" | "metadata_incomplete";
@@ -70,8 +71,21 @@ export interface StageIncompleteRow {
   reason: string;
 }
 
+export interface StageCaptureBuilderRow {
+  workspace_id: string;
+  capture_id: string;
+  intent: string;
+  context: string;
+  agent_name: string;
+  agent_model: string;
+  user_id: string | null;
+  key_id: string | null;
+  created_at: number;
+}
+
 export interface StageCaptureInventory {
   capture: StageCaptureRow;
+  builder: StageCaptureBuilderRow | null;
   files: StageCaptureFileRow[];
   changes: StageCaptureChangeRow[];
   incomplete: StageIncompleteRow[];
@@ -97,6 +111,9 @@ export function getStageCaptureForWorkspaces(id: string, workspaceIds: string[])
 function inventory(capture: StageCaptureRow): StageCaptureInventory {
   return {
     capture,
+    builder: db.query<StageCaptureBuilderRow, [string, string]>(
+      "SELECT * FROM stage_capture_builders WHERE workspace_id = ? AND capture_id = ?",
+    ).get(capture.workspace_id, capture.id) ?? null,
     files: db.query<StageCaptureFileRow, [string, string]>(
       "SELECT * FROM stage_capture_files WHERE workspace_id = ? AND capture_id = ? ORDER BY path, id",
     ).all(capture.workspace_id, capture.id),
@@ -130,6 +147,7 @@ export interface CaptureInsert {
   changes: StageCaptureChangeRow[];
   incomplete: StageIncompleteRow[];
   blobs: { sha256: string; bytes: number }[];
+  builder?: Omit<StageCaptureBuilderRow, "workspace_id" | "capture_id" | "created_at">;
 }
 
 /** One short transaction makes the capture visible only after all objects are written. */
@@ -150,6 +168,12 @@ export const insertStageCapture = db.transaction((input: CaptureInsert): { captu
     "INSERT INTO stage_capture_idempotency (workspace_id, idempotency_key, request_hash, capture_id, created_at) VALUES (?, ?, ?, ?, ?)",
     [input.capture.workspace_id, input.idempotencyKey, input.requestHash, input.capture.id, now],
   );
+  if (input.builder) {
+    db.run(
+      "INSERT INTO stage_capture_builders (workspace_id, capture_id, intent, context, agent_name, agent_model, user_id, key_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [input.capture.workspace_id, input.capture.id, input.builder.intent, input.builder.context, input.builder.agent_name, input.builder.agent_model, input.builder.user_id, input.builder.key_id, now],
+    );
+  }
   for (const blob of input.blobs) {
     db.run(
       "INSERT OR IGNORE INTO stage_blobs (workspace_id, sha256, bytes, created_at) VALUES (?, ?, ?, ?)",
@@ -182,3 +206,118 @@ export const insertStageCapture = db.transaction((input: CaptureInsert): { captu
 
 export function freshFileId(): string { return tinyId("stf"); }
 export function freshIncompleteId(): string { return tinyId("sti"); }
+
+export interface StageRow {
+  id: string;
+  workspace_id: string;
+  slug: string;
+  repo: string;
+  repo_id: number;
+  branch: string;
+  lineage_base_ref: string;
+  lineage_base_sha: string;
+  latest_version: number;
+  created_by_user_id: string;
+  created_by_key_id: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface StageVersionRow {
+  id: string;
+  workspace_id: string;
+  stage_id: string;
+  slug: string;
+  version: number;
+  capture_id: string;
+  doc: StageDoc;
+  digest: string;
+  witness_user_id: string;
+  witness_key_id: string;
+  created_at: number;
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).every((key) => keys.includes(key)) && keys.every((key) => key in value);
+}
+
+function stageAgent(value: unknown): boolean {
+  return record(value) && exactKeys(value, ["name", "model"]) && typeof value.name === "string" && value.name.length >= 1 && value.name.length <= 80 && typeof value.model === "string" && value.model.length >= 1 && value.model.length <= 80;
+}
+
+function stageGroup(value: unknown): boolean {
+  if (!record(value) || Object.keys(value).some((key) => !["id", "title", "category", "importance", "complexity", "explanation", "attention", "examples", "members"].includes(key)) ||
+      !["id", "title", "category", "importance", "complexity", "explanation", "examples", "members"].every((key) => key in value)) return false;
+  if (typeof value.id !== "string" || !SLUG_RE.test(value.id) || typeof value.title !== "string" || value.title.length < 1 || value.title.length > 60 ||
+      !["Contract", "Code", "Tests", "Test fixtures", "Docs", "Generated"].includes(value.category as string) ||
+      !["low", "medium", "high"].includes(value.importance as string) ||
+      !["low", "medium", "high"].includes(value.complexity as string) || typeof value.explanation !== "string" || value.explanation.length < 1 || value.explanation.length > 1600 ||
+      !Array.isArray(value.examples) || value.examples.length > 5 || !Array.isArray(value.members) || value.members.length > 10000) return false;
+  if ("attention" in value && (typeof value.attention !== "string" || value.attention.length > 300)) return false;
+  return value.examples.every((example) => record(example) && exactKeys(example, ["code", "text"]) && typeof example.code === "string" && example.code.length >= 1 && example.code.length <= 500 && typeof example.text === "string" && example.text.length >= 1 && example.text.length <= 300) &&
+    value.members.every((member) => record(member) && exactKeys(member, ["type", "id", "description"]) &&
+      ["change", "material", "file"].includes(member.type as string) && typeof member.id === "string" && member.id.length >= 1 && member.id.length <= 80 && typeof member.description === "string" && member.description.length >= 1 && member.description.length <= 400);
+}
+
+function isStageDoc(value: unknown): value is StageDoc {
+  if (!record(value) || !exactKeys(value, ["identity", "source", "builder", "witness", "projects"])) return false;
+  const identity = value.identity;
+  const source = value.source;
+  const builder = value.builder;
+  const witness = value.witness;
+  if (!record(identity) || !exactKeys(identity, ["id", "slug", "version", "title", "createdAt"]) ||
+      !STA_ID_RE.test(String(identity.id)) || !SLUG_RE.test(String(identity.slug)) || !Number.isInteger(identity.version) || (identity.version as number) < 1 ||
+      typeof identity.title !== "string" || identity.title.length < 1 || identity.title.length > 80 || typeof identity.createdAt !== "string" || Number.isNaN(Date.parse(identity.createdAt))) return false;
+  if (!record(source) || !exactKeys(source, ["captureId", "repo", "repoId", "branch", "baseRef", "sourceHeadSha", "baseTipSha", "mergeBaseSha"]) ||
+      typeof source.captureId !== "string" || !STG_ID_RE.test(source.captureId) || typeof source.repo !== "string" || !Number.isInteger(source.repoId) ||
+      typeof source.branch !== "string" || typeof source.baseRef !== "string" || typeof source.sourceHeadSha !== "string" || typeof source.baseTipSha !== "string" || typeof source.mergeBaseSha !== "string") return false;
+  if (!record(builder) || !exactKeys(builder, ["intent", "context", "agent", "userId", "keyId"]) || typeof builder.intent !== "string" || builder.intent.length < 1 || builder.intent.length > 1200 || typeof builder.context !== "string" || builder.context.length > 4000 || !stageAgent(builder.agent) || typeof builder.userId !== "string" || typeof builder.keyId !== "string") return false;
+  if (!record(witness) || !exactKeys(witness, ["summary", "groups", "agent", "userId", "keyId"]) || typeof witness.summary !== "string" || witness.summary.length < 1 || witness.summary.length > 1200 || !Array.isArray(witness.groups) || witness.groups.length < 1 || witness.groups.length > 16 || !stageAgent(witness.agent) || typeof witness.userId !== "string" || typeof witness.keyId !== "string" || !witness.groups.every(stageGroup)) return false;
+  return Array.isArray(value.projects) && value.projects.length <= 16 && value.projects.every((project) => typeof project === "string" && SLUG_RE.test(project));
+}
+
+function parseStageVersion(row: Omit<StageVersionRow, "doc"> & { doc: string }): StageVersionRow | null {
+  try {
+    const doc = JSON.parse(row.doc) as unknown;
+    if (!isStageDoc(doc)) {
+      console.error(`[seer] stage version ${row.id}: stored document has an invalid StageDoc shape`);
+      return null;
+    }
+    if (doc.identity.id !== row.stage_id || doc.identity.slug !== row.slug || doc.identity.version !== row.version || doc.source.captureId !== row.capture_id) {
+      console.error(`[seer] stage version ${row.id}: stored document identity does not match its row`);
+      return null;
+    }
+    return { ...row, doc };
+  } catch {
+    console.error(`[seer] stage version ${row.id}: stored document is not valid JSON`);
+    return null;
+  }
+}
+
+export function getStage(workspaceId: string, slug: string): StageRow | null {
+  return db.query<StageRow, [string, string]>("SELECT * FROM stages WHERE workspace_id = ? AND slug = ?").get(workspaceId, slug);
+}
+
+export function getStageVersion(workspaceId: string, slug: string, version: number): StageVersionRow | null {
+  const row = db.query<Omit<StageVersionRow, "doc"> & { doc: string }, [string, string, number]>(
+    "SELECT sv.* FROM stage_versions sv JOIN stages s ON s.id = sv.stage_id AND s.workspace_id = sv.workspace_id AND s.slug = sv.slug WHERE sv.workspace_id = ? AND sv.slug = ? AND sv.version = ?",
+  ).get(workspaceId, slug, version);
+  return row ? parseStageVersion(row) : null;
+}
+
+export function getStageVersionByCapture(workspaceId: string, captureId: string): StageVersionRow | null {
+  const row = db.query<Omit<StageVersionRow, "doc"> & { doc: string }, [string, string]>(
+    "SELECT sv.* FROM stage_versions sv JOIN stages s ON s.id = sv.stage_id AND s.workspace_id = sv.workspace_id AND s.slug = sv.slug WHERE sv.workspace_id = ? AND sv.capture_id = ?",
+  ).get(workspaceId, captureId);
+  return row ? parseStageVersion(row) : null;
+}
+
+export function listProjectStageSlugs(workspaceId: string, projectId: string): string[] {
+  return db.query<{ slug: string }, [string, string]>(
+    "SELECT slug FROM project_stages WHERE workspace_id = ? AND project_id = ? ORDER BY created_at ASC",
+  ).all(workspaceId, projectId).map((row) => row.slug);
+}

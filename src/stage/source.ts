@@ -7,7 +7,8 @@ import { requireApiKey } from "../auth";
 import { config } from "../config";
 import { hashKey, SLUG_RE, STG_ID_RE, tinyId } from "../ids";
 import { json } from "../http";
-import { saveStageBlob } from "../store";
+import { openStageBlob, saveStageBlob } from "../store";
+import { normalizeBuilderPacket, StagePacketError, type StageBuilderPacket } from "./packet";
 import { githubClientFor } from "../overseer/github-app";
 import { readableWorkspaces } from "../overseer/read";
 import {
@@ -43,6 +44,7 @@ export interface StageCaptureRequest {
   repo: string;
   branch: string;
   baseRef?: string;
+  builder?: StageBuilderPacket;
 }
 
 export interface StageCaptureOptions {
@@ -50,6 +52,8 @@ export interface StageCaptureOptions {
   client?: GithubClient;
   idempotencyKey?: string;
   requestHash?: string;
+  builderUserId?: string;
+  builderKeyId?: string;
   saveBlob?: typeof saveStageBlob;
   persist?: typeof insertStageCapture;
 }
@@ -103,6 +107,13 @@ function captureJson(inventory: StageCaptureInventory): Response {
       changes: changes.filter((change) => change.file_id === file.id).map(changeJson),
     })),
     incomplete: incomplete.map((item) => ({ id: item.id, kind: item.kind, path: item.path, side: item.side, reason: item.reason })),
+    builder: inventory.builder ? {
+      intent: inventory.builder.intent,
+      context: inventory.builder.context,
+      agent: { name: inventory.builder.agent_name, model: inventory.builder.agent_model },
+      userId: inventory.builder.user_id,
+      keyId: inventory.builder.key_id,
+    } : null,
     createdAt: new Date(capture.created_at).toISOString(),
   }, 200, "application/json");
   response.headers.set("cache-control", "no-store");
@@ -149,7 +160,7 @@ function readRequest(body: unknown, idempotencyKey: string | null): { input: Sta
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new StageCaptureError(400, "Body must be a JSON object.");
   const value = body as Record<string, unknown>;
-  const allowed = new Set(["slug", "repo", "branch", "baseRef"]);
+  const allowed = new Set(["slug", "repo", "branch", "baseRef", "builder"]);
   const extra = Object.keys(value).find((name) => !allowed.has(name));
   if (extra) throw new StageCaptureError(400, `Unknown capture field ${JSON.stringify(extra)}.`);
   if (typeof value.slug !== "string" || !SLUG_RE.test(value.slug)) throw new StageCaptureError(400, "slug must match [a-z0-9][a-z0-9-]{0,63}.");
@@ -165,7 +176,14 @@ function readRequest(body: unknown, idempotencyKey: string | null): { input: Sta
   } catch (err) {
     throw new StageCaptureError(400, err instanceof Error ? err.message : String(err));
   }
-  const input = { slug: value.slug, repo: value.repo, branch: value.branch, baseRef: baseRef ?? "" };
+  let builder: StageBuilderPacket;
+  try {
+    builder = normalizeBuilderPacket(value.builder);
+  } catch (err) {
+    if (err instanceof StagePacketError) throw new StageCaptureError(422, err.message);
+    throw err;
+  }
+  const input = { slug: value.slug, repo: value.repo, branch: value.branch, baseRef: baseRef ?? "", builder };
   return { input, requestHash: hashKey(stable(input)) };
 }
 
@@ -362,6 +380,14 @@ const STAGE_BLOB_CONCURRENCY = 16;
 
 export async function captureSource(workspaceId: string, request: StageCaptureRequest, options: StageCaptureOptions = {}): Promise<{ captureId: string; created: boolean }> {
   if (!options.idempotencyKey) throw new StageCaptureError(400, "Idempotency-Key header is required.");
+  if (request.builder !== undefined) {
+    try {
+      request = { ...request, builder: normalizeBuilderPacket(request.builder) };
+    } catch (err) {
+      if (err instanceof StagePacketError) throw new StageCaptureError(422, err.message);
+      throw err;
+    }
+  }
   const client = stageClient(options.client ?? githubClientFor(workspaceId));
   let repo: Awaited<ReturnType<StageClient["getRepository"]>>;
   let sourceRef: Awaited<ReturnType<StageClient["getRef"]>>;
@@ -572,8 +598,9 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
     blobs.set(patchSha, rawPatchBytes);
   }
   const persist = options.persist ?? insertStageCapture;
-  const result = persist({ capture: { id: captureId, workspace_id: workspaceId, slug: request.slug, repo: repo.full_name, repo_id: repo.id, branch: request.branch, base_ref: baseRef, source_head_sha: sourceRef.sha, base_tip_sha: baseRefResult.sha, merge_base_sha: comparison.merge_base_commit.sha, patch_sha256: patchSha }, requestHash: options.requestHash ?? hashKey(stable({ slug: request.slug, repo: request.repo, branch: request.branch, baseRef: request.baseRef })), idempotencyKey: options.idempotencyKey, files: fileRows, changes, incomplete,
-    blobs: [...blobs].map(([sha256, data]) => ({ sha256, bytes: data.byteLength })) });
+  const result = persist({ capture: { id: captureId, workspace_id: workspaceId, slug: request.slug, repo: repo.full_name, repo_id: repo.id, branch: request.branch, base_ref: baseRef, source_head_sha: sourceRef.sha, base_tip_sha: baseRefResult.sha, merge_base_sha: comparison.merge_base_commit.sha, patch_sha256: patchSha }, requestHash: options.requestHash ?? hashKey(stable({ slug: request.slug, repo: request.repo, branch: request.branch, baseRef: request.baseRef ?? "", builder: request.builder ?? null })), idempotencyKey: options.idempotencyKey, files: fileRows, changes, incomplete,
+    blobs: [...blobs].map(([sha256, data]) => ({ sha256, bytes: data.byteLength })),
+    ...(request.builder ? { builder: { intent: request.builder.intent, context: request.builder.context, agent_name: request.builder.agent.name, agent_model: request.builder.agent.model, user_id: options.builderUserId ?? null, key_id: options.builderKeyId ?? null } } : {}), });
   return result;
 }
 
@@ -623,6 +650,8 @@ export async function handleCreateStageCapture(req: Request): Promise<Response> 
       client: githubClientFor(auth.workspaceId, auth.userId),
       idempotencyKey: key!,
       requestHash: parsed.requestHash,
+      builderUserId: auth.userId,
+      builderKeyId: auth.keyId,
     });
     const inventory = getStageCapture(result.captureId, auth.workspaceId);
     return inventory ? captureJson(inventory) : stageJson({ error: "Capture was not written." }, 502);
@@ -639,4 +668,41 @@ export function handleReadStageCapture(req: Request, id: string): Response {
   if (!STG_ID_RE.test(id)) return softNotFound();
   const inventory = getStageCaptureForWorkspaces(id, workspaces);
   return inventory ? captureJson(inventory) : softNotFound();
+}
+
+/** Serve one retained capture object through Seer. The inventory is the authorization
+ * boundary: a digest that merely exists in the workspace is not enough to open it. */
+export async function handleReadStageObject(req: Request, id: string, digest: string, loadBlob: typeof openStageBlob = openStageBlob): Promise<Response> {
+  const workspaces = readableWorkspaces(req);
+  if (!STG_ID_RE.test(id) || !/^[a-f0-9]{64}$/.test(digest)) return softNotFound();
+  const inventory = getStageCaptureForWorkspaces(id, workspaces);
+  if (!inventory) return softNotFound();
+
+  const named = inventory.capture.patch_sha256 === digest || inventory.files.some((file) => file.old_blob_sha === digest || file.new_blob_sha === digest);
+  if (!named) return softNotFound();
+
+  let object: Awaited<ReturnType<typeof openStageBlob>>;
+  try {
+    object = await loadBlob(inventory.capture.workspace_id, digest);
+  } catch (error) {
+    console.error(`[seer] stage capture ${id} object ${digest} could not be opened:`, error);
+    return new Response(JSON.stringify({ error: "Stage capture storage is temporarily unavailable." }), {
+      status: 502,
+      headers: { "content-type": "application/json", "cache-control": "no-store" },
+    });
+  }
+  if (object === null) {
+    console.error(`[seer] stage capture ${id} names missing object ${digest}`);
+    return new Response(JSON.stringify({ error: "Stage capture storage corruption." }), {
+      status: 500,
+      headers: { "content-type": "application/json", "cache-control": "no-store" },
+    });
+  }
+  return new Response(object, {
+    headers: {
+      "content-type": "application/octet-stream",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
 }

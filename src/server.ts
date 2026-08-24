@@ -74,6 +74,7 @@ import {
 import { agoWords } from "./relative-time";
 import { setWorkspaceHoldings } from "./overseer/github-app";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
+import { handleStageSkill, handleStageAgent } from "./stage/skill";
 import { handleAnnotation } from "./overseer/annotations";
 import { reviewTopic, setFreshnessPublisher } from "./overseer/freshness";
 import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
@@ -612,6 +613,7 @@ function handleProjectPage(req: Request, wsId: string, slug: string): Response {
     plans: state.plans,
     bundles: state.bundles,
     reviews: state.reviews,
+    stages: state.stages,
     // The record's tail: notes and derived status events, oldest first. Note bodies
     // render through the same constrained renderer, same corruption fallback.
     trail: projectTrail(project, listNotesTail(project.id, NOTES_TAIL)).map((e) => {
@@ -786,6 +788,8 @@ export async function startServer() {
       "/llms.txt": () => markdown(skillRouter()),
       "/bundles/skill.md": () => markdown(skillDoc()),
       "/projects/skill.md": () => markdown(projectsSkillDoc()),
+      "/stage/skill.md": () => handleStageSkill(),
+      "/stage/agent.md": () => handleStageAgent(),
 
       // The signed-in ledger of held bundles, grouped by the user's workspaces.
       "/bundles": (req) => {
