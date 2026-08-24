@@ -136,6 +136,12 @@ export function createUserGithubClient(
       listReviewComments: (r, n) => guard(() => client.listReviewComments(r, n)),
       getFileAtSha: (r, p, sha) => guard(() => client.getFileAtSha(r, p, sha)),
       getPullDiff: (r, n) => guard(() => client.getPullDiff(r, n)),
+      getRepository: (r) => guard(() => client.getRepository!(r)),
+      getRef: (r, ref) => guard(() => client.getRef!(r, ref)),
+      getTree: (r, sha, recursive) => guard(() => client.getTree!(r, sha, recursive)),
+      getBlobBytes: (r, sha) => guard(() => client.getBlobBytes!(r, sha)),
+      compare: (r, base, head) => guard(() => client.compare!(r, base, head)),
+      compareDiff: (r, base, head) => guard(() => client.compareDiff!(r, base, head)),
     };
   }
 
@@ -219,5 +225,11 @@ export function createUserGithubClient(
     async listReviewComments(repo, number) { return (await required(repo)).listReviewComments(repo, number); },
     async getFileAtSha(repo, path, sha) { return (await required(repo)).getFileAtSha(repo, path, sha); },
     async getPullDiff(repo, number) { return (await required(repo)).getPullDiff(repo, number); },
+    async getRepository(repo) { return (await required(repo)).getRepository!(repo); },
+    async getRef(repo, ref) { return (await required(repo)).getRef!(repo, ref); },
+    async getTree(repo, sha, recursive) { return (await required(repo)).getTree!(repo, sha, recursive); },
+    async getBlobBytes(repo, sha) { return (await required(repo)).getBlobBytes!(repo, sha); },
+    async compare(repo, base, head) { return (await required(repo)).compare!(repo, base, head); },
+    async compareDiff(repo, base, head) { return (await required(repo)).compareDiff!(repo, base, head); },
   };
 }

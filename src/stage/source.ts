@@ -1,0 +1,602 @@
+// Source capture is the first stage slice. GitHub is used only before publication:
+// the tree walk proves completeness, while compare supplies patch and rename facts.
+// After insertStageCapture commits, the JSON inventory and stage blobs are sufficient
+// for every read and derivation. Blob writes deliberately happen before that transaction.
+import { createHash } from "node:crypto";
+import { requireApiKey } from "../auth";
+import { config } from "../config";
+import { hashKey, SLUG_RE, STG_ID_RE, tinyId } from "../ids";
+import { json } from "../http";
+import { saveStageBlob } from "../store";
+import { githubClientFor } from "../overseer/github-app";
+import { readableWorkspaces } from "../overseer/read";
+import {
+  assertPath,
+  assertRef,
+  assertRepo,
+  GithubError,
+  type GithubClient,
+  type GithubCompare,
+  type GithubFile,
+  type GithubTreeEntry,
+} from "../overseer/github";
+import { lineDiff, parsePatch, splitUnifiedDiff, type PayloadLine } from "../overseer/diff";
+import type { Hunk } from "../overseer/types";
+import {
+  freshFileId,
+  freshIncompleteId,
+  getStageCapture,
+  getStageCaptureForWorkspaces,
+  getStageIdempotency,
+  insertStageCapture,
+  StageIdempotencyConflict,
+  type Availability,
+  type CaptureInsert,
+  type MaterialKind,
+  type StageCaptureInventory,
+} from "./db";
+
+const MAX_KEY_LENGTH = 200;
+const MAX_GITHUB_BLOB_BYTES = 100 * 1024 * 1024;
+export interface StageCaptureRequest {
+  slug: string;
+  repo: string;
+  branch: string;
+  baseRef?: string;
+}
+
+export interface StageCaptureOptions {
+  maxLogicalBytes?: number;
+  client?: GithubClient;
+  idempotencyKey?: string;
+  requestHash?: string;
+  saveBlob?: typeof saveStageBlob;
+  persist?: typeof insertStageCapture;
+}
+
+export class StageCaptureError extends Error {
+  constructor(readonly status: 400 | 409 | 422 | 502, message: string) {
+    super(message);
+    this.name = "StageCaptureError";
+  }
+}
+
+function softNotFound(): Response {
+  return new Response(JSON.stringify({ error: "No such stage capture" }, null, 2), {
+    status: 404,
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
+  });
+}
+
+function stageJson(data: unknown, status = 200): Response {
+  const response = json(data, status);
+  response.headers.set("cache-control", "no-store");
+  return response;
+}
+
+function captureJson(inventory: StageCaptureInventory): Response {
+  const { capture, files, changes, incomplete } = inventory;
+  const response = json({
+    id: capture.id,
+    workspace: capture.workspace_id,
+    slug: capture.slug,
+    state: capture.state,
+    repo: capture.repo,
+    repoId: capture.repo_id,
+    branch: capture.branch,
+    baseRef: capture.base_ref,
+    sourceHeadSha: capture.source_head_sha,
+    baseTipSha: capture.base_tip_sha,
+    mergeBaseSha: capture.merge_base_sha,
+    patch: capture.patch_sha256 ? { sha256: capture.patch_sha256, available: true } : null,
+    complete: incomplete.every((item) => item.kind !== "snapshot_incomplete" && item.kind !== "bytes_unavailable"),
+    reviewable: incomplete.every((item) => item.kind !== "snapshot_incomplete" && item.kind !== "bytes_unavailable" && item.kind !== "lines_unavailable"),
+    files: files.map((file) => ({
+      id: file.id,
+      path: file.path,
+      oldPath: file.old_path,
+      status: file.status,
+      old: side(file, "old"),
+      new: side(file, "new"),
+      additions: file.additions,
+      deletions: file.deletions,
+      changes: changes.filter((change) => change.file_id === file.id).map(changeJson),
+    })),
+    incomplete: incomplete.map((item) => ({ id: item.id, kind: item.kind, path: item.path, side: item.side, reason: item.reason })),
+    createdAt: new Date(capture.created_at).toISOString(),
+  }, 200, "application/json");
+  response.headers.set("cache-control", "no-store");
+  return response;
+}
+
+function side(file: StageCaptureInventory["files"][number], which: "old" | "new") {
+  const prefix = which === "old" ? "old" : "new";
+  return {
+    objectId: file[`${prefix}_object_id`],
+    mode: file[`${prefix}_mode`],
+    kind: file[`${prefix}_kind`],
+    availability: file[`${prefix}_availability`],
+    blobSha256: file[`${prefix}_blob_sha`],
+    reason: file[`${prefix}_reason`],
+  };
+}
+
+function changeJson(change: StageCaptureInventory["changes"][number]) {
+  return {
+    id: change.id,
+    old: { start: change.old_start, lines: change.old_lines },
+    new: { start: change.new_start, lines: change.new_lines },
+    oldFingerprint: change.old_fingerprint,
+    newFingerprint: change.new_fingerprint,
+    contextFingerprint: change.context_fingerprint,
+    source: change.source,
+  };
+}
+
+function stable(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+  return `{${Object.keys(value as object).sort().map((key) => `${JSON.stringify(key)}:${stable((value as Record<string, unknown>)[key])}`).join(",")}}`;
+}
+
+function sha256(bytes: Uint8Array | string): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function readRequest(body: unknown, idempotencyKey: string | null): { input: StageCaptureRequest; requestHash: string } {
+  if (!idempotencyKey || idempotencyKey.length > MAX_KEY_LENGTH || /[\u0000-\u001f\u007f]/.test(idempotencyKey)) {
+    throw new StageCaptureError(400, "Idempotency-Key header is required and must be a short printable value.");
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new StageCaptureError(400, "Body must be a JSON object.");
+  const value = body as Record<string, unknown>;
+  const allowed = new Set(["slug", "repo", "branch", "baseRef"]);
+  const extra = Object.keys(value).find((name) => !allowed.has(name));
+  if (extra) throw new StageCaptureError(400, `Unknown capture field ${JSON.stringify(extra)}.`);
+  if (typeof value.slug !== "string" || !SLUG_RE.test(value.slug)) throw new StageCaptureError(400, "slug must match [a-z0-9][a-z0-9-]{0,63}.");
+  if (typeof value.repo !== "string") throw new StageCaptureError(400, "repo is required and must be owner/name.");
+  if (typeof value.branch !== "string" || value.branch.length === 0) throw new StageCaptureError(400, "branch is required.");
+  const rawBaseRef = value.baseRef;
+  if (rawBaseRef !== undefined && typeof rawBaseRef !== "string") throw new StageCaptureError(400, "baseRef must be a Git branch name.");
+  const baseRef = rawBaseRef === undefined ? null : rawBaseRef;
+  try {
+    assertRepo(value.repo);
+    assertRef(value.branch);
+    if (baseRef !== null) assertRef(baseRef);
+  } catch (err) {
+    throw new StageCaptureError(400, err instanceof Error ? err.message : String(err));
+  }
+  const input = { slug: value.slug, repo: value.repo, branch: value.branch, baseRef: baseRef ?? "" };
+  return { input, requestHash: hashKey(stable(input)) };
+}
+
+type StageClient = Required<Pick<GithubClient, "getRepository" | "getRef" | "getTree" | "getBlobBytes" | "compare" | "compareDiff">>;
+function stageClient(client: GithubClient): StageClient {
+  if (!client.getRepository || !client.getRef || !client.getTree || !client.getBlobBytes || !client.compare || !client.compareDiff) {
+    throw new StageCaptureError(502, "The routed GitHub client does not provide stage capture capabilities.");
+  }
+  return client as StageClient;
+}
+
+interface TreeResult { entries: GithubTreeEntry[]; incomplete: string | null; }
+
+/** Git paths are ordered by Unicode code point, independent of the process locale. */
+function compareCodePoints(left: string, right: string): number {
+  const leftPoints = Array.from(left, (character) => character.codePointAt(0)!);
+  const rightPoints = Array.from(right, (character) => character.codePointAt(0)!);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index++) {
+    if (leftPoints[index]! !== rightPoints[index]!) return leftPoints[index]! - rightPoints[index]!;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+async function treeAt(client: StageClient, repo: string, sha: string, sideName: string): Promise<TreeResult> {
+  try {
+    const result = await client.getTree(repo, sha, true);
+    for (const entry of result.tree) {
+      if (entry.type === "blob" && (typeof entry.size !== "number" || !Number.isInteger(entry.size) || entry.size < 0)) {
+        throw new StageCaptureError(502, `GitHub returned a blob tree entry without a valid size for ${entry.path}.`);
+      }
+    }
+    return {
+      entries: result.tree.filter((entry) => entry.type !== "tree").sort((a, b) => compareCodePoints(a.path, b.path)),
+      incomplete: result.truncated ? `GitHub truncated the ${sideName} commit tree; the path inventory is incomplete.` : null,
+    };
+  } catch (err) {
+    throw new StageCaptureError(502, `GitHub refused the ${sideName} commit tree: ${message(err)}`);
+  }
+}
+
+function message(err: unknown): string { return err instanceof Error ? err.message : String(err); }
+function isText(bytes: Uint8Array): boolean {
+  try { return !new TextDecoder("utf-8", { fatal: true }).decode(bytes).slice(0, 8000).includes("\u0000"); }
+  catch { return false; }
+}
+function text(bytes: Uint8Array): string { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+function linesOf(value: string): string[] {
+  const lines = value.split("\n");
+  if (lines.length > 1 && lines.at(-1) === "") lines.pop();
+  return lines;
+}
+function fingerprints(oldLines: string[], newLines: string[], context: string[]): { old: string; newer: string; context: string } {
+  return { old: sha256(JSON.stringify(oldLines)), newer: sha256(JSON.stringify(newLines)), context: sha256(JSON.stringify(context)) };
+}
+function canonicalChanges(fileId: string, path: string, hunks: Hunk[], source: "patch" | "reconstructed") {
+  return hunks.map((hunk) => {
+    const oldLines = hunk.lines.filter((line) => line.kind !== "add").map((line) => line.content);
+    const newLines = hunk.lines.filter((line) => line.kind !== "del").map((line) => line.content);
+    const context = hunk.lines.filter((line) => line.kind === "ctx").map((line) => line.content);
+    const fp = fingerprints(oldLines, newLines, context);
+    const canonical = { path, oldStart: hunk.oldStart, oldLines: hunk.oldLines, newStart: hunk.newStart, newLines: hunk.newLines, old: oldLines, newer: newLines, context };
+    return {
+      id: `chg_${sha256(stable(canonical))}`,
+      capture_id: "",
+      file_id: fileId,
+      old_start: hunk.oldStart,
+      old_lines: hunk.oldLines,
+      new_start: hunk.newStart,
+      new_lines: hunk.newLines,
+      old_fingerprint: fp.old,
+      new_fingerprint: fp.newer,
+      context_fingerprint: fp.context,
+      source,
+    };
+  });
+}
+const MAX_RECONSTRUCTED_LINES = 12_000;
+
+function reconstructedHunks(repo: string, path: string, headSha: string, oldText: string | null, newText: string | null): Hunk[] {
+  const oldLines = oldText === null ? [] : linesOf(oldText);
+  const newLines = newText === null ? [] : linesOf(newText);
+  const rows: PayloadLine[] = oldText === null
+    ? linesOf(newText ?? "").map((content) => ({ kind: "add" as const, content, wordRanges: [] }))
+    : newText === null
+      ? linesOf(oldText).map((content) => ({ kind: "del" as const, content, wordRanges: [] }))
+      : lineDiff(oldText, newText);
+  const oldCount = rows.filter((row) => row.kind !== "add").length;
+  const newCount = rows.filter((row) => row.kind !== "del").length;
+  let oldNo = oldCount === 0 ? 0 : 1;
+  let newNo = newCount === 0 ? 0 : 1;
+  return [{
+    id: "",
+    repo,
+    prNumber: 0,
+    path,
+    sha: headSha,
+    oldStart: oldCount === 0 ? 0 : 1,
+    oldLines: oldLines.length,
+    newStart: newCount === 0 ? 0 : 1,
+    newLines: newLines.length,
+    lines: rows.map((row) => ({ kind: row.kind, content: row.content, wordRanges: row.wordRanges,
+      oldNo: row.kind === "add" ? null : oldNo++, newNo: row.kind === "del" ? null : newNo++ })),
+  }];
+}
+
+interface Candidate { path: string; oldPath: string | null; old: GithubTreeEntry | null; newer: GithubTreeEntry | null; compare: GithubFile | null; }
+interface ObjectState { bytes: Uint8Array | null; reason: string | null; retained: boolean; blobSha: string | null; declaredSize: number | null; skipped: boolean; }
+
+function treeIncompleteFor(candidate: Candidate, oldTree: TreeResult, newTree: TreeResult): boolean {
+  return (candidate.old === null && oldTree.incomplete !== null) || (candidate.newer === null && newTree.incomplete !== null);
+}
+
+interface ChangeDecision { hunks: Hunk[]; source: "patch" | "reconstructed" | null; reason: string | null; }
+interface ChangeFileFacts {
+  status: string;
+  old_kind: string | null;
+  new_kind: string | null;
+  old_availability: Availability;
+  new_availability: Availability;
+  old_mode: string | null;
+  new_mode: string | null;
+}
+
+/** The one rule used at capture and re-derivation. It never guesses a line change
+ * for a side that was not retained, and it bounds the quadratic line alignment. */
+function chooseChange(file: ChangeFileFacts, path: string, patch: string | undefined, oldBytes: Uint8Array | null, newBytes: Uint8Array | null, repo: string, headSha: string): ChangeDecision {
+  if (file.status === "renamed") return { hunks: [], source: null, reason: null };
+  if (file.status === "mode_changed") return { hunks: [], source: null, reason: "Only the file mode changed, so there are no line changes." };
+  if (file.old_mode === "120000" || file.new_mode === "120000") {
+    return { hunks: [], source: null, reason: "The symlink target is retained, but line changes are not represented for symlinks." };
+  }
+  if (patch !== undefined && file.new_kind === "blob") {
+    return { hunks: parsePatch(patch, { repo, prNumber: 0, path, sha: headSha }), source: "patch", reason: null };
+  }
+  const oldText = oldBytes && isText(oldBytes) ? text(oldBytes) : null;
+  const newText = newBytes && isText(newBytes) ? text(newBytes) : null;
+  if (file.status === "modified" && oldText !== null && newText !== null) {
+    if (oldBytes!.byteLength === newBytes!.byteLength && oldBytes!.every((byte, index) => byte === newBytes![index])) return { hunks: [], source: null, reason: null };
+    if (linesOf(oldText).length + linesOf(newText).length > MAX_RECONSTRUCTED_LINES) return { hunks: [], source: null, reason: `Text reconstruction exceeds the ${MAX_RECONSTRUCTED_LINES}-line alignment limit.` };
+    return { hunks: reconstructedHunks(repo, path, headSha, oldText, newText), source: "reconstructed", reason: null };
+  }
+  if (file.status === "added" && newText !== null && oldBytes === null) return { hunks: reconstructedHunks(repo, path, headSha, null, newText), source: "reconstructed", reason: null };
+  if (file.status === "removed" && oldText !== null && newBytes === null) return { hunks: reconstructedHunks(repo, path, headSha, oldText, null), source: "reconstructed", reason: null };
+  return { hunks: [], source: null, reason: "Retained textual sides were not sufficient to reconstruct line changes." };
+}
+
+function compareFor(cmp: GithubCompare, path: string, oldPath: string | null): GithubFile | null {
+  return cmp.files.find((file) => file.filename === path || (oldPath !== null && file.filename === oldPath) || file.previous_filename === path || file.previous_filename === oldPath) ?? null;
+}
+
+/** 64 blob requests consume 1.28% of GitHub's shared 5,000-request hourly
+ * installation budget. A 16-way pool prevents ordinary small-file captures from scaling
+ * wall time linearly, stays well below GitHub's 100-concurrent-request secondary limit,
+ * and each call retains its own 20-second timeout. This does not claim a total wall-time bound. */
+const MAX_STAGE_BLOB_REQUESTS = 64;
+const STAGE_BLOB_CONCURRENCY = 16;
+
+export async function captureSource(workspaceId: string, request: StageCaptureRequest, options: StageCaptureOptions = {}): Promise<{ captureId: string; created: boolean }> {
+  if (!options.idempotencyKey) throw new StageCaptureError(400, "Idempotency-Key header is required.");
+  const client = stageClient(options.client ?? githubClientFor(workspaceId));
+  let repo: Awaited<ReturnType<StageClient["getRepository"]>>;
+  let sourceRef: Awaited<ReturnType<StageClient["getRef"]>>;
+  let baseRefResult: Awaited<ReturnType<StageClient["getRef"]>>;
+  let comparison: Awaited<ReturnType<StageClient["compare"]>>;
+  try {
+    repo = await client.getRepository(request.repo);
+    if (repo.full_name.toLowerCase() !== request.repo.toLowerCase()) throw new StageCaptureError(422, `GitHub resolved ${request.repo} to a different repository, ${repo.full_name}.`);
+    const baseRef = request.baseRef || repo.default_branch;
+    assertRef(baseRef);
+    [sourceRef, baseRefResult] = await Promise.all([client.getRef(request.repo, request.branch), client.getRef(request.repo, baseRef)]);
+    comparison = await client.compare(request.repo, baseRefResult.sha, sourceRef.sha);
+  } catch (err) {
+    if (err instanceof StageCaptureError) throw err;
+    if (err instanceof GithubError && err.status === 404) throw new StageCaptureError(422, `GitHub could not resolve the requested repository or ref: ${err.message}`);
+    throw err;
+  }
+  const baseRef = request.baseRef || repo.default_branch;
+  assertRef(baseRef);
+  const [oldTree, newTree] = await Promise.all([
+    treeAt(client, request.repo, comparison.merge_base_commit.sha, "merge-base"),
+    treeAt(client, request.repo, sourceRef.sha, "source"),
+  ]);
+
+  const oldByPath = new Map(oldTree.entries.map((entry) => [entry.path, entry]));
+  const newByPath = new Map(newTree.entries.map((entry) => [entry.path, entry]));
+  const candidates: Candidate[] = [];
+  const usedOld = new Set<string>();
+  const usedNew = new Set<string>();
+  for (const file of comparison.files) {
+    if (file.status !== "renamed" || !file.previous_filename) continue;
+    const old = oldByPath.get(file.previous_filename) ?? null;
+    const newer = newByPath.get(file.filename) ?? null;
+    if (old && newer) {
+      candidates.push({ path: file.filename, oldPath: file.previous_filename, old, newer, compare: file });
+      usedOld.add(file.previous_filename); usedNew.add(file.filename);
+    }
+  }
+  const paths = new Set([...oldByPath.keys(), ...newByPath.keys()]);
+  for (const path of [...paths].sort(compareCodePoints)) {
+    if (usedOld.has(path) || usedNew.has(path)) continue;
+    const old = oldByPath.get(path) ?? null;
+    const newer = newByPath.get(path) ?? null;
+    if (old && newer && old.sha === newer.sha && old.mode === newer.mode && old.type === newer.type) continue;
+    candidates.push({ path, oldPath: null, old, newer, compare: compareFor(comparison, path, null) });
+  }
+  // If compare names a path that neither tree returned, keep its metadata visible and
+  // say exactly why its object facts are unavailable.
+  for (const file of comparison.files) {
+    if (!candidates.some((candidate) => candidate.path === file.filename || candidate.oldPath === file.filename || candidate.oldPath === file.previous_filename)) {
+      candidates.push({ path: file.filename, oldPath: file.previous_filename ?? null, old: null, newer: null, compare: file });
+    }
+  }
+  candidates.sort((a, b) => compareCodePoints(a.path, b.path) || compareCodePoints(a.oldPath ?? "", b.oldPath ?? ""));
+
+  const limit = options.maxLogicalBytes ?? config.maxUploadBytes;
+  if (!Number.isFinite(limit) || limit < 0) throw new StageCaptureError(400, "The stage capture retention limit must be a non-negative number.");
+  const captureId = tinyId("stg");
+  let rawPatch: string | null = null;
+  let patchReason: string | null = null;
+  try { rawPatch = await client.compareDiff(request.repo, comparison.merge_base_commit.sha, sourceRef.sha); }
+  catch (err) {
+    patchReason = `GitHub did not provide the pinned unified compare diff: ${message(err)}`;
+  }
+  const rawPatchBytes = rawPatch === null ? null : new TextEncoder().encode(rawPatch);
+  const rawPatches = rawPatch && rawPatchBytes && rawPatchBytes.byteLength <= limit ? splitUnifiedDiff(rawPatch) : new Map<string, string>();
+  let used = 0;
+  const patchSha = rawPatchBytes && rawPatchBytes.byteLength <= limit ? sha256(rawPatchBytes) : null;
+  if (rawPatchBytes && patchSha) used += rawPatchBytes.byteLength;
+  else if (rawPatchBytes) patchReason = `The pinned unified compare diff is ${rawPatchBytes.byteLength} logical bytes, over the ${limit}-byte capture budget.`;
+
+  const objectState = new Map<string, ObjectState>();
+  const orderedObjects: { id: string; path: string; side: "old" | "new"; entry: GithubTreeEntry }[] = [];
+  for (const candidate of candidates) for (const [sideName, entry] of [["old", candidate.old], ["new", candidate.newer]] as const) {
+    if (!entry || entry.type !== "blob") continue;
+    const previous = objectState.get(entry.sha);
+    if (previous) {
+      if (previous.declaredSize !== null && entry.size !== undefined && previous.declaredSize !== entry.size) throw new StageCaptureError(502, `Git tree reported conflicting sizes for object ${entry.sha}.`);
+      if (previous.declaredSize === null && entry.size !== undefined) previous.declaredSize = entry.size;
+      continue;
+    }
+    orderedObjects.push({ id: entry.sha, path: candidate.path, side: sideName, entry });
+    objectState.set(entry.sha, { bytes: null, reason: null, retained: false, blobSha: null, declaredSize: entry.size ?? null, skipped: false });
+  }
+  orderedObjects.sort((a, b) => compareCodePoints(a.path, b.path) || (a.side === "old" ? -1 : 1));
+  const eligibleObjects: typeof orderedObjects = [];
+  for (const object of orderedObjects) {
+    const state = objectState.get(object.id)!;
+    if (state.declaredSize !== null && state.declaredSize > MAX_GITHUB_BLOB_BYTES) {
+      state.skipped = true;
+      state.reason = `GitHub's Git blob API ceiling is ${MAX_GITHUB_BLOB_BYTES} bytes; the tree declares ${state.declaredSize} bytes.`;
+    } else if (state.declaredSize !== null && used + state.declaredSize > limit) {
+      state.skipped = true;
+      state.reason = `The capture's retained logical-byte budget is ${limit}; deterministic retention order left this ${state.declaredSize}-byte object out.`;
+    } else {
+      eligibleObjects.push(object);
+      if (state.declaredSize !== null) used += state.declaredSize;
+    }
+  }
+  const fetchObjects = eligibleObjects.slice(0, MAX_STAGE_BLOB_REQUESTS);
+  for (const object of eligibleObjects.slice(MAX_STAGE_BLOB_REQUESTS)) {
+    const state = objectState.get(object.id)!;
+    state.skipped = true;
+    state.reason = `The capture permits at most ${MAX_STAGE_BLOB_REQUESTS} unique Git blob requests; this object was outside the first ${MAX_STAGE_BLOB_REQUESTS} eligible objects in deterministic retention order.`;
+  }
+  const fetched = new Map<string, { bytes: Uint8Array | null; error: unknown }>();
+  let nextObject = 0;
+  async function fetchWorker(): Promise<void> {
+    while (nextObject < fetchObjects.length) {
+      const object = fetchObjects[nextObject++]!;
+      try {
+        fetched.set(object.id, { bytes: await client.getBlobBytes(request.repo, object.id), error: null });
+      } catch (error) {
+        fetched.set(object.id, { bytes: null, error });
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(STAGE_BLOB_CONCURRENCY, fetchObjects.length) }, () => fetchWorker()));
+  // Declared sizes made the byte decisions before any request. Reconcile responses in
+  // deterministic order so actual bytes and error handling never depend on completion order.
+  used = patchSha ? rawPatchBytes!.byteLength : 0;
+  for (const object of fetchObjects) {
+    const state = objectState.get(object.id)!;
+    const result = fetched.get(object.id)!;
+    if (result.error) {
+      if (result.error instanceof StageCaptureError) throw result.error;
+      state.reason = `GitHub did not retain this Git blob: ${message(result.error)}`;
+      continue;
+    }
+    state.bytes = result.bytes;
+    if (!state.bytes) {
+      state.reason = "GitHub did not provide this Git blob.";
+      continue;
+    }
+    if (state.declaredSize !== null && state.bytes.byteLength !== state.declaredSize) {
+      throw new StageCaptureError(502, `Git tree declared ${state.declaredSize} bytes for ${object.id}, but GitHub returned ${state.bytes.byteLength}.`);
+    }
+    if (used + state.bytes.byteLength > limit) {
+      state.bytes = null;
+      state.skipped = true;
+      state.reason = `The capture's retained logical-byte budget is ${limit}; deterministic retention order left this object out.`;
+      continue;
+    }
+    state.retained = true; state.blobSha = sha256(state.bytes); used += state.bytes.byteLength;
+  }
+
+  const blobs = new Map<string, Uint8Array>();
+  for (const state of objectState.values()) if (state.retained && state.bytes && state.blobSha) blobs.set(state.blobSha, state.bytes);
+  const fileRows: CaptureInsert["files"] = [];
+  const changes: CaptureInsert["changes"] = [];
+  const incomplete: CaptureInsert["incomplete"] = [];
+  if (oldTree.incomplete) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "snapshot_incomplete", path: null, side: "snapshot", reason: oldTree.incomplete });
+  if (newTree.incomplete) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "snapshot_incomplete", path: null, side: "snapshot", reason: newTree.incomplete });
+  if (comparison.files.length >= 300) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "metadata_incomplete", path: null, side: "snapshot", reason: "GitHub compare returned its 300-file ceiling; tree facts are complete, but omitted rename and patch metadata may exist." });
+  if (patchReason) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "patch_unavailable", path: null, side: "snapshot", reason: patchReason });
+
+  for (const candidate of candidates) {
+    const fileId = freshFileId();
+    const compare = candidate.compare;
+      const compareStatus = compare?.status;
+    const knownCompareStatus = compareStatus === "added" || compareStatus === "removed" || compareStatus === "modified" || (compareStatus === "renamed" && candidate.oldPath !== null);
+    const status = compareStatus === "renamed" && candidate.oldPath ? "renamed" : candidate.old && candidate.newer && candidate.old.sha === candidate.newer.sha && candidate.old.mode !== candidate.newer.mode ? "mode_changed" : knownCompareStatus ? compareStatus : candidate.old && candidate.newer ? "modified" : treeIncompleteFor(candidate, oldTree, newTree) ? "unknown" : candidate.old ? "removed" : "added";
+    const makeSide = (entry: GithubTreeEntry | null, sideName: "old" | "new"): { availability: Availability; blob: string | null; reason: string | null } => {
+      if (!entry) {
+        const compareEstablishesAbsence = (sideName === "old" && (status === "added" || status === "renamed")) || (sideName === "new" && (status === "removed" || status === "renamed"));
+        if (compareEstablishesAbsence || !treeIncompleteFor(candidate, oldTree, newTree)) return { availability: "not_applicable", blob: null, reason: null };
+        return { availability: "unavailable", blob: null, reason: `The ${sideName} tree was truncated before this path could be established.` };
+      }
+      if (entry.type !== "blob") return entry.type === "commit"
+        ? { availability: "not_applicable", blob: null, reason: "The submodule commit id is retained, but line changes are not represented for submodules." }
+        : { availability: "unavailable", blob: null, reason: "This tree object has no file bytes." };
+      const state = objectState.get(entry.sha)!;
+      if (!state.bytes) return { availability: "unavailable", blob: null, reason: state.reason ?? "GitHub did not provide this Git blob." };
+      if (!state.retained) return { availability: "unavailable", blob: null, reason: state.reason ?? "The Git blob was outside the retention budget." };
+      return { availability: "retained", blob: state.blobSha, reason: null };
+    };
+    const oldSide = makeSide(candidate.old, "old"), newSide = makeSide(candidate.newer, "new");
+    const oldBytes = candidate.old?.type === "blob" && oldSide.availability === "retained" ? objectState.get(candidate.old.sha)!.bytes : null;
+    const newBytes = candidate.newer?.type === "blob" && newSide.availability === "retained" ? objectState.get(candidate.newer.sha)!.bytes : null;
+    const patch = patchSha ? rawPatches.get(candidate.path) ?? (candidate.oldPath ? rawPatches.get(candidate.oldPath) : undefined) : undefined;
+    const decision = chooseChange({ status, old_kind: candidate.old?.type ?? null, new_kind: candidate.newer?.type ?? null, old_availability: oldSide.availability, new_availability: newSide.availability, old_mode: candidate.old?.mode ?? null, new_mode: candidate.newer?.mode ?? null }, candidate.path, patch, oldBytes, newBytes, request.repo, sourceRef.sha);
+    const hunks = decision.hunks;
+    const source = decision.source;
+    const derivedAdds = hunks.reduce((n, h) => n + h.lines.filter((line) => line.kind === "add").length, 0);
+    const derivedDels = hunks.reduce((n, h) => n + h.lines.filter((line) => line.kind === "del").length, 0);
+    const oldReason = oldSide.reason ?? (candidate.old?.mode === "120000" ? "The symlink target is retained, but line changes are not represented for symlinks." : candidate.old?.type === "blob" && objectState.get(candidate.old.sha)?.bytes && !isText(objectState.get(candidate.old.sha)!.bytes!) ? "Binary bytes are retained, but line changes are unavailable." : decision.reason);
+    const newReason = newSide.reason ?? (candidate.newer?.mode === "120000" ? "The symlink target is retained, but line changes are not represented for symlinks." : candidate.newer?.type === "blob" && objectState.get(candidate.newer.sha)?.bytes && !isText(objectState.get(candidate.newer.sha)!.bytes!) ? "Binary bytes are retained, but line changes are unavailable." : decision.reason);
+    const additions = compare?.additions ?? derivedAdds;
+    const deletions = compare?.deletions ?? derivedDels;
+    fileRows.push({ id: fileId, path: candidate.path, old_path: candidate.oldPath, status, old_object_id: candidate.old?.sha ?? null, new_object_id: candidate.newer?.sha ?? null, old_mode: candidate.old?.mode ?? null, new_mode: candidate.newer?.mode ?? null, old_kind: candidate.old?.type ?? null, new_kind: candidate.newer?.type ?? null, additions, deletions, old_availability: oldSide.availability, new_availability: newSide.availability, old_blob_sha: oldSide.blob, new_blob_sha: newSide.blob, old_reason: oldReason, new_reason: newReason });
+    if (source) changes.push(...canonicalChanges(fileId, candidate.path, hunks, source).map((change) => ({ ...change, workspace_id: workspaceId, capture_id: captureId })));
+    const addMaterial = (sideName: "old" | "new", availability: Availability, reason: string | null) => {
+      if (!reason) return;
+      const kind: MaterialKind = availability === "unavailable" ? "bytes_unavailable" : "lines_unavailable";
+      incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind, path: candidate.path, side: sideName, reason });
+    };
+    addMaterial("old", oldSide.availability, oldReason);
+    addMaterial("new", newSide.availability, newReason);
+  }
+  const writeBlob = options.saveBlob ?? saveStageBlob;
+  for (const [digest, bytes] of blobs) await writeBlob(workspaceId, digest, bytes);
+  if (rawPatchBytes && patchSha) {
+    await writeBlob(workspaceId, patchSha, rawPatchBytes);
+    blobs.set(patchSha, rawPatchBytes);
+  }
+  const persist = options.persist ?? insertStageCapture;
+  const result = persist({ capture: { id: captureId, workspace_id: workspaceId, slug: request.slug, repo: repo.full_name, repo_id: repo.id, branch: request.branch, base_ref: baseRef, source_head_sha: sourceRef.sha, base_tip_sha: baseRefResult.sha, merge_base_sha: comparison.merge_base_commit.sha, patch_sha256: patchSha }, requestHash: options.requestHash ?? hashKey(stable({ slug: request.slug, repo: request.repo, branch: request.branch, baseRef: request.baseRef })), idempotencyKey: options.idempotencyKey, files: fileRows, changes, incomplete,
+    blobs: [...blobs].map(([sha256, data]) => ({ sha256, bytes: data.byteLength })) });
+  return result;
+}
+
+/** Re-derive canonical anchors using only the stored patch and retained blobs. The
+ * loader is the storage seam, so callers can prove this function with a GitHub client
+ * that throws on every method. */
+export async function rederiveCanonicalChanges(
+  inventory: StageCaptureInventory,
+  loadBlob: (sha256: string) => Promise<Uint8Array | null>,
+): Promise<ReturnType<typeof canonicalChanges>[number][]> {
+  let patches: { path: string; patch?: string }[] = [];
+  if (inventory.capture.patch_sha256) {
+    const patchBytes = await loadBlob(inventory.capture.patch_sha256);
+    if (!patchBytes) throw new Error(`Retained canonical patch ${inventory.capture.patch_sha256} is missing.`);
+    patches = [...splitUnifiedDiff(text(patchBytes))].map(([path, patch]) => ({ path, patch }));
+  }
+  const out: ReturnType<typeof canonicalChanges>[number][] = [];
+  for (const file of inventory.files) {
+    const oldBytes = file.old_blob_sha ? await loadBlob(file.old_blob_sha) : null;
+    const newBytes = file.new_blob_sha ? await loadBlob(file.new_blob_sha) : null;
+    const patch = patches.find((item) => item.path === file.path || item.path === file.old_path)?.patch;
+    const decision = chooseChange({ status: file.status, old_kind: file.old_kind, new_kind: file.new_kind, old_availability: file.old_availability, new_availability: file.new_availability, old_mode: file.old_mode, new_mode: file.new_mode }, file.path, patch, oldBytes, newBytes, inventory.capture.repo, inventory.capture.source_head_sha);
+    if (decision.source) out.push(...canonicalChanges(file.id, file.path, decision.hunks, decision.source).map((change) => ({ ...change, workspace_id: inventory.capture.workspace_id, capture_id: inventory.capture.id })));
+  }
+  return out;
+}
+
+export async function handleCreateStageCapture(req: Request): Promise<Response> {
+  const auth = requireApiKey(req);
+  if (auth instanceof Response) {
+    auth.headers.set("cache-control", "no-store");
+    return auth;
+  }
+  let body: unknown;
+  try { body = await req.json(); } catch { return stageJson({ error: "Body is not valid JSON." }, 400); }
+  const key = req.headers.get("idempotency-key")?.trim() ?? null;
+  try {
+    const parsed = readRequest(body, key);
+    const existing = getStageIdempotency(auth.workspaceId, key!);
+    if (existing) {
+      if (existing.request_hash !== parsed.requestHash) throw new StageIdempotencyConflict();
+      const inventory = getStageCapture(existing.capture_id, auth.workspaceId);
+      if (!inventory) throw new Error(`Idempotency row points to missing stage capture ${existing.capture_id}.`);
+      return captureJson(inventory);
+    }
+    const result = await captureSource(auth.workspaceId, parsed.input, {
+      client: githubClientFor(auth.workspaceId, auth.userId),
+      idempotencyKey: key!,
+      requestHash: parsed.requestHash,
+    });
+    const inventory = getStageCapture(result.captureId, auth.workspaceId);
+    return inventory ? captureJson(inventory) : stageJson({ error: "Capture was not written." }, 502);
+  } catch (err) {
+    if (err instanceof StageIdempotencyConflict) return stageJson({ error: err.message }, 409);
+    if (err instanceof StageCaptureError) return stageJson({ error: err.message }, err.status);
+    if (err instanceof GithubError) return stageJson({ error: err.message }, err.status === 422 ? 422 : 502);
+    return stageJson({ error: message(err) }, 502);
+  }
+}
+
+export function handleReadStageCapture(req: Request, id: string): Response {
+  const workspaces = readableWorkspaces(req);
+  if (!STG_ID_RE.test(id)) return softNotFound();
+  const inventory = getStageCaptureForWorkspaces(id, workspaces);
+  return inventory ? captureJson(inventory) : softNotFound();
+}

@@ -83,6 +83,43 @@ describe("the fetch client", () => {
     expect(files.map((f) => f.filename)).toContain("src/images.ts");
   });
 
+  test("stage reads validate and pin repository refs, trees, blobs, and compares", async () => {
+    const sha = "a".repeat(40);
+    const calls: string[] = [];
+    const { impl } = stubFetch((url) => {
+      calls.push(url);
+      if (url.endsWith("/repos/a/b")) return ok({ id: 9, full_name: "a/b", default_branch: "main" });
+      if (url.includes("/git/ref/heads/feature%2Fx")) return ok({ ref: "refs/heads/feature/x", object: { sha, type: "commit" } });
+      if (url.includes("/git/trees/")) return ok({ sha, truncated: false, tree: [{ path: "x.txt", mode: "100644", type: "blob", sha, size: 2 }] });
+      if (url.includes("/git/blobs/")) return ok({ sha, size: 2, encoding: "base64", content: "aGk=\n" });
+      return ok({ merge_base_commit: { sha }, files: [] });
+    });
+    const client = createFetchGithubClient({ token: "t", fetchImpl: impl });
+    expect(await client.getRepository!("a/b")).toEqual({ id: 9, full_name: "a/b", default_branch: "main" });
+    expect(await client.getRef!("a/b", "feature/x")).toEqual({ ref: "refs/heads/feature/x", sha, type: "commit" });
+    expect((await client.getTree!("a/b", sha)).tree[0]!.path).toBe("x.txt");
+    expect(await client.getBlobBytes!("a/b", sha)).toEqual(new TextEncoder().encode("hi"));
+    expect((await client.compare!("a/b", "main", "feature/x")).files).toEqual([]);
+    expect(calls).toContain("https://api.github.com/repos/a/b/git/ref/heads/feature%2Fx");
+  });
+
+  test("stage transport rejects non-commit branch objects and blob trees without sizes", async () => {
+    const sha = "a".repeat(40);
+    let refType = "commit";
+    let includeSize = true;
+    const { impl } = stubFetch((url) => {
+      if (url.includes("/git/ref/heads/")) return ok({ ref: "refs/heads/main", object: { sha, type: refType } });
+      if (url.includes("/git/trees/")) return ok({ sha, truncated: false, tree: [{ path: "x.txt", mode: "100644", type: "blob", sha, ...(includeSize ? { size: 2 } : {}) }] });
+      return ok({});
+    });
+    const client = createFetchGithubClient({ token: "t", fetchImpl: impl });
+    refType = "tree";
+    await expect(client.getRef!("a/b", "main")).rejects.toThrow(GithubError);
+    refType = "commit";
+    includeSize = false;
+    await expect(client.getTree!("a/b", sha)).rejects.toThrow(GithubError);
+  });
+
   test("getPullDiff asks for the diff media type and returns text", async () => {
     const { impl, calls } = stubFetch(() => ok("diff --git a/x b/x\n"));
     const diff = await createFetchGithubClient({ fetchImpl: impl }).getPullDiff("a/b", 9);
@@ -118,6 +155,15 @@ describe("the fetch client", () => {
     const client = createFetchGithubClient({ token: "t", fetchImpl: impl });
     await expect(client.listCommits("a/b", 1)).rejects.toThrow(/evil\.example/);
     expect(calls.length).toBe(1);
+  });
+
+  test("hostile refs are refused before they reach transport", async () => {
+    const { impl, calls } = stubFetch(() => ok({}));
+    const client = createFetchGithubClient({ token: "t", fetchImpl: impl });
+    for (const ref of ["bad ref", "a?b", "a\\b", "a..b", "a@{1}", "a/.", "a//b", "a\u0000b", "a.lock", "-main", "@", ".hidden", "a/.hidden", "a/.lock", "a/b.lock"]) {
+      await expect(client.getRef!("a/b", ref)).rejects.toThrow(GithubError);
+    }
+    expect(calls.length).toBe(0);
   });
 
   test("a path that climbs out of the repository is refused before any request", async () => {

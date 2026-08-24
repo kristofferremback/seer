@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 11 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 12 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -45,6 +45,10 @@ import { hashKey, tinyId } from "./ids";
 // v11 adds project_notes: the append-only record of what the agent was thinking while
 // it worked. Nothing in src updates or deletes a row here, on purpose — a journal you
 // can edit afterwards is testimony you can revise. Purely additive.
+//
+// v12 adds completed staged source captures. The workflow row, immutable file inventory,
+// canonical changes, explicit incomplete items, workspace-scoped retained objects, and
+// idempotency records are additive. Pending stage versions do not exist in this slice.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -516,8 +520,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 11) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 11`);
+  if (uv > 12) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 12`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -530,6 +534,7 @@ export function migrate(): void {
   if (userVersion() < 9) migrateToV9();
   if (userVersion() < 10) migrateToV10();
   if (userVersion() < 11) migrateToV11();
+  if (userVersion() < 12) migrateToV12();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -744,6 +749,98 @@ function migrateToV11(): void {
     db.run("PRAGMA user_version = 11");
   })();
   console.log("[seer] migrated to schema v11 (notes).");
+}
+
+const V12_STAGE_CAPTURES = `
+  CREATE TABLE IF NOT EXISTS stage_blobs (
+    workspace_id TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, sha256)
+  );
+  CREATE TABLE IF NOT EXISTS stage_captures (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    repo_id INTEGER NOT NULL,
+    branch TEXT NOT NULL,
+    base_ref TEXT NOT NULL,
+    source_head_sha TEXT NOT NULL,
+    base_tip_sha TEXT NOT NULL,
+    merge_base_sha TEXT NOT NULL,
+    patch_sha256 TEXT,
+    state TEXT NOT NULL CHECK (state IN ('completed')),
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_stage_captures_workspace ON stage_captures (workspace_id, slug);
+  CREATE TABLE IF NOT EXISTS stage_capture_files (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    capture_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    old_path TEXT,
+    status TEXT NOT NULL CHECK (status IN ('added','removed','modified','renamed','mode_changed','unknown')),
+    old_object_id TEXT,
+    new_object_id TEXT,
+    old_mode TEXT,
+    new_mode TEXT,
+    old_kind TEXT,
+    new_kind TEXT,
+    additions INTEGER,
+    deletions INTEGER,
+    old_availability TEXT NOT NULL CHECK (old_availability IN ('retained','unavailable','not_applicable')),
+    new_availability TEXT NOT NULL CHECK (new_availability IN ('retained','unavailable','not_applicable')),
+    old_blob_sha TEXT,
+    new_blob_sha TEXT,
+    old_reason TEXT,
+    new_reason TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_stage_capture_files_capture ON stage_capture_files (workspace_id, capture_id, path);
+  CREATE TABLE IF NOT EXISTS stage_capture_changes (
+    id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    capture_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    old_start INTEGER NOT NULL,
+    old_lines INTEGER NOT NULL,
+    new_start INTEGER NOT NULL,
+    new_lines INTEGER NOT NULL,
+    old_fingerprint TEXT NOT NULL,
+    new_fingerprint TEXT NOT NULL,
+    context_fingerprint TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('patch','reconstructed')),
+    PRIMARY KEY (capture_id, id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_stage_capture_changes_file ON stage_capture_changes (workspace_id, capture_id, file_id);
+  CREATE TABLE IF NOT EXISTS stage_capture_incomplete (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    capture_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('snapshot_incomplete','bytes_unavailable','lines_unavailable','patch_unavailable','metadata_incomplete')),
+    path TEXT,
+    side TEXT NOT NULL CHECK (side IN ('old','new','snapshot')),
+    reason TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_stage_capture_incomplete_capture ON stage_capture_incomplete (workspace_id, capture_id);
+  CREATE TABLE IF NOT EXISTS stage_capture_idempotency (
+    workspace_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    capture_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, idempotency_key)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_capture_idempotency_capture ON stage_capture_idempotency (capture_id);
+`;
+
+function migrateToV12(): void {
+  db.transaction(() => {
+    db.exec(V12_STAGE_CAPTURES);
+    db.run("PRAGMA user_version = 12");
+  })();
+  console.log("[seer] migrated to schema v12 (stage captures).");
 }
 
 /**

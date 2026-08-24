@@ -8,10 +8,12 @@ const zipsDir = join(config.dataDir, "zips");
 const cacheDir = join(config.dataDir, "cache");
 const imagesDir = join(config.dataDir, "images");
 const attachmentsDir = join(config.dataDir, "review-attachments");
+const stageBlobsDir = join(config.dataDir, "stage-blobs");
 
 mkdirSync(zipsDir, { recursive: true });
 mkdirSync(imagesDir, { recursive: true });
 mkdirSync(attachmentsDir, { recursive: true });
+mkdirSync(stageBlobsDir, { recursive: true });
 // Zips are the source of truth; the extraction cache is disposable, so start clean.
 rmSync(cacheDir, { recursive: true, force: true });
 mkdirSync(cacheDir, { recursive: true });
@@ -183,6 +185,41 @@ export function attachmentLocation(wsId: string, attachmentId: string): string {
   return s3
     ? `s3://${config.s3!.bucket}/${attachmentKey(wsId, attachmentId)}`
     : attachmentPath(wsId, attachmentId);
+}
+
+// ---- staged capture blobs ----
+
+/** Stage objects are durable, workspace-scoped, and addressed only by a server-computed
+ * SHA-256. Readers stream them through Seer, never through a presigned store URL. */
+export function stageBlobKey(workspaceId: string, sha256: string): string {
+  return `stage-blobs/${workspaceId}/${sha256}`;
+}
+
+export function stageBlobPath(workspaceId: string, sha256: string): string {
+  return join(stageBlobsDir, workspaceId, sha256);
+}
+
+export async function saveStageBlob(workspaceId: string, sha256: string, data: Uint8Array): Promise<void> {
+  if (s3) {
+    await s3.write(stageBlobKey(workspaceId, sha256), data);
+    return;
+  }
+  mkdirSync(join(stageBlobsDir, workspaceId), { recursive: true });
+  await Bun.write(stageBlobPath(workspaceId, sha256), data);
+}
+
+export async function openStageBlob(
+  workspaceId: string,
+  sha256: string,
+): Promise<BunFile | ReadableStream<Uint8Array> | null> {
+  if (s3) {
+    const file: S3File = s3.file(stageBlobKey(workspaceId, sha256));
+    if (!(await file.exists())) return null;
+    return file.stream();
+  }
+  const file: BunFile = Bun.file(stageBlobPath(workspaceId, sha256));
+  if (!(await file.exists())) return null;
+  return file;
 }
 
 // ---- extraction cache with freshness bumping ----

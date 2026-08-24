@@ -50,6 +50,7 @@ import {
   resolveUploadProject,
 } from "./projects/api";
 import { attachBundle, listProjectsForBundle } from "./projects/db";
+import { handleCreateStageCapture, handleReadStageCapture } from "./stage/source";
 
 // ---- the shape of an entry ----
 
@@ -1106,6 +1107,78 @@ export const API_ROUTES: readonly ApiRoute[] = [
         },
       },
       run: (req) => handleListProjectNotes(req, req.params.slug),
+    },
+  }),
+
+  // Stage source capture. This route resolves and retains a pinned branch snapshot;
+  // stage versions and authored narrative are later slices.
+  route("/api/stage-captures", {
+    POST: {
+      doc: {
+        operationId: "createStageCapture",
+        summary: "Capture a pushed same-repository branch",
+        description:
+          "The API key's workspace owns the capture. Send a valid stage slug, repository, " +
+          "mutable source branch, and the Idempotency-Key header. baseRef defaults to the " +
+          "repository's default branch. Seer resolves both refs, verifies the merge base, " +
+          "walks both pinned trees, retains source objects within the configured logical-byte " +
+          "cap, and writes a self-contained completed inventory before returning. Compare " +
+          "metadata supplies rename and patch facts but never decides whether the snapshot " +
+          "is complete. Reusing the header for another request is a 409.",
+        security: "key",
+        parameters: [{
+          name: "Idempotency-Key",
+          in: "header",
+          required: true,
+          schema: { type: "string", minLength: 1, maxLength: 200 },
+          description: "Required replay key. It is scoped to the API key's workspace.",
+        }],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: {
+            type: "object",
+            required: ["slug", "repo", "branch"],
+            properties: {
+              slug: { type: "string", pattern: SLUG_RE.source },
+              repo: { type: "string", description: "owner/name; head repository and arbitrary commits are not accepted." },
+              branch: { type: "string", description: "The mutable source branch in repo. Slash-containing names are allowed." },
+              baseRef: { type: "string", description: "A branch in repo. Defaults to the repository's default branch." },
+            },
+            additionalProperties: false,
+          } } },
+        },
+        responses: {
+          "200": { description: "The completed immutable capture inventory.", content: { "application/json": { schema: {
+            type: "object", required: ["id", "workspace", "slug", "state", "repo", "repoId", "branch", "baseRef", "sourceHeadSha", "baseTipSha", "mergeBaseSha", "complete", "reviewable", "files", "incomplete", "createdAt"],
+            properties: {
+              id: { type: "string" }, workspace: { type: "string" }, slug: { type: "string" }, state: { type: "string", enum: ["completed"] },
+              repo: { type: "string" }, repoId: { type: "integer" }, branch: { type: "string" }, baseRef: { type: "string" },
+              sourceHeadSha: { type: "string" }, baseTipSha: { type: "string" }, mergeBaseSha: { type: "string" },
+              patch: { type: ["object", "null"] }, complete: { type: "boolean" }, reviewable: { type: "boolean" }, files: { type: "array", items: { type: "object" } },
+              incomplete: { type: "array", items: { type: "object", required: ["id", "kind", "path", "side", "reason"] } }, createdAt: { type: "string", format: "date-time" },
+            },
+          } } } },
+          "400": errorResponse, "401": errorResponse, "409": errorResponse, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handleCreateStageCapture(req),
+    },
+  }),
+
+  route("/api/stage-captures/:id", {
+    GET: {
+      doc: {
+        operationId: "readStageCapture",
+        summary: "Read a completed stage capture inventory",
+        description: "Workspace members and keys read completed captures. Missing, malformed, and cross-workspace ids return the same soft 404. This route never calls GitHub.",
+        security: "keyOrSession",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: "^stg_" } }],
+        responses: {
+          "200": { description: "The stored inventory and pinned source facts.", content: { "application/json": { schema: { type: "object", additionalProperties: true } } } },
+          "404": errorResponse,
+        },
+      },
+      run: (req) => handleReadStageCapture(req, req.params.id),
     },
   }),
 

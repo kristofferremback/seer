@@ -103,12 +103,48 @@ function repoFixture(readable: Record<string, string>) {
   return { seen, fetchImpl };
 }
 
-function credentialFor(userId: string, token: string): void {
-  createGithubUserCredential({
+function credentialFor(userId: string, token: string): string {
+  return createGithubUserCredential({
     userId, kind: "pat", label: "t", secret: token,
     accountLogin: "x", accountId: 1, scopes: ["contents:read"],
   });
 }
+
+test("a personal credential routes every stage method and a later 401 marks it dead", async () => {
+  const token = "github_pat_stage_private";
+  const user = "usr_stage_private";
+  const credentialId = credentialFor(user, token);
+  const sha = "a".repeat(40);
+  let failBlob = false;
+  const urls: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    urls.push(url);
+    const auth = new Headers(init?.headers).get("authorization");
+    if (url.endsWith("/repos/acme/private")) return auth === `Bearer ${token}`
+      ? Response.json({ id: 7, full_name: "acme/private", default_branch: "main" })
+      : new Response("no", { status: 404 });
+    if (failBlob && url.includes("/git/blobs/")) return new Response("dead", { status: 401 });
+    if (url.includes("/git/ref/heads/")) return Response.json({ ref: "refs/heads/main", object: { sha, type: "commit" } });
+    if (url.includes("/git/trees/")) return Response.json({ sha, truncated: false, tree: [] });
+    if (url.includes("/git/blobs/")) return Response.json({ sha, size: 2, encoding: "base64", content: "aGk=" });
+    if (url.includes("/compare/") && new Headers(init?.headers).get("accept") === "application/vnd.github.diff") return new Response("");
+    if (url.includes("/compare/")) return Response.json({ merge_base_commit: { sha }, files: [] });
+    return new Response("no", { status: 404 });
+  }) as typeof fetch;
+  const client = createUserGithubClient(user, { apiBase: "https://github.test", fetchImpl });
+  expect((await client.getRepository!("acme/private")).id).toBe(7);
+  expect((await client.getRef!("acme/private", "main")).sha).toBe(sha);
+  expect((await client.getTree!("acme/private", sha)).tree).toEqual([]);
+  expect(await client.getBlobBytes!("acme/private", sha)).toEqual(new TextEncoder().encode("hi"));
+  expect((await client.compare!("acme/private", sha, sha)).files).toEqual([]);
+  expect(await client.compareDiff!("acme/private", sha, sha)).toBe("");
+  expect(urls.every((url) => url.includes("github.test"))).toBe(true);
+
+  failBlob = true;
+  await expect(client.getBlobBytes!("acme/private", sha)).rejects.toBeInstanceOf(GithubCredentialDeadError);
+  expect(getGithubUserCredential(credentialId, user)?.dead_at).toBeTypeOf("number");
+});
 
 test("a user with their OWN credential still cannot reach a repository it cannot read", async () => {
   // This is the case the first test skipped. B is not credential-less: B has a working
