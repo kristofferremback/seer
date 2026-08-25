@@ -224,6 +224,7 @@ describe("stage reader", () => {
     ]);
     const bodies = await Promise.all(responses.map((response) => response.text()));
     expect(responses.map((response) => response.status)).toEqual([404, 404, 404, 404]);
+    expect(responses.map((response) => response.headers.get("cache-control"))).toEqual(["no-store", "no-store", "no-store", "no-store"]);
     expect(new Set(bodies).size).toBe(1);
   });
 
