@@ -96,6 +96,13 @@ describe("the document and the router are one list", () => {
     expect(undescribed).toEqual(["POST /api/github/webhook"]);
   });
 
+  test("the stage capture read has one indistinguishable refusal response", () => {
+    const route = API_ROUTES.find((entry) => entry.path === "/api/stage-captures/:id")!;
+    const responses = route.methods.GET!.doc!.responses;
+    expect(responses["401"]).toBeUndefined();
+    expect(responses["404"]).toBeDefined();
+  });
+
   test("no two operations share an operationId", () => {
     const ids = API_ROUTES.flatMap((r) =>
       Object.values(r.methods)
@@ -370,6 +377,8 @@ describe("a 200 matches the schema the document declares for it", () => {
     publishImage: "sharp re-encodes on the way in; covered end to end in tests/images.test.ts",
     publishImageViaPost: "same operation as publishImage",
     health: "not an /api/ route; its 200 is the four bytes of `ok`",
+    createStageCapture: "needs a staged GitHub tree fixture; covered in tests/stage.test.ts",
+    readStageCapture: "needs a staged capture fixture; covered in tests/stage.test.ts",
   };
 
   let ajv: Ajv2020;

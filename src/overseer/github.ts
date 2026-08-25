@@ -55,6 +55,38 @@ export interface GithubFile {
   patch?: string;
 }
 
+export interface GithubRepository {
+  id: number;
+  full_name: string;
+  default_branch: string;
+}
+
+export interface GithubRef {
+  ref: string;
+  sha: string;
+  type: "commit";
+}
+
+export interface GithubTreeEntry {
+  path: string;
+  mode: string;
+  type: "blob" | "tree" | "commit";
+  sha: string;
+  size?: number;
+}
+
+export interface GithubTree {
+  sha: string;
+  truncated: boolean;
+  tree: GithubTreeEntry[];
+}
+
+export interface GithubCompare {
+  merge_base_commit: { sha: string };
+  files: GithubFile[];
+  total_commits?: number;
+}
+
 export interface GithubReviewComment {
   id: number;
   path: string;
@@ -77,6 +109,13 @@ export interface GithubClient {
   getFileAtSha(repo: string, path: string, sha: string): Promise<string>;
   /** The whole pull request as one unified diff. The fallback when `files[].patch` is absent. */
   getPullDiff(repo: string, number: number): Promise<string>;
+  /** Stage capture capabilities. Optional keeps existing Overseer fakes source-compatible. */
+  getRepository?(repo: string): Promise<GithubRepository>;
+  getRef?(repo: string, ref: string): Promise<GithubRef>;
+  getTree?(repo: string, sha: string, recursive?: boolean): Promise<GithubTree>;
+  getBlobBytes?(repo: string, sha: string): Promise<Uint8Array>;
+  compare?(repo: string, base: string, head: string): Promise<GithubCompare>;
+  compareDiff?(repo: string, base: string, head: string): Promise<string>;
   /**
    * Which installation this client would route `repo` through, or null when none does
    * and the call would be refused.
@@ -129,6 +168,21 @@ export function assertRepo(repo: string): void {
   }
 }
 
+function assertObjectId(sha: string): void {
+  if (!/^[0-9a-f]{40}$/i.test(sha)) {
+    throw new GithubError(`Malformed Git object id ${JSON.stringify(sha)}.`, 0, "");
+  }
+}
+
+export function assertRef(ref: string): void {
+  if (
+    ref.length === 0 || ref.length > 255 || ref.startsWith("/") || ref.endsWith("/") || ref.startsWith("-") || ref === "@" ||
+    ref.split("/").some((part) => part === "" || part === "." || part === ".." || part.startsWith(".") || part.endsWith(".lock")) ||
+    ref.includes("..") || ref.includes("@{") || ref.endsWith(".") || ref.endsWith(".lock") ||
+    /[\u0000-\u0020~^:?*\[\]\\]/.test(ref)
+  ) throw new GithubError(`Malformed Git ref ${JSON.stringify(ref)}.`, 0, "");
+}
+
 /** A pull request number is interpolated raw into the URL, so it is a number or nothing. */
 function assertNumber(number: number): void {
   if (!Number.isInteger(number) || number <= 0) {
@@ -146,7 +200,7 @@ function assertNumber(number: number): void {
  * endpoint with the token attached. Paths are authored outside this module, so they
  * are checked here rather than trusted.
  */
-function assertPath(path: string): void {
+export function assertPath(path: string): void {
   const bad =
     path.length === 0 ||
     path.startsWith("/") ||
@@ -238,6 +292,20 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
     return (await res.json()) as T;
   }
 
+  function validObjectId(value: unknown, label: string, path: string): string {
+    if (typeof value !== "string" || !/^[0-9a-f]{40}$/i.test(value)) {
+      throw new GithubError(`GitHub returned an invalid ${label} for ${base}${path}.`, 0, `${base}${path}`);
+    }
+    return value;
+  }
+
+  function validString(value: unknown, label: string, path: string): string {
+    if (typeof value !== "string" || value.length === 0) {
+      throw new GithubError(`GitHub returned an invalid ${label} for ${base}${path}.`, 0, `${base}${path}`);
+    }
+    return value;
+  }
+
   async function paged<T>(path: string): Promise<T[]> {
     const out: T[] = [];
     let next: string | null = `${path}?per_page=${PER_PAGE}`;
@@ -263,6 +331,122 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
       assertRepo(repo);
       assertNumber(number);
       return json<GithubPull>(`/repos/${repo}/pulls/${number}`);
+    },
+    async getRepository(repo) {
+      assertRepo(repo);
+      const path = `/repos/${repo}`;
+      const body = (await json<unknown>(path)) as Record<string, unknown>;
+      if (!body || typeof body !== "object" || !Number.isInteger(body.id) || (body.id as number) <= 0 || typeof body.full_name !== "string") {
+        throw new GithubError(`GitHub returned an invalid repository for ${base}${path}.`, 0, `${base}${path}`);
+      }
+      const fullName = validString(body.full_name, "canonical repository name", path);
+      try { assertRepo(fullName); } catch { throw new GithubError(`GitHub returned an invalid canonical repository name for ${base}${path}.`, 0, `${base}${path}`); }
+      const defaultBranch = validString(body.default_branch, "default branch", path);
+      assertRef(defaultBranch);
+      return { id: body.id as number, full_name: fullName, default_branch: defaultBranch };
+    },
+    async getRef(repo, ref) {
+      assertRepo(repo);
+      assertRef(ref);
+      const path = `/repos/${repo}/git/ref/heads/${encodeURIComponent(ref)}`;
+      const body = (await json<unknown>(path)) as Record<string, unknown>;
+      const object = body?.object as Record<string, unknown> | undefined;
+      const sha = validObjectId(object?.sha, "ref object id", path);
+      const returnedRef = validString(body?.ref, "ref name", path);
+      if (returnedRef !== `refs/heads/${ref}` || (body?.object as Record<string, unknown> | undefined)?.type !== "commit") {
+        throw new GithubError(`GitHub returned ${returnedRef} instead of refs/heads/${ref}.`, 0, `${base}${path}`);
+      }
+      return { ref: returnedRef, sha, type: "commit" };
+    },
+    async getTree(repo, sha, recursive = true) {
+      assertRepo(repo);
+      assertObjectId(sha);
+      const path = `/repos/${repo}/git/trees/${sha}${recursive ? "?recursive=1" : ""}`;
+      const body = (await json<unknown>(path)) as Record<string, unknown>;
+      if (!Array.isArray(body?.tree) || typeof body?.truncated !== "boolean") {
+        throw new GithubError(`GitHub returned an invalid tree for ${base}${path}.`, 0, `${base}${path}`);
+      }
+      const tree: GithubTreeEntry[] = [];
+      for (const raw of body.tree) {
+        const entry = raw as Record<string, unknown>;
+        if (
+          typeof entry.path !== "string" || entry.path.length === 0 ||
+          (() => { try { assertPath(entry.path as string); return false; } catch { return true; } })() ||
+          typeof entry.mode !== "string" || !["blob", "tree", "commit"].includes(String(entry.type)) ||
+          (entry.type === "blob" && (!["100644", "100755", "120000"].includes(entry.mode as string) || !Number.isInteger(entry.size) || (entry.size as number) < 0)) ||
+          (entry.type === "tree" && entry.mode !== "040000") ||
+          (entry.type === "commit" && entry.mode !== "160000") ||
+          typeof entry.sha !== "string" || !/^[0-9a-f]{40}$/i.test(entry.sha) ||
+          (entry.size !== undefined && (!Number.isInteger(entry.size) || (entry.size as number) < 0))
+        ) throw new GithubError(`GitHub returned an invalid tree entry for ${base}${path}.`, 0, `${base}${path}`);
+        tree.push({ path: entry.path, mode: entry.mode, type: entry.type as GithubTreeEntry["type"], sha: entry.sha,
+          ...(entry.size === undefined ? {} : { size: entry.size as number }) });
+      }
+      return { sha: validObjectId(body.sha ?? sha, "tree id", path), truncated: body.truncated as boolean, tree };
+    },
+    async getBlobBytes(repo, sha) {
+      assertRepo(repo);
+      assertObjectId(sha);
+      const path = `/repos/${repo}/git/blobs/${sha}`;
+      const body = (await json<unknown>(path)) as Record<string, unknown>;
+      if (body?.encoding !== "base64" || typeof body.content !== "string" ||
+          typeof body.sha !== "string" || !/^[0-9a-f]{40}$/i.test(body.sha) || body.sha.toLowerCase() !== sha.toLowerCase() ||
+          !Number.isInteger(body.size) || (body.size as number) < 0 || (body.size as number) > 100 * 1024 * 1024) {
+        throw new GithubError(`GitHub returned an invalid blob for ${base}${path}.`, 0, `${base}${path}`);
+      }
+      const compact = body.content.replace(/\s/g, "");
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(compact) || compact.length % 4 !== 0) {
+        throw new GithubError(`GitHub returned invalid base64 for ${base}${path}.`, 0, `${base}${path}`);
+      }
+      const bytes = Uint8Array.from(Buffer.from(compact, "base64"));
+      if (bytes.byteLength !== body.size) {
+        throw new GithubError(`GitHub returned blob size ${bytes.byteLength}, expected ${body.size}, for ${base}${path}.`, 0, `${base}${path}`);
+      }
+      return bytes;
+    },
+    async compareDiff(repo, baseRef, headRef) {
+      assertRepo(repo);
+      assertObjectId(baseRef);
+      assertObjectId(headRef);
+      const path = `/repos/${repo}/compare/${encodeURIComponent(baseRef)}...${encodeURIComponent(headRef)}`;
+      const res = await request(path, "application/vnd.github.diff");
+      return res.text();
+    },
+    async compare(repo, baseRef, headRef) {
+      assertRepo(repo);
+      assertRef(baseRef);
+      assertRef(headRef);
+      const path = `/repos/${repo}/compare/${encodeURIComponent(baseRef)}...${encodeURIComponent(headRef)}`;
+      const body = (await json<unknown>(path)) as Record<string, unknown>;
+      const merge = body?.merge_base_commit as Record<string, unknown> | undefined;
+      if (!merge || !Array.isArray(body?.files)) {
+        throw new GithubError(`GitHub returned an invalid comparison for ${base}${path}.`, 0, `${base}${path}`);
+      }
+      const files: GithubFile[] = [];
+      for (const raw of body.files) {
+        const file = raw as Record<string, unknown>;
+        if (typeof file.filename !== "string" || typeof file.status !== "string" ||
+            !Number.isInteger(file.additions) || !Number.isInteger(file.deletions) || !Number.isInteger(file.changes)) {
+          throw new GithubError(`GitHub returned an invalid comparison file for ${base}${path}.`, 0, `${base}${path}`);
+        }
+        try {
+          assertPath(file.filename as string);
+          if (file.previous_filename !== undefined) assertPath(file.previous_filename as string);
+        } catch {
+          throw new GithubError(`GitHub returned an invalid comparison path for ${base}${path}.`, 0, `${base}${path}`);
+        }
+        if (file.sha !== undefined) validObjectId(file.sha, "comparison file object id", path);
+        if (file.patch !== undefined && typeof file.patch !== "string") {
+          throw new GithubError(`GitHub returned an invalid patch for ${base}${path}.`, 0, `${base}${path}`);
+        }
+        files.push({ filename: file.filename, status: file.status, additions: file.additions as number,
+          deletions: file.deletions as number, changes: file.changes as number,
+          ...(file.sha === undefined ? {} : { sha: file.sha as string }),
+          ...(file.previous_filename === undefined ? {} : { previous_filename: file.previous_filename as string }),
+          ...(file.patch === undefined ? {} : { patch: file.patch as string }) });
+      }
+      return { merge_base_commit: { sha: validObjectId(merge.sha, "merge base object id", path) }, files,
+        ...(Number.isInteger(body.total_commits) ? { total_commits: body.total_commits as number } : {}) };
     },
     async listCommits(repo, number) {
       assertRepo(repo);

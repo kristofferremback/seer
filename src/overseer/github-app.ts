@@ -500,6 +500,12 @@ export function createWorkspaceGithubClient(options: WorkspaceClientOptions): Gi
       listReviewComments: (r, n) => guard(() => client.listReviewComments(r, n)),
       getFileAtSha: (r, p, sha) => guard(() => client.getFileAtSha(r, p, sha)),
       getPullDiff: (r, n) => guard(() => client.getPullDiff(r, n)),
+      getRepository: (r) => guard(() => client.getRepository!(r)),
+      getRef: (r, ref) => guard(() => client.getRef!(r, ref)),
+      getTree: (r, sha, recursive) => guard(() => client.getTree!(r, sha, recursive)),
+      getBlobBytes: (r, sha) => guard(() => client.getBlobBytes!(r, sha)),
+      compare: (r, base, head) => guard(() => client.compare!(r, base, head)),
+      compareDiff: (r, base, head) => guard(() => client.compareDiff!(r, base, head)),
     };
   }
 
@@ -542,6 +548,12 @@ export function createWorkspaceGithubClient(options: WorkspaceClientOptions): Gi
       getFileAtSha: (r, p, sha) =>
         fall(() => user.getFileAtSha(r, p, sha), () => anon.getFileAtSha(r, p, sha)),
       getPullDiff: (r, n) => fall(() => user.getPullDiff(r, n), () => anon.getPullDiff(r, n)),
+      getRepository: (r) => fall(() => user.getRepository!(r), () => anon.getRepository!(r)),
+      getRef: (r, ref) => fall(() => user.getRef!(r, ref), () => anon.getRef!(r, ref)),
+      getTree: (r, sha, recursive) => fall(() => user.getTree!(r, sha, recursive), () => anon.getTree!(r, sha, recursive)),
+      getBlobBytes: (r, sha) => fall(() => user.getBlobBytes!(r, sha), () => anon.getBlobBytes!(r, sha)),
+      compare: (r, base, head) => fall(() => user.compare!(r, base, head), () => anon.compare!(r, base, head)),
+      compareDiff: (r, base, head) => fall(() => user.compareDiff!(r, base, head), () => anon.compareDiff!(r, base, head)),
     };
   }
 
@@ -611,6 +623,24 @@ export function createWorkspaceGithubClient(options: WorkspaceClientOptions): Gi
     },
     async getPullDiff(repo, number) {
       return (await authorize(repo)).getPullDiff(repo, number);
+    },
+    async getRepository(repo) {
+      return (await authorize(repo)).getRepository!(repo);
+    },
+    async getRef(repo, ref) {
+      return (await authorize(repo)).getRef!(repo, ref);
+    },
+    async getTree(repo, sha, recursive) {
+      return (await authorize(repo)).getTree!(repo, sha, recursive);
+    },
+    async getBlobBytes(repo, sha) {
+      return (await authorize(repo)).getBlobBytes!(repo, sha);
+    },
+    async compare(repo, base, head) {
+      return (await authorize(repo)).compare!(repo, base, head);
+    },
+    async compareDiff(repo, base, head) {
+      return (await authorize(repo)).compareDiff!(repo, base, head);
     },
   };
 }

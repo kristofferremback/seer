@@ -37,6 +37,12 @@ test("v0-with-data migrates losslessly and is idempotent", async () => {
   expect(out).toContain("all assertions passed");
 });
 
+test("a populated v11 database gains only the additive v12 capture tables", async () => {
+  const { code, out } = await runScenario("v11");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("fresh/empty db bootstraps the root workspace", async () => {
   const { code, out } = await runScenario("fresh");
   expect(code).toBe(0);
