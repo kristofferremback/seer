@@ -104,9 +104,12 @@ export const STAGE_CLIENT = String.raw`(()=>{
   const observeActiveChanges=()=>{
     activeObserver?.disconnect?.();activeObserver=null;if(!('IntersectionObserver' in window)||!dialog?.open)return;
     const stream=dialog.querySelector('[data-focus-stream]');if(!stream)return;
-    activeObserver=new IntersectionObserver(entries=>{
-      const visible=entries.filter(entry=>entry.isIntersecting).sort((a,b)=>b.intersectionRatio-a.intersectionRatio)[0];
-      if(visible?.target?.dataset.change)activateChange(visible.target.dataset.change,{scrollLedger:true,writeUrl:true});
+    const intersecting=new Set();activeObserver=new IntersectionObserver(entries=>{
+      for(const entry of entries)entry.isIntersecting?intersecting.add(entry.target):intersecting.delete(entry.target);
+      const bounds=stream.getBoundingClientRect();const focusY=bounds.top+bounds.height/2;
+      const visible=[...intersecting].map(node=>({node,bounds:node.getBoundingClientRect()}));
+      visible.sort((a,b)=>{const distance=item=>item.bounds.top<=focusY&&item.bounds.bottom>=focusY?0:Math.min(Math.abs(item.bounds.top-focusY),Math.abs(item.bounds.bottom-focusY));return distance(a)-distance(b)||a.bounds.top-b.bounds.top});
+      const change=visible[0]?.node?.dataset.change;if(change&&change!==dialog.dataset.activeChange)activateChange(change,{scrollLedger:true,writeUrl:true});
     },{root:stream,threshold:[.25,.55,.85]});
     dialog.querySelectorAll('.hunk-review[data-change]').forEach(node=>activeObserver.observe(node));
   };

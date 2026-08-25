@@ -3,6 +3,7 @@ await GlobalRegistrator.register({ url: "http://localhost/ws/st/reader/v/1" });
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { STAGE_CLIENT } from "../src/stage/render-client";
+import { STAGE_CSS } from "../src/stage/render-css";
 
 declare const document: any;
 declare const window: any;
@@ -92,6 +93,13 @@ beforeEach(async () => {
 afterAll(async () => GlobalRegistrator.unregister());
 
 describe("stage reader client", () => {
+  test("the closed mobile panel scrim cannot cover the focused review", () => {
+    expect(STAGE_CSS).toContain("[hidden]{display:none!important}");
+    expect(STAGE_CSS).toContain(".focus-layout[data-panel=tree] .focus-scrim");
+    expect(STAGE_CSS).toContain(".focus-layout[data-panel=detail] .focus-scrim");
+    expect(STAGE_CSS).not.toContain(".focus-layout[data-panel] .focus-scrim");
+  });
+
   test("marking read collapses only that change and updates every aggregate", async () => {
     run(); click("[data-focus-link]");
     const hunks = document.querySelectorAll(".hunk-review[data-change]");
@@ -222,6 +230,29 @@ describe("stage reader client", () => {
     expect(document.querySelector("[data-review-nav]").dataset.open).toBe("false");
     expect(new URL(location.href).searchParams.get("panel")).toBeNull();
     expect(location.hash).toBe("#group-first");
+  });
+
+  test("active change follows the reading line instead of the shortest visible hunk", () => {
+    let intersect: ((entries: any[]) => void) | null = null;
+    class IntersectionObserverStub {
+      constructor(callback: (entries: any[]) => void) { intersect = callback; }
+      observe() {}
+      disconnect() {}
+    }
+    window.IntersectionObserver = IntersectionObserverStub;
+    (globalThis as any).IntersectionObserver = IntersectionObserverStub;
+    const stream = document.querySelector("[data-focus-stream]");
+    const hunks = document.querySelectorAll(".hunk-review[data-change]");
+    stream.getBoundingClientRect = () => ({ top: 0, bottom: 700, height: 700 });
+    hunks[0].getBoundingClientRect = () => ({ top: 60, bottom: 180, height: 120 });
+    hunks[1].getBoundingClientRect = () => ({ top: 220, bottom: 520, height: 300 });
+    run(); click("[data-focus-link]"); click(`[data-activate-change="${B}"]`);
+    intersect!([
+      { target: hunks[0], isIntersecting: true, intersectionRatio: 0.95 },
+      { target: hunks[1], isIntersecting: true, intersectionRatio: 0.4 },
+    ]);
+    expect(document.querySelector("[data-focus-dialog]").dataset.activeChange).toBe(B);
+    expect(new URL(location.href).searchParams.get("change")).toBe(B);
   });
 
   test("unread filter and linked hover change emphasis without changing content", () => {
