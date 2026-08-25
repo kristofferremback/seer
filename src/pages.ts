@@ -1455,13 +1455,13 @@ export function skillRouter(): string {
   const base = config.baseUrl;
   return `---
 name: seer
-description: "Publish to Seer: HTML bundles a human can open in a browser, and Overseer reviews of GitHub pull requests. Takes one argument naming what you want to do. Use when asked to publish a page, share a built artifact, or review a pull request."
+description: "Publish to Seer: HTML bundles, staged walkthroughs, and Overseer reviews of GitHub pull requests. Takes one argument naming what you want to do."
 ---
 
 # Seer
 
-Seer holds things a human is meant to look at: HTML bundles you built, and Overseer
-reviews of pull requests. Each capability has its own instructions; this page says which
+Seer holds things a human is meant to look at: HTML bundles, staged walkthroughs, and
+Overseer reviews of pull requests. Each capability has its own instructions; this page says which
 one you want and where it lives.
 
 You need an API key, \`$SEER_API_KEY\`, which belongs to one workspace and is the same key
@@ -1473,6 +1473,7 @@ for everything below. A human mints it at \`${base}/settings/<workspace>\`.
 |---|---|
 | publish a page, dashboard, report or small app | \`${base}/bundles/skill.md\` |
 | review a pull request, or a stack of them | \`${base}/overseer/agent.md\` |
+| publish a pinned staged walkthrough | \`${base}/stage/agent.md\` |
 | group work into a project, keep it, or resume one | \`${base}/projects/skill.md\` |
 
 Fetch the one that matches and follow it. Do not guess at an API from this page: each
@@ -1482,6 +1483,7 @@ document carries the exact calls, and they are the current ones.
 # whichever fits the request
 curl -s ${base}/bundles/skill.md
 curl -s ${base}/overseer/agent.md
+curl -s ${base}/stage/agent.md
 curl -s ${base}/projects/skill.md
 \`\`\`
 
@@ -1523,6 +1525,7 @@ GET    /api/projects/<slug>                       everything one project holds, 
 PATCH  /api/projects/<slug>                       any of: title, description, status, parent
 PUT    /api/projects/<slug>/bundles/<bundle>      attach a bundle    (DELETE detaches)
 PUT    /api/projects/<slug>/reviews/<review>      attach a review    (DELETE detaches)
+POST   /api/stages                               publish a staged walkthrough, with optional projects
 PUT    /api/bundles/<bundle>?project=<slug>       publish a bundle straight into a project
 POST   /api/projects/<slug>/tasks                 create: {title, body?, gates?, prs?}
 PATCH  /api/projects/<slug>/tasks/<tsk_id>        any of: title, body, status, gates, prs
@@ -1591,7 +1594,10 @@ status transition Seer recorded, oldest first. Reading it front to back is readi
 the project's history.
 
 A review can also name projects as it publishes: a \`projects\`: \`["calling"]\` field
-in the review document attaches the review on landing. See ${base}/overseer/skill.md.
+in the review document attaches the review on landing. A staged walkthrough can name the
+same field when it publishes; the project state carries its title and version, but this
+slice does not make a stage page link. See ${base}/overseer/skill.md and
+${base}/stage/agent.md.
 
 ## The fields
 
@@ -2703,6 +2709,8 @@ export interface ProjectPageData {
   plans: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   bundles: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   reviews: { slug: string; title: string; latestVersion: number; publishedAt: number; url: string }[];
+  /** Stages are carried for the API and markdown projection. The human row waits for task 3's page URL. */
+  stages?: { slug: string; title: string; latestVersion: number; updatedAt: number; apiUrl: string }[];
   /** The bounded tail of the record: authored notes (body rendered by the server)
    *  interleaved with derived status events, oldest first. */
   trail: (
@@ -2998,6 +3006,10 @@ export function projectMarkdown(d: ProjectPageData): string {
   if (d.reviews.length > 0) {
     lines.push("", "## Reviews", "");
     for (const r of d.reviews) lines.push(`- ${r.title} (${r.slug}) v${r.latestVersion}: ${r.url}`);
+  }
+  if ((d.stages ?? []).length > 0) {
+    lines.push("", "## Stages", "");
+    for (const s of d.stages ?? []) lines.push(`- ${s.title} (${s.slug}) v${s.latestVersion}`);
   }
   if (d.trail.length > 0) {
     lines.push("", "## Notes", "");

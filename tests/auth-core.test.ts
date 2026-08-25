@@ -14,7 +14,9 @@ beforeAll(() => {
   // (and imports API_TOKEN=test-token as the legacy key) if no prior test file did.
   migrate();
   rootWs = legacyWorkspaceId()!;
-  rootUserId = db.query<{ id: string }, []>("SELECT id FROM users LIMIT 1").get()!.id;
+  rootUserId = db.query<{ user_id: string }, [string]>(
+    "SELECT user_id FROM api_keys WHERE workspace_id = ? AND is_legacy = 1 ORDER BY created_at ASC LIMIT 1",
+  ).get(rootWs)!.user_id;
 });
 
 function bearer(token: string): Request {

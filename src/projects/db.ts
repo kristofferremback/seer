@@ -206,7 +206,7 @@ export function listProjectEvents(projectId: string): ProjectEvent[] {
 
 // ---- membership ----
 
-type MembershipTable = "project_bundles" | "project_reviews";
+type MembershipTable = "project_bundles" | "project_reviews" | "project_stages";
 
 function attach(table: MembershipTable, project: ProjectRow, slug: string): boolean {
   const before = db
@@ -273,6 +273,7 @@ export function listProjectsForBundle(wsId: string, slug: string): ProjectRow[] 
 export interface ProjectCounts {
   bundles: number;
   reviews: number;
+  stages: number;
   children: number;
   tasks: number;
 }
@@ -280,9 +281,13 @@ export interface ProjectCounts {
 export function projectCounts(projectId: string): ProjectCounts {
   const count = (sql: string) =>
     db.query<{ n: number }, [string]>(sql).get(projectId)?.n ?? 0;
+  const stages = db.query<{ n: number }, [string, string]>(
+    "SELECT COUNT(*) AS n FROM project_stages WHERE project_id = ? AND workspace_id = (SELECT workspace_id FROM projects WHERE id = ?)",
+  ).get(projectId, projectId)?.n ?? 0;
   return {
     bundles: count("SELECT COUNT(*) AS n FROM project_bundles WHERE project_id = ?"),
     reviews: count("SELECT COUNT(*) AS n FROM project_reviews WHERE project_id = ?"),
+    stages,
     children: count("SELECT COUNT(*) AS n FROM projects WHERE parent_id = ?"),
     tasks: count("SELECT COUNT(*) AS n FROM project_tasks WHERE project_id = ?"),
   };

@@ -1,15 +1,22 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020";
+import addFormats from "ajv-formats";
 import { join } from "node:path";
 import { startServer } from "../src/server";
 import { config } from "../src/config";
 import { createWorkspace, legacyWorkspaceId, listMembers, mintApiKey } from "../src/db";
+import { sessionCookie } from "../src/auth";
 import { offlineGithubClientFactory } from "./offline-github";
 import { setGithubClientFactory } from "../src/overseer/github-app";
 import type { GithubClient } from "../src/overseer/github";
 import { db } from "../src/db";
-import { openStageBlob } from "../src/store";
+import { tinyId } from "../src/ids";
+import { openStageBlob, saveStageBlob, stageBlobPath } from "../src/store";
 import { getStageCapture, insertStageCapture } from "../src/stage/db";
 import { rederiveCanonicalChanges } from "../src/stage/source";
+import { validateStagePublish } from "../src/stage/validate";
+import { createProject } from "../src/projects/db";
+import { openApiSpec } from "../src/agent-discovery";
 
 const id = (n: number) => n.toString(16).padStart(40, "0");
 const BASE = id(1), HEAD = id(2), MERGE = id(3);
@@ -141,7 +148,16 @@ let server: Awaited<ReturnType<typeof startServer>>;
 let base: string;
 let key: string;
 let ws: string;
-const body = { slug: "branch-snapshot", repo: "Acme/Repo", branch: "feature/blue" };
+const body = {
+  slug: "branch-snapshot",
+  repo: "Acme/Repo",
+  branch: "feature/blue",
+  builder: {
+    intent: "Capture the pushed branch for a staged walkthrough.",
+    context: "The witness will inspect the pinned source.",
+    agent: { name: "builder", model: "test-model" },
+  },
+};
 const auth = (extra: Record<string, string> = {}) => ({ authorization: `Bearer ${key}`, ...extra });
 
 async function rederiveStored(inventory: NonNullable<ReturnType<typeof getStageCapture>>) {
@@ -149,6 +165,54 @@ async function rederiveStored(inventory: NonNullable<ReturnType<typeof getStageC
     const file = await openStageBlob(inventory.capture.workspace_id, sha);
     return file ? new Uint8Array(await new Response(file).arrayBuffer()) : null;
   });
+}
+
+function validateOpenApiResponse(operationId: string, body: unknown): void {
+  const spec = openApiSpec() as any;
+  const operation = Object.values(spec.paths).flatMap((path: any) => Object.values(path)).find((candidate: any) => candidate.operationId === operationId) as any;
+  const schema = operation.responses["200"].content["application/json"].schema;
+  const ajv = new Ajv2020({ strict: false });
+  addFormats(ajv);
+  const validate = ajv.compile(schema);
+  if (!validate(body)) throw new Error(`${operationId}: ${ajv.errorsText(validate.errors)}`);
+}
+
+async function createCapture(slug: string, builder = body.builder, idempotencySuffix = slug): Promise<any> {
+  setGithubClientFactory(() => fixtureClient());
+  const response = await fetch(`${base}/api/stage-captures`, {
+    method: "POST",
+    headers: auth({ "content-type": "application/json", "Idempotency-Key": `capture-${idempotencySuffix}` }),
+    body: JSON.stringify({ ...body, slug, builder }),
+  });
+  expect(response.status).toBe(200);
+  return response.json();
+}
+
+function partitionMembers(capture: any): any[] {
+  return [
+    ...capture.incomplete.filter((item: any) => item.path === null).map((item: any) => ({ type: "material", id: item.id, description: "Capture material" })),
+    ...capture.files.flatMap((file: any) => {
+      const materials = capture.incomplete.filter((item: any) => item.path === file.path);
+      return [
+        ...file.changes.map((change: any) => ({ type: "change", id: change.id, description: `Read ${file.path}` })),
+        ...materials.map((item: any) => ({ type: "material", id: item.id, description: `Material for ${file.path}` })),
+        ...(file.changes.length === 0 && materials.length === 0 ? [{ type: "file", id: file.id, description: `Retained file ${file.path}` }] : []),
+      ];
+    }),
+  ];
+}
+
+function publishPayload(capture: any, overrides: Record<string, unknown> = {}): any {
+  return {
+    captureId: capture.id,
+    expectedPreviousVersion: 0,
+    slug: capture.slug,
+    title: "Pinned branch walkthrough",
+    summary: "The witness account.",
+    witness: { name: "witness", model: "fresh-model" },
+    groups: [{ id: "source-account", title: "Source account", category: "Code", importance: "high", complexity: "medium", explanation: "The pinned source account.", examples: [], members: partitionMembers(capture) }],
+    ...overrides,
+  };
 }
 
 beforeAll(async () => {
@@ -169,6 +233,9 @@ describe("stage captures", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     const capture = await res.json() as any;
+    const objectSha = capture.patch?.sha256 ?? capture.files.flatMap((file: any) => [file.old.blobSha256, file.new.blobSha256]).find(Boolean);
+    validateOpenApiResponse("createStageCapture", capture);
+    expect(capture.id).toMatch(/^stg_[0-9abcdefghjkmnpqrstvwxyz]{10}$/);
     expect(capture.baseRef).toBe("main");
     expect(capture.sourceHeadSha).toBe(HEAD);
     expect(capture.baseTipSha).toBe(BASE);
@@ -210,10 +277,24 @@ describe("stage captures", () => {
     expect(capture.incomplete.filter((item: any) => item.path === "image.bin").map((item: any) => item.reason)).toEqual([binaryReason, binaryReason]);
     expect(calls.count).toBe(1);
 
+    const otherClient = fixtureClient();
+    otherClient.compareDiff = async () => "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+other\n";
+    setGithubClientFactory(() => otherClient);
+    const otherResponse = await fetch(`${base}/api/stage-captures`, { method: "POST", headers: auth({ "content-type": "application/json", "Idempotency-Key": "privacy-second" }), body: JSON.stringify({ ...body, slug: "privacy-second" }) });
+    expect(otherResponse.status).toBe(200);
+    const otherCapture = await otherResponse.json() as any;
+    const otherObjectSha = otherCapture.patch?.sha256 ?? otherCapture.files.flatMap((file: any) => [file.old.blobSha256, file.new.blobSha256]).find(Boolean);
+    expect(otherObjectSha).toBeTruthy();
+    expect(otherObjectSha).not.toBe(objectSha);
+
     setGithubClientFactory(() => { throw new Error("GitHub must not be called while reading"); });
+    const objectOperation = Object.values((openApiSpec() as any).paths).flatMap((path: any) => Object.values(path)).find((operation: any) => operation.operationId === "readStageCaptureObject") as any;
+    expect(objectOperation.responses["200"].content["application/octet-stream"].schema).toEqual({ type: "string", format: "binary" });
     const read = await fetch(`${base}/api/stage-captures/${capture.id}`, { headers: auth() });
     expect(read.status).toBe(200);
-    expect(await read.text()).toBe(JSON.stringify(capture, null, 2));
+    const readText = await read.text();
+    validateOpenApiResponse("readStageCapture", JSON.parse(readText));
+    expect(readText).toBe(JSON.stringify(capture, null, 2));
 
     const inventory = getStageCapture(capture.id, ws)!;
     expect((db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM stage_blobs").get()!).count).toBeGreaterThan(0);
@@ -226,7 +307,7 @@ describe("stage captures", () => {
     const script = join(import.meta.dir, "stage-privacy.script.ts");
     const proc = Bun.spawn(["bun", "run", script], {
       stdout: "pipe", stderr: "pipe",
-      env: { ...process.env, AUTH_DISABLED: undefined as unknown as string, STAGE_CAPTURE_ID: capture.id, STAGE_CAPTURE_KEY: key },
+      env: { ...process.env, AUTH_DISABLED: undefined as unknown as string, STAGE_CAPTURE_ID: capture.id, STAGE_CAPTURE_KEY: key, STAGE_OTHER_CAPTURE_ID: otherCapture.id, STAGE_OTHER_OBJECT_SHA: otherObjectSha },
     });
     const code = await proc.exited;
     const output = await new Response(proc.stdout).text();
@@ -556,6 +637,463 @@ describe("stage captures", () => {
     expect([...stored.values()].some((data) => new TextDecoder().decode(data).includes("diff --git"))).toBe(false);
     const rederived = await rederiveCanonicalChanges(inventory, async (sha) => stored.get(sha) ?? null);
     expect(rederived).toEqual(inventory.changes);
+  });
+
+  test("publishes an exact partition with separate builder and witness actors and Project state", async () => {
+    setGithubClientFactory(() => fixtureClient());
+    const captureResponse = await fetch(`${base}/api/stage-captures`, {
+      method: "POST",
+      headers: auth({ "content-type": "application/json", "Idempotency-Key": "publish-capture" }),
+      body: JSON.stringify({ ...body, slug: "publish-stage" }),
+    });
+    expect(captureResponse.status).toBe(200);
+    const capture = await captureResponse.json() as any;
+    const projectResponse = await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: auth({ "content-type": "application/json" }),
+      body: JSON.stringify({ slug: "stage-project", title: "Stage project" }),
+    });
+    expect(projectResponse.status).toBe(200);
+    const members = [
+      ...capture.incomplete.filter((item: any) => item.path === null).map((item: any) => ({ type: "material", id: item.id, description: "Capture material" })),
+      ...capture.files.flatMap((file: any) => [
+      ...file.changes.map((change: any) => ({ type: "change", id: change.id, description: `Read ${file.path}` })),
+      ...capture.incomplete.filter((item: any) => item.path === file.path).map((item: any) => ({ type: "material", id: item.id, description: `Material for ${file.path}` })),
+      ...(file.changes.length === 0 && !capture.incomplete.some((item: any) => item.path === file.path)
+        ? [{ type: "file", id: file.id, description: `Retained file ${file.path}` }]
+        : []),
+      ]),
+    ];
+    const witnessUser = tinyId("usr");
+    db.run("INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)", [witnessUser, "witness@stage.test", Date.now()]);
+    db.run("INSERT INTO memberships (workspace_id, user_id, created_at) VALUES (?, ?, ?)", [ws, witnessUser, Date.now()]);
+    const witnessKey = mintApiKey(witnessUser, ws, "witness");
+    const publishResponse = await fetch(`${base}/api/stages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${witnessKey.token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        captureId: capture.id,
+        expectedPreviousVersion: 0,
+        slug: capture.slug,
+        title: "Pinned branch walkthrough",
+        summary: "The witness account.",
+        witness: { name: "witness", model: "fresh-model" },
+        groups: [{ id: "source-account", title: "Source account", category: "Code", importance: "high", complexity: "medium", explanation: "The pinned source account.", examples: [], members }],
+        projects: ["stage-project"],
+      }),
+    });
+    expect(publishResponse.status).toBe(200);
+    const published = await publishResponse.json() as any;
+    validateOpenApiResponse("publishStage", published);
+    expect(published.version).toBe(1);
+    expect(published.id).toMatch(/^sta_[0-9abcdefghjkmnpqrstvwxyz]{10}$/);
+    expect(published.document.identity.id).toBe(published.id);
+    expect((db.query<{ id: string }, [string]>('SELECT id FROM stage_versions WHERE capture_id = ?').get(capture.id)!).id).toMatch(/^stv_[0-9abcdefghjkmnpqrstvwxyz]{10}$/);
+    expect(published.document.builder.userId).toBe((capture.builder as any).userId);
+    expect(published.document.witness.userId).toBe(witnessUser);
+    expect(published.document.builder.keyId).toBe((capture.builder as any).keyId);
+    expect(published.document.witness.keyId).toBe(witnessKey.id);
+    expect(published.document.builder.keyId).not.toBe(published.document.witness.keyId);
+    expect(db.query("SELECT witness_user_id, witness_key_id FROM stage_versions WHERE capture_id = ?").get(capture.id)).toEqual({ witness_user_id: witnessUser, witness_key_id: witnessKey.id });
+    expect(published.document.source.mergeBaseSha).toBe(capture.mergeBaseSha);
+    expect(db.query("SELECT COUNT(*) AS count FROM stages WHERE workspace_id = ?").get(ws)).toEqual({ count: 1 });
+    expect(db.query("SELECT COUNT(*) AS count FROM stage_versions WHERE workspace_id = ?").get(ws)).toEqual({ count: 1 });
+    expect(db.query("SELECT COUNT(*) AS count FROM project_stages WHERE workspace_id = ?").get(ws)).toEqual({ count: 1 });
+    const read = await fetch(`${base}/api/stages/${capture.slug}`, { headers: auth() });
+    expect(read.status).toBe(200);
+    expect((await read.json() as any).document.identity.version).toBe(1);
+    const project = await (await fetch(`${base}/api/projects/stage-project`, { headers: auth() })).json() as any;
+    expect(project.stages).toEqual([{ slug: capture.slug, title: "Pinned branch walkthrough", latestVersion: 1, updatedAt: project.stages[0].updatedAt, apiUrl: `${config.baseUrl}/api/stages/${capture.slug}` }]);
+    const projectMarkdown = await fetch(`${base}/${ws}/p/stage-project`, { headers: { ...auth(), accept: "text/markdown" } });
+    const projectMarkdownText = await projectMarkdown.text();
+    expect(projectMarkdownText).toContain("Pinned branch walkthrough (publish-stage) v1");
+    expect(projectMarkdownText).not.toContain(`/st/${capture.slug}`);
+    const script = join(import.meta.dir, "stage-privacy.script.ts");
+    const proc = Bun.spawn(["bun", "run", script], {
+      stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, AUTH_DISABLED: undefined as unknown as string, STAGE_CAPTURE_ID: capture.id, STAGE_CAPTURE_KEY: key, STAGE_SLUG: capture.slug },
+    });
+    const code = await proc.exited;
+    const output = await new Response(proc.stdout).text();
+    const error = await new Response(proc.stderr).text();
+    if (code !== 0) console.error("stage publication privacy stderr:", error);
+    expect(code).toBe(0);
+    expect(output).toContain("all assertions passed");
+  });
+
+  test("replays and conflicts immutably, handles same-process finalization, and refuses Project writes", async () => {
+    const capture = await createCapture("replay-publication");
+    const payload = publishPayload(capture);
+    const publish = () => fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(payload) });
+    const first = await publish();
+    expect(first.status).toBe(200);
+    const firstText = await first.text();
+    const replay = await publish();
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(firstText);
+    const conflictPayload = publishPayload(capture, { summary: "A changed witness account." });
+    const conflict = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(conflictPayload) });
+    expect(conflict.status).toBe(409);
+    createProject(ws, "replay-a", "Replay A", "", null);
+    createProject(ws, "replay-z", "Replay Z", "", null);
+    const projectCapture = await createCapture("replay-project-order");
+    const projectPayload = publishPayload(projectCapture, { projects: ["replay-z", "replay-a"] });
+    const projectFirst = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(projectPayload) });
+    expect(projectFirst.status).toBe(200);
+    const projectFirstText = await projectFirst.text();
+    const projectReplay = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify({ ...projectPayload, projects: ["replay-a", "replay-z", "replay-a"] }) });
+    expect(projectReplay.status).toBe(200);
+    expect(await projectReplay.text()).toBe(projectFirstText);
+
+    const secondCapture = await createCapture("concurrent-publication");
+    const concurrentPayload = publishPayload(secondCapture);
+    const concurrent = await Promise.all(Array.from({ length: 4 }, () => fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(concurrentPayload) })));
+    expect(concurrent.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+    const concurrentBodies = await Promise.all(concurrent.map((response) => response.text()));
+    expect(new Set(concurrentBodies).size).toBe(1);
+    expect(db.query("SELECT COUNT(*) AS count FROM stage_versions WHERE workspace_id = ? AND capture_id = ?").get(ws, secondCapture.id)).toEqual({ count: 1 });
+
+    const unknownProjectCapture = await createCapture("unknown-project-publication");
+    const before = db.query("SELECT COUNT(*) AS count FROM stages WHERE workspace_id = ?").get(ws);
+    const unknownProject = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(publishPayload(unknownProjectCapture, { projects: ["missing-project"] })) });
+    expect(unknownProject.status).toBe(422);
+    expect(db.query("SELECT COUNT(*) AS count FROM stages WHERE workspace_id = ?").get(ws)).toEqual(before);
+    const otherWorkspace = createWorkspace("Stage other", listMembers(legacyWorkspaceId()!)[0]!.id);
+    createProject(otherWorkspace, "other-project", "Other", "", null);
+    const crossWorkspace = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(publishPayload(unknownProjectCapture, { projects: ["other-project"] })) });
+    expect(crossWorkspace.status).toBe(422);
+    expect(db.query("SELECT COUNT(*) AS count FROM stages WHERE workspace_id = ?").get(ws)).toEqual(before);
+
+    const conflictCapture = await createCapture("occupied-stage");
+    expect((await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(publishPayload(conflictCapture)) })).status).toBe(200);
+    const duplicateSlugCapture = await createCapture("occupied-stage", body.builder, "occupied-stage-2");
+    const duplicateSlug = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(publishPayload(duplicateSlugCapture)) });
+    expect(duplicateSlug.status).toBe(409);
+  });
+
+  test("reads latest and pinned versions without GitHub, and rejects capture and slug mismatches", async () => {
+    const capture = await createCapture("read-stage");
+    const malformedCapture = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(publishPayload(capture, { captureId: "x".repeat(100_000) })) });
+    expect(malformedCapture.status).toBe(404);
+    expect(await malformedCapture.text()).toBe(JSON.stringify({ error: "No completed capture in this workspace" }, null, 2));
+    const mismatch = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(publishPayload(capture, { slug: "different-slug" })) });
+    expect(mismatch.status).toBe(422);
+    expect(db.query("SELECT COUNT(*) AS count FROM stages WHERE workspace_id = ? AND slug = ?").get(ws, "different-slug")).toEqual({ count: 0 });
+    const published = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(publishPayload(capture)) });
+    expect(published.status).toBe(200);
+    setGithubClientFactory(() => { throw new Error("GitHub must not be called while reading a stage"); });
+    const latest = await fetch(`${base}/api/stages/${capture.slug}`, { headers: auth() });
+    const pinned = await fetch(`${base}/api/stages/${capture.slug}/v/1`, { headers: auth() });
+    expect(latest.status).toBe(200);
+    expect(pinned.status).toBe(200);
+    const latestText = await latest.text();
+    const pinnedText = await pinned.text();
+    validateOpenApiResponse("readLatestStage", JSON.parse(latestText));
+    validateOpenApiResponse("readStageVersion", JSON.parse(pinnedText));
+    expect(latestText).toBe(pinnedText);
+    const leadingZero = await fetch(`${base}/api/stages/${capture.slug}/v/01`, { headers: auth() });
+    expect(leadingZero.status).toBe(404);
+    const absent = await fetch(`${base}/api/stages/${capture.slug}/v/2`, { headers: auth() });
+    expect(absent.status).toBe(404);
+    expect(absent.headers.get("cache-control")).toBe("no-store");
+  });
+
+  test("normalizes builder packets, rejects forbidden input, and includes builder content in idempotency", async () => {
+    setGithubClientFactory(() => fixtureClient());
+    const normalized = await createCapture("normalized-packet", {
+      intent: "  Keep *the intent*\r\n on two lines  ",
+      context: "Pinned\tcontext",
+      agent: { name: "  builder  ", model: "model" },
+    });
+    expect(normalized.builder.intent).toBe("  Keep *the intent*\n on two lines  ");
+    expect(normalized.builder.context).toBe("Pinned\tcontext");
+    expect(normalized.builder.agent.name).toBe("builder");
+    const identifiers = await createCapture("plain-identifiers", {
+      intent: "Capture identifiers.", context: "", agent: { name: "agent_model_v2", model: "Array<T> stable() [old_path] `code`" },
+    });
+    expect(identifiers.builder.agent.model).toBe("Array<T> stable() [old_path] `code`");
+    const missingContext = await fetch(`${base}/api/stage-captures`, { method: "POST", headers: auth({ "content-type": "application/json", "Idempotency-Key": "packet-missing-context" }), body: JSON.stringify({ ...body, slug: "packet-missing-context", builder: { ...body.builder, context: undefined } }) });
+    expect(missingContext.status).toBe(422);
+    expect(await missingContext.text()).toContain("builder.context");
+    const forbidden = await fetch(`${base}/api/stage-captures`, { method: "POST", headers: auth({ "content-type": "application/json", "Idempotency-Key": "packet-forbidden" }), body: JSON.stringify({ ...body, slug: "packet-forbidden", builder: { ...body.builder, intent: "# not a heading" } }) });
+    expect(forbidden.status).toBe(422);
+    expect(await forbidden.text()).toContain("builder.intent");
+    const del = await fetch(`${base}/api/stage-captures`, { method: "POST", headers: auth({ "content-type": "application/json", "Idempotency-Key": "packet-del" }), body: JSON.stringify({ ...body, slug: "packet-del", builder: { ...body.builder, intent: "DEL\u007f" } }) });
+    expect(del.status).toBe(422);
+    const overlong = await fetch(`${base}/api/stage-captures`, { method: "POST", headers: auth({ "content-type": "application/json", "Idempotency-Key": "packet-overlong" }), body: JSON.stringify({ ...body, slug: "packet-overlong", builder: { ...body.builder, context: "x".repeat(4001) } }) });
+    expect(overlong.status).toBe(422);
+    expect(await overlong.text()).toContain("4000");
+    for (const [suffix, builder] of [
+      ["intent", { ...body.builder, intent: "x".repeat(1201) }],
+      ["agent", { ...body.builder, agent: { name: "x".repeat(81), model: "model" } }],
+      ["control", { ...body.builder, agent: { name: "builder\nname", model: "model" } }],
+    ] as const) {
+      const response = await fetch(`${base}/api/stage-captures`, { method: "POST", headers: auth({ "content-type": "application/json", "Idempotency-Key": `packet-${suffix}` }), body: JSON.stringify({ ...body, slug: `packet-${suffix}`, builder }) });
+      expect(response.status).toBe(422);
+    }
+    const first = await fetch(`${base}/api/stage-captures`, { method: "POST", headers: auth({ "content-type": "application/json", "Idempotency-Key": "packet-digest" }), body: JSON.stringify({ ...body, slug: "packet-digest" }) });
+    expect(first.status).toBe(200);
+    const changedPacket = await fetch(`${base}/api/stage-captures`, { method: "POST", headers: auth({ "content-type": "application/json", "Idempotency-Key": "packet-digest" }), body: JSON.stringify({ ...body, slug: "packet-digest", builder: { ...body.builder, intent: "A different intent" } }) });
+    expect(changedPacket.status).toBe(409);
+  });
+
+  test("validates every publication enum, nested shape, budget, and exact leaf partition", async () => {
+    const capture = await createCapture("validation-boundaries");
+    const post = (payload: any) => fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(payload) });
+    const normalizedProjects = validateStagePublish(publishPayload(capture, { projects: ["z-project", "a-project", "z-project"] }), getStageCapture(capture.id, ws)!);
+    expect(normalizedProjects.value?.projects).toEqual(["a-project", "z-project"]);
+    const punctuation = publishPayload(await createCapture("punctuation"));
+    punctuation.title = "stable()";
+    punctuation.witness = { name: "agent_model_v2", model: "Array<T>" };
+    punctuation.groups[0].title = "[old_path]";
+    punctuation.groups[0].attention = "_attention_";
+    punctuation.groups[0].members[0].description = "`code` _identifier_";
+    expect((await post(punctuation)).status).toBe(200);
+    const narrativeDel = publishPayload(await createCapture("narrative-del"), { summary: "DEL\u007f" });
+    expect((await post(narrativeDel)).status).toBe(422);
+    const inlineRejection = publishPayload(await createCapture("inline-rejection"), { title: "# heading" });
+    const inlineResponse = await post(inlineRejection);
+    expect(inlineResponse.status).toBe(422);
+    expect((await inlineResponse.json() as any).errors).toContainEqual({ field: "title", message: expect.stringContaining("heading") });
+    const enumCases: [string, (payload: any) => void][] = [
+      ["category", (payload) => { payload.groups[0].category = "Other"; }],
+      ["importance", (payload) => { payload.groups[0].importance = "urgent"; }],
+      ["complexity", (payload) => { payload.groups[0].complexity = "hard"; }],
+      ["member type", (payload) => { payload.groups[0].members.find((member: any) => member.type === "change").type = "material"; }],
+    ];
+    for (const [name, mutate] of enumCases) {
+      const payload = publishPayload(capture);
+      mutate(payload);
+      const response = await post(payload);
+      const body = await response.text();
+      expect({ name, status: response.status, body }).toMatchObject({ name, status: 422 });
+      if (name === "category") expect(body).not.toContain("omits canonical");
+    }
+    const budgetCases: [string, (payload: any) => void][] = [
+      ["title", (payload) => { payload.title = "x".repeat(81); }],
+      ["summary", (payload) => { payload.summary = "x".repeat(1201); }],
+      ["group title", (payload) => { payload.groups[0].title = "x".repeat(61); }],
+      ["explanation", (payload) => { payload.groups[0].explanation = "x".repeat(1601); }],
+      ["attention", (payload) => { payload.groups[0].attention = "x".repeat(301); }],
+      ["member description", (payload) => { payload.groups[0].members[0].description = "x".repeat(401); }],
+      ["witness name", (payload) => { payload.witness.name = "x".repeat(81); }],
+      ["witness model", (payload) => { payload.witness.model = "x".repeat(81); }],
+      ["example code", (payload) => { payload.groups[0].examples = [{ code: "x".repeat(501), text: "caption" }]; }],
+      ["example text", (payload) => { payload.groups[0].examples = [{ code: "code", text: "x".repeat(301) }]; }],
+    ];
+    for (const [name, mutate] of budgetCases) {
+      const payload = publishPayload(capture);
+      mutate(payload);
+      const response = await post(payload);
+      expect({ name, status: response.status, body: await response.text() }).toMatchObject({ name, status: 422 });
+    }
+    const examples = publishPayload(capture);
+    examples.groups[0].examples = Array.from({ length: 6 }, () => ({ code: "code", text: "caption" }));
+    expect((await post(examples)).status).toBe(422);
+    const hugeExamples = publishPayload(capture);
+    hugeExamples.groups[0].examples = Array.from({ length: 1000 }, () => ({ code: "code", text: "caption" }));
+    const hugeExamplesResponse = await post(hugeExamples);
+    expect(hugeExamplesResponse.status).toBe(422);
+    expect(((await hugeExamplesResponse.json()) as any).errors.length).toBeLessThanOrEqual(32);
+    const groups = publishPayload(capture);
+    groups.groups = Array.from({ length: 17 }, (_, index) => ({ ...groups.groups[0], id: `group-${index}` }));
+    expect((await post(groups)).status).toBe(422);
+    const projects = publishPayload(capture, { projects: Array.from({ length: 17 }, (_, index) => `project-${index}`) });
+    expect((await post(projects)).status).toBe(422);
+    const hugeGroups = publishPayload(capture);
+    hugeGroups.groups = Array.from({ length: 1000 }, (_, index) => ({ ...hugeGroups.groups[0], id: `group-${index}` }));
+    const hugeGroupsResponse = await post(hugeGroups);
+    expect(hugeGroupsResponse.status).toBe(422);
+    expect(((await hugeGroupsResponse.json()) as any).errors.length).toBeLessThanOrEqual(32);
+    const hugeMembers = publishPayload(capture);
+    hugeMembers.groups[0].members = Array.from({ length: 10001 }, (_, index) => ({ type: "file", id: `file-${index}`, description: "file" }));
+    const hugeMembersResponse = await post(hugeMembers);
+    expect(hugeMembersResponse.status).toBe(422);
+    expect(((await hugeMembersResponse.json()) as any).errors.length).toBeLessThanOrEqual(32);
+    const extra = publishPayload(capture);
+    extra.groups[0].unknown = true;
+    extra.groups[0].examples = [{ code: "code", text: "caption", extra: true }];
+    extra.groups[0].members[0].extra = true;
+    expect((await post(extra)).status).toBe(422);
+
+    const members = partitionMembers(capture);
+    const cases: [string, any[]][] = [
+      ["unknown", [{ ...members[0], id: "unknown-leaf" }, ...members.slice(1)]],
+      ["duplicate", [...members, members[0]]],
+      ["omitted", members.slice(1)],
+    ];
+    const changeIndex = members.findIndex((member) => member.type === "change");
+    cases.push(["wrong type", members.map((member, index) => index === changeIndex ? { ...member, type: "material" } : member)]);
+    for (const [name, changedMembers] of cases) {
+      const payload = publishPayload(capture);
+      payload.groups[0].members = changedMembers;
+      const response = await post(payload);
+      const text = await response.text();
+      expect({ name, status: response.status, concrete: text.includes("a.txt") || text.includes("new.txt") || text.includes("material") || text.includes("change") }).toMatchObject({ name, status: 422, concrete: true });
+    }
+    expect(db.query("SELECT COUNT(*) AS count FROM stages WHERE workspace_id = ? AND slug = ?").get(ws, capture.slug)).toEqual({ count: 0 });
+  });
+
+  test("associates material with its current path only across a rename and recreate", async () => {
+    const capture = await createCapture("rename-recreate-material");
+    const inventory = getStageCapture(capture.id, ws)!;
+    const custom = {
+      ...inventory,
+      files: [
+        { ...inventory.files[0]!, id: "rename-file", path: "b.txt", old_path: "a.txt", status: "renamed" },
+        { ...inventory.files[1]!, id: "created-file", path: "a.txt", old_path: null, status: "added" },
+      ],
+      changes: [],
+      incomplete: [{ ...inventory.incomplete[0]!, id: "material-a", path: "a.txt", side: "new", kind: "bytes_unavailable", reason: "new bytes unavailable" }],
+    } as any;
+    const checked = validateStagePublish({
+      captureId: capture.id, expectedPreviousVersion: 0, slug: capture.slug, title: "Rename", summary: "Summary",
+      witness: { name: "w", model: "m" },
+      groups: [{ id: "rename", title: "Rename", category: "Code", importance: "high", complexity: "low", explanation: "Files", examples: [], members: [
+        { type: "material", id: "material-a", description: "Material for a" },
+        { type: "file", id: "rename-file", description: "Renamed file" },
+      ] }],
+    }, custom);
+    expect(checked.errors).toEqual([]);
+    expect(checked.value).not.toBeNull();
+    const pathless = { ...custom, incomplete: [...custom.incomplete, { ...custom.incomplete[0], id: "snapshot-material", path: null, reason: "tree snapshot was truncated" }] } as any;
+    const omitted = validateStagePublish({
+      captureId: capture.id, expectedPreviousVersion: 0, slug: capture.slug, title: "Rename", summary: "Summary",
+      witness: { name: "w", model: "m" }, groups: [{ id: "rename", title: "Rename", category: "Code", importance: "high", complexity: "low", explanation: "Files", examples: [], members: [
+        { type: "material", id: "material-a", description: "Material for a" }, { type: "file", id: "rename-file", description: "Renamed file" },
+      ] }],
+    }, pathless);
+    expect(omitted.errors.map((error) => error.message)).toContain("omits incomplete material snapshot-material (tree snapshot was truncated)");
+  });
+
+  test("a capture without a builder packet is readable but cannot publish", async () => {
+    const { captureSource } = await import("../src/stage/source");
+    const result = await captureSource(ws, { slug: "legacy-no-packet", repo: "Acme/Repo", branch: "feature/blue" }, { client: fixtureClient(), idempotencyKey: "legacy-no-packet" });
+    const response = await fetch(`${base}/api/stages`, {
+      method: "POST",
+      headers: auth({ "content-type": "application/json" }),
+      body: JSON.stringify({ captureId: result.captureId, expectedPreviousVersion: 0, slug: "legacy-no-packet", title: "No packet", summary: "Summary", witness: { name: "w", model: "m" }, groups: [] }),
+    });
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain("new capture");
+  });
+
+  test("soft-404s a malformed stored stage document", async () => {
+    const capture = await createCapture("malformed-stage-document");
+    createProject(ws, "malformed-project", "Malformed project", "", null);
+    const malformedPayload = publishPayload(capture, { projects: ["malformed-project"] });
+    const response = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(malformedPayload) });
+    expect(response.status).toBe(200);
+    const stored = JSON.stringify((await response.clone().json() as any).document);
+    for (const malformed of ["{", "{}", JSON.stringify({ identity: {}, source: "wrong" })]) {
+      db.run("UPDATE stage_versions SET doc = ? WHERE workspace_id = ? AND capture_id = ?", [malformed, ws, capture.id]);
+      const read = await fetch(`${base}/api/stages/${capture.slug}`, { headers: auth() });
+      const pinned = await fetch(`${base}/api/stages/${capture.slug}/v/1`, { headers: auth() });
+      const project = await fetch(`${base}/api/projects/malformed-project`, { headers: auth() });
+      const page = await fetch(`${base}/${ws}/p/malformed-project`);
+      expect(read.status).toBe(404);
+      expect(pinned.status).toBe(404);
+      expect(project.status).toBe(200);
+      expect(page.status).toBe(200);
+      expect(read.headers.get("cache-control")).toBe("no-store");
+      const replay = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(malformedPayload) });
+      expect(replay.status).toBe(409);
+    }
+    const mismatched = JSON.parse(stored) as any;
+    mismatched.identity.version = 2;
+    db.run("UPDATE stage_versions SET doc = ? WHERE workspace_id = ? AND capture_id = ?", [JSON.stringify(mismatched), ws, capture.id]);
+    const mismatchRead = await fetch(`${base}/api/stages/${capture.slug}`, { headers: auth() });
+    const mismatchProject = await fetch(`${base}/api/projects/malformed-project`, { headers: auth() });
+    const mismatchReplay = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(malformedPayload) });
+    expect(mismatchRead.status).toBe(404);
+    expect(mismatchProject.status).toBe(200);
+    expect(mismatchReplay.status).toBe(409);
+    db.run("UPDATE stage_versions SET doc = ? WHERE workspace_id = ? AND capture_id = ?", [stored, ws, capture.id]);
+  });
+
+  test("continues to a healthy same-slug stage in a later readable workspace", async () => {
+    const capture = await createCapture("cross-workspace-corruption");
+    const published = await fetch(`${base}/api/stages`, { method: "POST", headers: auth({ "content-type": "application/json" }), body: JSON.stringify(publishPayload(capture)) });
+    expect(published.status).toBe(200);
+    const healthy = await published.json() as any;
+    const owner = listMembers(legacyWorkspaceId()!)[0]!.id;
+    const laterWs = createWorkspace("Stage later readable", owner);
+    const laterStageId = tinyId("sta");
+    const laterCaptureId = tinyId("stg");
+    const laterVersionId = tinyId("stv");
+    const laterDoc = JSON.parse(JSON.stringify(healthy.document)) as any;
+    laterDoc.identity.id = laterStageId;
+    laterDoc.source.captureId = laterCaptureId;
+    db.run("INSERT INTO stages (id, workspace_id, slug, repo, repo_id, branch, lineage_base_ref, lineage_base_sha, latest_version, created_by_user_id, created_by_key_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)", [laterStageId, laterWs, capture.slug, "Acme/Repo", 987, "feature/blue", "main", MERGE, owner, "key_later", Date.now(), Date.now()]);
+    db.run("INSERT INTO stage_versions (id, workspace_id, stage_id, slug, version, capture_id, doc, digest, witness_user_id, witness_key_id, created_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)", [laterVersionId, laterWs, laterStageId, capture.slug, laterCaptureId, JSON.stringify(laterDoc), "healthy", owner, "key_later", Date.now()]);
+    db.run("UPDATE stage_versions SET doc = ? WHERE workspace_id = ? AND capture_id = ?", ["{", ws, capture.id]);
+    try {
+      const read = await fetch(`${base}/api/stages/${capture.slug}`, { headers: { cookie: sessionCookie(owner).split(";")[0]! } });
+      expect(read.status).toBe(200);
+      expect((await read.json() as any).workspace).toBe(laterWs);
+    } finally {
+      db.run("DELETE FROM stage_versions WHERE workspace_id = ? AND capture_id = ?", [laterWs, laterCaptureId]);
+      db.run("DELETE FROM stages WHERE workspace_id = ? AND id = ?", [laterWs, laterStageId]);
+      db.run("UPDATE stage_versions SET doc = ? WHERE workspace_id = ? AND capture_id = ?", [JSON.stringify(healthy.document), ws, capture.id]);
+    }
+  });
+
+  test("hosts complete builder and witness documents with deployment discovery", async () => {
+    const agent = await fetch(`${base}/stage/agent.md`);
+    const witness = await fetch(`${base}/stage/skill.md`);
+    expect(agent.status).toBe(200);
+    expect(witness.status).toBe(200);
+    const agentText = await agent.text();
+    const witnessText = await witness.text();
+    for (const text of [agentText, witnessText]) {
+      expect(text).not.toContain("—");
+      expect(text).not.toContain("–");
+    }
+    expect(agentText).toContain("/api/stage-captures");
+    expect(agentText).toContain("no conversation history");
+    expect(agentText).toContain("/stage/skill.md");
+    expect(witnessText).toContain("/api/stage-captures/<capture-id>");
+    expect(witnessText).toContain("/api/stages");
+    expect(witnessText).toContain("canonical change id");
+    expect(witnessText).toContain("Do not claim");
+    const discovery = await (await fetch(`${base}/.well-known/agent-skills/index.json`)).json() as any;
+    expect(discovery.skills.map((skill: any) => skill.name)).toEqual(expect.arrayContaining(["seer-stage", "seer-stage-witness"]));
+  });
+
+  test("reports missing named object storage as corruption", async () => {
+    const capture = await createCapture("missing-object-storage");
+    const sha = capture.patch.sha256 as string;
+    const stored = await openStageBlob(ws, sha);
+    expect(stored).not.toBeNull();
+    const bytes = new Uint8Array(await new Response(stored!).arrayBuffer());
+    const path = stageBlobPath(ws, sha);
+    const file = Bun.file(path);
+    expect(await file.exists()).toBe(true);
+    const { rmSync } = await import("node:fs");
+    rmSync(path);
+    try {
+      const response = await fetch(`${base}/api/stage-captures/${capture.id}/objects/${sha}`, { headers: auth() });
+      expect(response.status).toBe(500);
+      expect(await response.text()).toContain("storage corruption");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    } finally {
+      await saveStageBlob(ws, sha, bytes);
+    }
+  });
+
+  test("reports a named object store exception as a retryable no-store error", async () => {
+    const capture = await createCapture("object-store-outage");
+    const sha = capture.patch.sha256 as string;
+    const operation = Object.values((openApiSpec() as any).paths).flatMap((path: any) => Object.values(path)).find((candidate: any) => candidate.operationId === "readStageCaptureObject") as any;
+    expect(operation.responses["500"]).toBeDefined();
+    expect(operation.responses["502"]).toBeDefined();
+    const { handleReadStageObject } = await import("../src/stage/source");
+    const response = await handleReadStageObject(new Request(`${base}/api/stage-captures/${capture.id}/objects/${sha}`, { headers: auth() }), capture.id, sha, async () => {
+      throw new Error("configured store unavailable");
+    });
+    expect(response.status).toBe(502);
+    expect(await response.text()).toBe(JSON.stringify({ error: "Stage capture storage is temporarily unavailable." }));
+    expect(response.headers.get("cache-control")).toBe("no-store");
   });
 
   test("a small injected logical cap retains deterministic unique objects and leaves metadata", async () => {

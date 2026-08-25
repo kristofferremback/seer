@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 12 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 13 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -48,7 +48,10 @@ import { hashKey, tinyId } from "./ids";
 //
 // v12 adds completed staged source captures. The workflow row, immutable file inventory,
 // canonical changes, explicit incomplete items, workspace-scoped retained objects, and
-// idempotency records are additive. Pending stage versions do not exist in this slice.
+// idempotency records are additive. Pending stage versions do not exist in that slice.
+//
+// v13 adds builder packets, immutable stage identity and version rows, and Project stage
+// membership. Existing captures stay readable; captures without a packet cannot publish.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -520,8 +523,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 12) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 12`);
+  if (uv > 13) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 13`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -535,6 +538,7 @@ export function migrate(): void {
   if (userVersion() < 10) migrateToV10();
   if (userVersion() < 11) migrateToV11();
   if (userVersion() < 12) migrateToV12();
+  if (userVersion() < 13) migrateToV13();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -841,6 +845,70 @@ function migrateToV12(): void {
     db.run("PRAGMA user_version = 12");
   })();
   console.log("[seer] migrated to schema v12 (stage captures).");
+}
+
+const V13_STAGES = `
+  CREATE TABLE IF NOT EXISTS stage_capture_builders (
+    workspace_id TEXT NOT NULL,
+    capture_id TEXT NOT NULL UNIQUE,
+    intent TEXT NOT NULL,
+    context TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    agent_model TEXT NOT NULL,
+    user_id TEXT,
+    key_id TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, capture_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_stage_capture_builders_workspace ON stage_capture_builders (workspace_id, capture_id);
+  CREATE TABLE IF NOT EXISTS stages (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    repo_id INTEGER NOT NULL,
+    branch TEXT NOT NULL,
+    lineage_base_ref TEXT NOT NULL,
+    lineage_base_sha TEXT NOT NULL,
+    latest_version INTEGER NOT NULL CHECK (latest_version >= 1),
+    created_by_user_id TEXT NOT NULL,
+    created_by_key_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, slug)
+  );
+  CREATE INDEX IF NOT EXISTS idx_stages_workspace ON stages (workspace_id, slug);
+  CREATE TABLE IF NOT EXISTS stage_versions (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    stage_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    capture_id TEXT NOT NULL UNIQUE,
+    doc TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    witness_user_id TEXT NOT NULL,
+    witness_key_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, slug, version)
+  );
+  CREATE INDEX IF NOT EXISTS idx_stage_versions_workspace ON stage_versions (workspace_id, slug, version);
+  CREATE TABLE IF NOT EXISTS project_stages (
+    project_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, slug)
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_stages_stage ON project_stages (workspace_id, slug);
+`;
+
+function migrateToV13(): void {
+  db.transaction(() => {
+    db.exec(V13_STAGES);
+    db.run("PRAGMA user_version = 13");
+  })();
+  console.log("[seer] migrated to schema v13 (stage publication).");
 }
 
 /**

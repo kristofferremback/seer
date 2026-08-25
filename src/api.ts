@@ -28,7 +28,7 @@ import {
 } from "./db";
 import { json, originOk } from "./http";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
-import { SLUG_RE } from "./ids";
+import { SLUG_RE, STA_ID_RE, STG_ID_RE } from "./ids";
 import { requireApiKey } from "./auth";
 import { inspectZip, readZipEntry, saveImage, saveZip } from "./store";
 import { handleCreateShare, handleListShares, handleRevokeShare } from "./shares";
@@ -50,7 +50,8 @@ import {
   resolveUploadProject,
 } from "./projects/api";
 import { attachBundle, listProjectsForBundle } from "./projects/db";
-import { handleCreateStageCapture, handleReadStageCapture } from "./stage/source";
+import { handleCreateStageCapture, handleReadStageCapture, handleReadStageObject } from "./stage/source";
+import { handlePublishStage, handleReadStage } from "./stage/publish";
 
 // ---- the shape of an entry ----
 
@@ -453,7 +454,7 @@ const projectStateSchema = {
   type: "object",
   required: [
     "slug", "title", "description", "status", "parent", "workspace", "url",
-    "createdAt", "updatedAt", "children", "tasks", "plans", "bundles", "reviews",
+    "createdAt", "updatedAt", "children", "tasks", "plans", "bundles", "reviews", "stages",
     "notes", "noteCount",
   ],
   properties: {
@@ -471,13 +472,14 @@ const projectStateSchema = {
       description: "Shallow summaries, never recursive.",
       items: {
         type: "object",
-        required: ["slug", "title", "status", "bundles", "reviews", "tasks"],
+        required: ["slug", "title", "status", "bundles", "reviews", "stages", "tasks"],
         properties: {
           slug: { type: "string" },
           title: { type: "string" },
           status: PROJECT_STATUS_ENUM,
           bundles: { type: "integer" },
           reviews: { type: "integer" },
+          stages: { type: "integer" },
           tasks: { type: "integer" },
         },
       },
@@ -514,6 +516,20 @@ const projectStateSchema = {
         },
       },
     },
+    stages: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["slug", "title", "latestVersion", "updatedAt", "apiUrl"],
+        properties: {
+          slug: { type: "string" },
+          title: { type: "string" },
+          latestVersion: { type: "integer" },
+          updatedAt: { type: "string", format: "date-time" },
+          apiUrl: { type: "string", format: "uri" },
+        },
+      },
+    },
     reviews: {
       type: "array",
       items: {
@@ -542,6 +558,156 @@ const projectStateSchema = {
 const projectStateResponse = {
   description: "The project's whole state, one call.",
   content: { "application/json": { schema: projectStateSchema } },
+};
+
+const stageBuilderSchema = {
+  type: "object",
+  required: ["intent", "context", "agent"],
+  additionalProperties: false,
+  properties: {
+    intent: { type: "string", minLength: 1, maxLength: 1200, description: "Constrained markdown." },
+    context: { type: "string", maxLength: 4000, description: "Constrained markdown." },
+    agent: {
+      type: "object",
+      required: ["name", "model"],
+      additionalProperties: false,
+      properties: {
+        name: { type: "string", minLength: 1, maxLength: 80, description: "Plain one-line text; inline code is allowed." },
+        model: { type: "string", minLength: 1, maxLength: 80, description: "Plain one-line text; inline code is allowed." },
+      },
+    },
+  },
+};
+
+const stageBuilderResponseSchema = {
+  ...stageBuilderSchema,
+  required: ["intent", "context", "agent", "userId", "keyId"],
+  properties: {
+    ...stageBuilderSchema.properties,
+    userId: { type: ["string", "null"], description: "Derived builder user; null on legacy reads." },
+    keyId: { type: ["string", "null"], description: "Derived builder key; null on legacy reads." },
+  },
+};
+
+const stageBuilderDocSchema = {
+  ...stageBuilderResponseSchema,
+  properties: {
+    ...stageBuilderResponseSchema.properties,
+    userId: { type: "string" },
+    keyId: { type: "string" },
+  },
+};
+
+const stageMemberSchema = {
+  oneOf: (["change", "material", "file"] as const).map((type) => ({
+    type: "object",
+    required: ["type", "id", "description"],
+    additionalProperties: false,
+    properties: {
+      type: { type: "string", enum: [type] },
+      id: { type: "string", minLength: 1, maxLength: 80 },
+      description: { type: "string", minLength: 1, maxLength: 400, description: "Plain one-line text; inline code is allowed." }
+    },
+  })),
+};
+
+const stageGroupSchema = {
+  type: "object",
+  required: ["id", "title", "category", "importance", "complexity", "explanation", "examples", "members"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: SLUG_RE.source },
+    title: { type: "string", minLength: 1, maxLength: 60, description: "Plain one-line text; inline code is allowed." },
+    category: { type: "string", enum: ["Contract", "Code", "Tests", "Test fixtures", "Docs", "Generated"] },
+    importance: { type: "string", enum: ["low", "medium", "high"] },
+    complexity: { type: "string", enum: ["low", "medium", "high"] },
+    explanation: { type: "string", minLength: 1, maxLength: 1600, description: "Constrained markdown." },
+    attention: { type: "string", maxLength: 300, description: "Plain one-line text; inline code is allowed." },
+    examples: {
+      type: "array",
+      maxItems: 5,
+      items: {
+        type: "object",
+        required: ["code", "text"],
+        additionalProperties: false,
+        properties: {
+          code: { type: "string", minLength: 1, maxLength: 500 },
+          text: { type: "string", minLength: 1, maxLength: 300 },
+        },
+      },
+    },
+    members: { type: "array", maxItems: 10000, items: stageMemberSchema, description: "Across all groups, at most 10,000 members are accepted." }
+  },
+};
+
+const stageDocSchema = {
+  type: "object",
+  required: ["identity", "source", "builder", "witness", "projects"],
+  additionalProperties: false,
+  properties: {
+    identity: {
+      type: "object", required: ["id", "slug", "version", "title", "createdAt"], additionalProperties: false,
+      properties: { id: { type: "string", pattern: STA_ID_RE.source }, slug: { type: "string", pattern: SLUG_RE.source }, version: { type: "integer", minimum: 1 }, title: { type: "string", minLength: 1, maxLength: 80 }, createdAt: { type: "string", format: "date-time" } },
+    },
+    source: {
+      type: "object", required: ["captureId", "repo", "repoId", "branch", "baseRef", "sourceHeadSha", "baseTipSha", "mergeBaseSha"], additionalProperties: false,
+      properties: { captureId: { type: "string", pattern: STG_ID_RE.source }, repo: { type: "string" }, repoId: { type: "integer" }, branch: { type: "string" }, baseRef: { type: "string" }, sourceHeadSha: { type: "string" }, baseTipSha: { type: "string" }, mergeBaseSha: { type: "string" } },
+    },
+    builder: stageBuilderDocSchema,
+    witness: {
+      type: "object", required: ["summary", "groups", "agent", "userId", "keyId"], additionalProperties: false,
+      properties: { summary: { type: "string", minLength: 1, maxLength: 1200 }, groups: { type: "array", minItems: 1, maxItems: 16, items: stageGroupSchema }, agent: stageBuilderSchema.properties.agent, userId: { type: "string" }, keyId: { type: "string" } },
+    },
+    projects: { type: "array", maxItems: 16, items: { type: "string", pattern: SLUG_RE.source } },
+  },
+};
+
+const stageCaptureChangeSchema = {
+  type: "object", required: ["id", "old", "new", "oldFingerprint", "newFingerprint", "contextFingerprint", "source"], additionalProperties: false,
+  properties: {
+    id: { type: "string" }, old: { type: "object", required: ["start", "lines"], additionalProperties: false, properties: { start: { type: "integer" }, lines: { type: "integer" } } },
+    new: { type: "object", required: ["start", "lines"], additionalProperties: false, properties: { start: { type: "integer" }, lines: { type: "integer" } } },
+    oldFingerprint: { type: "string" }, newFingerprint: { type: "string" }, contextFingerprint: { type: "string" }, source: { type: "string", enum: ["patch", "reconstructed"] },
+  },
+};
+
+const stageCaptureSideSchema = {
+  type: "object", required: ["objectId", "mode", "kind", "availability", "blobSha256", "reason"], additionalProperties: false,
+  properties: {
+    objectId: { type: ["string", "null"] }, mode: { type: ["string", "null"] }, kind: { type: ["string", "null"] },
+    availability: { type: "string", enum: ["retained", "unavailable", "not_applicable"] }, blobSha256: { type: ["string", "null"] }, reason: { type: ["string", "null"] },
+  },
+};
+
+const stageCaptureFileSchema = {
+  type: "object", required: ["id", "path", "oldPath", "status", "old", "new", "additions", "deletions", "changes"], additionalProperties: false,
+  properties: {
+    id: { type: "string" }, path: { type: "string" }, oldPath: { type: ["string", "null"] }, status: { type: "string", enum: ["added", "removed", "modified", "renamed", "mode_changed", "unknown"] },
+    old: stageCaptureSideSchema, new: stageCaptureSideSchema, additions: { type: ["integer", "null"] }, deletions: { type: ["integer", "null"] }, changes: { type: "array", items: stageCaptureChangeSchema },
+  },
+};
+
+const stageCaptureSchema = {
+  type: "object", required: ["id", "workspace", "slug", "state", "repo", "repoId", "branch", "baseRef", "sourceHeadSha", "baseTipSha", "mergeBaseSha", "patch", "complete", "reviewable", "files", "incomplete", "builder", "createdAt"], additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: STG_ID_RE.source }, workspace: { type: "string" }, slug: { type: "string", pattern: SLUG_RE.source }, state: { type: "string", enum: ["completed"] },
+    repo: { type: "string" }, repoId: { type: "integer" }, branch: { type: "string" }, baseRef: { type: "string" }, sourceHeadSha: { type: "string" }, baseTipSha: { type: "string" }, mergeBaseSha: { type: "string" },
+    patch: { type: ["object", "null"], required: ["sha256", "available"], additionalProperties: false, properties: { sha256: { type: "string" }, available: { type: "boolean" } } }, complete: { type: "boolean" }, reviewable: { type: "boolean" },
+    files: { type: "array", items: stageCaptureFileSchema },
+    incomplete: { type: "array", items: { type: "object", required: ["id", "kind", "path", "side", "reason"], additionalProperties: false, properties: { id: { type: "string" }, kind: { type: "string", enum: ["snapshot_incomplete", "bytes_unavailable", "lines_unavailable", "patch_unavailable", "metadata_incomplete"] }, path: { type: ["string", "null"] }, side: { type: "string", enum: ["old", "new", "snapshot"] }, reason: { type: "string" } } } },
+    builder: { oneOf: [stageBuilderResponseSchema, { type: "null" }] }, createdAt: { type: "string", format: "date-time" },
+  },
+};
+
+const stageViewSchema = {
+  type: "object",
+  required: ["id", "slug", "workspace", "version", "latestVersion", "isLatest", "apiUrl", "apiVersionUrl", "document"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: STA_ID_RE.source }, slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
+    version: { type: "integer", minimum: 1 }, latestVersion: { type: "integer", minimum: 1 }, isLatest: { type: "boolean" },
+    apiUrl: { type: "string", format: "uri" }, apiVersionUrl: { type: "string", format: "uri" }, document: stageDocSchema,
+  },
 };
 
 /** One membership operation's doc. The four share everything but their nouns, and a
@@ -794,7 +960,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
                     type: "object",
                     required: [
                       "slug", "title", "status", "parent", "workspace", "url",
-                      "updatedAt", "bundles", "reviews", "children",
+                      "updatedAt", "bundles", "reviews", "stages", "children",
                     ],
                     properties: {
                       slug: { type: "string" },
@@ -806,6 +972,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
                       updatedAt: { type: "string", format: "date-time" },
                       bundles: { type: "integer" },
                       reviews: { type: "integer" },
+                      stages: { type: "integer" },
                       children: { type: "integer" },
                     },
                   },
@@ -1137,27 +1304,19 @@ export const API_ROUTES: readonly ApiRoute[] = [
           required: true,
           content: { "application/json": { schema: {
             type: "object",
-            required: ["slug", "repo", "branch"],
+            required: ["slug", "repo", "branch", "builder"],
             properties: {
               slug: { type: "string", pattern: SLUG_RE.source },
               repo: { type: "string", description: "owner/name; head repository and arbitrary commits are not accepted." },
               branch: { type: "string", description: "The mutable source branch in repo. Slash-containing names are allowed." },
               baseRef: { type: "string", description: "A branch in repo. Defaults to the repository's default branch." },
+              builder: stageBuilderSchema,
             },
             additionalProperties: false,
           } } },
         },
         responses: {
-          "200": { description: "The completed immutable capture inventory.", content: { "application/json": { schema: {
-            type: "object", required: ["id", "workspace", "slug", "state", "repo", "repoId", "branch", "baseRef", "sourceHeadSha", "baseTipSha", "mergeBaseSha", "complete", "reviewable", "files", "incomplete", "createdAt"],
-            properties: {
-              id: { type: "string" }, workspace: { type: "string" }, slug: { type: "string" }, state: { type: "string", enum: ["completed"] },
-              repo: { type: "string" }, repoId: { type: "integer" }, branch: { type: "string" }, baseRef: { type: "string" },
-              sourceHeadSha: { type: "string" }, baseTipSha: { type: "string" }, mergeBaseSha: { type: "string" },
-              patch: { type: ["object", "null"] }, complete: { type: "boolean" }, reviewable: { type: "boolean" }, files: { type: "array", items: { type: "object" } },
-              incomplete: { type: "array", items: { type: "object", required: ["id", "kind", "path", "side", "reason"] } }, createdAt: { type: "string", format: "date-time" },
-            },
-          } } } },
+          "200": { description: "The completed immutable capture inventory.", content: { "application/json": { schema: stageCaptureSchema } } },
           "400": errorResponse, "401": errorResponse, "409": errorResponse, "422": errorResponse, "502": errorResponse,
         },
       },
@@ -1172,13 +1331,80 @@ export const API_ROUTES: readonly ApiRoute[] = [
         summary: "Read a completed stage capture inventory",
         description: "Workspace members and keys read completed captures. Missing, malformed, and cross-workspace ids return the same soft 404. This route never calls GitHub.",
         security: "keyOrSession",
-        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: "^stg_" } }],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: STG_ID_RE.source } }],
         responses: {
-          "200": { description: "The stored inventory and pinned source facts.", content: { "application/json": { schema: { type: "object", additionalProperties: true } } } },
+          "200": { description: "The stored inventory and pinned source facts.", content: { "application/json": { schema: stageCaptureSchema } } },
           "404": errorResponse,
         },
       },
       run: (req) => handleReadStageCapture(req, req.params.id),
+    },
+  }),
+
+  route("/api/stage-captures/:id/objects/:sha256", {
+    GET: {
+      doc: {
+        operationId: "readStageCaptureObject",
+        summary: "Read one retained capture object",
+        description: "Reads a canonical patch or retained old/new blob named by the authorized capture. Workspace members and valid workspace keys may read it. Unknown, unrelated, malformed, and cross-workspace objects share the capture soft 404; a named object missing from durable storage is reported as storage corruption, while a store-open failure is a retryable 502.",
+        security: "keyOrSession",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string", pattern: STG_ID_RE.source } },
+          { name: "sha256", in: "path", required: true, schema: { type: "string", pattern: "^[a-f0-9]{64}$" } },
+        ],
+        responses: {
+          "200": { description: "The retained patch or blob bytes.", content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } } },
+          "404": errorResponse,
+          "500": errorResponse,
+          "502": errorResponse,
+        },
+      },
+      run: (req) => handleReadStageObject(req, req.params.id, req.params.sha256),
+    },
+  }),
+
+  route("/api/stages", {
+    POST: {
+      doc: {
+        operationId: "publishStage",
+        summary: "Publish one immutable staged walkthrough",
+        description: "Publishes a validated witness narrative over one completed capture. The capture slug must match, expectedPreviousVersion is 0 in this slice, every canonical change and incomplete material must be accounted for exactly once, and Project attachments resolve before the one transaction writes stage, version, and membership rows. Unknown Project slugs return 422, matching review publication.",
+        security: "key",
+        requestBody: { required: true, content: { "application/json": { schema: {
+          type: "object",
+          required: ["captureId", "expectedPreviousVersion", "slug", "title", "summary", "witness", "groups"],
+          properties: {
+            captureId: { type: "string", pattern: STG_ID_RE.source },
+            expectedPreviousVersion: { type: "integer", enum: [0] },
+            slug: { type: "string", pattern: SLUG_RE.source },
+            title: { type: "string", minLength: 1, maxLength: 80 },
+            summary: { type: "string", minLength: 1, maxLength: 1200, description: "Constrained markdown." },
+            witness: { type: "object", required: ["name", "model"], additionalProperties: false, properties: { name: { type: "string", minLength: 1, maxLength: 80 }, model: { type: "string", minLength: 1, maxLength: 80 } } },
+            groups: { type: "array", minItems: 1, maxItems: 16, items: stageGroupSchema, description: "Group ids are unique slugs. Each group must include examples, which may be an empty array. The total member count is capped at 10,000. Rejected requests contain at most 32 field errors." },
+            projects: { type: "array", maxItems: 16, items: { type: "string", pattern: SLUG_RE.source } },
+          },
+          additionalProperties: false,
+        } } } },
+        responses: {
+          "200": { description: "The immutable stage version and resolved document.", content: { "application/json": { schema: stageViewSchema } } },
+          "400": errorResponse, "401": errorResponse, "404": errorResponse, "409": errorResponse, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handlePublishStage(req),
+    },
+  }),
+
+  route("/api/stages/:slug", {
+    GET: {
+      doc: { operationId: "readLatestStage", summary: "Read the latest stage version", security: "keyOrSession", parameters: [slugParam], responses: { "200": { description: "The resolved latest stage version.", content: { "application/json": { schema: stageViewSchema } } }, "404": errorResponse } },
+      run: (req) => handleReadStage(req, req.params.slug, null),
+    },
+  }),
+
+  route("/api/stages/:slug/v/:version", {
+    GET: {
+      doc: { operationId: "readStageVersion", summary: "Read one pinned stage version", security: "keyOrSession", parameters: [slugParam, { name: "version", in: "path", required: true, schema: { type: "string", pattern: "^[1-9][0-9]{0,8}$" } }], responses: { "200": { description: "The resolved immutable stage version.", content: { "application/json": { schema: stageViewSchema } } }, "404": errorResponse } },
+      run: (req) => handleReadStage(req, req.params.slug, req.params.version),
     },
   }),
 
