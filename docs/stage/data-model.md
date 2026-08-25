@@ -1,6 +1,6 @@
 # Stage capture data model
 
-Slice 2 adds the builder packet, immutable stage identity, version 1 publication, and Project membership.
+Slices 1 through 3 add immutable capture, version 1 publication, the member reader, and personal read state.
 A capture is readable only through its creating workspace and contains enough pinned facts,
 manifest rows, canonical change anchors, and retained bytes to derive its inventory without
 calling GitHub again.
@@ -36,6 +36,8 @@ calling GitHub again.
   and witness actor ids. Version 1 is the only version written in this slice.
 - `project_stages` stores workspace-scoped Project attachments created with publication.
   A Project state query resolves the stage and latest version rather than trusting this join.
+- `stage_change_reads` stores a member's explicit read marks by workspace, immutable
+  stage-version id, user, and canonical change id. It never changes StageDoc.
 
 Every child inventory and publication table includes `workspace_id`, and reads filter on
 both workspace and its parent id. SQLite foreign keys are not the contract; writes and
@@ -90,4 +92,6 @@ does not sweep or delete them.
 
 Publication validates the witness document before the transaction. Project slugs are normalized as a sorted unique list, so input order and repeated names do not change an otherwise identical replay. The transaction checks Project slugs again, creates the stage and version, and inserts Project joins. The version's
 resolved document carries source facts and opaque capture ids, not patches, bytes, or line
-arrays. The retained patch and old/new blobs are read through `GET /api/stage-captures/:id/objects/:sha256` only when that exact capture names their SHA-256. A capture is consumed by the unique `stage_versions.capture_id` rule. Publication assumes one SQLite writer process; uniqueness remains the final integrity guard, not a cross-process race protocol. Repeating an identical normalized narrative returns the existing version; a different narrative is a conflict. Later versions, rendered stage pages, shares, comments, read state, approval, deltas, and pull request attachments are deferred.
+arrays. The retained patch and old/new blobs are read through `GET /api/stage-captures/:id/objects/:sha256` only when that exact capture names their SHA-256. The member page re-materializes persisted changes from those bytes and refuses a mismatch. Its retained-line API accepts only an opaque file id belonging to the exact immutable version; it never accepts a path or object digest as authority. Marking a change read writes only the current member's `stage_change_reads` row.
+
+A capture is consumed by the unique `stage_versions.capture_id` rule. Publication assumes one SQLite writer process; uniqueness remains the final integrity guard, not a cross-process race protocol. Repeating an identical normalized narrative returns the existing version; a different narrative is a conflict. Later versions, shares, comments, missing-material acknowledgement, approval, deltas, and pull request attachments are deferred.

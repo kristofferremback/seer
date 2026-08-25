@@ -44,7 +44,7 @@ The fresh witness must fetch the pinned capture and write the narrative contract
 
 ## Publish
 
-The witness submits the complete document to `/api/stages`. Check the response and retain its `apiVersionUrl` from the pinned JSON API response. A failed validation means the walkthrough was not published. Retry the same capture only with the same narrative, or make a new capture.
+The witness submits the complete document to `/api/stages`. Check the response and retain its pinned human `versionUrl`; `apiVersionUrl` is the same immutable version as JSON. A failed validation means the walkthrough was not published. Retry the same capture only with the same narrative, or make a new capture.
 
 Never author Git facts, capture ids, inventory ids, diff totals, completeness, actor ids, stage ids, or version movement. Seer derives those facts from the capture and authentication.
 

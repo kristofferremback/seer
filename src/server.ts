@@ -75,6 +75,8 @@ import { agoWords } from "./relative-time";
 import { setWorkspaceHoldings } from "./overseer/github-app";
 import { handleOverseerSkill, handleOverseerAgentSkill } from "./overseer/skill";
 import { handleStageSkill, handleStageAgent } from "./stage/skill";
+import { handleStagePage } from "./stage/render";
+import { handleStageReadMutation } from "./stage/read";
 import { handleAnnotation } from "./overseer/annotations";
 import { reviewTopic, setFreshnessPublisher } from "./overseer/freshness";
 import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
@@ -130,6 +132,12 @@ const WS_IMG_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/i/`
 // every workspace the reader can reach.
 const WS_REVIEW_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)(?:/(v|a)/([^/]+))?/?$`,
+);
+const WS_STAGE_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/st/([^/]+)(?:/v/([^/]+))?/?$`,
+);
+const WS_STAGE_READ_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/st/([^/]+)/v/([^/]+)/changes/([^/]+)/read/?$`,
 );
 // The same review's surrounding code: /<ws_id>/r/<slug>/c, everything else in the
 // query. Its own pattern rather than a third branch of the one above, because the tail
@@ -1157,6 +1165,17 @@ export async function startServer() {
       // whole tree: the remainder after the token is arbitrary, and what it means is
       // not knowable until the token says which kind of asset it opens.
       if (url.pathname.startsWith("/s/")) return handleShareRequest(req);
+
+      const stageRead = url.pathname.match(WS_STAGE_READ_RE);
+      if (stageRead) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleStageReadMutation(req, stageRead[1]!, stageRead[2]!, stageRead[3]!, stageRead[4]!);
+      }
+      const stagePage = url.pathname.match(WS_STAGE_RE);
+      if (stagePage) {
+        if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
+        return handleStagePage(req, stagePage[1]!, stagePage[2]!, stagePage[3] ?? null);
+      }
 
       const wsPage = url.pathname.match(WS_PAGE_RE);
       if (wsPage) return handleWorkspacePage(req, wsPage[1]!, wsPage[2]);

@@ -64,6 +64,8 @@ function stageView(stage: StageRow, version: StageVersionRow, latestVersion: num
     version: version.version,
     latestVersion,
     isLatest: version.version === latestVersion,
+    url: `${config.baseUrl}/${stage.workspace_id}/st/${stage.slug}`,
+    versionUrl: `${config.baseUrl}/${stage.workspace_id}/st/${stage.slug}/v/${version.version}`,
     apiUrl: `${config.baseUrl}/api/stages/${stage.slug}`,
     apiVersionUrl: `${config.baseUrl}/api/stages/${stage.slug}/v/${version.version}`,
     document: version.doc,

@@ -93,7 +93,10 @@ export interface ProjectStageEntry {
   title: string;
   latestVersion: number;
   updatedAt: number;
+  url: string;
+  versionUrl: string;
   apiUrl: string;
+  apiVersionUrl: string;
 }
 
 export interface ProjectState {
@@ -214,7 +217,10 @@ export function projectState(project: ProjectRow): ProjectState {
       title: latest.doc.identity.title,
       latestVersion: stage.latest_version,
       updatedAt: latest.created_at,
+      url: `${config.baseUrl}/${ws}/st/${slug}`,
+      versionUrl: `${config.baseUrl}/${ws}/st/${slug}/v/${stage.latest_version}`,
       apiUrl: `${config.baseUrl}/api/stages/${slug}`,
+      apiVersionUrl: `${config.baseUrl}/api/stages/${slug}/v/${stage.latest_version}`,
     });
   }
 
@@ -305,7 +311,10 @@ function stateJson(state: ProjectState): unknown {
       title: s.title,
       latestVersion: s.latestVersion,
       updatedAt: new Date(s.updatedAt).toISOString(),
+      url: s.url,
+      versionUrl: s.versionUrl,
       apiUrl: s.apiUrl,
+      apiVersionUrl: s.apiVersionUrl,
     })),
     reviews: state.reviews.map((r) => ({
       slug: r.slug,

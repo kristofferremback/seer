@@ -28,7 +28,7 @@ import {
 } from "./db";
 import { json, originOk } from "./http";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
-import { SLUG_RE, STA_ID_RE, STG_ID_RE } from "./ids";
+import { SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE } from "./ids";
 import { requireApiKey } from "./auth";
 import { inspectZip, readZipEntry, saveImage, saveZip } from "./store";
 import { handleCreateShare, handleListShares, handleRevokeShare } from "./shares";
@@ -52,6 +52,7 @@ import {
 import { attachBundle, listProjectsForBundle } from "./projects/db";
 import { handleCreateStageCapture, handleReadStageCapture, handleReadStageObject } from "./stage/source";
 import { handlePublishStage, handleReadStage } from "./stage/publish";
+import { handleStageLines } from "./stage/read";
 
 // ---- the shape of an entry ----
 
@@ -520,13 +521,16 @@ const projectStateSchema = {
       type: "array",
       items: {
         type: "object",
-        required: ["slug", "title", "latestVersion", "updatedAt", "apiUrl"],
+        required: ["slug", "title", "latestVersion", "updatedAt", "url", "versionUrl", "apiUrl", "apiVersionUrl"],
         properties: {
           slug: { type: "string" },
           title: { type: "string" },
           latestVersion: { type: "integer" },
           updatedAt: { type: "string", format: "date-time" },
+          url: { type: "string", format: "uri" },
+          versionUrl: { type: "string", format: "uri" },
           apiUrl: { type: "string", format: "uri" },
+          apiVersionUrl: { type: "string", format: "uri" },
         },
       },
     },
@@ -699,13 +703,37 @@ const stageCaptureSchema = {
   },
 };
 
+const stageLinesSchema = {
+  type: "object",
+  required: ["fileId", "path", "side", "start", "end", "totalLines", "lines"],
+  additionalProperties: false,
+  properties: {
+    fileId: { type: "string", pattern: STF_ID_RE.source },
+    path: { type: "string" },
+    side: { type: "string", enum: ["old", "new"] },
+    start: { type: "integer", minimum: 0 },
+    end: { type: "integer", minimum: 0 },
+    totalLines: { type: "integer", minimum: 0 },
+    lines: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["number", "text"],
+        additionalProperties: false,
+        properties: { number: { type: "integer", minimum: 1 }, text: { type: "string" } },
+      },
+    },
+  },
+};
+
 const stageViewSchema = {
   type: "object",
-  required: ["id", "slug", "workspace", "version", "latestVersion", "isLatest", "apiUrl", "apiVersionUrl", "document"],
+  required: ["id", "slug", "workspace", "version", "latestVersion", "isLatest", "url", "versionUrl", "apiUrl", "apiVersionUrl", "document"],
   additionalProperties: false,
   properties: {
     id: { type: "string", pattern: STA_ID_RE.source }, slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
     version: { type: "integer", minimum: 1 }, latestVersion: { type: "integer", minimum: 1 }, isLatest: { type: "boolean" },
+    url: { type: "string", format: "uri" }, versionUrl: { type: "string", format: "uri" },
     apiUrl: { type: "string", format: "uri" }, apiVersionUrl: { type: "string", format: "uri" }, document: stageDocSchema,
   },
 };
@@ -1405,6 +1433,33 @@ export const API_ROUTES: readonly ApiRoute[] = [
     GET: {
       doc: { operationId: "readStageVersion", summary: "Read one pinned stage version", security: "keyOrSession", parameters: [slugParam, { name: "version", in: "path", required: true, schema: { type: "string", pattern: "^[1-9][0-9]{0,8}$" } }], responses: { "200": { description: "The resolved immutable stage version.", content: { "application/json": { schema: stageViewSchema } } }, "404": errorResponse } },
       run: (req) => handleReadStage(req, req.params.slug, req.params.version),
+    },
+  }),
+
+  route("/api/stages/:slug/v/:version/files/:fileId", {
+    GET: {
+      doc: {
+        operationId: "readStageFileLines",
+        summary: "Read retained lines from one staged file",
+        description: "The opaque file id must belong to this immutable version. Paths, repositories, Git object ids, and storage digests are never accepted as authority.",
+        security: "keyOrSession",
+        parameters: [
+          slugParam,
+          { name: "version", in: "path", required: true, schema: { type: "string", pattern: "^[1-9][0-9]{0,8}$" } },
+          { name: "fileId", in: "path", required: true, schema: { type: "string", pattern: STF_ID_RE.source } },
+          { name: "side", in: "query", required: true, schema: { type: "string", enum: ["old", "new"] } },
+          { name: "start", in: "query", required: false, schema: { type: "integer", minimum: 1 } },
+          { name: "end", in: "query", required: false, schema: { type: "integer", minimum: 1 } },
+        ],
+        responses: {
+          "200": { description: "At most 400 retained text lines.", content: { "application/json": { schema: stageLinesSchema } } },
+          "404": errorResponse,
+          "422": errorResponse,
+          "500": errorResponse,
+          "502": errorResponse,
+        },
+      },
+      run: (req) => handleStageLines(req, req.params.slug, req.params.version, req.params.fileId),
     },
   }),
 

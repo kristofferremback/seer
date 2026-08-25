@@ -49,6 +49,12 @@ test("a populated v12 capture survives the additive v13 publication migration", 
   expect(out).toContain("all assertions passed");
 });
 
+test("a populated v13 stage survives the additive read-state migration", async () => {
+  const { code, out } = await runScenario("v13");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("fresh/empty db bootstraps the root workspace", async () => {
   const { code, out } = await runScenario("fresh");
   expect(code).toBe(0);

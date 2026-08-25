@@ -377,12 +377,13 @@ describe("a 200 matches the schema the document declares for it", () => {
     publishImage: "sharp re-encodes on the way in; covered end to end in tests/images.test.ts",
     publishImageViaPost: "same operation as publishImage",
     health: "not an /api/ route; its 200 is the four bytes of `ok`",
-    createStageCapture: "all six stage operations are validated by the authenticated integration coverage in tests/stage.test.ts",
-    readStageCapture: "all six stage operations are validated by the authenticated integration coverage in tests/stage.test.ts",
-    publishStage: "all six stage operations are validated by the authenticated integration coverage in tests/stage.test.ts",
-    readLatestStage: "all six stage operations are validated by the authenticated integration coverage in tests/stage.test.ts",
-    readStageVersion: "all six stage operations are validated by the authenticated integration coverage in tests/stage.test.ts",
-    readStageCaptureObject: "all six stage operations are validated by the authenticated integration coverage in tests/stage.test.ts",
+    createStageCapture: "stage operations are validated by the authenticated integration coverage in tests/stage.test.ts and tests/stage-reader.test.ts",
+    readStageCapture: "stage operations are validated by the authenticated integration coverage in tests/stage.test.ts and tests/stage-reader.test.ts",
+    publishStage: "stage operations are validated by the authenticated integration coverage in tests/stage.test.ts and tests/stage-reader.test.ts",
+    readLatestStage: "stage operations are validated by the authenticated integration coverage in tests/stage.test.ts and tests/stage-reader.test.ts",
+    readStageVersion: "stage operations are validated by the authenticated integration coverage in tests/stage.test.ts and tests/stage-reader.test.ts",
+    readStageCaptureObject: "stage operations are validated by the authenticated integration coverage in tests/stage.test.ts and tests/stage-reader.test.ts",
+    readStageFileLines: "stage operations are validated by the authenticated integration coverage in tests/stage-reader.test.ts",
   };
 
   let ajv: Ajv2020;
