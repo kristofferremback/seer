@@ -196,7 +196,7 @@ function softHtml(req: Request): Response {
   const url = new URL(req.url);
   return new Response(softNotFoundPage(sessionEmail(req), url.pathname + url.search), {
     status: 404,
-    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-cache" },
+    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
   });
 }
 
