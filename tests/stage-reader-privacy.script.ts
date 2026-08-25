@@ -9,11 +9,12 @@ const owner = process.env.STAGE_READER_OWNER!;
 const member = process.env.STAGE_READER_MEMBER!;
 const stranger = process.env.STAGE_READER_STRANGER!;
 const changeId = process.env.STAGE_READER_CHANGE!;
+const groupId = process.env.STAGE_READER_GROUP!;
 const fileId = process.env.STAGE_READER_FILE!;
 const otherFileId = process.env.STAGE_READER_OTHER_FILE!;
 const key = process.env.STAGE_READER_KEY!;
 const otherKey = process.env.STAGE_READER_OTHER_KEY!;
-if (![workspace, slug, owner, member, stranger, changeId, fileId, otherFileId, key, otherKey, process.env.DATA_DIR].every(Boolean)) throw new Error("stage reader privacy env is incomplete");
+if (![workspace, slug, owner, member, stranger, changeId, groupId, fileId, otherFileId, key, otherKey, process.env.DATA_DIR].every(Boolean)) throw new Error("stage reader privacy env is incomplete");
 
 const { startServer } = await import("../src/server");
 const { sessionCookie } = await import("../src/auth");
@@ -23,6 +24,7 @@ const server = await startServer();
 const base = `http://localhost:${server.port}`;
 const cookie = (user: string) => sessionCookie(user).split(";")[0]!;
 const page = (user: string, path = `/${workspace}/st/${slug}/v/1`) => fetch(`${base}${path}`, { headers: { cookie: cookie(user) } });
+const focusedPage = (user: string) => page(user, `/${workspace}/st/${slug}/v/1?review=${encodeURIComponent(groupId)}&change=${encodeURIComponent(changeId)}`);
 const lines = (headers: Record<string, string>, id = fileId) => fetch(`${base}/api/stages/${slug}/v/1/files/${id}?side=new&start=1&end=1`, { headers });
 
 try {
@@ -32,7 +34,7 @@ try {
   const ownerPage = await page(owner);
   const memberPage = await page(member);
   if (ownerPage.status !== 200 || memberPage.status !== 200) throw new Error("workspace members could not read the stage");
-  const memberBefore = await memberPage.text();
+  const memberBefore = await (await focusedPage(member)).text();
   if (!memberBefore.includes(`data-change="${changeId}"`) || !memberBefore.includes('data-read="false"')) throw new Error("member did not begin unread");
 
   const nonmember = await page(stranger);
@@ -46,9 +48,9 @@ try {
     body: new URLSearchParams({ read: "true" }),
   });
   if (marked.status !== 200) throw new Error(`owner read write returned ${marked.status}`);
-  const ownerAfter = await (await page(owner)).text();
-  const memberAfter = await (await page(member)).text();
-  const around = (body: string) => body.slice(body.indexOf(`data-change="${changeId}"`), body.indexOf(`data-change="${changeId}"`) + 260);
+  const ownerAfter = await (await focusedPage(owner)).text();
+  const memberAfter = await (await focusedPage(member)).text();
+  const around = (body: string) => body.slice(body.indexOf(`id="${changeId}" data-change="${changeId}"`), body.indexOf(`id="${changeId}" data-change="${changeId}"`) + 300);
   if (!around(ownerAfter).includes('data-read="true"')) throw new Error("owner read state was not rendered");
   if (!around(memberAfter).includes('data-read="false"')) throw new Error("owner read state leaked to another member");
 

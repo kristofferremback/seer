@@ -72,6 +72,7 @@ let cookie: string;
 let capture: any;
 let otherCapture: any;
 let changeIds: string[];
+let groupByChange: Map<string, string>;
 let second: string;
 let stranger: string;
 let otherWorkspace: string;
@@ -140,7 +141,15 @@ beforeAll(async () => {
   });
   if (otherPublish.status !== 200) throw new Error(await otherPublish.text());
   const members = partition(capture);
-  changeIds = members.filter((member: any) => member.type === "change").map((member: any) => member.id);
+  const changeMembers = members.filter((member: any) => member.type === "change");
+  const implementationMembers = [
+    ...[...changeMembers].reverse(),
+    ...members.filter((member: any) => member.type !== "change" && member.description.includes("scripts/")),
+  ];
+  const implementationIds = new Set(implementationMembers.map((member: any) => member.id));
+  const supportingMembers = members.filter((member: any) => !implementationIds.has(member.id));
+  changeIds = changeMembers.map((member: any) => member.id);
+  groupByChange = new Map(changeIds.map((id) => [id, "implementation"]));
   const response = await fetch(`${base}/api/stages`, {
     method: "POST", headers: apiHeaders({ "content-type": "application/json" }),
     body: JSON.stringify({
@@ -148,8 +157,8 @@ beforeAll(async () => {
       title: "Read retained source", summary: "The witness accounts for every retained and unavailable leaf.",
       witness: { name: "Witness", model: "review-model" },
       groups: [
-        { id: "implementation", title: "Implementation", category: "Code", importance: "high", complexity: "medium", explanation: "Read the implementation before its supporting material.", examples: [{ code: "Array<T>", text: "The identifier remains plain." }], members: members.filter((member: any) => member.description.includes("src/") || member.description.includes("scripts/")) },
-        { id: "supporting-material", title: "Supporting material", category: "Test fixtures", importance: "medium", complexity: "low", explanation: "Docs and fixtures remain explicit.", examples: [], members: members.filter((member: any) => !member.description.includes("src/") && !member.description.includes("scripts/")) },
+        { id: "implementation", title: "Implementation", category: "Code", importance: "high", complexity: "medium", explanation: "Read the implementation before its supporting material.", examples: [{ code: "Array<T>", text: "The identifier remains plain." }], members: implementationMembers },
+        { id: "supporting-material", title: "Supporting material", category: "Test fixtures", importance: "medium", complexity: "low", explanation: "Docs and fixtures remain explicit.", examples: [], members: supportingMembers },
       ],
     }),
   });
@@ -170,29 +179,52 @@ describe("stage reader", () => {
     expect(body).toContain("Builder<span> · build-model");
     expect(body).toContain("Witness<span> · review-model");
     expect(body).toContain("Implementation"); expect(body).toContain("Supporting material");
-    expect(body).toContain("data-tree-node"); expect(body).toContain("data-layout=\"unified\"");
-    expect(body).toContain("Mark as read"); expect(body).toContain("Load file context");
+    expect(body).toContain("category-summary"); expect(body).toContain("data-tree-node");
+    expect(body.match(/class="review-group-card"/g)?.length).toBe(2);
+    expect(body.match(/data-focus-link data-review=/g)?.length).toBeGreaterThanOrEqual(2);
+    const renderedBody = body.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<style>[\s\S]*?<\/style>/g, "");
+    expect(renderedBody).not.toContain("data-diff-frame");
+    expect(renderedBody).not.toContain("class=\"hunk-review");
     expect(body).toContain("Binary bytes are retained"); expect(body).toContain("Only the file mode changed");
     expect(body).toContain("Array&lt;T&gt;"); expect(body).not.toContain("github.com");
-    const withoutScripts = body.replace(/<script[\s\S]*?<\/script>/g, "");
+
+    const implementationChange = changeIds.find((id) => groupByChange.get(id) === "implementation")!;
+    const focusedResponse = await fetch(`${base}/${workspace}/st/${capture.slug}/v/1?review=implementation&change=${implementationChange}#${implementationChange}`, { headers: sessionHeaders() });
+    expect(focusedResponse.status).toBe(200);
+    const focused = await focusedResponse.text();
+    const focusedContent = focused.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<style>[\s\S]*?<\/style>/g, "");
+    expect(focusedContent).toContain(`data-review="implementation"`);
+    expect(focusedContent).not.toContain("data-stage-background");
+    expect(focusedContent).not.toContain("review-group-card");
+    expect(focusedContent).toContain("Read retained source · 01 · Code");
+    expect(focused).toContain(`id="${implementationChange}" data-change="${implementationChange}"`);
+    expect(focused).toContain("class=\"file-review\"");
+    expect(focused).toContain("data-layout=\"unified\"");
+    expect(focused).toContain("Mark as read"); expect(focused).toContain("Load file context");
+    const withoutScripts = focused.replace(/<script[\s\S]*?<\/script>/g, "");
     expect(withoutScripts).toContain("diff-line add");
     expect(withoutScripts).toContain("read-form");
-    expect(withoutScripts).toContain("Repository");
-    const anchors = [...body.matchAll(/class="tree-file[^>]*href="#([^"]+)"/g)].map((match) => match[1]);
-    const ids = new Set([...body.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]));
-    expect(anchors.every((anchor) => ids.has(anchor!))).toBe(true);
-    const focused = await (await fetch(`${base}/${workspace}/st/${capture.slug}/v/1?focus=${changeIds[0]}#${changeIds[0]}`, { headers: sessionHeaders() })).text();
-    expect(focused).toContain(`id="${changeIds[0]}" open data-change=`);
+    expect(withoutScripts).toContain("focus-file-tree");
+    expect(withoutScripts).toContain("Close group review");
+    const focusTargets = [...focused.matchAll(/data-scroll-file="([^"]+)"/g)].map((match) => match[1]!);
+    const focusIds = new Set([...focused.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]));
+    expect(focusTargets.every((target) => focusIds.has(target))).toBe(true);
+    const treeCodeOrder = focusTargets.filter((target) => target.startsWith("review-file-"));
+    const streamFileOrder = [...focused.matchAll(/<details class="file-review" id="([^"]+)"/g)].map((match) => match[1]);
+    expect(streamFileOrder).toEqual(treeCodeOrder);
   });
 
   test("uses one private HTML refusal for malformed and missing pages", async () => {
+    const wrongGroupChange = changeIds[0]!;
     const responses = await Promise.all([
       fetch(`${base}/${workspace}/st/not-here`, { headers: sessionHeaders() }),
       fetch(`${base}/${workspace}/st/${capture.slug}/v/01`, { headers: sessionHeaders() }),
+      fetch(`${base}/${workspace}/st/${capture.slug}/v/1?review=not-a-group`, { headers: sessionHeaders() }),
+      fetch(`${base}/${workspace}/st/${capture.slug}/v/1?review=supporting-material&change=${wrongGroupChange}`, { headers: sessionHeaders() }),
     ]);
     const bodies = await Promise.all(responses.map((response) => response.text()));
-    expect(responses.map((response) => response.status)).toEqual([404, 404]);
-    expect(bodies[0]).toBe(bodies[1]);
+    expect(responses.map((response) => response.status)).toEqual([404, 404, 404, 404]);
+    expect(new Set(bodies).size).toBe(1);
   });
 
   test("refuses retained material that no longer reproduces persisted identity", async () => {
@@ -244,14 +276,15 @@ describe("stage reader", () => {
     const action = `${base}/${workspace}/st/${capture.slug}/v/1/changes/${changeId}/read`;
     const saved = await fetch(action, { method: "POST", headers: sessionHeaders({ origin: new URL(config.baseUrl).origin, accept: "application/json" }), body: new URLSearchParams({ read: "true" }) });
     expect(saved.status).toBe(200); expect(await saved.json()).toEqual({ changeId, read: true });
-    const page = await (await fetch(`${base}/${workspace}/st/${capture.slug}/v/1`, { headers: sessionHeaders() })).text();
-    expect(page).toContain(`data-change="${changeId}" data-file=`);
-    expect(page).toContain(`data-read="true"`);
+    const groupId = groupByChange.get(changeId)!;
+    const page = await (await fetch(`${base}/${workspace}/st/${capture.slug}/v/1?review=${groupId}&change=${changeId}`, { headers: sessionHeaders() })).text();
+    expect(page).toContain(`data-change="${changeId}" data-read="true"`);
 
     expect(listStageReadChangeIds(workspace, getStageVersion(workspace, capture.slug, 1)!.id, second)).toEqual(new Set());
 
     const reversed = await fetch(action, { method: "POST", headers: sessionHeaders({ origin: new URL(config.baseUrl).origin }), body: new URLSearchParams({ read: "false" }), redirect: "manual" });
-    expect(reversed.status).toBe(303); expect(reversed.headers.get("location")).toEndWith(`#${changeId}`);
+    expect(reversed.status).toBe(303);
+    expect(reversed.headers.get("location")).toBe(`/${workspace}/st/${capture.slug}/v/1?review=${groupId}&change=${changeId}#${changeId}`);
     const foreign = await fetch(action, { method: "POST", headers: sessionHeaders({ origin: "https://elsewhere.example" }), body: new URLSearchParams({ read: "true" }) });
     expect(foreign.status).toBe(403);
   });
@@ -271,6 +304,7 @@ describe("stage reader", () => {
         STAGE_READER_MEMBER: second,
         STAGE_READER_STRANGER: stranger,
         STAGE_READER_CHANGE: changeIds[0]!,
+        STAGE_READER_GROUP: groupByChange.get(changeIds[0]!)!,
         STAGE_READER_FILE: file.id,
         STAGE_READER_OTHER_FILE: otherFile.id,
         STAGE_READER_KEY: key,

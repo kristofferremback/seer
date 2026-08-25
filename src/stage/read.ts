@@ -220,10 +220,15 @@ export async function handleStageReadMutation(
   const read = rawRead === "true";
   setStageChangeRead(workspaceId, resolved.version.id, user.id, changeId, read);
   if ((req.headers.get("accept") ?? "").includes("application/json")) return stageJson({ changeId, read });
+  const group = resolved.version.doc.witness.groups.find((candidate) =>
+    candidate.members.some((member) => member.type === "change" && member.id === changeId),
+  );
+  if (!group) return softHtml(req);
+  const params = new URLSearchParams({ review: group.id, change: changeId });
   return new Response(null, {
     status: 303,
     headers: {
-      location: `/${workspaceId}/st/${slug}/v/${rawVersion}#${changeId}`,
+      location: `/${workspaceId}/st/${slug}/v/${rawVersion}?${params}#${changeId}`,
       "cache-control": "no-store",
     },
   });

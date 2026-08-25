@@ -1056,6 +1056,8 @@ describe("stage captures", () => {
     expect(witnessText).toContain("/api/stage-captures/<capture-id>");
     expect(witnessText).toContain("/api/stages");
     expect(witnessText).toContain("canonical change id");
+    expect(witnessText).toContain("concrete behavior or implementation claim");
+    expect(witnessText).toContain("already prints its path and line");
     expect(witnessText).toContain("Do not claim");
     const discovery = await (await fetch(`${base}/.well-known/agent-skills/index.json`)).json() as any;
     expect(discovery.skills.map((skill: any) => skill.name)).toEqual(expect.arrayContaining(["seer-stage", "seer-stage-witness"]));

@@ -8,10 +8,17 @@ export interface StageTreeNode {
   files: StageCaptureFileRow[];
 }
 
+export interface StageChangeStats {
+  added: number;
+  removed: number;
+}
+
 export interface StageTreeStats {
   files: number;
   changes: number;
   unread: number;
+  added: number;
+  removed: number;
 }
 
 function codePointOrder(left: string, right: string): number {
@@ -67,18 +74,26 @@ export function stageTreeStats(
   node: StageTreeNode,
   fileChanges: Map<string, string[]>,
   readIds: Set<string>,
+  changeStats: Map<string, StageChangeStats> = new Map(),
 ): StageTreeStats {
-  const result = { files: node.files.length, changes: 0, unread: 0 };
+  const result = { files: node.files.length, changes: 0, unread: 0, added: 0, removed: 0 };
   for (const file of node.files) {
     const ids = fileChanges.get(file.id) ?? [];
     result.changes += ids.length;
     result.unread += ids.filter((id) => !readIds.has(id)).length;
+    for (const id of ids) {
+      const diff = changeStats.get(id);
+      result.added += diff?.added ?? 0;
+      result.removed += diff?.removed ?? 0;
+    }
   }
   for (const folder of node.folders) {
-    const child = stageTreeStats(folder, fileChanges, readIds);
+    const child = stageTreeStats(folder, fileChanges, readIds, changeStats);
     result.files += child.files;
     result.changes += child.changes;
     result.unread += child.unread;
+    result.added += child.added;
+    result.removed += child.removed;
   }
   return result;
 }

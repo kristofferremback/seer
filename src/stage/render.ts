@@ -19,10 +19,10 @@ import { loadStageBytes, StageStoreUnavailable } from "./read";
 import { STAGE_CLIENT, STAGE_THEME_BOOTSTRAP } from "./render-client";
 import { STAGE_CSS } from "./render-css";
 import {
-  changesByFile,
   splitDiffRows,
   stageTree,
   stageTreeStats,
+  type StageChangeStats,
   type StageTreeNode,
 } from "./render-model";
 import {
@@ -30,9 +30,35 @@ import {
   StageMaterializationError,
   type MaterializedStageChange,
 } from "./source";
-import type { StageGroup, StageMember } from "./types";
+import type { StageCategory, StageGroup, StageMember, StageSignal } from "./types";
 
 const VERSION_RE = /^[1-9][0-9]{0,8}$/;
+
+type ChangeMember = Extract<StageMember, { type: "change" }>;
+type MaterialMember = Extract<StageMember, { type: "material" }>;
+type FileMember = Extract<StageMember, { type: "file" }>;
+
+interface ChangeView {
+  member: ChangeMember;
+  item: MaterializedStageChange;
+  file: StageCaptureFileRow;
+  diff: StageChangeStats;
+  ordinal: number;
+}
+
+interface GroupView {
+  group: StageGroup;
+  index: number;
+  changes: ChangeView[];
+  files: StageCaptureFileRow[];
+  fileChanges: Map<string, string[]>;
+  changeStats: Map<string, StageChangeStats>;
+  materials: { member: MaterialMember; material: StageIncompleteRow }[];
+  leafFiles: { member: FileMember; file: StageCaptureFileRow }[];
+  added: number;
+  removed: number;
+  read: number;
+}
 
 function esc(value: unknown): string {
   return escapeHtml(String(value ?? ""));
@@ -42,17 +68,31 @@ function markdown(value: string): string {
   return renderMarkdown(value);
 }
 
-function softNotFound(req: Request): Response {
-  const url = new URL(req.url);
-  return new Response(softNotFoundPage(sessionEmail(req), url.pathname + url.search), {
-    status: 404,
-    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-cache" },
-  });
+function exactExcerpt(value: string, limit = 220): { text: string; shortened: boolean } {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (text.length <= limit) return { text, shortened: false };
+  const sentence = text.slice(0, limit + 1).match(/^(.+?[.!?])(?:\s|$)/)?.[1];
+  const cut = sentence && sentence.length >= 80 ? sentence : text.slice(0, limit).replace(/\s+\S*$/, "");
+  return { text: `${cut}…`, shortened: true };
+}
+
+function accountCopy(value: string, className: string, limit = 220): string {
+  const excerpt = exactExcerpt(value, limit);
+  if (!excerpt.shortened) return `<div class="${className}">${markdown(value)}</div>`;
+  return `<div class="${className}"><p>${esc(excerpt.text)}</p><details><summary>Full account</summary><div class="markdown">${markdown(value)}</div></details></div>`;
 }
 
 function html(body: string, status = 200): Response {
   return new Response(body, {
     status,
+    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-cache" },
+  });
+}
+
+function softNotFound(req: Request): Response {
+  const url = new URL(req.url);
+  return new Response(softNotFoundPage(sessionEmail(req), url.pathname + url.search), {
+    status: 404,
     headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-cache" },
   });
 }
@@ -66,8 +106,15 @@ function accountHeading(role: "Builder" | "Witness", name: string, model: string
   return `<h2>${role}<span> · ${esc(identity)}</span></h2>`;
 }
 
-function summaryHeader(title: string, metadata: string, action = ""): string {
-  return `<summary class="item-summary hoverable"><span class="item-arrow" aria-hidden="true">›</span><span class="item-title">${esc(title)}</span><span class="item-meta">${esc(metadata)}</span>${action}</summary>`;
+function accountCard(role: "Builder" | "Witness", name: string, model: string, value: string, context = ""): string {
+  const excerpt = exactExcerpt(value, 120).text;
+  return `<details class="account"><summary>${accountHeading(role, name, model)}<p>${esc(excerpt)}</p></summary><div class="account-full"><div class="markdown">${markdown(value)}</div>${context.trim() ? `<h3>Context</h3><div class="markdown">${markdown(context)}</div>` : ""}</div></details>`;
+}
+
+function reviewUrl(workspaceId: string, slug: string, version: number, groupId: string, changeId?: string): string {
+  const params = new URLSearchParams({ review: groupId });
+  if (changeId) params.set("change", changeId);
+  return `/${workspaceId}/st/${slug}/v/${version}?${esc(params.toString())}#${esc(changeId ?? `review-${groupId}`)}`;
 }
 
 function lineHtml(line: HunkLine, side: "unified" | "old" | "new", path: string): string {
@@ -84,14 +131,28 @@ function diffHtml(hunk: Hunk): string {
   const range = `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`;
   const unified = hunk.lines.map((line) => lineHtml(line, "unified", hunk.path)).join("");
   const split = splitDiffRows(hunk).map((row) => `<div class="split-row"><div class="split-cell">${row.old ? lineHtml(row.old, "old", hunk.path) : ""}</div><div class="split-cell new">${row.newer ? lineHtml(row.newer, "new", hunk.path) : ""}</div></div>`).join("");
-  return `<div class="diff-frame" data-diff-frame data-layout="unified"><div class="diff"><div class="hunk-head">${esc(range)}</div><div class="unified">${unified}</div><div class="split"><div class="split-head"><span>Old</span><span>New</span></div>${split}</div></div></div>`;
+  return `<div class="diff-frame" data-diff-frame data-layout="unified"><div class="diff"><div class="hunk-range">${esc(range)}</div><div class="unified">${unified}</div><div class="split"><div class="split-head"><span>Old</span><span>New</span></div>${split}</div></div></div>`;
 }
 
-function readForm(workspaceId: string, slug: string, version: number, changeId: string, read: boolean): string {
-  return `<form class="read-form" method="post" action="/${workspaceId}/st/${slug}/v/${version}/changes/${changeId}/read"><input data-read-input type="hidden" name="read" value="${read ? "false" : "true"}"><span data-read-failure role="status" aria-live="polite"></span><button data-read-button type="submit">${read ? "Mark unread" : "Mark as read"}</button></form>`;
+function diffStat(added: number, removed: number): string {
+  return `<span class="diff-stat"><span class="diff-add">+${added}</span><span class="diff-del">−${removed}</span></span>`;
 }
 
-function contextControl(slug: string, version: number, item: MaterializedStageChange, file: StageCaptureFileRow): string {
+function scale(signal: StageSignal, label: string): string {
+  const level = signal === "low" ? 1 : signal === "medium" ? 2 : 3;
+  return `<span class="dimension"><span class="signal-scale" aria-hidden="true">${[1, 2, 3].map((value) => `<i${value <= level ? ` class="active"` : ""}></i>`).join("")}</span><span>${esc(`${signal} ${label}`)}</span></span>`;
+}
+
+function dimensions(group: StageGroup, readLabel?: string, place = ""): string {
+  return `<span class="dimensions ${place}">${scale(group.importance, "importance")}${scale(group.complexity, "complexity")}${readLabel === undefined ? "" : `<span class="dimension read-dimension" data-read-state><span class="read-mark" aria-hidden="true">✓</span><span>${esc(readLabel)}</span></span>`}</span>`;
+}
+
+function readForm(workspaceId: string, slug: string, version: number, changeId: string, read: boolean, placement = ""): string {
+  return `<form class="read-form ${placement}" method="post" action="/${workspaceId}/st/${slug}/v/${version}/changes/${changeId}/read"><input data-read-input type="hidden" name="read" value="${read ? "false" : "true"}"><span data-read-failure role="status" aria-live="polite"></span><button data-read-button type="submit">${read ? "Mark unread" : "Mark as read"}</button></form>`;
+}
+
+function contextControl(slug: string, version: number, view: ChangeView): string {
+  const { file, item } = view;
   const useNew = file.new_availability === "retained" && file.new_kind === "blob" && item.hunk.newLines > 0;
   const side = useNew ? "new" : "old";
   const available = useNew
@@ -105,30 +166,26 @@ function contextControl(slug: string, version: number, item: MaterializedStageCh
   return `<div class="file-context" data-context><button class="context-trigger" type="button" data-context-trigger data-context-url="${esc(url)}">Load file context</button><div class="context-lines" data-context-lines aria-live="polite"></div></div>`;
 }
 
-function localSignals(group: StageGroup, readState: string): string {
-  return `<div class="local-signals"><span>${esc(group.category)}</span><span class="importance">importance ${esc(group.importance)}</span><span class="complexity">complexity ${esc(group.complexity)}</span><span data-read-state>${esc(readState)}</span></div>`;
+function gapControl(slug: string, version: number, before: ChangeView, after: ChangeView): string {
+  if (before.file.id !== after.file.id) return "";
+  const useNew = before.file.new_availability === "retained" && before.file.new_kind === "blob";
+  const useOld = before.file.old_availability === "retained" && before.file.old_kind === "blob";
+  if (!useNew && !useOld) return "";
+  const side = useNew ? "new" : "old";
+  const start = useNew
+    ? before.item.hunk.newStart + before.item.hunk.newLines
+    : before.item.hunk.oldStart + before.item.hunk.oldLines;
+  const finish = (useNew ? after.item.hunk.newStart : after.item.hunk.oldStart) - 1;
+  if (finish < start) return "";
+  const lines = finish - start + 1;
+  const end = Math.min(finish, start + 399);
+  const shown = end - start + 1;
+  const label = shown === lines ? `${lines} unchanged line${lines === 1 ? "" : "s"}` : `${shown} of ${lines} unchanged lines`;
+  const url = `/api/stages/${slug}/v/${version}/files/${before.file.id}?side=${side}&start=${start}&end=${end}`;
+  return `<div class="hunk-gap" data-context><button type="button" data-context-trigger data-context-url="${esc(url)}"><span aria-hidden="true">···</span>${esc(label)}<span aria-hidden="true">···</span></button><div class="context-lines" data-context-lines aria-live="polite"></div></div>`;
 }
 
-function changeItem(
-  workspaceId: string,
-  slug: string,
-  version: number,
-  group: StageGroup,
-  member: Extract<StageMember, { type: "change" }>,
-  item: MaterializedStageChange,
-  file: StageCaptureFileRow,
-  readIds: Set<string>,
-  focused: boolean,
-): string {
-  const read = readIds.has(item.change.id);
-  const count = stats([item.hunk]);
-  const path = file.old_path ? `${file.old_path} → ${file.path}` : file.path;
-  const metadata = `${read ? "read" : "unread"} · +${count.added} −${count.removed}`;
-  const action = `<a class="review-action" data-focus-link data-focus="${item.change.id}" href="/${workspaceId}/st/${slug}/v/${version}?focus=${item.change.id}#${item.change.id}">Review</a>`;
-  return `<details class="review-item change-item" id="${item.change.id}"${focused ? " open" : ""} data-change="${item.change.id}" data-file="${file.id}" data-read="${read}" data-path="${esc(file.path)}" data-description="${esc(member.description)}" data-group-title="${esc(group.title)}" data-signals="${esc(`${group.category} · importance ${group.importance} · complexity ${group.complexity}`)}">${summaryHeader(path, metadata, action)}<div class="item-body"><p class="mobile-meta">${esc(metadata)}</p>${localSignals(group, read ? "read" : "unread")}<div data-review-core><p class="description">${esc(member.description)}</p><p class="range">old ${item.hunk.oldStart},${item.hunk.oldLines} · new ${item.hunk.newStart},${item.hunk.newLines}</p>${diffHtml(item.hunk)}${contextControl(slug, version, item, file)}${readForm(workspaceId, slug, version, item.change.id, read)}</div></div></details>`;
-}
-
-function facts(file: StageCaptureFileRow): string {
+function fileFacts(file: StageCaptureFileRow): string {
   const values: [string, string][] = [
     ["status", file.status],
     ["old mode", file.old_mode ?? "not applicable"],
@@ -139,15 +196,68 @@ function facts(file: StageCaptureFileRow): string {
   return `<dl class="fact-list">${values.map(([term, value]) => `<div><dt>${esc(term)}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`;
 }
 
-function materialItem(group: StageGroup, member: Extract<StageMember, { type: "material" }>, material: StageIncompleteRow): string {
-  const title = material.path ?? material.kind.replaceAll("_", " ");
-  const metadata = `${material.side} · ${material.kind.replaceAll("_", " ")}`;
-  return `<details class="review-item material-item" id="${member.id}">${summaryHeader(title, metadata, `<span class="item-state">${esc(material.side)}</span>`)}<div class="item-body"><p class="mobile-meta">${esc(metadata)}</p>${localSignals(group, "material")}<p class="description">${esc(member.description)}</p><p class="material-reason">${esc(material.reason)}</p></div></details>`;
-}
-
-function fileItem(group: StageGroup, member: Extract<StageMember, { type: "file" }>, file: StageCaptureFileRow): string {
-  const path = file.old_path ? `${file.old_path} → ${file.path}` : file.path;
-  return `<details class="review-item file-item" id="${member.id}">${summaryHeader(path, file.status)}<div class="item-body"><p class="mobile-meta">${esc(file.status)}</p>${localSignals(group, "file")}<p class="description">${esc(member.description)}</p>${facts(file)}</div></details>`;
+function buildGroupViews(
+  groups: StageGroup[],
+  materialized: Map<string, MaterializedStageChange>,
+  inventory: StageCaptureInventory,
+  readIds: Set<string>,
+): GroupView[] {
+  const fileById = new Map(inventory.files.map((file) => [file.id, file]));
+  const materialById = new Map(inventory.incomplete.map((material) => [material.id, material]));
+  const canonicalOrder = new Map(inventory.changes.map((change, index) => [change.id, index]));
+  return groups.map((group, index) => {
+    const changes: ChangeView[] = [];
+    const materials: GroupView["materials"] = [];
+    const leafFiles: GroupView["leafFiles"] = [];
+    const fileIds = new Set<string>();
+    for (const member of group.members) {
+      if (member.type === "change") {
+        const item = materialized.get(member.id);
+        const file = item && fileById.get(item.change.file_id);
+        if (!item || !file) throw new StageMaterializationError(`Narrative change ${member.id} has no retained material.`);
+        const measured = stats([item.hunk]);
+        changes.push({ member, item, file, diff: measured, ordinal: 0 });
+        fileIds.add(file.id);
+      } else if (member.type === "material") {
+        const material = materialById.get(member.id);
+        if (!material) throw new StageMaterializationError(`Narrative material ${member.id} is missing.`);
+        materials.push({ member, material });
+        const file = material.path ? inventory.files.find((candidate) => candidate.path === material.path) : null;
+        if (file) fileIds.add(file.id);
+      } else {
+        const file = fileById.get(member.id);
+        if (!file) throw new StageMaterializationError(`Narrative file ${member.id} is missing.`);
+        leafFiles.push({ member, file });
+        fileIds.add(file.id);
+      }
+    }
+    const files = inventory.files.filter((file) => fileIds.has(file.id));
+    const fileOrder = new Map(filesInTreeOrder(stageTree(files)).map((file, order) => [file.id, order]));
+    changes.sort((left, right) =>
+      (fileOrder.get(left.file.id) ?? 0) - (fileOrder.get(right.file.id) ?? 0)
+      || (canonicalOrder.get(left.item.change.id) ?? 0) - (canonicalOrder.get(right.item.change.id) ?? 0),
+    );
+    changes.forEach((change, order) => { change.ordinal = order + 1; });
+    const fileChanges = new Map<string, string[]>();
+    const changeStats = new Map<string, StageChangeStats>();
+    for (const change of changes) {
+      fileChanges.set(change.file.id, [...(fileChanges.get(change.file.id) ?? []), change.item.change.id]);
+      changeStats.set(change.item.change.id, change.diff);
+    }
+    return {
+      group,
+      index,
+      changes,
+      files,
+      fileChanges,
+      changeStats,
+      materials,
+      leafFiles,
+      added: changes.reduce((sum, change) => sum + change.diff.added, 0),
+      removed: changes.reduce((sum, change) => sum + change.diff.removed, 0),
+      read: changes.filter((change) => readIds.has(change.item.change.id)).length,
+    };
+  });
 }
 
 function treeChangeIds(node: StageTreeNode, fileChanges: Map<string, string[]>): string[] {
@@ -157,79 +267,191 @@ function treeChangeIds(node: StageTreeNode, fileChanges: Map<string, string[]>):
   ];
 }
 
-function narrativeAnchors(groups: StageGroup[], inventory: StageCaptureInventory): Map<string, string> {
-  const anchors = new Map<string, string>();
-  for (const member of groups.flatMap((group) => group.members)) {
-    let fileId: string | null = null;
-    if (member.type === "change") fileId = inventory.changes.find((change) => change.id === member.id)?.file_id ?? null;
-    else if (member.type === "material") {
-      const path = inventory.incomplete.find((item) => item.id === member.id)?.path;
-      fileId = path ? inventory.files.find((file) => file.path === path)?.id ?? null : null;
-    } else fileId = member.id;
-    if (fileId && !anchors.has(fileId)) anchors.set(fileId, member.id);
-  }
-  return anchors;
+function treeSummary(ids: string[], files: number, added: number, removed: number, readIds: Set<string>): string {
+  const read = ids.filter((id) => readIds.has(id)).length;
+  return `<span class="tree-summary" data-tree-summary><span>${files} file${files === 1 ? "" : "s"}</span>${diffStat(added, removed)}<span class="tree-read${read === ids.length && ids.length > 0 ? " is-read" : ""}"><i aria-hidden="true"></i>${read}/${ids.length}</span></span>`;
 }
 
-function treeHtml(
+function overviewTreeHtml(
   node: StageTreeNode,
-  fileChanges: Map<string, string[]>,
+  view: GroupView,
   readIds: Set<string>,
-  anchors: Map<string, string>,
-  focusMode = false,
+  workspaceId: string,
+  slug: string,
+  version: number,
 ): string {
   const folders = node.folders.map((folder) => {
-    const ids = treeChangeIds(folder, fileChanges);
-    const counts = stageTreeStats(folder, fileChanges, readIds);
-    return `<details class="tree-folder" data-tree-node data-files="${counts.files}" data-change-ids="${ids.join(",")}"><summary><span class="tree-arrow" aria-hidden="true">›</span><span>${esc(folder.name)}</span><span class="tree-summary" data-tree-summary>${counts.files} files · ${counts.changes} changes · ${counts.unread} unread</span></summary><div class="tree-children">${treeHtml(folder, fileChanges, readIds, anchors, focusMode)}</div></details>`;
+    const ids = treeChangeIds(folder, view.fileChanges);
+    const counts = stageTreeStats(folder, view.fileChanges, readIds, view.changeStats);
+    return `<details class="tree-folder"${view.files.length <= 8 ? " open" : ""} data-tree-node data-files="${counts.files}" data-added="${counts.added}" data-removed="${counts.removed}" data-change-ids="${ids.join(",")}"><summary><span class="tree-arrow" aria-hidden="true">›</span><span class="tree-label">${esc(folder.name)}</span>${treeSummary(ids, counts.files, counts.added, counts.removed, readIds)}</summary><div class="tree-children">${overviewTreeHtml(folder, view, readIds, workspaceId, slug, version)}</div></details>`;
   }).join("");
   const files = node.files.map((file) => {
-    const ids = fileChanges.get(file.id) ?? [];
-    const unread = ids.some((id) => !readIds.has(id));
-    const target = anchors.get(file.id) ?? ids[0] ?? file.id;
-    const focus = focusMode && ids[0] ? ` data-tree-focus="${ids[0]}"` : "";
-    const meta = ids.length > 0 ? `${ids.length} change${ids.length === 1 ? "" : "s"}` : file.status;
-    const content = `<span class="tree-file-name">${esc(file.path.split("/").at(-1) ?? file.path)}</span><span class="tree-file-meta">${esc(meta)}</span>`;
-    if (focusMode && ids.length === 0) return `<span class="tree-file" data-change-ids="" data-unread="false">${content}</span>`;
-    return `<a class="tree-file hoverable" data-tree-file data-change-ids="${ids.join(",")}" data-unread="${unread}"${focus} href="#${target}">${content}</a>`;
+    const ids = view.fileChanges.get(file.id) ?? [];
+    const added = ids.reduce((sum, id) => sum + (view.changeStats.get(id)?.added ?? 0), 0);
+    const removed = ids.reduce((sum, id) => sum + (view.changeStats.get(id)?.removed ?? 0), 0);
+    const read = ids.filter((id) => readIds.has(id)).length;
+    const first = ids[0];
+    const content = `<span class="tree-file-name">${esc(file.path.split("/").at(-1) ?? file.path)}</span>${diffStat(added, removed)}<span class="tree-read${read === ids.length && ids.length > 0 ? " is-read" : ""}"><i aria-hidden="true"></i>${read}/${ids.length}</span>`;
+    if (!first) return `<span class="tree-file" data-change-ids="">${content}</span>`;
+    return `<a class="tree-file hoverable" data-focus-link data-review="${esc(view.group.id)}" data-change="${first}" data-change-ids="${ids.join(",")}" href="${reviewUrl(workspaceId, slug, version, view.group.id, first)}">${content}</a>`;
   }).join("");
   return folders + files;
 }
 
-function groupHtml(
+function focusTreeHtml(
+  node: StageTreeNode,
+  view: GroupView,
+  readIds: Set<string>,
   workspaceId: string,
   slug: string,
   version: number,
-  group: StageGroup,
-  materialized: Map<string, MaterializedStageChange>,
-  inventory: StageCaptureInventory,
-  readIds: Set<string>,
-  focusId: string | null,
 ): string {
-  const changeIds = group.members.filter((member): member is Extract<StageMember, { type: "change" }> => member.type === "change").map((member) => member.id);
-  const read = changeIds.filter((id) => readIds.has(id)).length;
-  const members = group.members.map((member) => {
-    if (member.type === "change") {
-      const item = materialized.get(member.id);
-      const file = item && inventory.files.find((candidate) => candidate.id === item.change.file_id);
-      if (!item || !file) throw new StageMaterializationError(`Narrative change ${member.id} has no retained material.`);
-      return changeItem(workspaceId, slug, version, group, member, item, file, readIds, focusId === member.id);
-    }
-    if (member.type === "material") {
-      const material = inventory.incomplete.find((candidate) => candidate.id === member.id);
-      if (!material) throw new StageMaterializationError(`Narrative material ${member.id} is missing.`);
-      return materialItem(group, member, material);
-    }
-    const file = inventory.files.find((candidate) => candidate.id === member.id);
-    if (!file) throw new StageMaterializationError(`Narrative file ${member.id} is missing.`);
-    return fileItem(group, member, file);
+  const folders = node.folders.map((folder) => {
+    const ids = treeChangeIds(folder, view.fileChanges);
+    const counts = stageTreeStats(folder, view.fileChanges, readIds, view.changeStats);
+    return `<details class="tree-folder" open data-tree-node data-files="${counts.files}" data-added="${counts.added}" data-removed="${counts.removed}" data-change-ids="${ids.join(",")}"><summary><span class="tree-arrow" aria-hidden="true">›</span><span class="tree-label">${esc(folder.name)}</span>${treeSummary(ids, counts.files, counts.added, counts.removed, readIds)}</summary><div class="tree-children">${focusTreeHtml(folder, view, readIds, workspaceId, slug, version)}</div></details>`;
   }).join("");
-  return `<section class="group" id="group-${group.id}" data-group="${group.id}" data-change-ids="${changeIds.join(",")}"><header class="group-header"><h2>${esc(group.title)}</h2><div class="group-signals"><span>${esc(group.category)}</span><span class="signal-importance">importance ${esc(group.importance)}</span><span class="signal-complexity">complexity ${esc(group.complexity)}</span><span data-group-progress>${read} / ${changeIds.length} read</span></div></header><div class="group-copy">${markdown(group.explanation)}${group.attention ? `<p class="attention">${esc(group.attention)}</p>` : ""}</div>${group.examples.map((example) => `<figure class="example"><pre><code>${esc(example.code)}</code></pre><figcaption>${esc(example.text)}</figcaption></figure>`).join("")}<div>${members}</div></section>`;
+  const files = node.files.map((file) => {
+    const changes = view.changes.filter((change) => change.file.id === file.id);
+    const added = changes.reduce((sum, change) => sum + change.diff.added, 0);
+    const removed = changes.reduce((sum, change) => sum + change.diff.removed, 0);
+    const read = changes.filter((change) => readIds.has(change.item.change.id)).length;
+    const codeAnchor = `review-file-${view.group.id}-${file.id}`;
+    const factMember = view.leafFiles.find((entry) => entry.file.id === file.id)?.member
+      ?? view.materials.find((entry) => entry.material.path === file.path)?.member;
+    const fileAnchor = changes.length > 0 ? codeAnchor : factMember ? `focus-${factMember.id}` : codeAnchor;
+    return `<div class="focus-tree-file" data-change-ids="${changes.map((change) => change.item.change.id).join(",")}"><a class="tree-file hoverable" data-scroll-file="${esc(fileAnchor)}" href="#${esc(fileAnchor)}"><span class="tree-file-name">${esc(file.path.split("/").at(-1) ?? file.path)}</span>${diffStat(added, removed)}<span class="tree-read${read === changes.length && changes.length > 0 ? " is-read" : ""}"><i aria-hidden="true"></i>${read}/${changes.length}</span></a>${changes.length === 0 ? "" : `<div class="tree-hunks">${changes.map((change) => {
+      const id = change.item.change.id;
+      const line = change.item.hunk.newLines > 0 ? change.item.hunk.newStart : change.item.hunk.oldStart;
+      return `<a href="${reviewUrl(workspaceId, slug, version, view.group.id, id)}" data-activate-change="${id}" data-read="${readIds.has(id)}"><i aria-hidden="true"></i>L${line}</a>`;
+    }).join("")}</div>`}</div>`;
+  }).join("");
+  return folders + files;
 }
 
-function focusDialog(tree: string): string {
-  const closeIcon = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>`;
-  return `<dialog class="focus-dialog" data-focus-dialog aria-label="Change review"><div class="focus-shell"><header class="focus-header"><button type="button" data-focus-toggle="tree" aria-label="Toggle repository"><span aria-hidden="true">☰</span></button><span class="focus-title" data-focus-title></span><span class="focus-spacer"></span><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><button type="button" data-focus-close aria-label="Close change review">${closeIcon}</button></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-tree" aria-label="Repository">${tree}</aside><main class="focus-center" data-focus-center></main><aside class="focus-detail" aria-label="Review details"><div data-focus-detail-content></div></aside></div><nav class="focus-mobile-bar" aria-label="Focus panels"><button type="button" data-focus-toggle="tree">Repository</button><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
+function extraMaterialHtml(view: GroupView, focus = false): string {
+  const materials = view.materials.map(({ member, material }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary><span>${esc(material.path ?? material.kind.replaceAll("_", " "))}</span><span>${esc(`${material.side} · ${material.kind.replaceAll("_", " ")}`)}</span></summary><div><p>${esc(member.description)}</p><p>${esc(material.reason)}</p></div></details>`).join("");
+  const files = view.leafFiles.map(({ member, file }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary><span>${esc(file.old_path ? `${file.old_path} → ${file.path}` : file.path)}</span><span>${esc(file.status)}</span></summary><div><p>${esc(member.description)}</p>${fileFacts(file)}</div></details>`).join("");
+  if (!materials && !files) return "";
+  return `<div class="group-materials">${materials}${files}</div>`;
+}
+
+function groupCard(
+  view: GroupView,
+  readIds: Set<string>,
+  workspaceId: string,
+  slug: string,
+  version: number,
+): string {
+  const sequence = String(view.index + 1).padStart(2, "0");
+  const tree = stageTree(view.files);
+  const total = view.changes.length;
+  const reviewLabel = total === 0 ? "Review material" : `Review ${total} change${total === 1 ? "" : "s"}`;
+  const points = view.changes.slice(0, 3);
+  return `<section class="review-group-card" id="group-${esc(view.group.id)}" data-group="${esc(view.group.id)}" data-category="${esc(view.group.category)}" data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}"><header class="group-head"><div class="group-sequence"><i aria-hidden="true"></i><span>${sequence} · ${esc(view.group.category)}</span></div><h2>${esc(view.group.title)}</h2>${dimensions(view.group, undefined, "in-group")}</header>${accountCopy(view.group.explanation, "group-copy")}${view.group.attention ? `<p class="group-attention">${esc(view.group.attention)}</p>` : ""}${points.length === 0 ? "" : `<ol class="group-points">${points.map((change) => {
+    const line = change.item.hunk.newLines > 0 ? change.item.hunk.newStart : change.item.hunk.oldStart;
+    return `<li><span>${String(change.ordinal).padStart(2, "0")}</span><code>${esc(change.file.path)}:L${line}</code><p>${esc(exactExcerpt(change.member.description, 160).text)}</p></li>`;
+  }).join("")}${view.changes.length > points.length ? `<li class="remaining"><span>+</span><code></code><p>${view.changes.length - points.length} more in review</p></li>` : ""}</ol>`}${view.group.examples.length === 0 ? "" : `<ul class="group-examples">${view.group.examples.map((example) => `<li><code>${esc(example.code)}</code><span>${esc(example.text)}</span></li>`).join("")}</ul>`}<div class="group-preview"><div class="group-preview-files">${overviewTreeHtml(tree, view, readIds, workspaceId, slug, version)}</div>${extraMaterialHtml(view)}<footer><span data-group-progress>${view.read} / ${total} read</span><a class="review-group-action" data-focus-link data-review="${esc(view.group.id)}" href="${reviewUrl(workspaceId, slug, version, view.group.id)}">${reviewLabel}<span aria-hidden="true">→</span></a></footer></div></section>`;
+}
+
+function categorySummary(views: GroupView[]): string {
+  const order: StageCategory[] = ["Contract", "Code", "Tests", "Test fixtures", "Docs", "Generated"];
+  return `<div class="category-summary" aria-label="Changed lines by category">${order.map((category) => {
+    const matching = views.filter((view) => view.group.category === category);
+    if (matching.length === 0) return "";
+    const added = matching.reduce((sum, view) => sum + view.added, 0);
+    const removed = matching.reduce((sum, view) => sum + view.removed, 0);
+    return `<div data-category="${esc(category)}"><span>${esc(category)}</span>${diffStat(added, removed)}</div>`;
+  }).join("")}</div>`;
+}
+
+function attentionBar(views: GroupView[]): string {
+  const attention = views.filter((view) => view.group.attention);
+  if (attention.length === 0) return "";
+  const link = (view: GroupView) => `<a href="#group-${esc(view.group.id)}">${esc(view.group.title)}</a>`;
+  const shown = attention.slice(0, 3).map(link).join("");
+  const remaining = attention.slice(3);
+  return `<div class="attention-bar"><span>Needs attention</span>${shown}${remaining.length === 0 ? "" : `<details><summary>${remaining.length} more</summary><div>${remaining.map(link).join("")}</div></details>`}</div>`;
+}
+
+function groupNavigation(views: GroupView[], version: number, latest: boolean, totalRead: number, total: number): string {
+  const progress = total === 0 ? 100 : Math.round(totalRead / total * 100);
+  return `<div class="review-nav-head"><span>Version ${version}${latest ? " · latest" : ""}</span><strong data-progress>${totalRead} / ${total} read</strong><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><nav class="group-links" aria-label="Walkthrough groups">${views.map((view) => `<a href="#group-${esc(view.group.id)}" data-category="${esc(view.group.category)}"><i aria-hidden="true"></i><span><small>${String(view.index + 1).padStart(2, "0")} · ${esc(view.group.category)}</small><strong>${esc(view.group.title)}</strong></span><em data-group-nav-progress data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}">${view.read}/${view.changes.length}</em></a>`).join("")}</nav>`;
+}
+
+function hunkReview(
+  view: GroupView,
+  change: ChangeView,
+  readIds: Set<string>,
+  workspaceId: string,
+  slug: string,
+  version: number,
+): string {
+  const id = change.item.change.id;
+  const read = readIds.has(id);
+  const line = change.item.hunk.newLines > 0 ? change.item.hunk.newStart : change.item.hunk.oldStart;
+  const path = change.file.old_path ? `${change.file.old_path} → ${change.file.path}` : change.file.path;
+  return `<article class="hunk-review${read ? " is-read" : ""}" id="${id}" data-change="${id}" data-read="${read}" data-collapsed="false"><header class="hunk-header"><button class="disclosure-button" type="button" data-toggle-change="${id}" aria-expanded="true" aria-label="Collapse ${esc(path)}"><span aria-hidden="true">⌄</span></button><span class="hunk-index">${String(change.ordinal).padStart(2, "0")}</span><code>${esc(path)}:L${line}</code>${diffStat(change.diff.added, change.diff.removed)}${dimensions(view.group, read ? "Read" : "Unread", "in-header")}${readForm(workspaceId, slug, version, id, read, "header-read")}</header><div class="hunk-body" data-hunk-body><p class="hunk-description">${esc(change.member.description)}</p><p class="hunk-range">old ${change.item.hunk.oldStart},${change.item.hunk.oldLines} · new ${change.item.hunk.newStart},${change.item.hunk.newLines}</p>${diffHtml(change.item.hunk)}${contextControl(slug, version, change)}</div></article>`;
+}
+
+function fileReview(
+  view: GroupView,
+  file: StageCaptureFileRow,
+  changes: ChangeView[],
+  readIds: Set<string>,
+  workspaceId: string,
+  slug: string,
+  version: number,
+): string {
+  const added = changes.reduce((sum, change) => sum + change.diff.added, 0);
+  const removed = changes.reduce((sum, change) => sum + change.diff.removed, 0);
+  const read = changes.filter((change) => readIds.has(change.item.change.id)).length;
+  const anchor = `review-file-${view.group.id}-${file.id}`;
+  return `<details class="file-review" id="${esc(anchor)}" open><summary class="file-review-head"><span class="file-disclosure" aria-hidden="true">⌄</span><span class="file-review-title"><strong>${esc(file.old_path ? `${file.old_path} → ${file.path}` : file.path)}</strong><small><span data-file-progress>${read} / ${changes.length} read</span></small></span>${diffStat(added, removed)}</summary><div class="file-review-body">${changes.map((change, index) => `${index === 0 ? "" : gapControl(slug, version, changes[index - 1]!, change)}${hunkReview(view, change, readIds, workspaceId, slug, version)}`).join("")}</div></details>`;
+}
+
+function focusLedger(
+  view: GroupView,
+  readIds: Set<string>,
+  workspaceId: string,
+  slug: string,
+  version: number,
+): string {
+  if (view.changes.length === 0) return `<p class="empty-ledger">No code changes in this group.</p>`;
+  return view.changes.map((change) => {
+    const id = change.item.change.id;
+    const read = readIds.has(id);
+    const line = change.item.hunk.newLines > 0 ? change.item.hunk.newStart : change.item.hunk.oldStart;
+    return `<article class="ledger-card${read ? " is-read" : ""}" data-ledger-change="${id}" data-change="${id}" data-read="${read}"><button type="button" data-activate-change="${id}"><span>${String(change.ordinal).padStart(2, "0")}</span><code>${esc(change.file.path)}:L${line}</code>${diffStat(change.diff.added, change.diff.removed)}</button><div class="ledger-body">${dimensions(view.group, read ? "Read" : "Unread", "in-ledger")}<p>${esc(change.member.description)}</p>${readForm(workspaceId, slug, version, id, read, "ledger-read")}</div></article>`;
+  }).join("");
+}
+
+function filesInTreeOrder(node: StageTreeNode): StageCaptureFileRow[] {
+  return [...node.folders.flatMap(filesInTreeOrder), ...node.files];
+}
+
+function focusDialog(
+  selected: GroupView | null,
+  views: GroupView[],
+  readIds: Set<string>,
+  workspaceId: string,
+  slug: string,
+  version: number,
+  stageTitle: string,
+  sourceHeadSha: string,
+  activeChange: string | null,
+): string {
+  if (!selected) return `<dialog class="focus-dialog" data-focus-dialog aria-label="Group review"></dialog>`;
+  const selectedTree = stageTree(selected.files);
+  const tree = focusTreeHtml(selectedTree, selected, readIds, workspaceId, slug, version);
+  const files = filesInTreeOrder(selectedTree).map((file) => ({
+    file,
+    changes: selected.changes.filter((change) => change.file.id === file.id),
+  })).filter((entry) => entry.changes.length > 0);
+  const pinned = `/${workspaceId}/st/${slug}/v/${version}`;
+  const sequence = String(selected.index + 1).padStart(2, "0");
+  const groupLinks = views.map((view) => `<a class="focus-group-link${view.group.id === selected.group.id ? " is-active" : ""}" data-focus-group-link data-review="${esc(view.group.id)}" data-category="${esc(view.group.category)}" href="${reviewUrl(workspaceId, slug, version, view.group.id)}"><i aria-hidden="true"></i><span><small>${String(view.index + 1).padStart(2, "0")} · ${esc(view.group.category)}</small><strong>${esc(view.group.title)}</strong></span><em data-group-nav-progress data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}">${view.read}/${view.changes.length}</em></a>`).join("");
+  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}" data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="/bundles">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(stageTitle)} · ${sequence} · ${esc(selected.group.category)}</span><strong>${esc(selected.group.title)}</strong></div><div class="focus-head-actions"><span>v${version} · ${esc(shortSha(sourceHeadSha))}</span><button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${pinned}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream><header class="focus-stream-head" data-category="${esc(selected.group.category)}"><div><span>${sequence} · ${esc(selected.group.category)}</span><h2>${esc(selected.group.title)}</h2>${accountCopy(selected.group.explanation, "focus-account", 160)}</div>${diffStat(selected.added, selected.removed)}</header>${files.map(({ file, changes }) => fileReview(selected, file, changes, readIds, workspaceId, slug, version)).join("")}${extraMaterialHtml(selected, true)}</main><aside class="focus-right" aria-label="Review details"><header><button type="button" data-filter-unread aria-pressed="false">Unread</button><button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${focusLedger(selected, readIds, workspaceId, slug, version)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
 }
 
 function storageFailurePage(nav: NavContext, title: string, status: number): Response {
@@ -261,6 +483,7 @@ export async function handleStagePage(
     current: { id: workspace.id, name: workspace.name },
     section: "projects",
   };
+
   let changes: MaterializedStageChange[];
   try {
     changes = await materializeCanonicalChanges(inventory, (digest) => loadStageBytes(workspaceId, digest));
@@ -271,24 +494,30 @@ export async function handleStagePage(
 
   const readIds = listStageReadChangeIds(workspaceId, version.id, user.id);
   const materialized = new Map(changes.map((item) => [item.change.id, item]));
-  const fileChanges = changesByFile(inventory);
-  const tree = stageTree(inventory.files);
-  const totals = stageTreeStats(tree, fileChanges, readIds);
-  const requestedFocus = new URL(req.url).searchParams.get("focus");
-  const focusId = requestedFocus && materialized.has(requestedFocus) ? requestedFocus : null;
-  let groups: string;
+  let views: GroupView[];
   try {
-    groups = version.doc.witness.groups.map((group) => groupHtml(workspaceId, slug, versionNumber, group, materialized, inventory, readIds, focusId)).join("");
+    views = buildGroupViews(version.doc.witness.groups, materialized, inventory, readIds);
   } catch (err) {
     console.error(`[seer] stage ${workspaceId}/${slug}/v/${versionNumber} narrative is inconsistent:`, err);
     return storageFailurePage(nav, version.doc.identity.title, 500);
   }
-  const anchors = narrativeAnchors(version.doc.witness.groups, inventory);
-  const repository = treeHtml(tree, fileChanges, readIds, anchors);
-  const focusRepository = treeHtml(tree, fileChanges, readIds, anchors, true);
+
+  const url = new URL(req.url);
+  const reviewId = url.searchParams.get("review");
+  const requestedChange = url.searchParams.get("change");
+  const selected = reviewId === null ? null : views.find((view) => view.group.id === reviewId) ?? null;
+  if (reviewId !== null && !selected) return softNotFound(req);
+  if (requestedChange !== null && (!selected || !selected.changes.some((change) => change.item.change.id === requestedChange))) return softNotFound(req);
+
   const readCount = changes.filter((item) => readIds.has(item.change.id)).length;
+  const allChangeIds = changes.map((item) => item.change.id);
+  if (selected) {
+    const focusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(selected.group.title)} · ${esc(version.doc.identity.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}">${focusDialog(selected, views, readIds, workspaceId, slug, versionNumber, version.doc.identity.title, version.doc.source.sourceHeadSha, requestedChange)}<script>${STAGE_CLIENT}</script></body></html>`;
+    return html(focusPage);
+  }
+  const groupCards = views.map((view) => groupCard(view, readIds, workspaceId, slug, versionNumber)).join("");
   const versionLinks = Array.from({ length: stage.latest_version }, (_, index) => index + 1).map((number) => `<a href="/${workspaceId}/st/${slug}/v/${number}"${number === versionNumber ? ` aria-current="page"` : ""}>v${number}</a>`).join(" · ");
-  const builderContext = version.doc.builder.context.trim() ? `<details><summary>Context</summary>${markdown(version.doc.builder.context)}</details>` : "";
-  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(version.doc.identity.title)} · Seer</title><style>${STAGE_CSS}</style></head><body><div class="stage-shell">${appBar(nav)}</div><div class="stage-grid"><header class="stage-header"><p class="stage-context">${esc(version.doc.source.repo)} · ${esc(version.doc.source.branch)}</p><h1>${esc(version.doc.identity.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(version.doc.source.mergeBaseSha)} → ${shortSha(version.doc.source.sourceHeadSha)}`)}</span><span>Version ${versionNumber}${versionNumber === stage.latest_version ? " · latest" : ""}</span></div></header><section class="accounts" aria-label="Accounts"><article class="account">${accountHeading("Builder", version.doc.builder.agent.name, version.doc.builder.agent.model)}<div class="markdown">${markdown(version.doc.builder.intent)}</div>${builderContext}</article><article class="account">${accountHeading("Witness", version.doc.witness.agent.name, version.doc.witness.agent.model)}<div class="markdown">${markdown(version.doc.witness.summary)}</div></article></section></div><div class="stage-grid stage-body"><aside class="repo-rail" data-repo-rail data-open="false"><div class="rail-head"><h2>Repository</h2><button class="icon-button drawer-close" type="button" data-repo-close aria-label="Close repository">Close</button></div><nav aria-label="Changed files">${repository}</nav><p class="progress"><strong data-progress>${readCount} / ${changes.length} read</strong><br>${totals.files} files · ${totals.changes} changes</p></aside><main class="walkthrough">${groups}</main><aside class="version-rail"><h2>Review</h2><p><strong data-progress>${readCount} / ${changes.length} read</strong></p><section><p>${versionLinks}</p></section><section><p>${esc(version.doc.source.repo)}</p><p>${esc(version.doc.source.branch)}</p></section></aside><footer class="terminal"><h2 data-unread-summary>${readCount === changes.length ? "Read" : `${changes.length - readCount} unread`}</h2><p class="terminal-meta">Version ${versionNumber} · ${totals.files} files</p></footer></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-repo-open>Repository</button><span data-progress>${readCount} / ${changes.length} read</span><span>v${versionNumber}</span></nav><button class="scrim" type="button" data-scrim hidden aria-label="Close repository"></button>${focusDialog(focusRepository)}<script>${STAGE_CLIENT}</script></body></html>`;
+  const progress = changes.length === 0 ? 100 : Math.round(readCount / changes.length * 100);
+  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(version.doc.identity.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"><div data-stage-background><div class="stage-shell">${appBar(nav)}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(version.doc.source.repo)} · ${esc(version.doc.source.branch)}</p><h1>${esc(version.doc.identity.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(version.doc.source.mergeBaseSha)} → ${shortSha(version.doc.source.sourceHeadSha)}`)}</span><span>Version ${versionNumber}${versionNumber === stage.latest_version ? " · latest" : ""}</span></div>${categorySummary(views)}${attentionBar(views)}</header><section class="accounts" aria-label="Accounts">${accountCard("Builder", version.doc.builder.agent.name, version.doc.builder.agent.model, version.doc.builder.intent, version.doc.builder.context)}${accountCard("Witness", version.doc.witness.agent.name, version.doc.witness.agent.model, version.doc.witness.summary)}</section></div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, versionNumber, versionNumber === stage.latest_version, readCount, changes.length)}</aside><main class="walkthrough">${groupCards}<footer class="terminal"><div><h2 data-unread-summary>${readCount === changes.length ? "Read" : `${changes.length - readCount} unread`}</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><p>Version ${versionNumber} · ${inventory.files.length} files</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${versionLinks}</p><section><p>${esc(version.doc.source.repo)}</p><p>${esc(version.doc.source.branch)}</p><code>${esc(shortSha(version.doc.source.sourceHeadSha))}</code></section></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>v${versionNumber}</button><span data-progress>${readCount} / ${changes.length} read</span></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, views, readIds, workspaceId, slug, versionNumber, version.doc.identity.title, version.doc.source.sourceHeadSha, null)}<script>${STAGE_CLIENT}</script></body></html>`;
   return html(page);
 }
