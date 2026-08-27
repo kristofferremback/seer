@@ -602,6 +602,7 @@ describe("a pull request becomes a review", () => {
     expect(anchor).not.toContain("onclick");
     expect(STAGE_CSS).toContain(".source-pr{color:inherit");
     expect(STAGE_CSS).toContain(".stage-context .source-pr{display:inline-flex;align-items:center;min-height:44px");
+    expect(STAGE_CSS).toContain(".focus-head-title>span{display:none}");
     expect(STAGE_CSS).toContain(".js .focus-head-actions>.source-pr{display:none}");
     expect(STAGE_CSS).toContain(".focus-pr-source .source-pr{display:inline-flex;align-items:center;min-height:44px");
     // Not a pill: no background, no border, no radius of its own.
