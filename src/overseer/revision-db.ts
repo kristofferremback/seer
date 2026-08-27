@@ -497,6 +497,84 @@ export const publishFirstRevision = db.transaction((input: PublishRevisionInput)
   return { lineage, revision, request, created: true };
 }) as (input: PublishRevisionInput) => PublishedRevision;
 
+export interface AppendSourceRevisionInput {
+  workspaceId: string;
+  lineage: ReviewLineageRow;
+  capture: {
+    id: string;
+    repo: string;
+    repoId: number;
+    branch: string;
+    baseRef: string;
+    sourceHeadSha: string;
+    baseTipSha: string;
+    mergeBaseSha: string;
+  };
+  builder: RevisionBuilder | null;
+}
+
+export interface AppendedRevision {
+  revision: ReviewRevisionRow;
+  request: WitnessRequestRow;
+}
+
+/**
+ * Append the next source revision of an existing lineage, with its pending witness
+ * request and the lineage's own pointer.
+ *
+ * NOT a transaction of its own, and that is the point: the caller is the pull request
+ * capture completion, which has to commit this together with the source association and
+ * the job's completed state, or a reader could see a revision whose provenance had not
+ * landed yet. It writes the exact task-4 V1 document — same fields, same schema version,
+ * same digest rule — because a pull request revision is evidence in precisely the way a
+ * branch revision is, and a second document format would soft-404 every old reader during
+ * a mixed-image deploy for no gain.
+ *
+ * `originalBaseRef` and `originalBaseSha` come from the LINEAGE rather than from this
+ * capture: they are the lineage's first base, which is what lets a later revision say
+ * what moved.
+ */
+export function appendSourceRevision(input: AppendSourceRevisionInput): AppendedRevision {
+  const { workspaceId, lineage, capture } = input;
+  const now = Date.now();
+  const number = (lineage.latest_revision ?? 0) + 1;
+  const doc: RevisionDoc = {
+    identity: { lineageId: lineage.id, slug: lineage.slug, revision: number, title: lineage.title, createdAt: new Date(now).toISOString() },
+    source: {
+      captureId: capture.id,
+      repo: capture.repo,
+      repoId: capture.repoId,
+      branch: capture.branch,
+      originalBaseRef: lineage.original_base_ref,
+      originalBaseSha: lineage.original_base_sha,
+      baseRef: capture.baseRef,
+      sourceHeadSha: capture.sourceHeadSha,
+      baseTipSha: capture.baseTipSha,
+      mergeBaseSha: capture.mergeBaseSha,
+    },
+    builder: input.builder,
+    projects: db.query<{ slug: string }, [string, string]>(
+      "SELECT p.slug AS slug FROM project_review_lineages j JOIN projects p ON p.id = j.project_id WHERE j.workspace_id = ? AND j.slug = ? ORDER BY j.created_at ASC",
+    ).all(workspaceId, lineage.slug).map((row) => row.slug),
+  };
+  const revisionId = tinyId("rvr");
+  db.run(
+    "INSERT INTO review_revisions (id, workspace_id, lineage_id, slug, revision, capture_id, schema_version, doc, digest, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+    [revisionId, workspaceId, lineage.id, lineage.slug, number, capture.id, JSON.stringify(doc), digestOf(doc), now],
+  );
+  const requestId = tinyId("wtr");
+  db.run(
+    "INSERT INTO review_witness_requests (id, workspace_id, lineage_id, revision_id, revision, state, retry_count, failure, account_id, created_at, updated_at) " +
+      "VALUES (?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, ?, ?)",
+    [requestId, workspaceId, lineage.id, revisionId, number, now, now],
+  );
+  db.run("UPDATE review_lineages SET latest_revision = ?, updated_at = ? WHERE id = ?", [number, now, lineage.id]);
+  const revision = getRevision(workspaceId, lineage.slug, number);
+  const request = getWitnessRequestForRevision(workspaceId, revisionId);
+  if (!revision || !request) throw new Error("Source revision publication did not write every row");
+  return { revision, request };
+}
+
 export interface PublishAccountInput {
   workspaceId: string;
   userId: string;
@@ -558,6 +636,11 @@ export const publishAccount = db.transaction((input: PublishAccountInput): Publi
       ? "Retry the failed witness request before publishing an account"
       : "This witness request already published an account");
   }
+  // Atomically claim and consume the attempt. A key that already holds the claim simply
+  // renews it, so task 4's single-agent path is unchanged; a key that does not, while
+  // somebody else's lease is still healthy, is refused rather than allowed to publish an
+  // account over work another agent is in the middle of.
+  takeClaim(workspaceId, request, input.userId, input.keyId, now);
 
   const version = (lineage.latest_account_version ?? 0) + 1;
   const accountId = tinyId("rac");
@@ -594,26 +677,153 @@ export const publishAccount = db.transaction((input: PublishAccountInput): Publi
   return { account, request: publishedRequest, created: true };
 }) as (input: PublishAccountInput) => PublishedAccount;
 
+// ---- witness claims ----
+//
+// A witness request is work, and work needs one owner at a time. The claim is keyed by
+// `(request, retry count)` rather than by the request alone, because the retry count is
+// exactly what makes a second attempt a DIFFERENT piece of work: the agent that failed
+// attempt zero has no standing over attempt one, and an agent picking up attempt one must
+// not have to wait for a lease held by a process that has already given up.
+//
+// The lease is renewable and recoverable in the same breath. A same-key claim renews it,
+// so a working agent stays the owner; an expired lease may be taken over by anyone,
+// because a claim nobody is renewing is a claim nobody is working.
+
+export interface WitnessClaimRow {
+  request_id: string;
+  retry_count: number;
+  workspace_id: string;
+  user_id: string;
+  key_id: string;
+  lease_token: string;
+  lease_expires_at: number;
+  claimed_at: number;
+}
+
+/** Long enough that an agent reading a large capture keeps its claim without thinking
+ *  about it; short enough that a process killed mid-answer frees the work the same
+ *  afternoon rather than the next deploy. */
+export const WITNESS_LEASE_MS = 10 * 60 * 1000;
+
+export function getWitnessClaim(requestId: string, retryCount: number): WitnessClaimRow | null {
+  return db.query<WitnessClaimRow, [string, number]>(
+    "SELECT * FROM review_witness_claims WHERE request_id = ? AND retry_count = ?",
+  ).get(requestId, retryCount);
+}
+
+function writeClaim(
+  workspaceId: string,
+  request: WitnessRequestRow,
+  userId: string,
+  keyId: string,
+  now: number,
+): WitnessClaimRow {
+  const token = tinyId("wcl");
+  db.run(
+    "INSERT INTO review_witness_claims (request_id, retry_count, workspace_id, user_id, key_id, lease_token, lease_expires_at, claimed_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(request_id, retry_count) DO UPDATE SET workspace_id = excluded.workspace_id, user_id = excluded.user_id, " +
+      "key_id = excluded.key_id, lease_token = excluded.lease_token, lease_expires_at = excluded.lease_expires_at, claimed_at = excluded.claimed_at",
+    [request.id, request.retry_count, workspaceId, userId, keyId, token, now + WITNESS_LEASE_MS, now],
+  );
+  return getWitnessClaim(request.id, request.retry_count)!;
+}
+
+/**
+ * The claim arbiter, shared by the claim route and by publication and failure.
+ *
+ * `null` means "no healthy claim stands in your way, and the attempt is now yours". A
+ * healthy claim held by a different key throws, which is what stops two agents writing
+ * two accounts over one revision and calling one of them a replay.
+ */
+function takeClaim(
+  workspaceId: string,
+  request: WitnessRequestRow,
+  userId: string,
+  keyId: string,
+  now: number,
+): WitnessClaimRow {
+  const held = getWitnessClaim(request.id, request.retry_count);
+  if (held && held.key_id !== keyId && held.lease_expires_at > now) {
+    throw new RevisionWriteError(409, "Another agent holds this witness request; its claim has not expired.");
+  }
+  return writeClaim(workspaceId, request, userId, keyId, now);
+}
+
+export interface WitnessClaimResult {
+  request: WitnessRequestRow;
+  claim: WitnessClaimRow;
+  /** False when this key already held the claim and the lease was renewed rather than
+   *  taken. What tells a replaying agent it is still the same attempt. */
+  created: boolean;
+}
+
+/**
+ * Claim one attempt of a witness request, renew a claim this key already holds, or
+ * recover one whose lease has expired.
+ *
+ * A published request has nothing left to claim, and a failed one has to be retried
+ * first — that is the transition that increments the count and makes the next attempt a
+ * different piece of work.
+ */
+export const claimWitnessRequest = db.transaction((input: {
+  workspaceId: string;
+  requestId: string;
+  userId: string;
+  keyId: string;
+  now?: number;
+}): WitnessClaimResult => {
+  const now = input.now ?? Date.now();
+  const request = getWitnessRequest(input.workspaceId, input.requestId);
+  if (!request) throw new RevisionWriteError(404, "No such witness request in this workspace");
+  if (request.state === "published") {
+    throw new RevisionWriteError(409, "This witness request already published an account");
+  }
+  if (request.state === "failed") {
+    throw new RevisionWriteError(409, "Retry the failed witness request before claiming it");
+  }
+  const held = getWitnessClaim(request.id, request.retry_count);
+  const created = !held || held.key_id !== input.keyId;
+  const claim = takeClaim(input.workspaceId, request, input.userId, input.keyId, now);
+  return { request, claim, created };
+}) as (input: {
+  workspaceId: string;
+  requestId: string;
+  userId: string;
+  keyId: string;
+  now?: number;
+}) => WitnessClaimResult;
+
 export const MAX_FAILURE_TEXT = 600;
 
-/** Pending to failed, recording bounded text. A request that already published is a
- *  conflict: the account exists and nothing about it failed. */
+/**
+ * Pending to failed, recording bounded text. A request that already published is a
+ * conflict: the account exists and nothing about it failed.
+ *
+ * `claimant` is optional so the direct in-process call task 4 ships keeps working
+ * unchanged — an internal writer with nobody to be is not competing for the attempt. The
+ * ROUTE always passes one, which is what makes a foreign key's failure a 409 against an
+ * agent whose lease is still healthy.
+ */
 export const failWitnessRequest = db.transaction((
   workspaceId: string,
   request: WitnessRequestRow,
   failure: string,
+  claimant?: { userId: string; keyId: string },
 ): WitnessRequestRow => {
   const current = getWitnessRequest(workspaceId, request.id);
   if (!current) throw new RevisionWriteError(404, "No such witness request in this workspace");
   if (current.state === "published") {
     throw new RevisionWriteError(409, "This witness request already published an account");
   }
+  const now = Date.now();
+  if (claimant) takeClaim(workspaceId, current, claimant.userId, claimant.keyId, now);
   db.run(
     "UPDATE review_witness_requests SET state = 'failed', failure = ?, updated_at = ? WHERE workspace_id = ? AND id = ?",
-    [failure.slice(0, MAX_FAILURE_TEXT), Date.now(), workspaceId, current.id],
+    [failure.slice(0, MAX_FAILURE_TEXT), now, workspaceId, current.id],
   );
   return getWitnessRequest(workspaceId, current.id)!;
-}) as (workspaceId: string, request: WitnessRequestRow, failure: string) => WitnessRequestRow;
+}) as (workspaceId: string, request: WitnessRequestRow, failure: string, claimant?: { userId: string; keyId: string }) => WitnessRequestRow;
 
 /** Failed back to pending, one retry counted. Pending is idempotent — a second retry
  *  of a request nobody has failed would inflate the count and make the reader say

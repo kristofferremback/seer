@@ -2715,8 +2715,10 @@ export interface ProjectPageData {
   reviewLineages?: {
     slug: string;
     title: string;
-    latestRevision: number;
+    latestRevision: number | null;
     latestAccountVersion: number | null;
+    /** Set only while there is no revision: what the review's page says instead. */
+    captureState: "pending" | "running" | "failed" | null;
     updatedAt: number;
     url: string;
   }[];
@@ -2747,6 +2749,24 @@ export interface ProjectPageData {
   noteCount: number;
   /** Authors matter only when there is more than one member to tell apart. */
   showAuthors: boolean;
+}
+
+/**
+ * What a promoted review's "latest" is, in one place because the page and the markdown
+ * projection must not answer it differently: the account version if a witness published,
+ * else the standing source revision, else where the first capture has got to. The last
+ * case is a review made from a pull request whose capture has not finished — it is on the
+ * project because somebody put it there, and saying nothing about it was the old bug.
+ */
+function reviewLineageStanding(r: {
+  latestRevision: number | null;
+  latestAccountVersion: number | null;
+  captureState: "pending" | "running" | "failed" | null;
+}): string {
+  if (r.latestAccountVersion !== null) return `v${r.latestAccountVersion}`;
+  if (r.latestRevision !== null) return `rev ${r.latestRevision}`;
+  if (r.captureState === "failed") return "capture failed";
+  return r.captureState === "running" ? "capturing" : "capture pending";
 }
 
 export function projectPage(d: ProjectPageData): string {
@@ -2881,7 +2901,8 @@ export function projectPage(d: ProjectPageData): string {
     </div>`;
 
   // One heading, both kinds. A promoted review whose witness has not published yet has
-  // no version to name, so it says which revision is standing instead — which is the
+  // no version to name, so it says which revision is standing instead — and one whose
+  // first capture has not finished has no revision either, so it says that. Each is the
   // true answer and reads as one.
   const reviewRows = [
     ...d.reviews.map((r) => ({
@@ -2894,7 +2915,7 @@ export function projectPage(d: ProjectPageData): string {
     ...(d.reviewLineages ?? []).map((r) => ({
       slug: r.slug,
       title: r.title,
-      latest: r.latestAccountVersion === null ? `rev ${r.latestRevision}` : `v${r.latestAccountVersion}`,
+      latest: reviewLineageStanding(r),
       at: r.updatedAt,
       url: r.url,
     })),
@@ -3056,8 +3077,7 @@ export function projectMarkdown(d: ProjectPageData): string {
     lines.push("", "## Reviews", "");
     for (const r of d.reviews) lines.push(`- ${r.title} (${r.slug}) v${r.latestVersion}: ${r.url}`);
     for (const r of d.reviewLineages ?? []) {
-      const standing = r.latestAccountVersion === null ? `rev ${r.latestRevision}` : `v${r.latestAccountVersion}`;
-      lines.push(`- ${r.title} (${r.slug}) ${standing}: ${r.url}`);
+      lines.push(`- ${r.title} (${r.slug}) ${reviewLineageStanding(r)}: ${r.url}`);
     }
   }
   if ((d.stages ?? []).length > 0) {

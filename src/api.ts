@@ -28,7 +28,7 @@ import {
 } from "./db";
 import { json, originOk } from "./http";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
-import { RAC_ID_RE, RLN_ID_RE, RVR_ID_RE, SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE, WTR_ID_RE } from "./ids";
+import { POB_ID_RE, RAC_ID_RE, RCJ_ID_RE, RLN_ID_RE, RVR_ID_RE, SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE, WTR_ID_RE } from "./ids";
 import { requireApiKey } from "./auth";
 import { inspectZip, readZipEntry, saveImage, saveZip } from "./store";
 import { handleCreateShare, handleListShares, handleRevokeShare } from "./shares";
@@ -54,6 +54,7 @@ import { handleCreateStageCapture, handleReadStageCapture, handleReadStageObject
 import { handlePublishStage, handleReadStage } from "./stage/publish";
 import { handleStageLines } from "./stage/read";
 import {
+  handleClaimWitnessRequest,
   handleCreateReviewLineage,
   handleFailWitnessRequest,
   handlePublishReviewAccount,
@@ -61,6 +62,12 @@ import {
   handleReadReviewRevision,
   handleRetryWitnessRequest,
 } from "./overseer/revision-routes";
+import {
+  handleAttachPullRequest,
+  handleCreatePullRequestLineage,
+  handleRefreshLineagePullRequest,
+} from "./overseer/revision-pr";
+import { handleReadCaptureJob, handleRetryCaptureJob } from "./overseer/revision-jobs";
 import { handleRevisionLines } from "./overseer/revision-read";
 
 // ---- the shape of an entry ----
@@ -562,18 +569,26 @@ const projectStateSchema = {
       type: "array",
       description:
         "Promoted reviews: a source revision reads at /rev/N and an account at /v/N. " +
-        "Listed apart from `reviews` because the two resolve through different readers.",
+        "Listed apart from `reviews` because the two resolve through different readers. " +
+        "A review made from a pull request joins its projects when its shell is created, so " +
+        "an entry may have no revision yet; `captureState` says where its pinned capture has " +
+        "got to, and `url` is the review's own page either way.",
       items: {
         type: "object",
-        required: ["slug", "title", "latestRevision", "latestAccountVersion", "updatedAt", "url", "revisionUrl", "apiUrl"],
+        required: ["slug", "title", "latestRevision", "latestAccountVersion", "captureState", "updatedAt", "url", "revisionUrl", "apiUrl"],
         properties: {
           slug: { type: "string" },
           title: { type: "string" },
-          latestRevision: { type: "integer" },
+          latestRevision: { type: ["integer", "null"], minimum: 1, description: "Null until the first source revision is published." },
           latestAccountVersion: { type: ["integer", "null"], description: "Null while no witness has published." },
+          captureState: {
+            type: ["string", "null"],
+            enum: ["pending", "running", "failed", null],
+            description: "Where the pinned capture stands. Null once there is a revision to read.",
+          },
           updatedAt: { type: "string", format: "date-time" },
           url: { type: "string", format: "uri" },
-          revisionUrl: { type: "string", format: "uri" },
+          revisionUrl: { type: ["string", "null"], description: "Null while `latestRevision` is." },
           apiUrl: { type: "string", format: "uri" },
         },
       },
@@ -863,6 +878,134 @@ const accountDocSchema = {
   },
 };
 
+/** One immutable reading of a pull request. `actor` names the kind of reader and never a
+ *  credential id; `mergeBaseSha` is null only on a reading a webhook delivered, because a
+ *  delivery carries no merge base and Seer will not invent one. */
+const prObservationSchema = {
+  type: "object",
+  required: ["id", "repo", "repoId", "number", "title", "state", "merged", "draft", "url", "baseRef", "baseSha", "headRef", "headSha", "mergeBaseSha", "actor", "updatedAt", "observedAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: POB_ID_RE.source },
+    repo: { type: "string" }, repoId: { type: "integer" }, number: { type: "integer", minimum: 1 },
+    title: { type: "string" },
+    state: { type: "string", enum: ["open", "closed", "draft", "merged"] },
+    merged: { type: "boolean" }, draft: { type: "boolean" },
+    url: { type: "string", format: "uri" },
+    baseRef: { type: "string" }, baseSha: { type: "string" },
+    headRef: { type: "string" }, headSha: { type: "string" },
+    mergeBaseSha: { type: ["string", "null"] },
+    actor: { type: "string", enum: ["installation", "user", "anonymous"] },
+    updatedAt: { type: "string", format: "date-time" },
+    observedAt: { type: "string", format: "date-time" },
+  },
+};
+
+const lineagePrSchema = {
+  type: ["object", "null"],
+  required: ["repo", "repoId", "number", "headRef", "baseRef", "url", "actor", "attachedAt", "observation"],
+  additionalProperties: false,
+  properties: {
+    repo: { type: "string" }, repoId: { type: "integer" }, number: { type: "integer", minimum: 1 },
+    headRef: { type: "string" }, baseRef: { type: "string" },
+    url: { type: "string", format: "uri" },
+    actor: { type: "string", enum: ["installation", "user", "anonymous"] },
+    attachedAt: { type: "string", format: "date-time" },
+    observation: { oneOf: [prObservationSchema, { type: "null" }] },
+  },
+};
+
+/** Workflow state, not a document. A pending or failed job is visible and retryable and
+ *  is never a source revision. */
+const captureJobSchema = {
+  type: "object",
+  required: ["id", "workspace", "lineage", "slug", "state", "attempts", "failure", "actor", "captureId", "revision", "revisionUrl", "url", "retryUrl", "reviewUrl", "pullRequest", "createdAt", "updatedAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: RCJ_ID_RE.source },
+    workspace: { type: "string" }, lineage: { type: "string", pattern: RLN_ID_RE.source },
+    slug: { type: "string", pattern: SLUG_RE.source },
+    state: { type: "string", enum: ["pending", "running", "failed", "completed"] },
+    attempts: { type: "integer", minimum: 0 },
+    failure: { type: ["string", "null"] },
+    actor: { type: "string", enum: ["installation", "user", "anonymous"] },
+    captureId: { type: ["string", "null"], pattern: STG_ID_RE.source },
+    revision: { type: ["integer", "null"], minimum: 1 },
+    revisionUrl: { type: ["string", "null"] },
+    url: { type: "string", format: "uri" }, retryUrl: { type: "string", format: "uri" }, reviewUrl: { type: "string", format: "uri" },
+    pullRequest: { oneOf: [prObservationSchema, { type: "null" }] },
+    createdAt: { type: "string", format: "date-time" },
+    updatedAt: { type: "string", format: "date-time" },
+  },
+};
+
+/**
+ * The 409 a failed pinned capture answers with.
+ *
+ * Its own response rather than the shared error one, because the retry URL travels in the
+ * body and an agent reading the served document has no other way to learn that. A caller
+ * that follows a spec naming only `error` reports the review as unrecoverable instead of
+ * calling `job.retryUrl`.
+ */
+const captureJobConflict = {
+  description:
+    "A conflict. When an earlier pinned capture for this pull request FAILED, the failure text " +
+    "is in `error` and the job travels with it in `job` — including `retryUrl`, which queues a " +
+    "fresh attempt against the same stored actor and pinned refs. Every other conflict (this " +
+    "review already reviews another pull request, this pull request is already reviewed by " +
+    "another review, this Idempotency-Key was used for a different body) carries `error` alone.",
+  content: { "application/json": { schema: {
+    oneOf: [
+      {
+        type: "object",
+        required: ["error", "job"],
+        additionalProperties: false,
+        properties: { error: { type: "string" }, job: captureJobSchema },
+      },
+      {
+        type: "object",
+        required: ["error"],
+        additionalProperties: false,
+        properties: { error: { type: "string" } },
+      },
+    ],
+  } } },
+};
+
+/** What an exact source-tuple reuse answers with: no capture was made, and the revision
+ *  named here is the one that already stood. */
+const reusedSourceSchema = {
+  type: "object",
+  required: ["slug", "lineage", "workspace", "reused", "revision", "url", "apiUrl", "pullRequest"],
+  additionalProperties: false,
+  properties: {
+    slug: { type: "string", pattern: SLUG_RE.source },
+    lineage: { type: "string", pattern: RLN_ID_RE.source },
+    workspace: { type: "string" },
+    reused: { type: "boolean", enum: [true] },
+    revision: { type: ["integer", "null"], minimum: 1 },
+    url: { type: ["string", "null"] },
+    apiUrl: { type: "string", format: "uri" },
+    pullRequest: prObservationSchema,
+  },
+};
+
+const refreshViewSchema = {
+  type: "object",
+  required: ["slug", "lineage", "workspace", "revision", "behind", "actor", "actorLabel", "pullRequest"],
+  additionalProperties: false,
+  properties: {
+    slug: { type: "string", pattern: SLUG_RE.source },
+    lineage: { type: "string", pattern: RLN_ID_RE.source },
+    workspace: { type: "string" },
+    revision: { type: ["integer", "null"], minimum: 1 },
+    behind: { type: "boolean", description: "True when the observed source tuple is not the latest revision's." },
+    actor: { type: "string", enum: ["installation", "user", "anonymous"] },
+    actorLabel: { type: "string" },
+    pullRequest: prObservationSchema,
+  },
+};
+
 const witnessRequestSchema = {
   type: "object",
   required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "updatedAt"],
@@ -880,9 +1023,30 @@ const witnessRequestSchema = {
   },
 };
 
+/** The claim view: the witness request, plus which attempt this key now holds. */
+const witnessClaimSchema = {
+  type: "object",
+  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "updatedAt", "claim"],
+  additionalProperties: false,
+  properties: {
+    ...witnessRequestSchema.properties,
+    claim: {
+      type: "object",
+      required: ["retryCount", "claimed", "leaseExpiresAt", "claimedAt"],
+      additionalProperties: false,
+      properties: {
+        retryCount: { type: "integer", minimum: 0 },
+        claimed: { type: "boolean", description: "False when this key already held the claim and the lease was renewed." },
+        leaseExpiresAt: { type: "string", format: "date-time" },
+        claimedAt: { type: "string", format: "date-time" },
+      },
+    },
+  },
+};
+
 const revisionViewSchema = {
   type: "object",
-  required: ["id", "lineage", "slug", "workspace", "revision", "schemaVersion", "digest", "url", "apiUrl", "createdAt", "document", "witness"],
+  required: ["id", "lineage", "slug", "workspace", "revision", "schemaVersion", "digest", "url", "apiUrl", "createdAt", "document", "pullRequest", "witness"],
   additionalProperties: false,
   properties: {
     id: { type: "string", pattern: RVR_ID_RE.source }, lineage: { type: "string", pattern: RLN_ID_RE.source },
@@ -890,7 +1054,9 @@ const revisionViewSchema = {
     revision: { type: "integer", minimum: 1 }, schemaVersion: { type: "integer", minimum: 1 }, digest: { type: "string" },
     url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" },
     createdAt: { type: "string", format: "date-time" },
-    document: revisionDocSchema, witness: witnessRequestSchema,
+    document: revisionDocSchema,
+    pullRequest: { oneOf: [prObservationSchema, { type: "null" }], description: "The observation this revision was captured from, beside the V1 document rather than inside it. Never the relation's latest." },
+    witness: witnessRequestSchema,
   },
 };
 
@@ -911,7 +1077,7 @@ const accountViewSchema = {
 
 const lineageViewSchema = {
   type: "object",
-  required: ["id", "slug", "workspace", "title", "repo", "repoId", "branch", "originalBaseRef", "originalBaseSha", "latestRevision", "latestAccountVersion", "url", "apiUrl", "projects", "revisions", "accounts"],
+  required: ["id", "slug", "workspace", "title", "repo", "repoId", "branch", "originalBaseRef", "originalBaseSha", "latestRevision", "latestAccountVersion", "url", "apiUrl", "projects", "pullRequest", "captureJobs", "revisions", "accounts"],
   additionalProperties: false,
   properties: {
     id: { type: "string", pattern: RLN_ID_RE.source }, slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
@@ -920,6 +1086,8 @@ const lineageViewSchema = {
     latestRevision: { type: ["integer", "null"], minimum: 1 }, latestAccountVersion: { type: ["integer", "null"], minimum: 1 },
     url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" },
     projects: { type: "array", items: { type: "string", pattern: SLUG_RE.source } },
+    pullRequest: lineagePrSchema,
+    captureJobs: { type: "array", items: captureJobSchema },
     revisions: {
       type: "array",
       items: {
@@ -938,6 +1106,14 @@ const lineageViewSchema = {
 };
 
 const revisionParam = { name: "revision", in: "path", required: true, schema: { type: "string", pattern: "^[1-9][0-9]{0,8}$" } };
+
+const idempotencyKeyParam = {
+  name: "Idempotency-Key",
+  in: "header",
+  required: true,
+  schema: { type: "string", minLength: 1, maxLength: 200 },
+  description: "Required replay key, scoped to the API key's workspace. It replays the OPERATION; the source tuple separately prevents a second capture publishing a duplicate revision.",
+};
 
 /** One membership operation's doc. The four share everything but their nouns, and a
  *  builder keeps the four descriptions from drifting apart one edit at a time. */
@@ -1795,6 +1971,166 @@ export const API_ROUTES: readonly ApiRoute[] = [
         },
       },
       run: (req) => handleRevisionLines(req, req.params.slug, req.params.revision, req.params.fileId),
+    },
+  }),
+
+  // The pull request half of a promoted review. Ingestion, attachment and refresh all
+  // observe through one exact stored actor and queue a pinned capture; no source revision
+  // exists until that capture completes.
+  route("/api/pull-request-review-lineages", {
+    POST: {
+      doc: {
+        operationId: "createPullRequestReviewLineage",
+        summary: "Review a pull request, from the pull request",
+        description:
+          "Creates the lineage shell, one immutable observation of the pull request, the one current " +
+          "relation, and one pinned capture job, in one transaction. NO source revision exists until " +
+          "that job completes, so the answer is 202 with the job. Seer reviews same-repository pull " +
+          "requests: a fork head, a missing head repository, or a repository mismatch is an explicit " +
+          "422 rather than a fallback. The read actor is resolved once — an installation this " +
+          "workspace holds, otherwise one credential of the asking member, otherwise an anonymous " +
+          "public read — and stored, and the capture runs through exactly that one. Replaying the " +
+          "Idempotency-Key with the same body returns the stored result; a different body is a 409.",
+        security: "key",
+        parameters: [idempotencyKeyParam],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: {
+            type: "object",
+            required: ["repo", "number", "slug"],
+            additionalProperties: false,
+            properties: {
+              repo: { type: "string", description: "owner/name. The base repository; a fork head is refused." },
+              number: { type: "integer", minimum: 1 },
+              slug: { type: "string", pattern: SLUG_RE.source },
+              title: { type: "string", minLength: 1, maxLength: 80, description: "Defaults to the pull request's own title." },
+              projects: { type: "array", maxItems: 16, items: { type: "string", pattern: SLUG_RE.source }, description: "Normalized to a sorted unique list, so input order does not change a replay." },
+            },
+          } } },
+        },
+        responses: {
+          "200": { description: "A replay of this key whose capture has since completed; the job names its revision.", content: { "application/json": { schema: captureJobSchema } } },
+          "202": { description: "The pinned capture job. Poll it, or read the review once it completes.", content: { "application/json": { schema: captureJobSchema } } },
+          "400": errorResponse, "401": errorResponse, "409": captureJobConflict, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handleCreatePullRequestLineage(req),
+    },
+  }),
+
+  route("/api/review-lineages/:slug/pull-request", {
+    POST: {
+      doc: {
+        operationId: "attachPullRequestToReviewLineage",
+        summary: "Attach a pull request to a branch-first review",
+        description:
+          "Verifies the lineage's repository id, the head repository id, the head ref and the base ref " +
+          "before anything is written. When the pull request's base tip, head and merge base are exactly " +
+          "the latest revision's, this records one immutable attachment and REUSES that revision with a " +
+          "200 — no recapture, no duplicate revision, no second witness request, and no reading state " +
+          "reset. Any other source tuple queues a pinned capture and answers 202; the previous revision " +
+          "stays current until it completes. A lineage that already reviews another pull request, a pull " +
+          "request another live lineage already reviews, and an existing failed capture are each a 409.",
+        security: "key",
+        parameters: [slugParam, idempotencyKeyParam],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: {
+            type: "object",
+            required: ["repo", "number"],
+            additionalProperties: false,
+            properties: {
+              repo: { type: "string", description: "owner/name. Must be the lineage's own repository." },
+              number: { type: "integer", minimum: 1 },
+            },
+          } } },
+        },
+        responses: {
+          "200": { description: "There is a source revision to read: the exact source was already published and is reused, or a replayed key's capture has since completed.", content: { "application/json": { schema: { oneOf: [reusedSourceSchema, captureJobSchema] } } } },
+          "202": { description: "A pinned capture is queued or running.", content: { "application/json": { schema: captureJobSchema } } },
+          "400": errorResponse, "401": errorResponse, "404": reviewNotFound, "409": captureJobConflict, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handleAttachPullRequest(req, req.params.slug),
+    },
+  }),
+
+  route("/api/review-lineages/:slug/refresh", {
+    POST: {
+      doc: {
+        operationId: "refreshReviewLineagePullRequest",
+        summary: "Observe the attached pull request again",
+        description:
+          "Reads through the actor stored at attachment and records one immutable observation. A review " +
+          "attached through a member's GitHub connection may only be refreshed by that member: a " +
+          "workspace is a group, and a stored personal credential is not the group's to spend. Re-reading " +
+          "unchanged facts through the same actor reuses the existing observation. This slice records " +
+          "that the pull request moved and says so with `behind`; publishing a later source revision " +
+          "from it is a later slice.",
+        security: "key",
+        parameters: [slugParam, idempotencyKeyParam],
+        responses: {
+          "200": { description: "The observation, and whether it is ahead of the latest revision.", content: { "application/json": { schema: refreshViewSchema } } },
+          "400": errorResponse, "401": errorResponse, "403": errorResponse, "404": reviewNotFound, "409": errorResponse, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handleRefreshLineagePullRequest(req, req.params.slug),
+    },
+  }),
+
+  route("/api/review-capture-jobs/:id", {
+    GET: {
+      doc: {
+        operationId: "readReviewCaptureJob",
+        summary: "Read one pinned capture job",
+        description: "Workflow state, never a document: a pending or failed job is not a source revision. Missing, malformed, and cross-workspace ids share the review soft 404.",
+        security: "keyOrSession",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: RCJ_ID_RE.source } }],
+        responses: {
+          "200": { description: "The job and the observation it was queued from.", content: { "application/json": { schema: captureJobSchema } } },
+          "404": reviewNotFound,
+        },
+      },
+      run: (req) => handleReadCaptureJob(req, req.params.id),
+    },
+  }),
+
+  route("/api/review-capture-jobs/:id/retry", {
+    POST: {
+      doc: {
+        operationId: "retryReviewCaptureJob",
+        summary: "Queue a failed pinned capture again",
+        description: "A new attempt against the same stored actor, repository and pinned refs; no completed document changes. A job that reads through a member's GitHub connection may only be retried by that member. A completed job and a running one with a healthy lease are each a 409.",
+        security: "key",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: RCJ_ID_RE.source } }],
+        responses: {
+          "202": { description: "The requeued job.", content: { "application/json": { schema: captureJobSchema } } },
+          "401": errorResponse, "403": errorResponse, "404": reviewNotFound, "409": errorResponse,
+        },
+      },
+      run: (req) => handleRetryCaptureJob(req, req.params.id),
+    },
+  }),
+
+  route("/api/review-witness-requests/:id/claim", {
+    POST: {
+      doc: {
+        operationId: "claimWitnessRequest",
+        summary: "Claim one attempt of a witness request",
+        description:
+          "The attempt is the request AND its retry count, so an agent that failed one attempt holds " +
+          "nothing over the next. A call from the key that already holds the claim renews its lease and " +
+          "reports `claimed: false`; an expired lease may be recovered by anyone without changing the " +
+          "retry count; a healthy claim held by another key is a 409. Publishing an account and failing " +
+          "the request each claim and consume the attempt on the same terms.",
+        security: "key",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: WTR_ID_RE.source } }],
+        responses: {
+          "200": { description: "The witness request and the claim this key now holds.", content: { "application/json": { schema: witnessClaimSchema } } },
+          "401": errorResponse, "404": reviewNotFound, "409": errorResponse,
+        },
+      },
+      run: (req) => handleClaimWitnessRequest(req, req.params.id),
     },
   }),
 

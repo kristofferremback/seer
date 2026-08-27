@@ -177,12 +177,13 @@ describe("the signature", () => {
     db.run("DELETE FROM github_pr_status WHERE workspace_id = ?", [wsA]);
 
     const forged = await deliver("pull_request", payload, {
+      delivery: "dlv-refused-forged",
       signature: `sha256=${"0".repeat(64)}`,
     });
     expect(forged.status).toBe(401);
     expect(statusA(12)).toBeNull();
 
-    const missing = await deliver("pull_request", payload, { signature: null });
+    const missing = await deliver("pull_request", payload, { delivery: "dlv-refused-missing", signature: null });
     expect(missing.status).toBe(401);
     expect(statusA(12)).toBeNull();
 
@@ -190,13 +191,21 @@ describe("the signature", () => {
     // without the length guard a truncated header crashes the handler instead of
     // refusing it.
     const good = webhookSignature(SECRET, JSON.stringify(payload));
-    const truncated = await deliver("pull_request", payload, { signature: good.slice(0, 20) });
+    const truncated = await deliver("pull_request", payload, {
+      delivery: "dlv-refused-truncated",
+      signature: good.slice(0, 20),
+    });
     expect(truncated.status).toBe(401);
     expect(statusA(12)).toBeNull();
 
     // Nothing above was recorded as a delivery either: a refused body is one that was
-    // never parsed, let alone acted on.
-    expect(db.query("SELECT COUNT(*) AS n FROM github_deliveries").get()).toEqual({ n: 0 });
+    // never parsed, let alone acted on. Named ids rather than a count over the whole
+    // table: every test file shares one database, so "the table is empty" is a claim
+    // about every other file's deliveries and is true only by accident of file order.
+    expect(db.query(
+      "SELECT COUNT(*) AS n FROM github_deliveries WHERE delivery_id IN " +
+        "('dlv-refused-forged', 'dlv-refused-missing', 'dlv-refused-truncated')",
+    ).get()).toEqual({ n: 0 });
 
     // And the success beside the refusal: the same payload, correctly signed, lands.
     const ok = await deliver("pull_request", payload);

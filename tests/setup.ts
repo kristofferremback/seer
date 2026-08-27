@@ -46,12 +46,13 @@ process.env.GITHUB_WEBHOOK_SECRET = "test-webhook-secret";
 // client which refuses, loudly and offline. A test that wants GitHub installs its own
 // with setGithubClientFactory().
 //
-// There are four seams to close, and the count has been wrong twice already: the
+// There are five seams to close, and the count has been wrong twice already: the
 // per-workspace client factory, the App's OAuth transport and the user OAuth transport,
-// neither of which is a GithubClient, and the PAT identifier, which is a bare function
-// and would carry a pasted token to api.github.com. Leaving any open would let the suite
-// make a real request with a real credential.
-const { setGithubClientFactory } = await import("../src/overseer/github-app");
+// neither of which is a GithubClient, the PAT identifier, which is a bare function and
+// would carry a pasted token to api.github.com, and the promoted review's read router,
+// which resolves and reopens an exact actor without going through the client factory.
+// Leaving any open would let the suite make a real request with a real credential.
+const { setGithubClientFactory, setReadRouter } = await import("../src/overseer/github-app");
 const { setGithubOAuth } = await import("../src/overseer/github-oauth");
 const { setGithubUserOAuth } = await import("../src/overseer/github-user-oauth");
 const { setGithubPatIdentifier } = await import("../src/overseer/github-user-pat");
@@ -60,8 +61,10 @@ const {
   offlineGithubOAuth,
   offlineGithubUserOAuth,
   offlineGithubPatIdentifier,
+  offlineReadRouter,
 } = await import("./offline-github");
 setGithubClientFactory(offlineGithubClientFactory());
+setReadRouter(offlineReadRouter());
 setGithubOAuth(offlineGithubOAuth());
 setGithubUserOAuth(offlineGithubUserOAuth());
 setGithubPatIdentifier(offlineGithubPatIdentifier());

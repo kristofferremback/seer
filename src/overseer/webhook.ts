@@ -30,9 +30,11 @@ import {
   deletePrStatusForInstallation,
   deletePrStatusForRepo,
   getLiveInstallation,
+  listWorkspaceLineagePrs,
   listWorkspacePrs,
   listWorkspaceTaskPrs,
   markInstallationRemoved,
+  matchLineagePrs,
   observePullRequest,
   recordInstallationDelivery,
   recordUnclaimedInstallation,
@@ -41,6 +43,7 @@ import {
   type PrObservation,
 } from "./installations";
 import { githubClientFor } from "./github-app";
+import { recordWebhookObservation } from "./revision-pr";
 import { parseUpdatedAt } from "./derive";
 
 export const WEBHOOK_PATH = "/api/github/webhook";
@@ -102,11 +105,16 @@ interface WebhookPayload {
   repositories_removed?: { id?: number; full_name?: string }[];
   pull_request?: {
     number?: number;
+    title?: string;
     state?: string;
     merged?: boolean;
     draft?: boolean;
     updated_at?: string;
-    head?: { sha?: string };
+    /** Complete on a same-repository pull request; `repo` is null on a deleted head and
+     *  names a different repository on a fork. Both are why a promoted observation needs
+     *  all of it and the legacy status row needs none of it. */
+    head?: { sha?: string; ref?: string; repo?: { id?: number; full_name?: string } | null };
+    base?: { sha?: string; ref?: string; repo?: { id?: number; full_name?: string } | null };
   };
 }
 
@@ -174,11 +182,80 @@ function applyPullRequest(installationId: number, payload: WebhookPayload): Effe
 
   const install = getLiveInstallation(installationId)!;
   const wsId = install.workspace_id!;
+  recordPromotedObservation(wsId, installationId, payload, obs);
   return {
     touched: reviewsNaming(wsId, obs.repoId, obs.repo, obs.prNumber).map((slug) => `${wsId}\0${slug}`),
     invalidate: [],
     reconcile: null,
   };
+}
+
+/**
+ * The promoted half of a `pull_request` delivery.
+ *
+ * Two conditions, both required. There must be a NAMED RELATION — an observation belongs
+ * to a lineage, and a delivery for a pull request no promoted review reviews has no
+ * lineage to belong to. And the payload must carry complete base and head identity: a
+ * promoted observation is what a capture is later pinned to, so one invented from half a
+ * payload would be indistinguishable from one that was read. A payload missing it still
+ * updates the legacy status row above, which needs none of it.
+ *
+ * Attribution is the installation in the signed payload and nothing else. A webhook never
+ * spends a personal credential: nobody asked for it.
+ *
+ * A failure here is NOT swallowed. `applyDelivery` records the delivery id in the same
+ * transaction as the work, precisely so a throw rolls the id back and GitHub's retry
+ * applies rather than being answered as a duplicate. Logging and carrying on would opt
+ * this one write out of that promise: the id would commit, the redelivery would be
+ * dropped as a duplicate, and the lost observation would exist nowhere but stdout.
+ */
+function recordPromotedObservation(
+  wsId: string,
+  installationId: number,
+  payload: WebhookPayload,
+  obs: PrObservation,
+): void {
+  const relations = matchLineagePrs(obs.repoId, obs.prNumber).filter((row) => row.workspace_id === wsId);
+  if (relations.length === 0) return;
+  const pr = payload.pull_request!;
+  const base = pr.base;
+  const head = pr.head;
+  if (
+    typeof pr.title !== "string" || pr.title.length === 0 ||
+    typeof base?.ref !== "string" || typeof base.sha !== "string" ||
+    typeof head?.ref !== "string" || typeof head.sha !== "string" ||
+    typeof base.repo?.id !== "number" || typeof base.repo.full_name !== "string" ||
+    typeof head.repo?.id !== "number" || typeof head.repo.full_name !== "string" ||
+    base.repo.id !== head.repo.id || base.repo.id !== obs.repoId
+  ) {
+    return;
+  }
+  for (const relation of relations) {
+    recordWebhookObservation({
+      workspaceId: wsId,
+      lineageId: relation.lineage_id,
+      installationId,
+      facts: {
+        repoId: base.repo.id,
+        repo: base.repo.full_name,
+        number: obs.prNumber,
+        title: pr.title,
+        state: obs.state === "closed" ? "closed" : "open",
+        merged: obs.merged,
+        draft: obs.draft,
+        baseRef: base.ref,
+        baseSha: base.sha,
+        headRef: head.ref,
+        headSha: head.sha,
+        // Null, and that is the whole point. A delivery does not carry a merge base and
+        // Seer must not invent one: a fabricated third leg would let an unasked-for
+        // reading be mistaken for a capturable source tuple. This records that the pull
+        // request moved; establishing what it moved TO is a compare somebody asked for.
+        mergeBaseSha: null,
+        githubUpdatedAt: obs.updatedAt,
+      },
+    });
+  }
 }
 
 function applyInstallation(installationId: number, payload: WebhookPayload): Effects {
@@ -434,11 +511,12 @@ export async function reconcileInstallation(
 
   const seen = new Set<string>();
   const touched = new Set<string>();
-  // Tasks name pull requests on the same terms as reviews, so the sweep walks both:
-  // a missed delivery is just as missed for a task, and observePullRequest heals and
-  // filters for both tables in one call. The loop reads only the fields the two row
-  // shapes share.
-  for (const row of [...listWorkspacePrs(wsId), ...listWorkspaceTaskPrs(wsId)]) {
+  // Tasks and promoted reviews name pull requests on the same terms as reviews, so the
+  // sweep walks all three: a missed delivery is just as missed for a task or a promoted
+  // review, and observePullRequest heals and filters for every table in one call. The
+  // loop reads only the fields the three row shapes share, and `seen` collapses one pull
+  // request named by several of them into one observation.
+  for (const row of [...listWorkspacePrs(wsId), ...listWorkspaceTaskPrs(wsId), ...listWorkspaceLineagePrs(wsId)]) {
     if (
       wantedIds &&
       wantedNames &&

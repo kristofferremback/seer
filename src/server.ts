@@ -86,6 +86,7 @@ import {
   handleRevisionReadMutation,
   promotedOwnsSlug,
 } from "./overseer/revision-read";
+import { recoverCaptureJobs, startCaptureSweep } from "./overseer/revision-jobs";
 import {
   agentSkillsIndex,
   apiCatalog,
@@ -713,6 +714,17 @@ export async function startServer() {
   // no holdings source and refuses to build a client at all, which is the loud failure
   // the alternative — a client that routes against nothing — would not be.
   setWorkspaceHoldings(dbWorkspaceHoldings());
+
+  // Only now, and not a line earlier: a capture job reopens an exact stored actor, so
+  // recovering one before the holdings source exists would ask an installation-backed job
+  // to route through nothing. A lease that expired while this process was down is
+  // released and re-queued; a healthy lease is left alone, because another container may
+  // be halfway through it.
+  recoverCaptureJobs();
+  // And again, on a timer. A lane this process left because another container held the
+  // lease has nothing else that would look at it: without the sweep, "another process may
+  // recover an abandoned claim" would only be true at boot.
+  startCaptureSweep();
 
   // Only the sockets a share opened, so revocation can find them. Membership-gated
   // sockets are not in here: nothing revokes a membership mid-connection today, and a

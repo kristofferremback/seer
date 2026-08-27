@@ -54,13 +54,14 @@ export interface UserGithubClientOptions {
 }
 
 /**
- * A client bound to one person. Authorization deliberately lives inside every method:
- * no caller can obtain a token-bearing client and then use it for a different repository.
+ * One person's credentials as a probe, a guard and a death notice.
+ *
+ * Extracted so that the promoted review's exact-actor path shares it: that path resolves
+ * a credential once, stores its id, and later reopens THAT credential and no other, which
+ * is a different shape from `createUserGithubClient`'s walk but must be the same rules —
+ * the same 401 handling, the same dead-credential message, the same routing memory.
  */
-export function createUserGithubClient(
-  userId: string,
-  options: UserGithubClientOptions = {},
-): GithubClient {
+function credentialTools(userId: string, options: UserGithubClientOptions = {}) {
   const base = (options.apiBase ?? API).replace(/\/$/, "");
   const doFetch = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -144,6 +145,19 @@ export function createUserGithubClient(
       compareDiff: (r, base, head) => guard(() => client.compareDiff!(r, base, head)),
     };
   }
+
+  return { now, probe, guarded };
+}
+
+/**
+ * A client bound to one person. Authorization deliberately lives inside every method:
+ * no caller can obtain a token-bearing client and then use it for a different repository.
+ */
+export function createUserGithubClient(
+  userId: string,
+  options: UserGithubClientOptions = {},
+): GithubClient {
+  const { now, probe, guarded } = credentialTools(userId, options);
 
   async function authorize(repo: string): Promise<GithubClient | null> {
     assertRepo(repo);
@@ -232,4 +246,64 @@ export function createUserGithubClient(
     async compare(repo, base, head) { return (await required(repo)).compare!(repo, base, head); },
     async compareDiff(repo, base, head) { return (await required(repo)).compareDiff!(repo, base, head); },
   };
+}
+
+/**
+ * WHICH credential of this person opens `repo`, by id, or null when none does.
+ *
+ * The promoted review stores the answer rather than re-deriving it, because a lineage
+ * that was created through one connected account must keep being refreshed through that
+ * account: re-walking the list would silently move to a second credential the moment the
+ * first stopped covering the repository, and the stored attribution would become a lie.
+ *
+ * Deliberately not cached here. `createUserGithubClient` caches because it answers the
+ * same question on every read; this is asked once, at attachment.
+ */
+export async function findUserCredentialFor(
+  userId: string,
+  repo: string,
+  options: UserGithubClientOptions = {},
+): Promise<string | null> {
+  const { probe } = credentialTools(userId, options);
+  assertRepo(repo);
+  for (const credential of listGithubUserCredentials(userId)) {
+    const token = openGithubUserCredential(credential.id, userId);
+    if (!token) continue;
+    try {
+      if (await probe(repo, credential.id, token)) return credential.id;
+    } catch (err) {
+      // A dead credential is not this repository's answer, and a third refusal (a
+      // personal rate limit, an organisation's SAML page) says nothing either. Both skip,
+      // exactly as the walk inside createUserGithubClient does.
+      if (err instanceof GithubCredentialDeadError || err instanceof GithubError) continue;
+      throw err;
+    }
+  }
+  return null;
+}
+
+/**
+ * A client bound to ONE stored credential of one person, with no walk and no fallback.
+ *
+ * This is what "the exact stored member and credential" means at the transport: a
+ * credential the person revoked, or that GitHub has since refused, fails the job visibly
+ * instead of falling through to a second credential or to an anonymous read that would
+ * quietly change who the observation was attributed to.
+ */
+export function exactUserGithubClient(
+  userId: string,
+  credentialId: string,
+  options: UserGithubClientOptions = {},
+): GithubClient {
+  const { now, guarded } = credentialTools(userId, options);
+  const token = openGithubUserCredential(credentialId, userId);
+  if (!token) {
+    throw new GithubCredentialDeadError(
+      credentialId,
+      "The GitHub credential this review reads through is no longer available. Reconnect the " +
+        "account in settings, or attach the pull request again through a credential that works.",
+    );
+  }
+  touchGithubUserCredential(credentialId, userId, now());
+  return guarded(credentialId, token);
 }

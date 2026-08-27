@@ -125,3 +125,22 @@ and the promoted slug may differ from the capture slug so an existing collision 
 resolved by naming a new one. See docs/overseer/data-model.md.
 
 A capture is consumed by the unique `stage_versions.capture_id` rule. Publication assumes one SQLite writer process; uniqueness remains the final integrity guard, not a cross-process race protocol. Repeating an identical normalized narrative returns the existing version; a different narrative is a conflict. Later versions, shares, comments, missing-material acknowledgement, approval, deltas, and pull request attachments are deferred.
+
+## Pinned-ref capture
+
+Branch mode asks GitHub what two branch names point at right now. A promoted review's pull
+request capture must not: the observation that queued it named exact commits, and a branch
+that moved in between would silently produce a revision of different code under the same
+pull request.
+
+So the engine takes an internal resolved source — canonical repository identity, both refs
+and all three SHAs — and spends **five** fixed metadata calls instead of seven: the
+repository, the compare, both pinned trees, and the pinned diff. The two branch-ref
+lookups are what it drops, and they are exactly the two that could have moved. The
+repository is still confirmed by numeric id. A newer canonical name with that id is a
+rename and remains the same source; the observed name resolving to a different id is a
+substitution and is refused. The compare's merge base must also equal the observed one, or
+the pin no longer holds and the capture is refused with the two SHAs in the message. A
+request-budget refusal reports the count that actually applies in either mode.
+
+No route accepts a resolved source. The Stage capture API is unchanged.

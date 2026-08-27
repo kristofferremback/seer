@@ -394,6 +394,15 @@ describe("a 200 matches the schema the document declares for it", () => {
     readReviewRevisionFileLines: "a promoted review needs a completed capture; driven and schema-checked in tests/overseer/revision.test.ts",
     failWitnessRequest: "a witness request only exists behind a published revision; driven in tests/overseer/revision.test.ts",
     retryWitnessRequest: "a witness request only exists behind a published revision; driven in tests/overseer/revision.test.ts",
+    claimWitnessRequest: "a witness request only exists behind a published revision; driven in tests/overseer/revision-pr.test.ts",
+    // The pull request path needs a GitHub fixture for both the observation and the
+    // pinned capture behind it. Every one of these is driven, and its body checked
+    // against these same schemas, in tests/overseer/revision-pr.test.ts.
+    createPullRequestReviewLineage: "needs a GitHub fixture and a pinned capture; driven and schema-checked in tests/overseer/revision-pr.test.ts",
+    attachPullRequestToReviewLineage: "needs a GitHub fixture and a completed capture; driven and schema-checked in tests/overseer/revision-pr.test.ts",
+    refreshReviewLineagePullRequest: "needs a stored read actor and a GitHub fixture; driven and schema-checked in tests/overseer/revision-pr.test.ts",
+    readReviewCaptureJob: "a capture job only exists behind an ingested pull request; driven and schema-checked in tests/overseer/revision-pr.test.ts",
+    retryReviewCaptureJob: "a failed capture job only exists behind an ingested pull request; driven in tests/overseer/revision-pr.test.ts",
   };
 
   let ajv: Ajv2020;

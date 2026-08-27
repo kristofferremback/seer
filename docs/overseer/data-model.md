@@ -428,8 +428,131 @@ heading, which is a presentation decision and stays one. Creation owns the promo
 in this slice; separate attach and detach routes are deferred until promoted lineage
 management needs them.
 
-Deferred here on purpose: pull request identity, repeated source revisions, stacks,
-sharing, local discussion, judgments, and any GitHub write.
+Deferred here on purpose: repeated source revisions, stacks, sharing, local discussion,
+judgments, and any GitHub write.
+
+### One pull request, one review lineage
+
+A lineage owns at most one current pull request, and a live pull request is owned by at
+most one lineage in a workspace. Both halves are constraints rather than conventions:
+`review_lineage_prs` has the lineage as its primary key, and a partial unique index on
+`(workspace, repo id, pr number) WHERE detached_at IS NULL` holds the other side. A later
+explicit detach releases the pull request by stamping `detached_at` while the historical
+row survives; task 5 adds no detach action.
+
+That one row is the whole relationship, and everything joins it: route resolution, webhook
+filtering, reconciliation, and the sweep that retires an orphaned status row. A second
+table naming the same fact would be a second place for the join to drift, and the sweep in
+particular has to ask all three naming tables — reviews, tasks, lineages — in one
+paragraph of code or it deletes something somebody still renders. Renames match by
+repository id; a stored name is a historical display fact and is never rewritten under the
+document that froze it. Current lineage views and native GitHub links use the newest stored
+observation's canonical name for that same id, so a freed name can never send a reader to a
+different repository's pull request.
+
+Seer reviews **same-repository** pull requests. A fork head, a missing head repository, a
+repository mismatch, a branch mismatch, and a base-ref mismatch are each an explicit 422
+with its own sentence. None of them falls back to another credential, another base, or
+another repository: a fork is not "a branch we could not find", and answering it as one
+sends somebody hunting for a typo.
+
+`review_pr_observations` is one immutable reading of a pull request. Its digest covers the
+normalized GitHub facts **and the exact read actor**, but not Seer's own `observed_at`.
+Re-reading unchanged facts through the same actor therefore reuses the row rather than
+accumulating one an hour; reading them through a different actor records a separately
+attributed observation, because who was allowed to see it is part of what was seen. A
+webhook observation has a null `merge_base_sha`, deliberately: a delivery carries no merge
+base, and a fabricated third leg would let an unasked-for reading be mistaken for a
+capturable source.
+
+`review_revision_sources` is the source-tuple arbiter, and the reason task 5 needs no V2
+revision document. A revision points at the immutable observation it was captured from, so
+pull request identity has one stored home, and the unique
+`(lineage, base tip, head, merge base)` is what stops a second capture result publishing a
+duplicate revision. The API exposes the associated observation **beside** the V1 document;
+the document's digest continues to cover only its own immutable bytes. A V2 document would
+duplicate the observation's facts and soft-404 every old reader during a mixed-image
+deploy, for nothing.
+
+A **branch-first exact attachment** — a pull request whose base tip, head and merge base
+are exactly the latest revision's — records one immutable attachment and source
+association and reuses that revision. No recapture, no duplicate revision, no second
+witness request, no reading state reset, no account rewrite. The attachment is lineage
+history; source revision numbering changes only when source evidence changes.
+
+### Reading as somebody, and staying that somebody
+
+Every observation and every capture job stores its read actor: an installation this
+workspace holds, one credential of one member, or `anonymous`. The initial resolver may
+choose an installation, otherwise a credential of the asking member, otherwise anonymity —
+but once stored, the actor is reopened exactly and never rerouted. A worker that fell back
+would mean the stored attribution and the credential actually spent had come apart.
+
+A stored personal credential is not the workspace's to spend. Refreshing and retrying a
+job that reads through a member's connection require that member. An anonymous read uses
+no workspace credential and gets no webhook-owned refresh promise: there is no
+installation, so there are no deliveries.
+
+`review_capture_jobs` is workflow state, in neither document. A pending or failed job is
+visible and retryable and is **not** a source revision — a lineage whose only job failed
+has no revision at all rather than an empty one. `actor_key` is the queue lane: one actor
+runs one capture at a time, and the renewable lease is what makes that true across
+processes as well as inside one, so a killed worker's claim can be recovered without two
+healthy workers spending one credential on one capture. A worker whose heartbeat says it no
+longer holds the job stops rather than publishing over the process that took it over.
+
+Recovery runs at startup and then on a timer one lease period long. Startup alone was not
+enough: a lane a process left because another container held the lease, or because a caller
+queued work while the lane was busy, has nothing else that would ever look at it, so its
+pending job would wait for the next ingest for that same actor or for a restart. A failed
+job does not end its lane either — the jobs behind it were queued by their own callers,
+each already holding a 202.
+
+An ingestion or attachment that meets an existing FAILED job answers 409 with the failure
+text in `error` and the job in `job`, `retryUrl` included, so the recovery is in the answer
+rather than something to go and look up. Every other conflict on those routes carries
+`error` alone, and the served document declares both shapes.
+
+Two replay identities, deliberately separate. The client's `Idempotency-Key` plus a request
+hash over the operation, the target slug and the normalized body replays the USER
+OPERATION; the source tuple prevents a second capture result publishing another revision.
+Merging them would be wrong in both directions: two different requests may legitimately
+observe the same bytes, and one request replayed must return one answer.
+
+`review_witness_claims` is keyed by `(request, retry count)`, because the retry count is
+exactly what makes a second attempt a different piece of work. A same-key claim renews its
+lease; an expired one may be recovered by anyone without touching the count; a healthy
+claim held by another key makes a claim, an account publication, or a failure a 409.
+Publication and failure claim and consume the attempt themselves when nothing stands in
+the way, which is what preserves the single-agent path exactly as it shipped.
+
+### The page before the first capture
+
+A lineage created from a pull request is real from the moment it is created — it owns its
+slug and its pull request — but it has no source revision until its capture completes. Its
+latest URL therefore renders a retained-only shell rather than a reader document: there is
+no capture, so constructing one would mean inventing an empty partition, a source rail
+with no history, reading state over nothing, and a witness request that does not exist.
+The shell says the four true things — what this review is, which pull request it reviews,
+what source it is pinned to, and where the capture has got to — under the same app bar and
+page tokens the completed page uses. `Capture pending`, `Capturing` and `Capture failed`
+replace the standing line; there is no `/rev/` URL to link to yet, and the actor is named
+as the GitHub App installation, the owning member's GitHub connection, or public GitHub,
+never by a credential id.
+
+On a completed revision the pull request reads as a short native link — `#41` — beside the
+repository and branch, with its status and age in restrained inline text. The observation
+shown is **the revision's own**, never the relation's latest, so a pinned page can go on
+saying `open, observed …` after the pull request has merged. The separate
+newer-observation notice is a later slice.
+
+A shell joins its Projects at creation, so a Project holds it before its capture finishes.
+`reviewLineages` therefore carries a nullable `latestRevision` and `revisionUrl` and a
+`captureState` of `pending`, `running` or `failed`, null once there is a revision to read.
+Listing only lineages with a revision was the alternative, and it was worse: the Project's
+own count includes the join row either way, so a Project said it held three reviews, listed
+two, and named nowhere the third or the fact that its capture had failed. An entry that has
+a revision is unchanged, so a reader written against the earlier shape still reads it.
 
 ## Privacy differs from Seer
 
