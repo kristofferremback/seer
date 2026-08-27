@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 14 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 15 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -55,6 +55,12 @@ import { hashKey, tinyId } from "./ids";
 //
 // v14 adds per-member read state for canonical changes in an immutable stage version.
 // It never changes the capture or StageDoc.
+//
+// v15 adds the promoted review: a lineage, its immutable source revisions, the immutable
+// accounts a witness publishes over a revision, the witness request that is waiting to
+// become one, per-revision read state, and Project membership. Purely additive — a
+// StageDoc V1 row, a legacy ReviewDoc row, and every read and join beside them are
+// untouched, and a capture that already backs a stage version may back a revision too.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -526,8 +532,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 14) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 14`);
+  if (uv > 15) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 15`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -543,6 +549,7 @@ export function migrate(): void {
   if (userVersion() < 12) migrateToV12();
   if (userVersion() < 13) migrateToV13();
   if (userVersion() < 14) migrateToV14();
+  if (userVersion() < 15) migrateToV15();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -934,6 +941,130 @@ function migrateToV14(): void {
     db.run("PRAGMA user_version = 14");
   })();
   console.log("[seer] migrated to schema v14 (stage read state).");
+}
+
+// The promoted review. A lineage is workspace-scoped and slugged exactly as a legacy
+// review and a stage are, and the slug is unique across `reviews` and `review_lineages`
+// together — enforced in both write paths rather than by a constraint, because SQLite
+// cannot spell "unique across two tables" and a promoted lineage must never be able to
+// take a slug an old bare `/r/<slug>` link already resolves.
+//
+// A revision is one immutable evidence document over one completed capture.
+// `capture_id UNIQUE` here is the revision's own rule and says nothing about
+// `stage_versions.capture_id`: one capture may back a StageDoc V1 and a revision at
+// once, and neither consumes the other.
+//
+// An account is what a witness publishes over a revision. Its `version` is lineage-wide
+// rather than per revision, so `/v/<n>` names one publication for the whole promoted
+// review the way a legacy review's version does, while `revision_id` records which code
+// stream it accounts for.
+//
+// `review_witness_requests` is workflow state, kept out of both documents: an evidence
+// document that carried "pending" would stop being immutable the moment the witness
+// answered. `revision_id UNIQUE` is the one-initial-request-per-revision rule of this
+// slice; lifting it means dropping the index, not rewriting rows.
+//
+// Read state keys on the REVISION rather than on an account: the code a member marks
+// read belongs to the source revision, so every account published over that revision
+// reads with the same handling state instead of resetting it.
+const V15_REVIEW_LINEAGES = `
+  CREATE TABLE IF NOT EXISTS review_lineages (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    repo_id INTEGER NOT NULL,
+    branch TEXT NOT NULL,
+    original_base_ref TEXT NOT NULL,
+    original_base_sha TEXT NOT NULL,
+    title TEXT NOT NULL,
+    latest_revision INTEGER,
+    latest_account_version INTEGER,
+    created_by_user_id TEXT NOT NULL,
+    created_by_key_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, slug)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_lineages_workspace ON review_lineages (workspace_id, slug);
+
+  CREATE TABLE IF NOT EXISTS review_revisions (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    capture_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+    doc TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, slug, revision)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revisions_lineage ON review_revisions (workspace_id, lineage_id, revision);
+
+  CREATE TABLE IF NOT EXISTS review_accounts (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    slug TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+    doc TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    witness_user_id TEXT NOT NULL,
+    witness_key_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, slug, version)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_accounts_revision ON review_accounts (workspace_id, revision_id, version);
+
+  CREATE TABLE IF NOT EXISTS review_witness_requests (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL UNIQUE,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    state TEXT NOT NULL CHECK (state IN ('pending','failed','published')),
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    failure TEXT,
+    account_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_witness_requests_lineage
+    ON review_witness_requests (workspace_id, lineage_id);
+
+  CREATE TABLE IF NOT EXISTS review_revision_change_reads (
+    workspace_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    change_id TEXT NOT NULL,
+    read_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, revision_id, user_id, change_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_change_reads_member
+    ON review_revision_change_reads (workspace_id, revision_id, user_id);
+
+  CREATE TABLE IF NOT EXISTS project_review_lineages (
+    project_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, slug)
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_review_lineages_lineage
+    ON project_review_lineages (workspace_id, slug);
+`;
+
+function migrateToV15(): void {
+  db.transaction(() => {
+    db.exec(V15_REVIEW_LINEAGES);
+    db.run("PRAGMA user_version = 15");
+  })();
+  console.log("[seer] migrated to schema v15 (promoted review revisions).");
 }
 
 /**

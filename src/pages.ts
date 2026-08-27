@@ -2702,12 +2702,24 @@ export interface ProjectPageData {
   description: string;
   /** The same field rendered to HTML by the server; "" renders nothing. */
   descriptionHtml: string;
-  children: { slug: string; title: string; status: ProjectStatusWord; bundles: number; reviews: number; tasks: number }[];
+  children: { slug: string; title: string; status: ProjectStatusWord; bundles: number; reviews: number; reviewLineages: number; tasks: number }[];
   /** Derived views plus the body rendered by the server; reading order is the list order. */
   tasks: (TaskView & { bodyHtml: string })[];
   plans: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   bundles: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
   reviews: { slug: string; title: string; latestVersion: number; publishedAt: number; url: string }[];
+  /** Promoted reviews. They read under the same heading as the legacy ones, because to
+   *  a person they are the same thing; they are a separate list because they resolve
+   *  through a different reader and their "latest" may be a revision nobody has
+   *  accounted for yet. */
+  reviewLineages?: {
+    slug: string;
+    title: string;
+    latestRevision: number;
+    latestAccountVersion: number | null;
+    updatedAt: number;
+    url: string;
+  }[];
   stages?: { slug: string; title: string; latestVersion: number; updatedAt: number; url: string; versionUrl: string; apiUrl: string; apiVersionUrl: string }[];
   /** The bounded tail of the record: authored notes (body rendered by the server)
    *  interleaved with derived status events, oldest first. */
@@ -2757,7 +2769,7 @@ export function projectPage(d: ProjectPageData): string {
           <td class="slug"><a href="/${d.wsId}/p/${encodeURIComponent(c.slug)}">${escapeHtml(c.title)}</a>
             <span class="row-sub mono">${escapeHtml(c.slug)}</span></td>
           <td>${statusWord(c.status)}</td>
-          <td class="status-cell">${holdsCell(c.bundles, c.reviews, 0, c.tasks)}</td>
+          <td class="status-cell">${holdsCell(c.bundles, c.reviews + c.reviewLineages, 0, c.tasks)}</td>
         </tr>`,
           )
           .join("\n")}
@@ -2868,21 +2880,40 @@ export function projectPage(d: ProjectPageData): string {
       </table>
     </div>`;
 
+  // One heading, both kinds. A promoted review whose witness has not published yet has
+  // no version to name, so it says which revision is standing instead — which is the
+  // true answer and reads as one.
+  const reviewRows = [
+    ...d.reviews.map((r) => ({
+      slug: r.slug,
+      title: r.title,
+      latest: `v${r.latestVersion}`,
+      at: r.publishedAt,
+      url: r.url,
+    })),
+    ...(d.reviewLineages ?? []).map((r) => ({
+      slug: r.slug,
+      title: r.title,
+      latest: r.latestAccountVersion === null ? `rev ${r.latestRevision}` : `v${r.latestAccountVersion}`,
+      at: r.updatedAt,
+      url: r.url,
+    })),
+  ];
   const reviewsSection =
-    d.reviews.length === 0
+    reviewRows.length === 0
       ? ""
       : `${sectionHead("Reviews")}
     <div class="ledger scroll-x">
       <table class="stack">
         <thead><tr><th>Review</th><th>Latest</th><th>Published</th></tr></thead>
         <tbody>
-        ${d.reviews
+        ${reviewRows
           .map(
             (r) => `<tr data-filter="${escapeHtml(`${r.title} ${r.slug}`.toLowerCase())}">
           <td class="slug"><a href="${r.url}">${escapeHtml(r.title)}</a>
             <span class="row-sub mono">${escapeHtml(r.slug)}</span></td>
-          <td class="mono">v${r.latestVersion}</td>
-          <td class="mono"><time datetime="${new Date(r.publishedAt).toISOString()}">${fmtInstant(r.publishedAt)}</time></td>
+          <td class="mono">${escapeHtml(r.latest)}</td>
+          <td class="mono"><time datetime="${new Date(r.at).toISOString()}">${fmtInstant(r.at)}</time></td>
         </tr>`,
           )
           .join("\n")}
@@ -2925,7 +2956,7 @@ export function projectPage(d: ProjectPageData): string {
     d.plans.length === 0 &&
     d.bundles.length === 0 &&
     (d.stages ?? []).length === 0 &&
-    d.reviews.length === 0 &&
+    reviewRows.length === 0 &&
     d.trail.length === 0
       ? `<p class="empty">Nothing here yet. Attach bundles and reviews, create tasks, or create sub-projects.</p>`
       : "";
@@ -3021,9 +3052,13 @@ export function projectMarkdown(d: ProjectPageData): string {
     lines.push("", "## Bundles", "");
     for (const b of d.bundles) lines.push(`- ${b.slug} v${b.latestVersion}: ${b.url}`);
   }
-  if (d.reviews.length > 0) {
+  if (d.reviews.length > 0 || (d.reviewLineages ?? []).length > 0) {
     lines.push("", "## Reviews", "");
     for (const r of d.reviews) lines.push(`- ${r.title} (${r.slug}) v${r.latestVersion}: ${r.url}`);
+    for (const r of d.reviewLineages ?? []) {
+      const standing = r.latestAccountVersion === null ? `rev ${r.latestRevision}` : `v${r.latestAccountVersion}`;
+      lines.push(`- ${r.title} (${r.slug}) ${standing}: ${r.url}`);
+    }
   }
   if ((d.stages ?? []).length > 0) {
     lines.push("", "## Stages", "");

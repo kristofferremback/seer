@@ -9,7 +9,7 @@ import { hashKey, SLUG_RE, STG_ID_RE, tinyId } from "../ids";
 import { json } from "../http";
 import { openStageBlob, saveStageBlob } from "../store";
 import { normalizeBuilderPacket, StagePacketError, type StageBuilderPacket } from "./packet";
-import { githubClientFor } from "../overseer/github-app";
+import { githubClientFor, GithubRateLimitError } from "../overseer/github-app";
 import { readableWorkspaces } from "../overseer/read";
 import {
   assertPath,
@@ -49,6 +49,11 @@ export interface StageCaptureRequest {
 
 export interface StageCaptureOptions {
   maxLogicalBytes?: number;
+  /** Test seams for the two request ceilings. Production reads them from config, where
+   *  they carry validated environment overrides; a fixture injects a small one so the
+   *  cap it means to prove binds without a thousand-file tree. */
+  maxBlobRequests?: number;
+  maxGithubRequests?: number;
   client?: GithubClient;
   idempotencyKey?: string;
   requestHash?: string;
@@ -380,12 +385,75 @@ function compareFor(cmp: GithubCompare, path: string, oldPath: string | null): G
     null;
 }
 
-/** 64 blob requests consume 1.28% of GitHub's shared 5,000-request hourly
- * installation budget. A 16-way pool prevents ordinary small-file captures from scaling
- * wall time linearly, stays well below GitHub's 100-concurrent-request secondary limit,
- * and each call retains its own 20-second timeout. This does not claim a total wall-time bound. */
-const MAX_STAGE_BLOB_REQUESTS = 64;
+/**
+ * What one capture may spend at GitHub, and how much of it may be in flight.
+ *
+ * Two ceilings rather than one, because they bound different things. The blob ceiling
+ * bounds how much source a capture retains; the total bounds what the capture costs the
+ * installation, and it counts the metadata calls too — repository, both refs, compare,
+ * both trees, and the compare diff — so a capture cannot be "within budget" while
+ * actually making a thousand-and-seven requests. At the defaults the total leaves 24
+ * calls of headroom over the blob ceiling, which is why the metadata is free in practice
+ * and the blob ceiling is the one that normally binds. Under an injected lower total the
+ * order reverses and the total binds on its own.
+ *
+ * 1,000 blob requests is 20% of GitHub's shared 5,000-request hourly installation budget,
+ * which is a real cost and the reason the ceiling exists at all rather than being a
+ * defensive round number.
+ *
+ * Concurrency is separate from either budget: a 16-way pool keeps an ordinary capture
+ * from scaling wall time linearly, stays well below GitHub's 100-concurrent-request
+ * secondary limit, and each call keeps its own 20-second timeout. Retained-object writes
+ * get their own pool of the same width for the same reason — a thousand sequential
+ * awaits on the blob store is the other place a large capture goes quiet for minutes.
+ * None of this claims a total wall-time bound.
+ */
 const STAGE_BLOB_CONCURRENCY = 16;
+const STAGE_WRITE_CONCURRENCY = 16;
+
+/** Machine-stable prefixes on a budget refusal, so a reader (or a test, or a later
+ *  slice) can tell WHICH ceiling left an object out without parsing prose, while the
+ *  prose still explains it to a person who has never heard of either. */
+const BUDGET_BLOB_REQUESTS = "[budget:blob_requests]";
+const BUDGET_GITHUB_REQUESTS = "[budget:github_requests]";
+const BUDGET_LOGICAL_BYTES = "[budget:logical_bytes]";
+const BUDGET_GITHUB_BLOB_CEILING = "[budget:github_blob_ceiling]";
+
+/** Every known REST call a capture makes, counted as it is made. */
+class RestBudget {
+  spent = 0;
+  constructor(readonly total: number) {}
+  spend(calls = 1): void {
+    if (this.spent + calls > this.total) {
+      throw new StageCaptureError(400, `The stage capture GitHub-request limit must allow the 7 required metadata calls.`);
+    }
+    this.spent += calls;
+  }
+  get remaining(): number { return this.total - this.spent; }
+}
+
+function positiveLimit(name: string, value: number, minimum = 1): number {
+  if (!Number.isSafeInteger(value) || value < minimum) {
+    throw new StageCaptureError(400, `${name} must be a whole number of at least ${minimum} requests.`);
+  }
+  return value;
+}
+
+/**
+ * GitHub throttling is not a fact about a blob.
+ *
+ * A primary or secondary rate-limit refusal aborts the capture instead of being written
+ * onto the object that happened to be in flight when it arrived. Recording it per object
+ * would turn one throttle into hundreds of `bytes_unavailable` rows that read exactly
+ * like source GitHub does not have — an immutable, permanent-looking lie about a
+ * transient condition, in the one record that is supposed to be trustworthy.
+ */
+function rateLimitRefusal(error: unknown): boolean {
+  if (error instanceof GithubRateLimitError) return true;
+  if (!(error instanceof GithubError)) return false;
+  if (error.status === 429) return true;
+  return error.status === 403 && /rate limit|secondary rate|abuse detection/i.test(error.message);
+}
 
 export async function captureSource(workspaceId: string, request: StageCaptureRequest, options: StageCaptureOptions = {}): Promise<{ captureId: string; created: boolean }> {
   if (!options.idempotencyKey) throw new StageCaptureError(400, "Idempotency-Key header is required.");
@@ -398,16 +466,21 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
     }
   }
   const client = stageClient(options.client ?? githubClientFor(workspaceId));
+  const blobRequestLimit = positiveLimit("The stage capture blob-request limit", options.maxBlobRequests ?? config.stageBlobRequestLimit);
+  const rest = new RestBudget(positiveLimit("The stage capture GitHub-request limit", options.maxGithubRequests ?? config.stageGithubRequestLimit, 7));
   let repo: Awaited<ReturnType<StageClient["getRepository"]>>;
   let sourceRef: Awaited<ReturnType<StageClient["getRef"]>>;
   let baseRefResult: Awaited<ReturnType<StageClient["getRef"]>>;
   let comparison: Awaited<ReturnType<StageClient["compare"]>>;
   try {
+    rest.spend();
     repo = await client.getRepository(request.repo);
     if (repo.full_name.toLowerCase() !== request.repo.toLowerCase()) throw new StageCaptureError(422, `GitHub resolved ${request.repo} to a different repository, ${repo.full_name}.`);
     const baseRef = request.baseRef || repo.default_branch;
     assertRef(baseRef);
+    rest.spend(2);
     [sourceRef, baseRefResult] = await Promise.all([client.getRef(request.repo, request.branch), client.getRef(request.repo, baseRef)]);
+    rest.spend();
     comparison = await client.compare(request.repo, baseRefResult.sha, sourceRef.sha);
   } catch (err) {
     if (err instanceof StageCaptureError) throw err;
@@ -416,6 +489,7 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
   }
   const baseRef = request.baseRef || repo.default_branch;
   assertRef(baseRef);
+  rest.spend(2);
   const [oldTree, newTree] = await Promise.all([
     treeAt(client, request.repo, comparison.merge_base_commit.sha, "merge-base"),
     treeAt(client, request.repo, sourceRef.sha, "source"),
@@ -457,8 +531,10 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
   const captureId = tinyId("stg");
   let rawPatch: string | null = null;
   let patchReason: string | null = null;
+  rest.spend();
   try { rawPatch = await client.compareDiff(request.repo, comparison.merge_base_commit.sha, sourceRef.sha); }
   catch (err) {
+    if (rateLimitRefusal(err)) throw err;
     patchReason = `GitHub did not provide the pinned unified compare diff: ${message(err)}`;
   }
   const rawPatchBytes = rawPatch === null ? null : new TextEncoder().encode(rawPatch);
@@ -487,34 +563,46 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
     const state = objectState.get(object.id)!;
     if (state.declaredSize !== null && state.declaredSize > MAX_GITHUB_BLOB_BYTES) {
       state.skipped = true;
-      state.reason = `GitHub's Git blob API ceiling is ${MAX_GITHUB_BLOB_BYTES} bytes; the tree declares ${state.declaredSize} bytes.`;
+      state.reason = `${BUDGET_GITHUB_BLOB_CEILING} GitHub's Git blob API ceiling is ${MAX_GITHUB_BLOB_BYTES} bytes; the tree declares ${state.declaredSize} bytes.`;
     } else if (state.declaredSize !== null && used + state.declaredSize > limit) {
       state.skipped = true;
-      state.reason = `The capture's retained logical-byte budget is ${limit}; deterministic retention order left this ${state.declaredSize}-byte object out.`;
+      state.reason = `${BUDGET_LOGICAL_BYTES} The capture's retained logical-byte budget is ${limit}; deterministic retention order left this ${state.declaredSize}-byte object out.`;
     } else {
       eligibleObjects.push(object);
       if (state.declaredSize !== null) used += state.declaredSize;
     }
   }
-  const fetchObjects = eligibleObjects.slice(0, MAX_STAGE_BLOB_REQUESTS);
-  for (const object of eligibleObjects.slice(MAX_STAGE_BLOB_REQUESTS)) {
+  // Both ceilings decide here, before any blob request goes out, so which one bound is
+  // a fact about the capture rather than about how far it got. The tighter one wins, and
+  // the objects it leaves out say which one it was.
+  const restAllowance = rest.remaining;
+  const blobAllowance = Math.min(blobRequestLimit, restAllowance);
+  const boundByRest = restAllowance < blobRequestLimit;
+  const fetchObjects = eligibleObjects.slice(0, blobAllowance);
+  for (const object of eligibleObjects.slice(blobAllowance)) {
     const state = objectState.get(object.id)!;
     state.skipped = true;
-    state.reason = `The capture permits at most ${MAX_STAGE_BLOB_REQUESTS} unique Git blob requests; this object was outside the first ${MAX_STAGE_BLOB_REQUESTS} eligible objects in deterministic retention order.`;
+    state.reason = boundByRest
+      ? `${BUDGET_GITHUB_REQUESTS} The capture permits at most ${rest.total} GitHub REST calls in total, of which ${rest.spent} were spent resolving the repository, refs, compare, trees, and pinned diff; this object was outside the first ${blobAllowance} eligible objects in deterministic retention order.`
+      : `${BUDGET_BLOB_REQUESTS} The capture permits at most ${blobRequestLimit} unique Git blob requests; this object was outside the first ${blobAllowance} eligible objects in deterministic retention order.`;
   }
+  rest.spend(fetchObjects.length);
   const fetched = new Map<string, { bytes: Uint8Array | null; error: unknown }>();
   let nextObject = 0;
+  let throttled: unknown = null;
   async function fetchWorker(): Promise<void> {
-    while (nextObject < fetchObjects.length) {
+    while (nextObject < fetchObjects.length && throttled === null) {
       const object = fetchObjects[nextObject++]!;
       try {
         fetched.set(object.id, { bytes: await client.getBlobBytes(request.repo, object.id), error: null });
       } catch (error) {
+        if (rateLimitRefusal(error)) throttled = error;
         fetched.set(object.id, { bytes: null, error });
       }
     }
   }
   await Promise.all(Array.from({ length: Math.min(STAGE_BLOB_CONCURRENCY, fetchObjects.length) }, () => fetchWorker()));
+  if (throttled !== null) throw throttled;
   // Declared sizes made the byte decisions before any request. Reconcile responses in
   // deterministic order so actual bytes and error handling never depend on completion order.
   used = patchSha ? rawPatchBytes!.byteLength : 0;
@@ -537,7 +625,7 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
     if (used + state.bytes.byteLength > limit) {
       state.bytes = null;
       state.skipped = true;
-      state.reason = `The capture's retained logical-byte budget is ${limit}; deterministic retention order left this object out.`;
+      state.reason = `${BUDGET_LOGICAL_BYTES} The capture's retained logical-byte budget is ${limit}; deterministic retention order left this object out.`;
       continue;
     }
     state.retained = true; state.blobSha = sha256(state.bytes); used += state.bytes.byteLength;
@@ -601,7 +689,26 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
     addMaterial("new", newSide.availability, newReason);
   }
   const writeBlob = options.saveBlob ?? saveStageBlob;
-  for (const [digest, bytes] of blobs) await writeBlob(workspaceId, digest, bytes);
+  // A thousand retained objects written one await at a time is the other place a large
+  // capture disappears for minutes. The pool is the same width as the fetch pool, and a
+  // failure is reported by lowest retention index rather than by whichever worker lost
+  // the race, so the same broken store fails the same capture the same way every time.
+  const writes = [...blobs];
+  const writeErrors = new Map<number, unknown>();
+  let nextWrite = 0;
+  const writeWorker = async (): Promise<void> => {
+    while (nextWrite < writes.length && writeErrors.size === 0) {
+      const index = nextWrite++;
+      const [digest, bytes] = writes[index]!;
+      try {
+        await writeBlob(workspaceId, digest, bytes);
+      } catch (error) {
+        writeErrors.set(index, error);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(STAGE_WRITE_CONCURRENCY, writes.length) }, writeWorker));
+  if (writeErrors.size > 0) throw writeErrors.get(Math.min(...writeErrors.keys()));
   if (rawPatchBytes && patchSha) {
     await writeBlob(workspaceId, patchSha, rawPatchBytes);
     blobs.set(patchSha, rawPatchBytes);

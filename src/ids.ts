@@ -50,6 +50,12 @@ export const TSK_ID_RE = new RegExp(`^tsk_${TINY}$`);
 export const STG_ID_RE = new RegExp(`^stg_${TINY}$`);
 export const STA_ID_RE = new RegExp(`^sta_${TINY}$`);
 export const STF_ID_RE = new RegExp(`^stf_${TINY}$`);
+// A promoted review: the lineage, one source revision of it, one account published over
+// a revision, and the witness request that is waiting to become that account.
+export const RLN_ID_RE = new RegExp(`^rln_${TINY}$`);
+export const RVR_ID_RE = new RegExp(`^rvr_${TINY}$`);
+export const RAC_ID_RE = new RegExp(`^rac_${TINY}$`);
+export const WTR_ID_RE = new RegExp(`^wtr_${TINY}$`);
 export const STAGE_CHANGE_ID_RE = /^chg_[a-f0-9]{64}$/;
 export const API_KEY_RE = /^seer_sk_[A-Za-z0-9_-]{32}$/;
 export const SHARE_TOKEN_RE = /^seer_sh_[A-Za-z0-9_-]{32}$/;

@@ -55,6 +55,20 @@ test("a populated v13 stage survives the additive read-state migration", async (
   expect(out).toContain("all assertions passed");
 });
 
+// The release this slice ships. Additive DDL is only half the claim; the other half is
+// that going back is a database restore, which is the only rollback this repo has.
+test("a populated v14 database survives v15 and rolls back by restore", async () => {
+  const { code, out } = await runScenario("v14");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
+test("a database from a newer release is refused rather than walked", async () => {
+  const { code, out } = await runScenario("newer");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("fresh/empty db bootstraps the root workspace", async () => {
   const { code, out } = await runScenario("fresh");
   expect(code).toBe(0);

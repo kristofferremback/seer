@@ -588,7 +588,9 @@ describe("stage captures", () => {
       return payloads.get(sha)!;
     };
     const { captureSource } = await import("../src/stage/source");
-    const result = await captureSource(ws, { slug: "blob-request-ceiling", repo: "Acme/Repo", branch: "feature/blue" }, { client, idempotencyKey: "blob-request-ceiling", maxLogicalBytes: 100_000 });
+    // The ceiling is injected rather than hard-coded now: production allows 1,000 blob
+    // requests, and proving the bound does not require a thousand-file fixture.
+    const result = await captureSource(ws, { slug: "blob-request-ceiling", repo: "Acme/Repo", branch: "feature/blue" }, { client, idempotencyKey: "blob-request-ceiling", maxLogicalBytes: 100_000, maxBlobRequests: 64 });
     const inventory = getStageCapture(result.captureId, ws)!;
     const retainedPaths = inventory.files.filter((file) => file.old_blob_sha && file.new_blob_sha).map((file) => file.path);
     const codePointOrder = [...paths].sort((left, right) => {
@@ -607,7 +609,8 @@ describe("stage captures", () => {
     expect(retainedPaths).not.toContain("ä.txt");
     const unavailable = inventory.incomplete.filter((item) => item.kind === "bytes_unavailable");
     expect(unavailable).toHaveLength((objectCount - 32) * 2);
-    expect(unavailable.every((item) => item.reason.includes("64 unique Git blob requests"))).toBe(true);
+    expect(unavailable.every((item) => item.reason.startsWith("[budget:blob_requests] "))).toBe(true);
+    expect(unavailable.every((item) => item.reason.includes("at most 64 unique Git blob requests"))).toBe(true);
     const retainedIndexes = new Set(codePointOrder.slice(0, 32).map((path) => paths.indexOf(path)));
     expect(calls.blobCalls.every((sha) => retainedIndexes.has(Number.parseInt(sha.slice(0, 2), 16)))).toBe(true);
   });

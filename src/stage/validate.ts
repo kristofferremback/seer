@@ -39,11 +39,17 @@ export interface StageValidationResult {
   errors: StageValidationError[];
 }
 
-function error(errors: StageValidationError[], field: string, message: string): void {
+// The field helpers below, the authored-group rule, and the partition rule are exported
+// because a promoted review's account publication is authored against the same capture
+// inventory under the same limits (src/overseer/revision-validate.ts). A second copy of
+// "every canonical change is accounted for exactly once" is a second place for it to
+// drift, and the drift would be silent: both copies would still refuse *something*.
+
+export function error(errors: StageValidationError[], field: string, message: string): void {
   if (errors.length < MAX_VALIDATION_ERRORS) errors.push({ field, message });
 }
 
-function line(errors: StageValidationError[], field: string, value: unknown, cap: number, required = true): string | null {
+export function line(errors: StageValidationError[], field: string, value: unknown, cap: number, required = true): string | null {
   if (typeof value !== "string") {
     error(errors, field, "must be plain text");
     return null;
@@ -59,7 +65,7 @@ function line(errors: StageValidationError[], field: string, value: unknown, cap
   return text;
 }
 
-function text(errors: StageValidationError[], field: string, value: unknown, cap: number, required = true): string | null {
+export function text(errors: StageValidationError[], field: string, value: unknown, cap: number, required = true): string | null {
   if (typeof value !== "string") {
     error(errors, field, "must be plain text");
     return null;
@@ -71,7 +77,7 @@ function text(errors: StageValidationError[], field: string, value: unknown, cap
   return normalized;
 }
 
-function markdown(errors: StageValidationError[], field: string, value: unknown, cap: number): string | null {
+export function markdown(errors: StageValidationError[], field: string, value: unknown, cap: number): string | null {
   if (typeof value !== "string") {
     error(errors, field, "must be constrained markdown");
     return null;
@@ -87,7 +93,7 @@ function markdown(errors: StageValidationError[], field: string, value: unknown,
   return normalized;
 }
 
-function slug(errors: StageValidationError[], field: string, value: unknown): string | null {
+export function slug(errors: StageValidationError[], field: string, value: unknown): string | null {
   if (typeof value !== "string" || !SLUG_RE.test(value)) {
     error(errors, field, "must match [a-z0-9][a-z0-9-]{0,63}");
     return null;
@@ -95,13 +101,13 @@ function slug(errors: StageValidationError[], field: string, value: unknown): st
   return value;
 }
 
-function enumValue<T extends string>(errors: StageValidationError[], field: string, value: unknown, allowed: readonly T[]): T | null {
+export function enumValue<T extends string>(errors: StageValidationError[], field: string, value: unknown, allowed: readonly T[]): T | null {
   if (typeof value === "string" && allowed.includes(value as T)) return value as T;
   error(errors, field, `must be one of ${allowed.join(", ")}`);
   return null;
 }
 
-function unsupported(errors: StageValidationError[], field: string, value: Record<string, unknown>, allowed: readonly string[]): void {
+export function unsupported(errors: StageValidationError[], field: string, value: Record<string, unknown>, allowed: readonly string[]): void {
   const extra = Object.keys(value).find((key) => !allowed.includes(key));
   if (extra) error(errors, `${field}.${extra}`, "is not a supported field");
 }
@@ -139,7 +145,7 @@ function validateMember(
   return { type, id, description } as StageMember;
 }
 
-function validateGroup(errors: StageValidationError[], field: string, value: unknown, skipMembers = false): StageGroup | null {
+export function validateGroup(errors: StageValidationError[], field: string, value: unknown, skipMembers = false): StageGroup | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     error(errors, field, "must be an object");
     return null;
@@ -188,7 +194,7 @@ function validateGroup(errors: StageValidationError[], field: string, value: unk
   return { id, title, category, importance, complexity, explanation, ...(attention === undefined ? {} : { attention }), examples, members };
 }
 
-function partition(errors: StageValidationError[], groups: StageGroup[], inventory: StageCaptureInventory): void {
+export function validateCompletePartition(errors: StageValidationError[], groups: StageGroup[], inventory: StageCaptureInventory): void {
   const changes = new Map(inventory.changes.map((change) => [change.id, change]));
   const materials = new Map(inventory.incomplete.map((item) => [item.id, item]));
   const files = new Map(inventory.files.map((file) => [file.id, file]));
@@ -354,7 +360,7 @@ export function validateStagePublish(input: unknown, inventory: StageCaptureInve
       }
     }
   }
-  if (groups.length > 0 && !groupValidationFailed && !tooManyMembers) partition(errors, groups, inventory);
+  if (groups.length > 0 && !groupValidationFailed && !tooManyMembers) validateCompletePartition(errors, groups, inventory);
   projects = [...new Set(projects)].sort();
   if (errors.length > 0 || !captureId || expected === null || !slugValue || !title || summary === null || !witness) return { value: null, errors };
   return { value: { captureId, expectedPreviousVersion: 0, slug: slugValue, title, summary, witness, groups, projects }, errors: [] };

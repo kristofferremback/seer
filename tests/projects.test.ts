@@ -182,7 +182,7 @@ describe("projects API", () => {
     const read = await fetch(`${base}/api/projects/calling`, { headers: auth() });
     const readState = await readJson(read);
     expect(readState.children).toEqual([
-      { slug: "video", title: "Video", status: "open", bundles: 0, reviews: 0, stages: 0, tasks: 0 },
+      { slug: "video", title: "Video", status: "open", bundles: 0, reviews: 0, reviewLineages: 0, stages: 0, tasks: 0 },
     ]);
 
     const done = await patch("video", { status: "done" });

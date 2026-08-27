@@ -343,6 +343,94 @@ How the delta renders is part of the design, not a renderer whim. Revised prose 
 
 Viewing is the refresh trigger. Opening `/r/:slug` compares the stored head SHAs against GitHub, rate limited to once a minute per review, and kicks an asynchronous re-derivation when a head has moved. The page renders the stored document immediately and updates its freshness marks when the refresh lands, over the same live channel Seer already uses for bundles. `POST /api/reviews/:slug/refresh` stays for explicit calls, but nothing depends on remembering to make one: a review someone is looking at cannot silently claim `current` while the branch moves underneath it, because looking at it is what checks.
 
+## The promoted review: evidence before an account
+
+A review published from a pull request is authored in one shot, and everything above is
+about that. A **promoted** review is the other order: a completed stage capture becomes a
+readable review the moment it exists, and a witness publishes an account over it later, or
+fails, or is retried. The reason is a product one. A reader who has just pushed a branch
+should be able to open it, page through the code, and mark what they have handled, without
+waiting for a model to finish; and the account, when it arrives, must not disturb any of
+that.
+
+Three rows carry it, all workspace-scoped and slugged exactly as a legacy review is.
+
+- `review_lineages` is the identity: repository, branch, the original base ref and merge
+  base the lineage started from, its title, and pointers to the latest revision and the
+  latest account version. A slug is unique across `reviews` and `review_lineages`
+  together. SQLite cannot spell that, so both write paths enforce it — the promoted
+  publish refuses a slug a legacy review owns, and a FIRST legacy publish refuses one a
+  lineage owns. An existing legacy review is untouched by the rule and keeps appending
+  versions: it owned its slug first, and `/r/<slug>` has to keep meaning what it meant.
+- `review_revisions` is the evidence: one immutable V1 document per source revision, over
+  one completed capture. It stores identity, exact source facts, nullable builder facts,
+  and Project slugs — and no witness object of any kind, because it is published before
+  any witness has finished and it must never change afterwards. The builder is nullable
+  rather than blank: a pull request nobody initiated through Seer has no intent to state,
+  and inventing an empty one would make "the builder said nothing" indistinguishable from
+  "there was no builder". `capture_id UNIQUE` here is this table's own rule and says
+  nothing about `stage_versions.capture_id`; one capture may back both, and neither
+  consumes the other.
+- `review_accounts` is what a witness published over a revision: the summary and agent,
+  the complete semantic partition of that capture, anchored focus items, and cited
+  evidence. Its `version` is lineage-wide rather than per revision, so `/v/<n>` names one
+  publication of the whole promoted review the way a legacy version does, while
+  `revision_id` records which code stream it accounts for.
+
+A **focus item** is one bounded thing worth stopping on: a decision that was made or a
+risk that was taken, with a stable slug id, a constrained body, and one or more anchors
+into the capture. Anchors own nothing and may overlap — two items may point at the same
+change, and pointing at it does not take it out of the partition. What they may not do is
+point at material the capture does not hold, because a decision anchored to nothing is an
+opinion wearing a citation. **Evidence references** are exact existing same-workspace
+attachments or bundle versions: an account points, it never mints. Attachment references
+resolve and store their owning review slug, media type, byte count, alt text, and caption so
+the immutable account can render the citation without rediscovering it from another row.
+
+`review_witness_requests` is workflow state, and it is deliberately in neither document.
+"Pending", "failed" and "retrying" are true only until they are not, so storing one in an
+immutable row would make that row lie the moment the workflow moved. It is read beside the
+document instead. Retry turns `failed` back to `pending` and counts one retry; `retrying`
+is derived from pending plus a nonzero count, so one row cannot claim to be waiting for a
+first answer and a second at once. A failed request must retry before it can publish.
+Publication moves it to `published` in the same transaction as the account, and stale
+failure or retry writers re-read that state inside their transaction before changing it. One initial request per revision in this slice, held by a
+unique index rather than by a convention.
+
+`review_revision_change_reads` keys on the REVISION, not on an account. The code a member
+marks read belongs to the source revision, so evidence and every account published over it
+share one exact handling state instead of resetting when a witness arrives.
+
+### What each address means
+
+- `/<workspace>/r/<slug>/rev/<n>` always reads the evidence revision, and keeps reading it
+  after an account is published. A pinned evidence URL does not redirect and does not gain
+  an account; it is the code stream, and that is the whole point of pinning it.
+- `/<workspace>/r/<slug>/v/<n>` reads one immutable account publication.
+- `/<workspace>/r/<slug>` resolves the latest account of the latest revision, and the
+  evidence document when no account exists yet.
+- Bare `/r/<slug>` and `/r/<slug>/v/<n>` stay legacy-only, and workspace-scoped dispatch
+  checks a legacy review first. No promoted review can change what an old link means.
+
+Evidence rendering uses retained objects only and never calls GitHub. It offers the same
+overview-to-focus flow as a stage walkthrough, through neutral, deterministic file-seam
+pages of at most 100 review items. Changes, incomplete material, and leafless files all
+count against that response bound. A seam is navigation, not an authored group: it
+names paths and counts lines, shows builder attribution where there is one, states the
+witness workflow, and says nothing about category, importance, complexity, or what any
+change means. A revision published before its witness finished has no standing to say any
+of that, and a plausible guess would be indistinguishable from a witness's judgment.
+
+Project membership is its own join, `project_review_lineages`, and Project state carries a
+`reviewLineages` list beside the existing `reviews` one rather than widening it: the two
+resolve through different readers. The human Project page composes both under one Reviews
+heading, which is a presentation decision and stays one. Creation owns the promoted joins
+in this slice; separate attach and detach routes are deferred until promoted lineage
+management needs them.
+
+Deferred here on purpose: pull request identity, repeated source revisions, stacks,
+sharing, local discussion, judgments, and any GitHub write.
+
 ## Privacy differs from Seer
 
 Seer bundles are public by link, because a bundle is something you want to hand to someone. A review contains private source code, so reviews belong to a workspace, the same unit bundles now live under, and are private within it: viewing needs a workspace session. If sharing is ever wanted it should be an explicit, revocable share token per review rather than a guessable slug.

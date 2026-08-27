@@ -63,7 +63,7 @@ import {
   listGithubUserCredentialsForSettings,
   revokeGithubUserCredential,
 } from "./overseer/user-credentials";
-import { getReviewVersion, listReviewVersions, listReviews } from "./overseer/db";
+import { getReview, getReviewVersion, listReviewVersions, listReviews } from "./overseer/db";
 import {
   dbWorkspaceHoldings,
   deliveryIsQuiet,
@@ -81,6 +81,11 @@ import { handleAnnotation } from "./overseer/annotations";
 import { reviewTopic, setFreshnessPublisher } from "./overseer/freshness";
 import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
 import { handleReviewContext } from "./overseer/context";
+import {
+  handlePromotedReviewPage,
+  handleRevisionReadMutation,
+  promotedOwnsSlug,
+} from "./overseer/revision-read";
 import {
   agentSkillsIndex,
   apiCatalog,
@@ -131,7 +136,13 @@ const WS_IMG_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/i/`
 // URL publish hands back; the bare /r/<slug> routes resolve the same review across
 // every workspace the reader can reach.
 const WS_REVIEW_RE = new RegExp(
-  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)(?:/(v|a)/([^/]+))?/?$`,
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)(?:/(v|a|rev)/([^/]+))?/?$`,
+);
+// A promoted review's read mark. Its own pattern, and revision-scoped rather than
+// account-scoped: the code a member marks read belongs to the source revision, so an
+// account published over that revision reads with the same handling state.
+const WS_REVISION_READ_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/rev/([^/]+)/changes/([^/]+)/read/?$`,
 );
 const WS_STAGE_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/st/([^/]+)(?:/v/([^/]+))?/?$`,
@@ -549,7 +560,9 @@ function projectLedgerGroups(userId: string): ProjectLedgerGroup[] {
         status: p.status,
         updatedAt: p.updated_at,
         bundles: counts.bundles,
-        reviews: counts.reviews,
+        // Both kinds, added: the ledger cell says how many reviews this project holds,
+        // and to a reader a promoted one is a review.
+        reviews: counts.reviews + counts.reviewLineages,
         tasks: counts.tasks,
         children,
       };
@@ -621,6 +634,7 @@ function handleProjectPage(req: Request, wsId: string, slug: string): Response {
     plans: state.plans,
     bundles: state.bundles,
     reviews: state.reviews,
+    reviewLineages: state.reviewLineages,
     stages: state.stages,
     // The record's tail: notes and derived status events, oldest first. Note bodies
     // render through the same constrained renderer, same corruption fallback.
@@ -1199,10 +1213,27 @@ export async function startServer() {
       const wsContext = url.pathname.match(WS_REVIEW_CONTEXT_RE);
       if (wsContext) return handleReviewContext(req, wsContext[2]!, wsContext[1]!);
 
+      const revisionRead = url.pathname.match(WS_REVISION_READ_RE);
+      if (revisionRead) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleRevisionReadMutation(req, revisionRead[1]!, revisionRead[2]!, revisionRead[3]!, revisionRead[4]!);
+      }
+
       const wsReview = url.pathname.match(WS_REVIEW_RE);
       if (wsReview) {
         const [, wsId, slug, part, value] = wsReview;
         if (part === "a") return handleReviewAttachment(req, slug!, value!, wsId!);
+        // `/rev/` exists only for a promoted review, so it never falls back: on a slug a
+        // legacy review owns it is a miss, not that review's latest version.
+        if (part === "rev") return handlePromotedReviewPage(req, wsId!, slug!, { kind: "revision", raw: value! });
+        // Legacy first, and that ordering is the guarantee: a slug a legacy review
+        // already holds keeps its shipped page, so no promoted review can change what an
+        // old link means. Publishing refuses the collision in both directions anyway;
+        // this is the reading half of the same rule.
+        if (getReview(wsId!, slug!)) return handleReviewPage(req, slug!, part === "v" ? value! : null, wsId!);
+        if (promotedOwnsSlug(wsId!, slug!)) {
+          return handlePromotedReviewPage(req, wsId!, slug!, part === "v" ? { kind: "account", raw: value! } : null);
+        }
         return handleReviewPage(req, slug!, part === "v" ? value! : null, wsId!);
       }
 
