@@ -390,6 +390,7 @@ describe("a 200 matches the schema the document declares for it", () => {
     createReviewLineage: "a promoted review needs a completed capture; driven and schema-checked in tests/overseer/revision.test.ts",
     readReviewLineage: "a promoted review needs a completed capture; driven and schema-checked in tests/overseer/revision.test.ts",
     readReviewRevision: "a promoted review needs a completed capture; driven and schema-checked in tests/overseer/revision.test.ts",
+    readReviewRevisionDelta: "a promoted review needs two completed captures; driven and schema-checked in tests/overseer/pr-movement.test.ts",
     publishReviewAccount: "a promoted review needs a completed capture; driven and schema-checked in tests/overseer/revision.test.ts",
     readReviewRevisionFileLines: "a promoted review needs a completed capture; driven and schema-checked in tests/overseer/revision.test.ts",
     failWitnessRequest: "a witness request only exists behind a published revision; driven in tests/overseer/revision.test.ts",

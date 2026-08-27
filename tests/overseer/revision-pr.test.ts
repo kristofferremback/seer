@@ -1314,7 +1314,10 @@ describe("a delivery joins the same relationship", () => {
     );
   });
 
-  test("a pull request only a promoted review names is observed", async () => {
+  test("a pull request only a promoted review names is observed, then captured", async () => {
+    // The worker is held at its own open, which is the only window in which a delivery's
+    // observation exists without the merge base its capture will establish.
+    const gate = holdOpenAt(1);
     const response = await deliver("pull_request", {
       action: "synchronize",
       installation: { id: INSTALLATION },
@@ -1337,6 +1340,20 @@ describe("a delivery joins the same relationship", () => {
     expect(observed.merge_base_sha).toBeNull();
     // The legacy status row was written too.
     expect(count("SELECT COUNT(*) AS n FROM github_pr_status WHERE workspace_id = ? AND pr_number = ?", workspace, 41)).toBe(1);
+
+    // The capture is queued through the RELATION's stored installation actor rather than
+    // the delivery's, and it establishes the merge base by comparing the delivery's own
+    // pinned SHAs.
+    const queued = db.query<{ installation_id: number | null }, [string, string]>(
+      "SELECT installation_id FROM review_capture_jobs WHERE lineage_id = ? AND observation_id = ?",
+    ).get(lineage.id, observed.id)!;
+    expect(queued.installation_id).toBe(4242);
+
+    gate.release();
+    await settleCaptureJobs();
+    const appended = getRevision(workspace, "pr-direct", 2)!;
+    expect(appended.doc.source.sourceHeadSha).toBe(HEAD2);
+    expect(appended.doc.source.mergeBaseSha).toBe(MERGE2);
   });
 
   test("the pinned revision keeps its own observation after the pull request moves", async () => {
@@ -1469,6 +1486,9 @@ describe("a delivery joins the same relationship", () => {
         head: { ref: "feature/reader", sha: FAULT, repo: { id: REPO_ID, full_name: REPO } },
       },
     };
+    // The capture this delivery queues is held at its own open, so the counts below are
+    // the delivery's own effects rather than its worker's enrichment as well.
+    const gate = holdOpenAt(1);
     db.exec(
       "CREATE TRIGGER pr_observation_fault BEFORE INSERT ON review_pr_observations " +
         `WHEN NEW.head_sha = '${FAULT}' BEGIN SELECT RAISE(ABORT, 'observation write failed'); END;`,
@@ -1495,6 +1515,11 @@ describe("a delivery joins the same relationship", () => {
     expect(count("SELECT COUNT(*) AS n FROM review_pr_observations WHERE lineage_id = ?", lineage.id)).toBe(observations + 1);
     expect(latestObservation(workspace, lineage.id)!.head_sha).toBe(FAULT);
     expect(statusOf().head_sha).toBe(FAULT);
+
+    // Let its capture run to whatever it becomes, so nothing is left in flight across the
+    // rest of this file.
+    gate.release();
+    await settleCaptureJobs();
   });
 
   test("the orphan sweep keeps a status row a promoted review names, then lets it go", () => {

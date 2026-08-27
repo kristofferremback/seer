@@ -43,7 +43,15 @@ import {
   type PrObservation,
 } from "./installations";
 import { githubClientFor } from "./github-app";
-import { recordWebhookObservation } from "./revision-pr";
+import type { GithubPull } from "./github";
+import { getLineage } from "./revision-db";
+import { scheduleActorQueue } from "./revision-jobs";
+import {
+  getLineagePr,
+  recordSweptObservation,
+  recordUnaskedObservation,
+  type ObservationFacts,
+} from "./revision-pr";
 import { parseUpdatedAt } from "./derive";
 
 export const WEBHOOK_PATH = "/api/github/webhook";
@@ -135,6 +143,10 @@ interface Effects {
   /** An event meaning observations may have been missed: sweep and re-observe once.
    *  `repos` null means sweep everything the workspace names. */
   reconcile: { installationId: number; repos: ReconcileRepos | null } | null;
+  /** Capture lanes this delivery queued work in. Scheduled only after the transaction
+   *  commits: a lane driven from inside it would be capturing against rows that may
+   *  still roll back, spending an installation token on a delivery that never landed. */
+  lanes: string[];
 }
 
 /** Both halves of what a payload says about a repository, because a review's rows are
@@ -146,7 +158,7 @@ export interface ReconcileRepos {
   names: string[];
 }
 
-const NOTHING: Effects = { touched: [], invalidate: [], reconcile: null };
+const NOTHING: Effects = { touched: [], invalidate: [], reconcile: null, lanes: [] };
 
 function repoNames(list: { full_name?: string }[] | undefined): string[] {
   return (list ?? []).map((r) => r.full_name).filter((n): n is string => typeof n === "string");
@@ -173,20 +185,70 @@ function applyPullRequest(installationId: number, payload: WebhookPayload): Effe
     updatedAt: parseUpdatedAt(pr.updated_at),
   };
 
+  // An installation nobody has claimed belongs to no workspace, so there are no rows here
+  // that would be anybody's. Read before the upsert rather than after it, because the
+  // promoted half below runs whatever the upsert decides.
+  const install = getLiveInstallation(installationId);
+  if (!install || install.workspace_id === null) return NOTHING;
+  const wsId = install.workspace_id;
+
   // The filter is not an optimisation. An installation covering "all repositories" on a
   // busy org delivers an event for every pull request anyone opens anywhere in it;
   // writing a row for each would grow github_pr_status without bound, forever, for pull
   // requests no review names and no page renders. observePullRequest applies the filter.
+  //
+  // Its answer bounds the legacy PUSH and nothing else. The promoted observation is
+  // recorded independently, because `github_pr_status` is one mutable row per pull request
+  // whose conditional upsert legitimately rejects an equal-or-older timestamp, while
+  // `review_pr_observations` is an immutable history: a delivery the status row declined
+  // to overwrite is still a reading that happened, and dropping it would lose the base-only
+  // movement that carries no new GitHub timestamp at all.
   const applied = observePullRequest(installationId, obs);
-  if (applied === 0) return NOTHING;
-
-  const install = getLiveInstallation(installationId)!;
-  const wsId = install.workspace_id!;
-  recordPromotedObservation(wsId, installationId, payload, obs);
+  const lanes = recordPromotedObservation(wsId, installationId, payload, obs);
   return {
-    touched: reviewsNaming(wsId, obs.repoId, obs.repo, obs.prNumber).map((slug) => `${wsId}\0${slug}`),
+    touched: applied === 0 ? [] : reviewsNaming(wsId, obs.repoId, obs.repo, obs.prNumber).map((slug) => `${wsId}\0${slug}`),
     invalidate: [],
     reconcile: null,
+    lanes,
+  };
+}
+
+/** The complete base and head identity a promoted observation needs, or null when the
+ *  payload does not carry it. A pull request whose head repository has been deleted, or
+ *  which was opened from a fork, is not a same-repository source. */
+function promotedFacts(payload: WebhookPayload, obs: PrObservation): ObservationFacts | null {
+  const pr = payload.pull_request;
+  const base = pr?.base;
+  const head = pr?.head;
+  if (
+    !pr || typeof pr.title !== "string" || pr.title.length === 0 ||
+    typeof base?.ref !== "string" || typeof base.sha !== "string" ||
+    typeof head?.ref !== "string" || typeof head.sha !== "string" ||
+    typeof base.repo?.id !== "number" || typeof base.repo.full_name !== "string" ||
+    typeof head.repo?.id !== "number" || typeof head.repo.full_name !== "string" ||
+    base.repo.id !== head.repo.id || base.repo.id !== obs.repoId
+  ) {
+    return null;
+  }
+  return {
+    repoId: base.repo.id,
+    repo: base.repo.full_name,
+    number: obs.prNumber,
+    title: pr.title,
+    state: obs.state === "closed" ? "closed" : "open",
+    merged: obs.merged,
+    draft: obs.draft,
+    baseRef: base.ref,
+    baseSha: base.sha,
+    headRef: head.ref,
+    headSha: head.sha,
+    // Null, and that is the whole point. A delivery does not carry a merge base and Seer
+    // must not invent one: a fabricated third leg would let an unasked-for reading be
+    // mistaken for a capturable source tuple. This records that the pull request moved;
+    // establishing what it moved TO is a compare, and the capture worker does it against
+    // these exact pinned SHAs.
+    mergeBaseSha: null,
+    githubUpdatedAt: obs.updatedAt,
   };
 }
 
@@ -201,7 +263,9 @@ function applyPullRequest(installationId: number, payload: WebhookPayload): Effe
  * updates the legacy status row above, which needs none of it.
  *
  * Attribution is the installation in the signed payload and nothing else. A webhook never
- * spends a personal credential: nobody asked for it.
+ * spends a personal credential: nobody asked for it. That is also why the capture job below
+ * is queued only for a relation that already reads through an installation — a review
+ * attached through a member's connected account records the drift and waits for them.
  *
  * A failure here is NOT swallowed. `applyDelivery` records the delivery id in the same
  * transaction as the work, precisely so a throw rolls the id back and GitHub's retry
@@ -214,48 +278,20 @@ function recordPromotedObservation(
   installationId: number,
   payload: WebhookPayload,
   obs: PrObservation,
-): void {
+): string[] {
   const relations = matchLineagePrs(obs.repoId, obs.prNumber).filter((row) => row.workspace_id === wsId);
-  if (relations.length === 0) return;
-  const pr = payload.pull_request!;
-  const base = pr.base;
-  const head = pr.head;
-  if (
-    typeof pr.title !== "string" || pr.title.length === 0 ||
-    typeof base?.ref !== "string" || typeof base.sha !== "string" ||
-    typeof head?.ref !== "string" || typeof head.sha !== "string" ||
-    typeof base.repo?.id !== "number" || typeof base.repo.full_name !== "string" ||
-    typeof head.repo?.id !== "number" || typeof head.repo.full_name !== "string" ||
-    base.repo.id !== head.repo.id || base.repo.id !== obs.repoId
-  ) {
-    return;
+  if (relations.length === 0) return [];
+  const facts = promotedFacts(payload, obs);
+  if (!facts) return [];
+  const lanes: string[] = [];
+  for (const row of relations) {
+    const lineage = getLineage(wsId, row.slug);
+    const relation = getLineagePr(wsId, row.lineage_id);
+    if (!lineage || !relation) continue;
+    const outcome = recordUnaskedObservation({ workspaceId: wsId, lineage, relation, installationId, facts });
+    if (outcome.actorKey) lanes.push(outcome.actorKey);
   }
-  for (const relation of relations) {
-    recordWebhookObservation({
-      workspaceId: wsId,
-      lineageId: relation.lineage_id,
-      installationId,
-      facts: {
-        repoId: base.repo.id,
-        repo: base.repo.full_name,
-        number: obs.prNumber,
-        title: pr.title,
-        state: obs.state === "closed" ? "closed" : "open",
-        merged: obs.merged,
-        draft: obs.draft,
-        baseRef: base.ref,
-        baseSha: base.sha,
-        headRef: head.ref,
-        headSha: head.sha,
-        // Null, and that is the whole point. A delivery does not carry a merge base and
-        // Seer must not invent one: a fabricated third leg would let an unasked-for
-        // reading be mistaken for a capturable source tuple. This records that the pull
-        // request moved; establishing what it moved TO is a compare somebody asked for.
-        mergeBaseSha: null,
-        githubUpdatedAt: obs.updatedAt,
-      },
-    });
-  }
+  return lanes;
 }
 
 function applyInstallation(installationId: number, payload: WebhookPayload): Effects {
@@ -274,7 +310,7 @@ function applyInstallation(installationId: number, payload: WebhookPayload): Eff
         accountType: account?.type ?? "User",
         repositorySelection: payload.installation?.repository_selection ?? "selected",
       });
-      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null };
+      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null, lanes: [] };
     case "deleted":
       // Its status rows go with it, found by installation_id — the glyph disappears
       // rather than showing the last thing that was true about a repository we can no
@@ -282,14 +318,14 @@ function applyInstallation(installationId: number, payload: WebhookPayload): Eff
       // observations with it.
       deletePrStatusForInstallation(installationId);
       markInstallationRemoved(installationId);
-      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null };
+      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null, lanes: [] };
     case "suspend":
       setInstallationSuspended(installationId, true);
       return NOTHING;
     case "unsuspend":
       // Already cleared by the delivery itself; this is where the sweep is triggered,
       // because everything that happened while it was suspended was never delivered.
-      return { touched: [], invalidate: [], reconcile: { installationId, repos: null } };
+      return { touched: [], invalidate: [], reconcile: { installationId, repos: null }, lanes: [] };
     case "new_permissions_accepted":
       // Recorded by the delivery row and nothing more: nothing here needs a write
       // permission yet, and it matters when annotation mirroring does.
@@ -319,6 +355,7 @@ function applyInstallationRepositories(installationId: number, payload: WebhookP
       added.length > 0 || addedIds.length > 0
         ? { installationId, repos: { ids: addedIds, names: added } }
         : null,
+    lanes: [],
   };
 }
 
@@ -460,6 +497,9 @@ export async function handleGithubWebhook(req: Request): Promise<Response> {
     publishReview(wsId!, slug!);
   }
   for (const repo of new Set(outcome.invalidate)) invalidateAppRouting(repo);
+  // The persistent job row is what makes this replayable: the lane is a hint that work is
+  // waiting now, and a restart that loses the hint still finds the row on its next sweep.
+  for (const lane of new Set(outcome.lanes)) scheduleActorQueue(lane);
   if (outcome.reconcile) {
     const { installationId, repos } = outcome.reconcile;
     // Detached, and guarded: reconcileInstallation's per-pull-request catch does not
@@ -511,6 +551,7 @@ export async function reconcileInstallation(
 
   const seen = new Set<string>();
   const touched = new Set<string>();
+  const lanes = new Set<string>();
   // Tasks and promoted reviews name pull requests on the same terms as reviews, so the
   // sweep walks all three: a missed delivery is just as missed for a task or a promoted
   // review, and observePullRequest heals and filters for every table in one call. The
@@ -555,6 +596,14 @@ export async function reconcileInstallation(
         updatedAt: parseUpdatedAt(pull.updated_at),
       });
       if (applied > 0) for (const slug of reviewsNaming(wsId, repoId, row.repo, row.pr_number)) touched.add(slug);
+      // The promoted arm runs off the payload already fetched, for EVERY lineage relation
+      // naming this pull request — including when the loop reached it through a legacy
+      // review or a task row first, because `seen` collapses the fetch and must not be
+      // allowed to collapse the recording with it. That is what lets a sweep heal a
+      // missed delivery instead of being the reason the only later observation is lost.
+      for (const lane of sweepPromotedObservation(wsId, attributed, pull, repoId, row.pr_number)) {
+        lanes.add(lane);
+      }
     } catch (err) {
       // A repository this workspace no longer holds fails exactly like an unreachable
       // GitHub: the last observation stands, and the failure is said out loud.
@@ -564,6 +613,63 @@ export async function reconcileInstallation(
     }
   }
   for (const slug of touched) publishReview(wsId, slug);
+  for (const lane of lanes) scheduleActorQueue(lane);
+}
+
+/**
+ * The promoted observation a sweep records, from the pull request payload it already paid
+ * for.
+ *
+ * Honest about what it does not know: a `getPull` answer carries no merge base either, so
+ * the observation is stored with a null one exactly as a delivery's is, and the capture
+ * worker establishes the third leg by comparing these same pinned SHAs. A fork or a
+ * deleted head repository records nothing — it is not a same-repository source.
+ *
+ * One transaction per pull request, because the observation and the job it queues are one
+ * fact. The sweep is not inside a transaction of its own: it is a loop of network calls,
+ * and holding SQLite's single writer open across them would stall every other write.
+ */
+function sweepPromotedObservation(
+  wsId: string,
+  installationId: number,
+  pull: GithubPull,
+  repoId: number,
+  prNumber: number,
+): string[] {
+  const relations = matchLineagePrs(repoId, prNumber).filter((row) => row.workspace_id === wsId);
+  if (relations.length === 0) return [];
+  const base = pull.base;
+  const head = pull.head;
+  if (
+    typeof pull.title !== "string" || pull.title.length === 0 ||
+    !base?.repo || !head?.repo || base.repo.id !== head.repo.id || base.repo.id !== repoId
+  ) {
+    return [];
+  }
+  const facts: ObservationFacts = {
+    repoId: base.repo.id,
+    repo: base.repo.full_name,
+    number: prNumber,
+    title: pull.title,
+    state: pull.state === "closed" ? "closed" : "open",
+    merged: pull.merged === true,
+    draft: pull.draft === true,
+    baseRef: base.ref,
+    baseSha: base.sha,
+    headRef: head.ref,
+    headSha: head.sha,
+    mergeBaseSha: null,
+    githubUpdatedAt: parseUpdatedAt(pull.updated_at),
+  };
+  const lanes: string[] = [];
+  for (const row of relations) {
+    const lineage = getLineage(wsId, row.slug);
+    const relation = getLineagePr(wsId, row.lineage_id);
+    if (!lineage || !relation) continue;
+    const outcome = recordSweptObservation({ workspaceId: wsId, lineage, relation, installationId, facts });
+    if (outcome.actorKey) lanes.push(outcome.actorKey);
+  }
+  return lanes;
 }
 
 // ---- keeping the delivery table from growing forever ----

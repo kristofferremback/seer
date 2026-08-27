@@ -543,8 +543,8 @@ never by a credential id.
 On a completed revision the pull request reads as a short native link — `#41` — beside the
 repository and branch, with its status and age in restrained inline text. The observation
 shown is **the revision's own**, never the relation's latest, so a pinned page can go on
-saying `open, observed …` after the pull request has merged. The separate
-newer-observation notice is a later slice.
+saying `open, observed …` after the pull request has merged. The newer-source notice beside
+it is a separate, dynamic line; see below.
 
 A shell joins its Projects at creation, so a Project holds it before its capture finishes.
 `reviewLineages` therefore carries a nullable `latestRevision` and `revisionUrl` and a
@@ -553,6 +553,88 @@ Listing only lineages with a revision was the alternative, and it was worse: the
 own count includes the join row either way, so a Project said it held three reviews, listed
 two, and named nowhere the third or the fact that its capture had failed. An entry that has
 a revision is unchanged, so a reader written against the earlier shape still reads it.
+
+### A moving pull request appends, and carries only what it can prove
+
+A complete source tuple that nobody has captured appends **one** immutable V1 revision and
+one pending witness request, and the previous complete revision stays current until that
+capture finishes. Nothing about the earlier revision changes: its document, its digest, its
+code, its accounts, its reading state and its URL are what they were.
+
+Three writers produce that source and converge on one capture. An explicit refresh reads
+through the stored actor. A signed `pull_request` delivery records its observation inside
+the delivery transaction, whatever the legacy `github_pr_status` upsert decides about the
+same timestamp — that row is one mutable fact per pull request and legitimately declines an
+equal-or-older one, while observations are history, and base-only movement carries no new
+GitHub timestamp at all. Reconciliation records the same thing from the payload its sweep
+already fetched. Webhook and reconciliation queue a capture only for a relation that reads
+through an **installation**: a delivery is GitHub telling us something happened, so there
+is nobody whose personal credential it is entitled to spend, and a PAT-owned relation
+records the drift and waits for its owner to ask.
+
+One pending or running job is reused per `(lineage, base, head)` pair, however many
+observations of those bytes exist — a title edit, a draft flip, a second actor's reading and
+a worker's merge-base enrichment all produce their own immutable rows and none of them is
+worth a second capture. A refresh **adopts** a pending webhook job by replacing its trigger
+observation with the complete reading it just took; a running job is never rewritten,
+because its observation is what its capture is being recorded against.
+
+A webhook carries no merge base, so its worker establishes one by comparing the delivery's
+**own pinned base and head** through the relation's exact stored actor, publishes a complete
+observation with that merge base, adopts it on its own running job under its lease, and then
+captures those same SHAs. There is no `getPull`: asking what the pull request looks like now
+would let a push that landed while the job waited replace the source the delivery was about.
+
+Order is `github_updated_at`, then Seer's immutable `observed_at`, then SQLite's insertion
+`rowid`. The last two are Seer's and are not dressed up as GitHub's: they exist because
+base-only movement leaves `updated_at` untouched, and because two processes deciding "is
+this newer" must decide the same way rather than falling back on a random id. Every drift,
+queue and completion decision uses those same three keys. A capture that finishes against
+source the lineage has already moved past completes as **superseded**, points at the
+revision that overtook it, and appends nothing. Before a claimed job spends a GitHub
+request, a complete observation whose exact source tuple already has a revision completes as
+converged instead. If GitHub later force-pushes back to retained source, drift links the
+matching earlier revision rather than asking for a refresh that cannot create another copy.
+
+**Read carry is per member and exact.** `review_revision_change_reads` is still the one
+active read; `review_revision_read_carries` is why one arrived. Both are written in the
+completion transaction, so a mark whose reason did not commit cannot exist. A text change
+carries only when its full key — rename-resolved path plus old, new and context
+fingerprints — occurs exactly once in the previous capture and exactly once in the current
+one. Line positions and canonical ids do not participate. Changed bytes, the same
+fingerprint in another file, a split, a merge, a deletion, a duplicate candidate and an
+ambiguous rename all carry nothing. Duplicate exact evidence still classifies as unchanged
+movement, but its ambiguity creates no carry equivalence. Approval never carries, and no acknowledgement or
+judgment table exists yet, so this is the only carried state there is; a future handling
+write must cite the same equivalence key and source revision rather than infer from display
+text. Unmarking a carried read removes the active row and leaves the provenance standing —
+the history still says why it once arrived.
+
+Non-text equivalence uses rename-resolved path, side, object kind, mode and Git object id
+where one is known. Where none is, one stable machine reason code such as
+`[budget:blob_requests]` participates and display prose never does, so a stable binary or
+300-file limitation reads as unchanged rather than as permanent movement. The shipped
+old/new tree truncation rows both remain capture-level `snapshot` facts; duplicate exact
+rows classify as unchanged while their ambiguity authorizes no handling carry. Delta
+classification may pair two placements to say `revised`; **carry** only ever follows a
+unique exact match, which is the stricter of the two on purpose.
+
+The account delta is a separate engine from the legacy `src/overseer/delta.ts`, whose
+rough-match ReviewDoc semantics are intentionally incompatible. Identity is the witness's
+own stable id — a group id, a focus id, an attachment id, a bundle version — and never
+position, and an entity the current account dropped is reported as removed and linked back
+to the account that still holds it rather than rewritten into one that never said it.
+
+`review_witness_supersessions` records that appending revision N left an earlier
+unpublished witness request behind. It is a JOIN rather than a fourth stored state: widening
+the v16 CHECK would mean a previous image refusing a whole promoted review over a word it
+does not recognise. The request id is the primary key and the insert ignores conflicts, so
+the FIRST successor is preserved; claim, publish, fail and retry all refuse a superseded
+request, and its page says `superseded` rather than pending forever.
+
+A fresh witness claim is handed `priorAccount`: the exact latest account published over a
+revision **lower** than this one, whole, or null. Never an account from this revision,
+never a later one, and never a rewritten summary.
 
 ## Privacy differs from Seer
 

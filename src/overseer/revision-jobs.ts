@@ -28,11 +28,22 @@ import { captureSource, StageCaptureError } from "../stage/source";
 import { GithubError } from "./github";
 import { openReadSession, type ReadActor } from "./github-app";
 import { readableWorkspaces, softNotFound } from "./read";
-import { appendSourceRevision, type ReviewLineageRow } from "./revision-db";
 import {
+  appendSourceRevision,
+  carryRevisionReads,
+  getRevision,
+  previousRevision,
+  supersedeOpenWitnessRequests,
+  type ReviewLineageRow,
+} from "./revision-db";
+import { revisionCodeDelta } from "./revision-delta";
+import {
+  enrichWebhookObservation,
   getLineagePr,
   getObservation,
   getSourceByTuple,
+  latestCapturedObservation,
+  observationIsAfter,
   observationView,
   readActorOf,
   type ReviewPrObservationRow,
@@ -102,6 +113,72 @@ export function getCaptureJobForObservation(
   return db.query<ReviewCaptureJobRow, [string, string, string]>(
     "SELECT * FROM review_capture_jobs WHERE workspace_id = ? AND lineage_id = ? AND observation_id = ?",
   ).get(workspaceId, lineageId, observationId);
+}
+
+/**
+ * A job already queued or running for this exact base/head pair, whatever observation
+ * triggered it.
+ *
+ * The pair and not the observation, because one moving pull request produces several
+ * observations of the same bytes: a webhook's null-merge-base reading, the complete reading
+ * a refresh takes through the relation's actor, the enriched reading a worker publishes,
+ * and any of those again with a new title or draft flag. Each is a different row and only
+ * one of them is worth a capture.
+ */
+export function openCaptureJobForPair(
+  workspaceId: string,
+  lineageId: string,
+  baseSha: string,
+  headSha: string,
+): ReviewCaptureJobRow | null {
+  return db.query<ReviewCaptureJobRow, [string, string, string, string]>(
+    "SELECT j.* FROM review_capture_jobs j JOIN review_pr_observations o ON o.id = j.observation_id " +
+      "WHERE j.workspace_id = ? AND j.lineage_id = ? AND j.state IN ('pending','running') " +
+      "AND o.base_sha = ? AND o.head_sha = ? ORDER BY j.created_at ASC, j.id ASC LIMIT 1",
+  ).get(workspaceId, lineageId, baseSha, headSha);
+}
+
+/** The newest job for this pair whatever became of it, which is what a drift notice
+ *  reports: a failed capture is the answer to "why is the newer source not readable". */
+export function latestCaptureJobForPair(
+  workspaceId: string,
+  lineageId: string,
+  baseSha: string,
+  headSha: string,
+): ReviewCaptureJobRow | null {
+  return db.query<ReviewCaptureJobRow, [string, string, string, string]>(
+    "SELECT j.* FROM review_capture_jobs j JOIN review_pr_observations o ON o.id = j.observation_id " +
+      "WHERE j.workspace_id = ? AND j.lineage_id = ? AND o.base_sha = ? AND o.head_sha = ? " +
+      "ORDER BY j.created_at DESC, j.id DESC LIMIT 1",
+  ).get(workspaceId, lineageId, baseSha, headSha);
+}
+
+/**
+ * Point a job at a better reading of the same source.
+ *
+ * Two callers, and the difference between them is the guard. A refresh adopts a PENDING
+ * job — one nobody is capturing — so the complete observation it just took replaces the
+ * webhook trigger that carried no merge base. A worker adopts its OWN RUNNING job, under
+ * its lease, so the observation it enriched is the one its capture is recorded against;
+ * without the lease in the WHERE clause a refresh could rewrite a running job's source
+ * underneath the worker producing it.
+ */
+export function adoptCaptureJobObservation(input: {
+  jobId: string;
+  observationId: string;
+  now: number;
+  leaseToken: string | null;
+}): boolean {
+  if (input.leaseToken === null) {
+    return db.run(
+      "UPDATE review_capture_jobs SET observation_id = ?, updated_at = ? WHERE id = ? AND state = 'pending'",
+      [input.observationId, input.now, input.jobId],
+    ).changes > 0;
+  }
+  return db.run(
+    "UPDATE review_capture_jobs SET observation_id = ?, updated_at = ? WHERE id = ? AND state = 'running' AND lease_token = ?",
+    [input.observationId, input.now, input.jobId, input.leaseToken],
+  ).changes > 0;
 }
 
 export function listCaptureJobs(workspaceId: string, lineageId: string): ReviewCaptureJobRow[] {
@@ -226,6 +303,11 @@ export interface CompletedCapture {
   /** False when this exact source tuple had already published a revision, so the job
    *  completed by pointing at it rather than by appending a second one. */
   appended: boolean;
+  /** True when this result was of source the lineage has already moved past, so it
+   *  completed by pointing at the newer revision without appending behind it. */
+  superseded: boolean;
+  /** How many members' reads the append carried forward on exact equivalence. */
+  carried: number;
 }
 
 /**
@@ -247,7 +329,7 @@ export const completeCaptureJob = db.transaction((input: {
   if (!job) throw new Error(`Capture job ${input.jobId} disappeared before completion`);
   if (job.state === "completed" && job.revision_id) {
     const revision = db.query<{ revision: number }, [string]>("SELECT revision FROM review_revisions WHERE id = ?").get(job.revision_id);
-    return { job, revisionId: job.revision_id, revision: revision?.revision ?? 0, appended: false };
+    return { job, revisionId: job.revision_id, revision: revision?.revision ?? 0, appended: false, superseded: false, carried: 0 };
   }
   if (job.state !== "running" || job.lease_token !== input.leaseToken) {
     throw new CaptureJobError(409, "This capture job is no longer held by this worker.");
@@ -280,7 +362,32 @@ export const completeCaptureJob = db.transaction((input: {
       [input.captureId, held.revision_id, now, job.id],
     );
     const revision = db.query<{ revision: number }, [string]>("SELECT revision FROM review_revisions WHERE id = ?").get(held.revision_id);
-    return { job: getCaptureJobById(job.id)!, revisionId: held.revision_id, revision: revision?.revision ?? 0, appended: false };
+    return { job: getCaptureJobById(job.id)!, revisionId: held.revision_id, revision: revision?.revision ?? 0, appended: false, superseded: false, carried: 0 };
+  }
+
+  // Order, against the observation the newest revision was captured from and under the
+  // same three keys every other decision uses. A capture of source the lineage has already
+  // moved past is a fact about an older reading, and appending it would put revision 3
+  // behind revision 2 in the one place a reader trusts to be chronological. It completes,
+  // because the work really did finish, and it points at the revision that overtook it.
+  const incumbent = latestCapturedObservation(job.workspace_id, job.lineage_id);
+  if (incumbent && !observationIsAfter(observation, incumbent)) {
+    const newest = lineage.latest_revision === null
+      ? null
+      : getRevision(job.workspace_id, lineage.slug, lineage.latest_revision);
+    if (!newest) throw new Error(`Capture job ${job.id} was overtaken by a revision that is not readable`);
+    db.run(
+      "UPDATE review_capture_jobs SET state = 'completed', failure = NULL, lease_token = NULL, lease_expires_at = NULL, capture_id = ?, revision_id = ?, updated_at = ? WHERE id = ?",
+      [input.captureId, newest.id, now, job.id],
+    );
+    return {
+      job: getCaptureJobById(job.id)!,
+      revisionId: newest.id,
+      revision: newest.revision,
+      appended: false,
+      superseded: true,
+      carried: 0,
+    };
   }
 
   const inventory = getStageCapture(input.captureId, job.workspace_id);
@@ -317,6 +424,26 @@ export const completeCaptureJob = db.transaction((input: {
     [appended.revision.id, job.workspace_id, job.lineage_id, observation.id,
       observation.base_sha, observation.head_sha, mergeBaseSha, now],
   );
+
+  // Personal handling, carried only where the retained bytes prove the change is the same
+  // change. Both captures are already stored, so this is two SQLite reads and arithmetic:
+  // no blob is fetched and GitHub is not called, which is what lets it live inside the
+  // transaction the revision is published in.
+  let carried = 0;
+  const previous = previousRevision(job.workspace_id, job.lineage_id, appended.revision.revision);
+  const previousInventory = previous ? getStageCapture(previous.capture_id, job.workspace_id) : null;
+  if (previous && previousInventory) {
+    carried = carryRevisionReads({
+      workspaceId: job.workspace_id,
+      lineageId: job.lineage_id,
+      sourceRevisionId: previous.id,
+      targetRevisionId: appended.revision.id,
+      equivalences: revisionCodeDelta(previousInventory, inventory).equivalences,
+      now,
+    });
+  }
+  supersedeOpenWitnessRequests(job.workspace_id, job.lineage_id, appended.revision.id, appended.revision.revision, now);
+
   db.run(
     "UPDATE review_capture_jobs SET state = 'completed', failure = NULL, lease_token = NULL, lease_expires_at = NULL, capture_id = ?, revision_id = ?, updated_at = ? WHERE id = ?",
     [input.captureId, appended.revision.id, now, job.id],
@@ -326,8 +453,31 @@ export const completeCaptureJob = db.transaction((input: {
     revisionId: appended.revision.id,
     revision: appended.revision.revision,
     appended: true,
+    superseded: false,
+    carried,
   };
 }) as (input: { jobId: string; leaseToken: string; captureId: string }) => CompletedCapture;
+
+/**
+ * A claimed job whose source is already published, finished without spending anything.
+ *
+ * The guard runs before the first GitHub request rather than after the capture, which is
+ * the whole point: a retried job, or a sibling queued from a second observation of the same
+ * bytes, would otherwise pay for a full capture and then discover at completion that the
+ * lane job ahead of it had already published exactly this revision.
+ */
+export const convergeCaptureJob = db.transaction((input: {
+  jobId: string;
+  leaseToken: string;
+  revisionId: string;
+  captureId: string | null;
+}): void => {
+  db.run(
+    "UPDATE review_capture_jobs SET state = 'completed', failure = NULL, lease_token = NULL, lease_expires_at = NULL, capture_id = ?, revision_id = ?, updated_at = ? " +
+      "WHERE id = ? AND state = 'running' AND lease_token = ?",
+    [input.captureId, input.revisionId, Date.now(), input.jobId, input.leaseToken],
+  );
+}) as (input: { jobId: string; leaseToken: string; revisionId: string; captureId: string | null }) => void;
 
 // ---- running one job ----
 
@@ -362,16 +512,83 @@ export async function runCaptureJob(job: ReviewCaptureJobRow): Promise<void> {
   // capture it accompanies is running.
   (beat as unknown as { unref?: () => void }).unref?.();
   try {
-    const observation = getObservation(job.workspace_id, job.observation_id);
+    let observation = getObservation(job.workspace_id, job.observation_id);
     if (!observation) throw new Error(`Capture job ${job.id} names a missing observation`);
-    const mergeBaseSha = observation.merge_base_sha;
-    if (mergeBaseSha === null) throw new Error(`Capture job ${job.id} names an observation with no merge base`);
+    const actor = readActorOf(job);
+
+    /**
+     * Finish without capturing when these exact bytes are already a revision.
+     *
+     * Asked before the first GitHub request rather than after the capture, which is the
+     * whole point: a retry, or a sibling job queued from a second observation of the same
+     * source, would otherwise pay for a full capture and only then discover that the lane
+     * job ahead of it had already published exactly this revision.
+     */
+    const convergeIfPublished = (): boolean => {
+      const mergeBase = observation!.merge_base_sha;
+      if (mergeBase === null) return false;
+      const published = getSourceByTuple(job.lineage_id, observation!.base_sha, observation!.head_sha, mergeBase);
+      if (!published) return false;
+      const revision = db.query<{ capture_id: string }, [string]>(
+        "SELECT capture_id FROM review_revisions WHERE id = ?",
+      ).get(published.revision_id);
+      convergeCaptureJob({ jobId: job.id, leaseToken, revisionId: published.revision_id, captureId: revision?.capture_id ?? null });
+      return true;
+    };
+    if (convergeIfPublished()) return;
+
     const session = await openReadSession(
       job.workspace_id,
-      readActorOf(job),
+      actor,
       observation.repo,
       observation.repo_id,
     );
+
+    // A webhook trigger carries no merge base, so the third leg of the source tuple is
+    // established here — by comparing the delivery's OWN pinned base and head through the
+    // relation's stored actor. Deliberately not `getPull`: asking GitHub what the pull
+    // request looks like now would let a push that landed while this job waited replace the
+    // source the delivery was about, and the revision would be evidence for bytes no
+    // observation ever recorded.
+    if (observation.merge_base_sha === null) {
+      if (!session.client.compare) {
+        throw new CaptureJobError(409, "The routed GitHub client cannot compare commits, so this delivery's merge base cannot be established.");
+      }
+      const comparison = await session.client.compare(observation.repo, observation.base_sha, observation.head_sha);
+      const enriched = enrichWebhookObservation({
+        workspaceId: job.workspace_id,
+        lineageId: job.lineage_id,
+        jobId: job.id,
+        leaseToken,
+        actor,
+        facts: {
+          repoId: observation.repo_id,
+          repo: observation.repo,
+          number: observation.pr_number,
+          title: observation.title,
+          state: observation.state,
+          merged: observation.merged === 1,
+          draft: observation.draft === 1,
+          baseRef: observation.base_ref,
+          baseSha: observation.base_sha,
+          headRef: observation.head_ref,
+          headSha: observation.head_sha,
+          mergeBaseSha: comparison.merge_base_commit.sha,
+          githubUpdatedAt: observation.github_updated_at,
+        },
+      });
+      if (!enriched.adopted) {
+        throw new CaptureJobError(409, "This capture job's lease was taken over while its merge base was established, so its result was discarded.");
+      }
+      observation = enriched.observation;
+    }
+    const mergeBaseSha = observation.merge_base_sha;
+    if (mergeBaseSha === null) throw new Error(`Capture job ${job.id} names an observation with no merge base`);
+    // Asked again, because the enrichment above is the moment a webhook trigger first HAS
+    // a source tuple to compare, and a refresh may have published exactly it in the
+    // meantime.
+    if (convergeIfPublished()) return;
+
     const result = await captureSource(
       job.workspace_id,
       {
@@ -532,12 +749,33 @@ export function stopCaptureSweep(): void {
 
 // ---- views and routes ----
 
+/**
+ * Whether this job's result was of source the lineage had already moved past.
+ *
+ * Asked of the STORED rows rather than remembered from the run, so a job read back
+ * a week later answers the same way. A webhook trigger that has not been enriched yet
+ * carries no merge base and therefore no comparable tuple, so it is not superseded — it is
+ * simply not finished. Convergence onto a revision published from the same tuple is not
+ * supersession either: those are the same bytes, which is the point of the source tuple.
+ */
+function jobSuperseded(job: ReviewCaptureJobRow, observation: ReviewPrObservationRow | null): boolean {
+  if (!job.revision_id || !observation || observation.merge_base_sha === null) return false;
+  const source = db.query<{ base_tip_sha: string; source_head_sha: string; merge_base_sha: string }, [string]>(
+    "SELECT base_tip_sha, source_head_sha, merge_base_sha FROM review_revision_sources WHERE revision_id = ?",
+  ).get(job.revision_id);
+  if (!source) return false;
+  return source.base_tip_sha !== observation.base_sha ||
+    source.source_head_sha !== observation.head_sha ||
+    source.merge_base_sha !== observation.merge_base_sha;
+}
+
 export function captureJobView(job: ReviewCaptureJobRow, observation: ReviewPrObservationRow | null): unknown {
   const revision = job.revision_id
     ? db.query<{ revision: number }, [string]>("SELECT revision FROM review_revisions WHERE id = ?").get(job.revision_id)
     : null;
   return {
     id: job.id,
+    superseded: jobSuperseded(job, observation),
     workspace: job.workspace_id,
     lineage: job.lineage_id,
     slug: job.slug,

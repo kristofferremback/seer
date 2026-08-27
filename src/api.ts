@@ -60,6 +60,7 @@ import {
   handlePublishReviewAccount,
   handleReadReviewLineage,
   handleReadReviewRevision,
+  handleReadRevisionDelta,
   handleRetryWitnessRequest,
 } from "./overseer/revision-routes";
 import {
@@ -919,10 +920,17 @@ const lineagePrSchema = {
  *  is never a source revision. */
 const captureJobSchema = {
   type: "object",
-  required: ["id", "workspace", "lineage", "slug", "state", "attempts", "failure", "actor", "captureId", "revision", "revisionUrl", "url", "retryUrl", "reviewUrl", "pullRequest", "createdAt", "updatedAt"],
+  required: ["id", "superseded", "workspace", "lineage", "slug", "state", "attempts", "failure", "actor", "captureId", "revision", "revisionUrl", "url", "retryUrl", "reviewUrl", "pullRequest", "createdAt", "updatedAt"],
   additionalProperties: false,
   properties: {
     id: { type: "string", pattern: RCJ_ID_RE.source },
+    superseded: {
+      type: "boolean",
+      description:
+        "True when this capture finished against source the review had already moved past, so it " +
+        "completed by pointing at the newer revision instead of appending behind it. Converging on a " +
+        "revision published from the SAME source tuple is not supersession.",
+    },
     workspace: { type: "string" }, lineage: { type: "string", pattern: RLN_ID_RE.source },
     slug: { type: "string", pattern: SLUG_RE.source },
     state: { type: "string", enum: ["pending", "running", "failed", "completed"] },
@@ -992,17 +1000,91 @@ const reusedSourceSchema = {
 
 const refreshViewSchema = {
   type: "object",
-  required: ["slug", "lineage", "workspace", "revision", "behind", "actor", "actorLabel", "pullRequest"],
+  required: ["slug", "lineage", "workspace", "revision", "sourceRevision", "captureJob", "behind", "actor", "actorLabel", "pullRequest"],
   additionalProperties: false,
   properties: {
     slug: { type: "string", pattern: SLUG_RE.source },
     lineage: { type: "string", pattern: RLN_ID_RE.source },
     workspace: { type: "string" },
-    revision: { type: ["integer", "null"], minimum: 1 },
+    revision: { type: ["integer", "null"], minimum: 1, description: "The review's latest source revision, or null before its first capture completes." },
+    sourceRevision: {
+      type: ["integer", "null"], minimum: 1,
+      description: "The revision these exact observed bytes already published, or null. When it is set there is no capture to make.",
+    },
+    captureJob: {
+      oneOf: [captureJobSchema, { type: "null" }],
+      description: "The capture that will publish this source: newly queued, or the one already queued or running for the same base and head. Null when nothing needs capturing.",
+    },
     behind: { type: "boolean", description: "True when the observed source tuple is not the latest revision's." },
     actor: { type: "string", enum: ["installation", "user", "anonymous"] },
     actorLabel: { type: "string" },
     pullRequest: prObservationSchema,
+  },
+};
+
+/** Four counts over one comparison, used for code items and for account entities alike. */
+const deltaCountsSchema = {
+  type: "object",
+  required: ["unchanged", "revised", "new", "removed"],
+  additionalProperties: false,
+  properties: {
+    unchanged: { type: "integer", minimum: 0 },
+    revised: { type: "integer", minimum: 0 },
+    new: { type: "integer", minimum: 0 },
+    removed: { type: "integer", minimum: 0 },
+  },
+};
+
+/** What this revision changed about the one before it. Derived from the two RETAINED
+ *  captures, so it is available offline and identical every time it is asked. */
+const revisionDeltaSummarySchema = {
+  oneOf: [
+    {
+      type: "object",
+      required: ["previousRevision", "previousRevisionUrl", "code", "account"],
+      additionalProperties: false,
+      properties: {
+        previousRevision: { type: "integer", minimum: 1 },
+        previousRevisionUrl: { type: "string", format: "uri" },
+        code: deltaCountsSchema,
+        account: {
+          oneOf: [
+            {
+              type: "object",
+              required: ["summary", "counts"],
+              additionalProperties: false,
+              properties: {
+                summary: { type: "string", enum: ["unchanged", "revised", "absent"] },
+                counts: deltaCountsSchema,
+              },
+            },
+            { type: "null" },
+          ],
+          description: "Null until an account exists on this revision and on an earlier one.",
+        },
+      },
+    },
+    { type: "null" },
+  ],
+};
+
+/** What the pull request has done since. Dynamic, and beside the immutable document
+ *  rather than inside it. */
+const revisionDriftSchema = {
+  type: "object",
+  required: ["newerRevision", "newerRevisionUrl", "sourceRevision", "sourceRevisionUrl", "moved", "capture", "refreshRequired"],
+  additionalProperties: false,
+  properties: {
+    newerRevision: { type: ["integer", "null"], minimum: 1 },
+    newerRevisionUrl: { type: ["string", "null"] },
+    sourceRevision: { type: ["integer", "null"], minimum: 1, description: "A previously published revision whose source tuple matches the newest observation." },
+    sourceRevisionUrl: { type: ["string", "null"] },
+    moved: {
+      type: "boolean",
+      description: "The newest observation's base or head differs from the newest revision's source. Compared on base and head SHAs only, so a title or draft edit and a delivery's absent merge base never claim code movement.",
+    },
+    capture: { type: ["string", "null"], enum: ["pending", "running", "failed", null] },
+    refreshRequired: { type: "boolean", description: "Source moved and no capture is queued for it, so somebody has to ask." },
   },
 };
 
@@ -1015,7 +1097,14 @@ const witnessRequestSchema = {
     workspace: { type: "string" },
     slug: { type: "string", pattern: SLUG_RE.source },
     revision: { type: "integer", minimum: 1 },
-    state: { type: "string", enum: ["pending", "failed", "retrying", "published"], description: "`retrying` is derived: pending after at least one failure." },
+    state: {
+      type: "string",
+      enum: ["pending", "failed", "retrying", "published", "superseded"],
+      description:
+        "`retrying` is derived: pending after at least one failure. `superseded` is derived too, from a " +
+        "later revision having been published while this request was still open; claim, publish, fail and " +
+        "retry all refuse a superseded request.",
+    },
     retryCount: { type: "integer", minimum: 0 },
     failure: { type: ["string", "null"] },
     accountId: { type: ["string", "null"], pattern: RAC_ID_RE.source },
@@ -1026,7 +1115,7 @@ const witnessRequestSchema = {
 /** The claim view: the witness request, plus which attempt this key now holds. */
 const witnessClaimSchema = {
   type: "object",
-  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "updatedAt", "claim"],
+  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "updatedAt", "claim", "priorAccount"],
   additionalProperties: false,
   properties: {
     ...witnessRequestSchema.properties,
@@ -1041,14 +1130,39 @@ const witnessClaimSchema = {
         claimedAt: { type: "string", format: "date-time" },
       },
     },
+    priorAccount: {
+      oneOf: [
+        {
+          type: "object",
+          required: ["id", "revision", "version", "schemaVersion", "digest", "url", "createdAt", "document"],
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", pattern: RAC_ID_RE.source },
+            revision: { type: "integer", minimum: 1 },
+            version: { type: "integer", minimum: 1 },
+            schemaVersion: { type: "integer", minimum: 1 },
+            digest: { type: "string" },
+            url: { type: "string", format: "uri" },
+            createdAt: { type: "string", format: "date-time" },
+            document: accountDocSchema,
+          },
+        },
+        { type: "null" },
+      ],
+      description:
+        "The exact latest account published over a revision LOWER than this one, whole, or null. Never an " +
+        "account from this revision, never a later one, and never a rewritten summary.",
+    },
   },
 };
 
 const revisionViewSchema = {
   type: "object",
-  required: ["id", "lineage", "slug", "workspace", "revision", "schemaVersion", "digest", "url", "apiUrl", "createdAt", "document", "pullRequest", "witness"],
+  required: ["id", "delta", "drift", "lineage", "slug", "workspace", "revision", "schemaVersion", "digest", "url", "apiUrl", "createdAt", "document", "pullRequest", "witness"],
   additionalProperties: false,
   properties: {
+    delta: revisionDeltaSummarySchema,
+    drift: revisionDriftSchema,
     id: { type: "string", pattern: RVR_ID_RE.source }, lineage: { type: "string", pattern: RLN_ID_RE.source },
     slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
     revision: { type: "integer", minimum: 1 }, schemaVersion: { type: "integer", minimum: 1 }, digest: { type: "string" },
@@ -1062,9 +1176,11 @@ const revisionViewSchema = {
 
 const accountViewSchema = {
   type: "object",
-  required: ["id", "lineage", "slug", "workspace", "revision", "version", "schemaVersion", "digest", "url", "revisionUrl", "createdAt", "document", "witness"],
+  required: ["id", "delta", "drift", "lineage", "slug", "workspace", "revision", "version", "schemaVersion", "digest", "url", "revisionUrl", "createdAt", "document", "witness"],
   additionalProperties: false,
   properties: {
+    delta: revisionDeltaSummarySchema,
+    drift: { oneOf: [revisionDriftSchema, { type: "null" }] },
     id: { type: "string", pattern: RAC_ID_RE.source }, lineage: { type: "string", pattern: RLN_ID_RE.source },
     slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
     revision: { type: "integer", minimum: 1 }, version: { type: "integer", minimum: 1 },
@@ -1091,8 +1207,18 @@ const lineageViewSchema = {
     revisions: {
       type: "array",
       items: {
-        type: "object", required: ["revision", "captureId", "createdAt", "url", "apiUrl"], additionalProperties: false,
-        properties: { revision: { type: "integer", minimum: 1 }, captureId: { type: "string", pattern: STG_ID_RE.source }, createdAt: { type: "string", format: "date-time" }, url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" } },
+        type: "object", required: ["revision", "captureId", "createdAt", "witness", "carriedReads", "url", "apiUrl"], additionalProperties: false,
+        properties: {
+          revision: { type: "integer", minimum: 1 },
+          captureId: { type: "string", pattern: STG_ID_RE.source },
+          createdAt: { type: "string", format: "date-time" },
+          witness: { type: ["string", "null"], enum: ["pending", "failed", "retrying", "published", "superseded", null] },
+          carriedReads: {
+            type: ["integer", "null"], minimum: 0,
+            description: "How many of the asking MEMBER's reads arrived here by exact carry. Null for an API key: a workspace key is not a person reading, and its owner's handling state is not its business.",
+          },
+          url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" },
+        },
       },
     },
     accounts: {
@@ -1100,6 +1226,99 @@ const lineageViewSchema = {
       items: {
         type: "object", required: ["version", "revision", "createdAt", "url"], additionalProperties: false,
         properties: { version: { type: "integer", minimum: 1 }, revision: { type: "integer", minimum: 1 }, createdAt: { type: "string", format: "date-time" }, url: { type: "string", format: "uri" } },
+      },
+    },
+  },
+};
+
+/** One item of one capture and what became of it. Opaque ids and paths the caller may
+ *  already read out of the authorized retained document; never a blob digest or a Git
+ *  object id, which are how a match is proved rather than facts about this review. */
+const deltaItemSchema = {
+  type: "object",
+  required: ["type", "status", "oldId", "newId", "path", "fileStatus"],
+  additionalProperties: false,
+  properties: {
+    type: { type: "string", enum: ["change", "material", "file"] },
+    status: { type: "string", enum: ["unchanged", "revised", "new", "removed"] },
+    oldId: { type: ["string", "null"] },
+    newId: { type: ["string", "null"] },
+    path: { type: ["string", "null"], description: "Rename-resolved where the capture recorded an unambiguous rename." },
+    fileStatus: { type: ["string", "null"] },
+  },
+};
+
+const accountEntityDeltaSchema = {
+  type: "object",
+  required: ["kind", "id", "status"],
+  additionalProperties: false,
+  properties: {
+    kind: { type: "string", enum: ["group", "focus", "evidence"] },
+    id: { type: "string", description: "The witness's own stable id, or an evidence key: `attachment:<id>` or `bundle:<slug>:<version>`." },
+    status: { type: "string", enum: ["unchanged", "revised", "new", "removed"] },
+  },
+};
+
+const revisionDeltaViewSchema = {
+  type: "object",
+  required: ["slug", "lineage", "workspace", "revision", "previous", "code", "account"],
+  additionalProperties: false,
+  properties: {
+    slug: { type: "string", pattern: SLUG_RE.source },
+    lineage: { type: "string", pattern: RLN_ID_RE.source },
+    workspace: { type: "string" },
+    revision: { type: "integer", minimum: 1 },
+    previous: {
+      oneOf: [
+        {
+          type: "object", required: ["revision", "url", "apiUrl"], additionalProperties: false,
+          properties: { revision: { type: "integer", minimum: 1 }, url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" } },
+        },
+        { type: "null" },
+      ],
+    },
+    code: {
+      oneOf: [
+        {
+          type: "object", required: ["counts", "items"], additionalProperties: false,
+          properties: { counts: deltaCountsSchema, items: { type: "array", items: deltaItemSchema } },
+        },
+        { type: "null" },
+      ],
+      description: "Null on the first revision of a lineage, which changed nothing about anything.",
+    },
+    account: {
+      type: "object",
+      required: ["state", "current", "prior", "delta"],
+      additionalProperties: false,
+      properties: {
+        state: { type: ["string", "null"], enum: ["pending", "failed", "retrying", "published", "superseded", null] },
+        current: {
+          oneOf: [
+            { type: "object", required: ["version", "url"], additionalProperties: false, properties: { version: { type: "integer", minimum: 1 }, url: { type: "string", format: "uri" } } },
+            { type: "null" },
+          ],
+        },
+        prior: {
+          oneOf: [
+            { type: "object", required: ["version", "revision", "url"], additionalProperties: false, properties: { version: { type: "integer", minimum: 1 }, revision: { type: "integer", minimum: 1 }, url: { type: "string", format: "uri" } } },
+            { type: "null" },
+          ],
+          description: "Where a removed group, focus item or evidence reference still stands. Nothing removed is rewritten into the current account.",
+        },
+        delta: {
+          oneOf: [
+            {
+              type: "object", required: ["summary", "counts", "entities"], additionalProperties: false,
+              properties: {
+                summary: { type: "string", enum: ["unchanged", "revised", "absent"] },
+                counts: deltaCountsSchema,
+                entities: { type: "array", items: accountEntityDeltaSchema },
+              },
+            },
+            { type: "null" },
+          ],
+        },
       },
     },
   },
@@ -1913,6 +2132,30 @@ export const API_ROUTES: readonly ApiRoute[] = [
     },
   }),
 
+  route("/api/review-lineages/:slug/revisions/:revision/delta", {
+    GET: {
+      doc: {
+        operationId: "readReviewRevisionDelta",
+        summary: "Read what one revision changed about the one before it",
+        description:
+          "Derived from the two RETAINED captures and the two immutable accounts: no blob is fetched and " +
+          "GitHub is never called, so it answers identically every time and answers at all when GitHub is " +
+          "down. Every item of both captures appears exactly once. `unchanged` is one unique exact key " +
+          "match on rename-resolved path plus fingerprints, or on object identity for material; `revised` " +
+          "is the same unambiguous placement with a changed key; ambiguous renames and duplicate keys " +
+          "produce no equivalence and read as removed beside new rather than as an arbitrary pairing. " +
+          "Missing, malformed, and cross-workspace slugs share the review soft 404.",
+        security: "keyOrSession",
+        parameters: [slugParam, revisionParam],
+        responses: {
+          "200": { description: "The retained code delta, the prior revision, and the account states beside it.", content: { "application/json": { schema: revisionDeltaViewSchema } } },
+          "404": reviewNotFound,
+        },
+      },
+      run: (req) => handleReadRevisionDelta(req, req.params.slug, req.params.revision),
+    },
+  }),
+
   route("/api/review-lineages/:slug/revisions/:revision/accounts", {
     POST: {
       doc: {
@@ -2064,13 +2307,19 @@ export const API_ROUTES: readonly ApiRoute[] = [
           "Reads through the actor stored at attachment and records one immutable observation. A review " +
           "attached through a member's GitHub connection may only be refreshed by that member: a " +
           "workspace is a group, and a stored personal credential is not the group's to spend. Re-reading " +
-          "unchanged facts through the same actor reuses the existing observation. This slice records " +
-          "that the pull request moved and says so with `behind`; publishing a later source revision " +
-          "from it is a later slice.",
+          "unchanged facts through the same actor reuses the existing observation.\n\n" +
+          "When the observed source is already published, `sourceRevision` names that revision and nothing " +
+          "is captured. Otherwise `captureJob` is the capture that will publish it — newly queued, or the " +
+          "one already queued or running for the same base and head, which is how an explicit refresh and " +
+          "a webhook converge on one capture. A pending job queued from a webhook adopts this complete " +
+          "reading, saving its worker the compare; a running job is never rewritten, because its " +
+          "observation is what its capture is being recorded against.\n\n" +
+          "Always 200: the refresh itself completed and the observation is stored, so the capture state " +
+          "travels in the body rather than in the status.",
         security: "key",
         parameters: [slugParam, idempotencyKeyParam],
         responses: {
-          "200": { description: "The observation, and whether it is ahead of the latest revision.", content: { "application/json": { schema: refreshViewSchema } } },
+          "200": { description: "The observation, whether it is ahead of the latest revision, and what is being done about that.", content: { "application/json": { schema: refreshViewSchema } } },
           "400": errorResponse, "401": errorResponse, "403": errorResponse, "404": reviewNotFound, "409": errorResponse, "422": errorResponse, "502": errorResponse,
         },
       },

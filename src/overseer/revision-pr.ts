@@ -48,17 +48,31 @@ import {
   type ValidatedPull,
 } from "./github";
 import { softNotFound } from "./read";
+import { getStageCapture, type StageCaptureInventory } from "../stage/db";
 import {
   digestOf,
   getLineage,
   getRevision,
+  latestAccountBeforeRevision,
+  latestAccountForRevision,
+  previousRevision,
   type ReviewLineageRow,
+  type ReviewRevisionRow,
 } from "./revision-db";
 import {
+  accountDelta,
+  revisionCodeDelta,
+  type AccountSummaryDelta,
+  type DeltaCounts,
+} from "./revision-delta";
+import {
+  adoptCaptureJobObservation,
   captureJobView,
   createCaptureJob,
   getCaptureJob,
   getCaptureJobForObservation,
+  latestCaptureJobForPair,
+  openCaptureJobForPair,
   scheduleActorQueue,
   type ReviewCaptureJobRow,
 } from "./revision-jobs";
@@ -89,6 +103,18 @@ export interface ReviewLineagePrRow extends StoredActor {
 }
 
 export interface ReviewPrObservationRow extends StoredActor {
+  /**
+   * SQLite's insertion order for this row, read as `rowid`.
+   *
+   * The third and last ordering key, and the only one that cannot tie. GitHub's
+   * `updated_at` has one-second resolution and does not move at all when only the base
+   * branch advanced, so two genuinely different sources can arrive carrying the same
+   * timestamp; Seer's own `observed_at` separates them to the millisecond, and this
+   * separates the ones that also share that. It is an arrival order and is not claimed to
+   * be GitHub's — what it buys is that two workers deciding "is this newer" always decide
+   * the same way, rather than falling back on a random id.
+   */
+  seq: number;
   id: string;
   workspace_id: string;
   lineage_id: string;
@@ -210,24 +236,72 @@ export function getLiveLineagePrByNumber(
 // beside `matchReviewPrs` and `matchTaskPrs`, because it is the third reading of one
 // question and the sweep that retires a status row has to ask all three in one place.
 
+/** Every read of an observation carries its insertion order, because every decision that
+ *  compares two observations needs the third key and none of them may invent it. */
+const OBSERVATION_COLUMNS = "rowid AS seq, *";
+
 export function getObservation(workspaceId: string, id: string): ReviewPrObservationRow | null {
   return db.query<ReviewPrObservationRow, [string, string]>(
-    "SELECT * FROM review_pr_observations WHERE workspace_id = ? AND id = ?",
+    `SELECT ${OBSERVATION_COLUMNS} FROM review_pr_observations WHERE workspace_id = ? AND id = ?`,
   ).get(workspaceId, id);
 }
 
 export function getObservationByDigest(lineageId: string, digest: string): ReviewPrObservationRow | null {
   return db.query<ReviewPrObservationRow, [string, string]>(
-    "SELECT * FROM review_pr_observations WHERE lineage_id = ? AND digest = ?",
+    `SELECT ${OBSERVATION_COLUMNS} FROM review_pr_observations WHERE lineage_id = ? AND digest = ?`,
   ).get(lineageId, digest);
 }
 
-/** The newest thing anybody has seen about this lineage's pull request. Used for the
- *  relation-level reading; a pinned revision reads its OWN observation instead. */
+/**
+ * One total order over observations, used by every decision that has to say which of two
+ * readings is later: GitHub's own timestamp, then Seer's immutable arrival time, then
+ * SQLite's insertion order.
+ *
+ * The last two are Seer's and are not dressed up as GitHub's. They exist because base-only
+ * movement leaves `updated_at` untouched — a pull request whose base branch advanced is a
+ * different source with the same GitHub timestamp — and because a redelivery of the same
+ * second must not be able to reorder history differently in two processes. What is
+ * guaranteed is determinism, not that GitHub resolves sub-second ordering.
+ */
+export function observationIsAfter(
+  candidate: Pick<ReviewPrObservationRow, "github_updated_at" | "observed_at" | "seq">,
+  incumbent: Pick<ReviewPrObservationRow, "github_updated_at" | "observed_at" | "seq">,
+): boolean {
+  if (candidate.github_updated_at !== incumbent.github_updated_at) {
+    return candidate.github_updated_at > incumbent.github_updated_at;
+  }
+  if (candidate.observed_at !== incumbent.observed_at) return candidate.observed_at > incumbent.observed_at;
+  return candidate.seq > incumbent.seq;
+}
+
+/** The newest thing anybody has seen about this lineage's pull request, under the same
+ *  three-key order every drift and queue decision uses. A pinned revision reads its OWN
+ *  observation instead. */
 export function latestObservation(workspaceId: string, lineageId: string): ReviewPrObservationRow | null {
   return db.query<ReviewPrObservationRow, [string, string]>(
-    "SELECT * FROM review_pr_observations WHERE workspace_id = ? AND lineage_id = ? " +
-      "ORDER BY github_updated_at DESC, observed_at DESC, id DESC LIMIT 1",
+    `SELECT ${OBSERVATION_COLUMNS} FROM review_pr_observations WHERE workspace_id = ? AND lineage_id = ? ` +
+      "ORDER BY github_updated_at DESC, observed_at DESC, rowid DESC LIMIT 1",
+  ).get(workspaceId, lineageId);
+}
+
+/** The newest COMPLETE observation: one somebody compared, so it could be a capture
+ *  source. What drift compares a webhook's pinned SHAs against. */
+export function latestCompleteObservation(workspaceId: string, lineageId: string): ReviewPrObservationRow | null {
+  return db.query<ReviewPrObservationRow, [string, string]>(
+    `SELECT ${OBSERVATION_COLUMNS} FROM review_pr_observations WHERE workspace_id = ? AND lineage_id = ? ` +
+      "AND merge_base_sha IS NOT NULL ORDER BY github_updated_at DESC, observed_at DESC, rowid DESC LIMIT 1",
+  ).get(workspaceId, lineageId);
+}
+
+/** The observation the lineage's newest source revision was captured from. The incumbent
+ *  every completion orders itself against, so an out-of-order arrival cannot append
+ *  history behind a newer source. */
+export function latestCapturedObservation(workspaceId: string, lineageId: string): ReviewPrObservationRow | null {
+  return db.query<ReviewPrObservationRow, [string, string]>(
+    `SELECT o.rowid AS seq, o.* FROM review_pr_observations o ` +
+      "JOIN review_revision_sources s ON s.observation_id = o.id " +
+      "JOIN review_revisions r ON r.id = s.revision_id " +
+      "WHERE o.workspace_id = ? AND o.lineage_id = ? ORDER BY r.revision DESC LIMIT 1",
   ).get(workspaceId, lineageId);
 }
 
@@ -522,26 +596,80 @@ export interface RefreshObservationInput {
   facts: CapturableFacts;
 }
 
-/** A refresh observes and records; task 6 owns publishing a later revision from it. */
-export const recordRefreshObservation = db.transaction((input: RefreshObservationInput): ReviewPrObservationRow => {
-  const replay = getPrIdempotency(input.workspaceId, input.idempotencyKey);
+export interface RefreshOutcome {
+  observation: ReviewPrObservationRow;
+  /** The capture that will publish this source, or null when nothing needs capturing. */
+  job: ReviewCaptureJobRow | null;
+  /** The revision these exact bytes already published, or null. */
+  sourceRevisionId: string | null;
+}
+
+/**
+ * One explicit refresh: the reading, and whatever it costs to turn that reading into a
+ * revision — which is nothing at all when the bytes are already published.
+ *
+ * Four outcomes, in the order a cheap answer beats an expensive one. These exact bytes
+ * already published a revision, so there is nothing to do. This observation already queued
+ * a job, so that job is the answer. A job is already queued or running for the same
+ * base/head pair — a webhook's, usually — so it is reused, and if it is still PENDING it
+ * adopts this complete reading, which is what saves its worker a compare. Otherwise one job
+ * is created through the relation's stored actor.
+ *
+ * A running job is never rewritten. Its observation is what its capture is being recorded
+ * against and its actor is whose credential is being spent; changing either underneath it
+ * would make the finished capture provenance for something nobody asked for.
+ */
+export const refreshLineageObservation = db.transaction((input: RefreshObservationInput): RefreshOutcome => {
+  const { workspaceId, lineage, facts } = input;
+  const replay = getPrIdempotency(workspaceId, input.idempotencyKey);
   if (replay) {
     if (replay.request_hash !== input.requestHash) {
       throw new PrIngestError(409, "This Idempotency-Key was already used for a different pull request request.");
     }
-    const observation = getObservation(input.workspaceId, replay.observation_id);
+    const observation = getObservation(workspaceId, replay.observation_id);
     if (!observation) throw new Error(`Idempotency row ${replay.idempotency_key} points at rows that are gone`);
-    return observation;
+    return {
+      observation,
+      job: replay.capture_job_id ? getCaptureJob(workspaceId, replay.capture_job_id) : null,
+      sourceRevisionId: replay.revision_id,
+    };
   }
   const now = Date.now();
-  const observation = insertObservation(input.workspaceId, input.lineage.id, input.facts, input.actor, now);
+  const observation = insertObservation(workspaceId, lineage.id, facts, input.actor, now);
+
+  let sourceRevisionId: string | null = null;
+  let job: ReviewCaptureJobRow | null = null;
+  const byTuple = getSourceByTuple(lineage.id, facts.baseSha, facts.headSha, facts.mergeBaseSha);
+  if (byTuple) {
+    sourceRevisionId = byTuple.revision_id;
+  } else {
+    const held = getCaptureJobForObservation(workspaceId, lineage.id, observation.id);
+    const open = held ?? openCaptureJobForPair(workspaceId, lineage.id, facts.baseSha, facts.headSha);
+    if (open) {
+      if (open.state === "pending" && open.observation_id !== observation.id) {
+        adoptCaptureJobObservation({ jobId: open.id, observationId: observation.id, now, leaseToken: null });
+      }
+      job = getCaptureJob(workspaceId, open.id);
+    } else {
+      job = createCaptureJob({
+        workspaceId,
+        lineageId: lineage.id,
+        slug: lineage.slug,
+        observationId: observation.id,
+        actor: input.actor,
+        actorKey: actorQueueKey(workspaceId, input.actor),
+        now,
+      });
+    }
+  }
+
   db.run(
     "INSERT INTO review_pr_idempotency (workspace_id, idempotency_key, request_hash, operation, lineage_id, observation_id, capture_job_id, revision_id, created_at) " +
-      "VALUES (?, ?, ?, 'refresh', ?, ?, NULL, NULL, ?)",
-    [input.workspaceId, input.idempotencyKey, input.requestHash, input.lineage.id, observation.id, now],
+      "VALUES (?, ?, ?, 'refresh', ?, ?, ?, ?, ?)",
+    [workspaceId, input.idempotencyKey, input.requestHash, lineage.id, observation.id, job?.id ?? null, sourceRevisionId, now],
   );
-  return observation;
-}) as (input: RefreshObservationInput) => ReviewPrObservationRow;
+  return { observation, job, sourceRevisionId };
+}) as (input: RefreshObservationInput) => RefreshOutcome;
 
 export interface WebhookObservationInput {
   workspaceId: string;
@@ -563,6 +691,110 @@ export const recordWebhookObservation = db.transaction((input: WebhookObservatio
   insertObservation(input.workspaceId, input.lineageId, input.facts,
     { kind: "installation", installationId: input.installationId }, Date.now()),
 ) as (input: WebhookObservationInput) => ReviewPrObservationRow;
+
+export interface EnrichObservationInput {
+  workspaceId: string;
+  lineageId: string;
+  jobId: string;
+  leaseToken: string;
+  actor: ReadActor;
+  facts: CapturableFacts;
+}
+
+/**
+ * The complete observation a worker publishes from a webhook's pinned SHAs, adopted onto
+ * the running job in the same breath.
+ *
+ * One transaction, because a complete observation nobody's job points at would be a
+ * capturable source tuple that arrived from nowhere, and a job pointing at an observation
+ * that was not written would name nothing at all. `adopted` false means the lease moved
+ * while the compare was in flight — another process is capturing this, and this worker must
+ * stop rather than write a second capture of the same bytes.
+ */
+export const enrichWebhookObservation = db.transaction((input: EnrichObservationInput): {
+  observation: ReviewPrObservationRow;
+  adopted: boolean;
+} => {
+  const now = Date.now();
+  const observation = insertObservation(input.workspaceId, input.lineageId, input.facts, input.actor, now);
+  const adopted = adoptCaptureJobObservation({
+    jobId: input.jobId,
+    observationId: observation.id,
+    now,
+    leaseToken: input.leaseToken,
+  });
+  return { observation, adopted };
+}) as (input: EnrichObservationInput) => { observation: ReviewPrObservationRow; adopted: boolean };
+
+export interface UnaskedObservationInput {
+  workspaceId: string;
+  lineage: ReviewLineageRow;
+  relation: ReviewLineagePrRow;
+  installationId: number;
+  facts: ObservationFacts;
+}
+
+export interface UnaskedObservation {
+  observation: ReviewPrObservationRow;
+  /** The lane to schedule after the delivery transaction commits, or null when nothing
+   *  was queued — because nothing moved, or because the credential is not ours to spend. */
+  actorKey: string | null;
+}
+
+/**
+ * What an unasked-for reading — a webhook delivery, or a reconciliation sweep — records.
+ *
+ * The observation always. The capture job only when the source actually moved AND the
+ * relation reads through an installation. A relation attached through a member's connected
+ * account records the drift and stops there: capturing would spend that person's credential
+ * because GitHub sent us a message, which nobody asked for and nobody consented to. Their
+ * page says so and offers them the refresh.
+ *
+ * The queue decision uses the same three-key order every other decision uses, so a
+ * redelivery of an older push is recorded as history and does not queue a capture of source
+ * the lineage has already moved past.
+ *
+ * Not a transaction of its own: the caller is the signed delivery transaction, which has to
+ * commit the delivery id with every effect of that delivery or with none of them.
+ */
+export function recordUnaskedObservation(input: UnaskedObservationInput): UnaskedObservation {
+  const { workspaceId, lineage, relation, facts } = input;
+  const now = Date.now();
+  const observation = insertObservation(workspaceId, lineage.id, facts,
+    { kind: "installation", installationId: input.installationId }, now);
+
+  const actor = readActorOf(relation);
+  if (actor.kind !== "installation") return { observation, actorKey: null };
+
+  const captured = lineage.latest_revision === null
+    ? null
+    : getRevision(workspaceId, lineage.slug, lineage.latest_revision);
+  const moved = captured === null ||
+    captured.doc.source.baseTipSha !== facts.baseSha ||
+    captured.doc.source.sourceHeadSha !== facts.headSha;
+  if (!moved) return { observation, actorKey: null };
+  const incumbent = latestCapturedObservation(workspaceId, lineage.id);
+  if (incumbent && !observationIsAfter(observation, incumbent)) return { observation, actorKey: null };
+
+  const held = getCaptureJobForObservation(workspaceId, lineage.id, observation.id);
+  const open = held ?? openCaptureJobForPair(workspaceId, lineage.id, facts.baseSha, facts.headSha);
+  const job = open ?? createCaptureJob({
+    workspaceId,
+    lineageId: lineage.id,
+    slug: lineage.slug,
+    observationId: observation.id,
+    actor,
+    actorKey: actorQueueKey(workspaceId, actor),
+    now,
+  });
+  return { observation, actorKey: job.actor_key };
+}
+
+/** The same write, wrapped, for the reconciliation sweep — which is a loop of network
+ *  calls rather than one transaction, so each pull request's observation and job commit
+ *  together on their own. */
+export const recordSweptObservation = db.transaction(recordUnaskedObservation) as
+  (input: UnaskedObservationInput) => UnaskedObservation;
 
 // ---- reading a pull request through the routed actor ----
 
@@ -620,6 +852,115 @@ export async function observePullRequestThrough(
       mergeBaseSha: comparison.merge_base_commit.sha,
       githubUpdatedAt: pull.updatedAt,
     },
+  };
+}
+
+// ---- what has moved since a revision was published ----
+
+/**
+ * Everything a page needs to say about source that arrived after the revision it is
+ * reading, computed from stored rows alone.
+ *
+ * Nothing here is personal, deliberately. `refreshRequired` says a refresh is what would
+ * move this forward; WHO may take it is a question about the reader, and the surfaces that
+ * have a reader answer it themselves rather than being handed a personalized fact by a
+ * function an API key also calls.
+ */
+export interface LineageDrift {
+  /** A completed revision newer than the one being read, or null. */
+  newerRevision: number | null;
+  /** A previously published revision whose tuple matches the newest observation. */
+  sourceRevision: number | null;
+  /** The newest observation's base or head differs from the newest revision's source. */
+  moved: boolean;
+  /** What is being done about it, when anything is. */
+  capture: "pending" | "running" | "failed" | null;
+  /** Movement is stored and nothing is queued, so somebody has to ask. */
+  refreshRequired: boolean;
+  /** The member whose personal credential this lineage reads through, or null when it
+   *  reads through an installation or anonymously and any member may refresh. */
+  ownerUserId: string | null;
+}
+
+export function lineageDrift(
+  workspaceId: string,
+  lineage: ReviewLineageRow,
+  pinnedRevision: number,
+): LineageDrift {
+  const relation = getLineagePr(workspaceId, lineage.id);
+  const ownerUserId = relation && relation.actor_kind === "user" ? relation.user_id : null;
+  const newerRevision = lineage.latest_revision !== null && lineage.latest_revision > pinnedRevision
+    ? lineage.latest_revision
+    : null;
+  const newest = lineage.latest_revision === null
+    ? null
+    : getRevision(workspaceId, lineage.slug, lineage.latest_revision);
+  const observation = latestObservation(workspaceId, lineage.id);
+  // BASE and HEAD only. A merge base a delivery did not carry is not evidence that
+  // anything moved, and a title or draft edit is not a change to the code — treating
+  // either as movement would put a permanent "new source" on a page nothing happened to.
+  const moved = !!newest && !!observation &&
+    (observation.base_sha !== newest.doc.source.baseTipSha ||
+      observation.head_sha !== newest.doc.source.sourceHeadSha);
+  const job = moved && observation
+    ? latestCaptureJobForPair(workspaceId, lineage.id, observation.base_sha, observation.head_sha)
+    : null;
+  const capture = job && job.state !== "completed" ? job.state : null;
+  let sourceRevision: number | null = null;
+  if (moved && observation) {
+    const source = observation.merge_base_sha
+      ? getSourceByTuple(lineage.id, observation.base_sha, observation.head_sha, observation.merge_base_sha)
+      : null;
+    const jobSource = job?.state === "completed" && job.revision_id
+      ? getRevisionSource(workspaceId, job.revision_id)
+      : null;
+    const jobMatches = !!jobSource &&
+      jobSource.base_tip_sha === observation.base_sha &&
+      jobSource.source_head_sha === observation.head_sha &&
+      (observation.merge_base_sha === null || jobSource.merge_base_sha === observation.merge_base_sha);
+    const revisionId = source?.revision_id ?? (jobMatches ? job?.revision_id ?? null : null);
+    sourceRevision = revisionId
+      ? db.query<{ revision: number }, [string]>("SELECT revision FROM review_revisions WHERE id = ?").get(revisionId)?.revision ?? null
+      : null;
+  }
+  return {
+    newerRevision,
+    sourceRevision,
+    moved,
+    capture,
+    refreshRequired: moved && capture === null && sourceRevision === null,
+    ownerUserId,
+  };
+}
+
+export interface RevisionMovement {
+  previousRevision: number;
+  code: DeltaCounts;
+  /** Null until an account exists on both this revision and an earlier one: there is
+   *  nothing to compare a walkthrough against until two of them exist. */
+  account: { summary: AccountSummaryDelta; counts: DeltaCounts } | null;
+}
+
+/** What one revision changed about the one before it, from the two retained captures and
+ *  the two immutable accounts. Reads rows; never GitHub. */
+export function revisionMovement(
+  workspaceId: string,
+  lineage: ReviewLineageRow,
+  revision: ReviewRevisionRow,
+  currentInventory?: StageCaptureInventory,
+): RevisionMovement | null {
+  const previous = previousRevision(workspaceId, lineage.id, revision.revision);
+  if (!previous) return null;
+  const before = getStageCapture(previous.capture_id, workspaceId);
+  const after = currentInventory ?? getStageCapture(revision.capture_id, workspaceId);
+  if (!before || !after) return null;
+  const current = latestAccountForRevision(workspaceId, revision.id);
+  const prior = latestAccountBeforeRevision(workspaceId, lineage.id, revision.revision);
+  const account = current && prior ? accountDelta(prior.doc, current.doc) : null;
+  return {
+    previousRevision: previous.revision,
+    code: revisionCodeDelta(before, after).counts,
+    account: account ? { summary: account.summary, counts: account.counts } : null,
   };
 }
 
@@ -1022,14 +1363,23 @@ export async function handleRefreshLineagePullRequest(req: Request, slug: string
         return prJson({ error: "This Idempotency-Key was already used for a different pull request request." }, 409);
       }
       const stored = getObservation(auth.workspaceId, replayed.observation_id);
-      if (stored) return prJson(refreshView(lineage, actor, stored));
+      // Replayed before a token is minted, which is the whole value of a replay. The
+      // capture state is re-read rather than remembered, so a replay after the work
+      // finished says so instead of repeating the pending answer.
+      if (stored) {
+        return prJson(refreshView(lineage, actor, {
+          observation: stored,
+          job: replayed.capture_job_id ? getCaptureJob(auth.workspaceId, replayed.capture_job_id) : null,
+          sourceRevisionId: replayed.revision_id,
+        }));
+      }
     }
     const session = await openReadSession(auth.workspaceId, actor, relation.repo, relation.repo_id);
     const observed = await observePullRequestThrough(session, relation.repo, relation.pr_number, relation.repo_id);
     if (observed.facts.repoId !== relation.repo_id) {
       throw new PrIngestError(422, `${relation.repo}#${relation.pr_number} now resolves to repository ${observed.facts.repoId}, not the attached ${relation.repo_id}.`);
     }
-    const observation = recordRefreshObservation({
+    const outcome = refreshLineageObservation({
       workspaceId: auth.workspaceId,
       idempotencyKey: key,
       requestHash,
@@ -1037,31 +1387,47 @@ export async function handleRefreshLineagePullRequest(req: Request, slug: string
       actor,
       facts: observed.facts,
     });
-    return prJson(refreshView(lineage, actor, observation));
+    // After the transaction committed, exactly as ingestion does it: a lane driven from
+    // inside would be capturing against rows that might still roll back.
+    if (outcome.job && outcome.job.state === "pending") scheduleActorQueue(outcome.job.actor_key);
+    return prJson(refreshView(getLineage(auth.workspaceId, slug) ?? lineage, actor, outcome));
   } catch (err) {
     return ingestFailure(err);
   }
 }
 
-/** What a refresh answers with: the reading, who took it, and whether the latest source
- *  revision is behind it. Recording that is this slice's job; publishing a revision from
- *  it is the next one's. */
+/**
+ * What a refresh answers with: the reading, who took it, whether the latest source revision
+ * is behind it, and what is being done about that.
+ *
+ * Always 200, and the capture state travels in the body rather than in the status. The
+ * refresh itself completed — the observation is stored and will not be taken back — and a
+ * caller that reads a 202 as "nothing was recorded" would refresh again for nothing.
+ * `captureJob` is the work; `sourceRevision` is the revision these exact bytes already
+ * published, which is the case where there is no work at all.
+ */
 function refreshView(
   lineage: ReviewLineageRow,
   actor: ReadActor,
-  observation: ReviewPrObservationRow,
+  outcome: RefreshOutcome,
 ): unknown {
+  const observation = outcome.observation;
   const latest = lineage.latest_revision === null
     ? null
     : getRevision(lineage.workspace_id, lineage.slug, lineage.latest_revision);
   const behind = latest === null || latest.doc.source.sourceHeadSha !== observation.head_sha ||
     latest.doc.source.baseTipSha !== observation.base_sha ||
     latest.doc.source.mergeBaseSha !== observation.merge_base_sha;
+  const source = outcome.sourceRevisionId
+    ? db.query<{ revision: number }, [string]>("SELECT revision FROM review_revisions WHERE id = ?").get(outcome.sourceRevisionId)
+    : null;
   return {
     slug: lineage.slug,
     lineage: lineage.id,
     workspace: lineage.workspace_id,
     revision: latest?.revision ?? null,
+    sourceRevision: source?.revision ?? null,
+    captureJob: outcome.job ? captureJobView(outcome.job, getObservation(lineage.workspace_id, outcome.job.observation_id)) : null,
     behind,
     actor: actor.kind,
     actorLabel: actorWords(actor),

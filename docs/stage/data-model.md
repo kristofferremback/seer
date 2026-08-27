@@ -21,7 +21,11 @@ calling GitHub again.
   and `bytes_unavailable` make source `complete` false. `lines_unavailable`,
   `patch_unavailable`, and `metadata_incomplete` describe review limitations without saying
   the pinned source is incomplete. A truncated tree produces one snapshot item per affected
-  tree, never a silent successful capture.
+  tree, never a silent successful capture. Both keep the shipped capture-level side
+  `snapshot`. When two captures carry the same duplicate exact snapshot facts, delta marks
+  the evidence unchanged but creates no handling equivalence from the ambiguous pair.
+  Capture-wide material such as the 300-file compare ceiling and an over-budget compare diff
+  also records side `snapshot`.
 - `stage_blobs` maps `(workspace_id, sha256)` to the byte count of an object stored at
   `stage-blobs/<workspace>/<sha256>`. The hash is computed by Seer, not accepted from the
   caller. The canonical compare patch uses the same store and its digest is recorded on
@@ -144,3 +148,27 @@ the pin no longer holds and the capture is refused with the two SHAs in the mess
 request-budget refusal reports the count that actually applies in either mode.
 
 No route accepts a resolved source. The Stage capture API is unchanged.
+
+## Two captures compared
+
+`src/overseer/revision-delta.ts` compares two retained inventories and nothing else: no
+blob is fetched and GitHub is never called, so the answer is identical every time and
+available when GitHub is not. It exists because a promoted review's pull request moves, and
+a member who has read a hunk should not have to read it again because the branch was
+rebased under it.
+
+Paths map by declared rename and by identity only — no similarity score and no
+display-name heuristic. One previous path may map to one current path; two current files
+claiming one previous path, or a rename target colliding with a file of the same name,
+produce no mapping and therefore no equivalence for the items involved.
+
+A text item's key is `text`, the rename-resolved path, and the old, new and context
+fingerprints. A non-text item's key is the resolved path, side, object kind, mode and Git
+object id where one is known; where none is, one machine reason code such as
+`[budget:blob_requests]` participates and display prose never does. A file that carries
+neither a change nor material of its own keys on both side identities and its status.
+`unchanged` requires the full key to occur exactly once on each side; anything else is
+ambiguous and produces no equivalence rather than an arbitrary pairing. What is left is
+paired by placement in canonical inventory order to say `revised`, which decides a count
+and never a handling carry. Every item of both captures is classified exactly once as
+`unchanged`, `revised`, `new`, or `removed`.

@@ -547,8 +547,11 @@ describe("stage captures", () => {
     const { captureSource } = await import("../src/stage/source");
     const result = await captureSource(ws, { slug: "truncated-tree", repo: "Acme/Repo", branch: "feature/blue" }, { client: fixtureClient({ count: 0, truncated: true }), idempotencyKey: "truncated-tree" });
     const inventory = getStageCapture(result.captureId, ws)!;
-    expect(inventory.incomplete.filter((item) => item.side === "snapshot")).toHaveLength(2);
-    expect(inventory.incomplete.filter((item) => item.side === "snapshot").every((item) => item.reason.includes("tree"))).toBe(true);
+    // One row per tree, both at the shipped capture-level snapshot side.
+    const trees = inventory.incomplete.filter((item) => item.kind === "snapshot_incomplete");
+    expect(trees).toHaveLength(2);
+    expect(trees.map((item) => item.side)).toEqual(["snapshot", "snapshot"]);
+    expect(trees.every((item) => item.reason.includes("tree"))).toBe(true);
     const response = await fetch(`${base}/api/stage-captures/${result.captureId}`, { headers: auth() });
     const capture = await response.json() as any;
     expect(capture.complete).toBe(false);

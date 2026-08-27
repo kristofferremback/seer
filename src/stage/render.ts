@@ -98,8 +98,33 @@ export interface ReaderEvidence {
 /** What a reader says about a witness that has not answered yet. Never stored in a
  *  document: it stops being true the moment the workflow moves. */
 export interface ReaderWorkflow {
-  word: "pending" | "failed" | "retrying";
+  word: "pending" | "failed" | "retrying" | "superseded";
   detail: string | null;
+}
+
+/**
+ * Source newer than the page, in the fewest words it can be said in.
+ *
+ * Four states, and the difference between them is what the reader can do about it. A newer
+ * revision is a link, because it exists and can be opened. A capture in flight is a state,
+ * because waiting is the only move. `refresh` is an action this reader may take; `source`
+ * is the same fact for somebody who may not, and it deliberately offers nothing — naming an
+ * action a member is forbidden to take is worse than saying less.
+ *
+ * Only a promoted review has one. A stage adapts it as null and renders byte-identically.
+ */
+export type ReaderDrift =
+  | { kind: "revision"; label: string; href: string }
+  | { kind: "capture"; state: "pending" | "running" | "failed" }
+  | { kind: "refresh" }
+  | { kind: "source" };
+
+/** What this revision changed about the one before it. Retained counts, so the line is
+ *  the same on a phone, on a desktop and with JavaScript off. */
+export interface ReaderMovement {
+  previousRevision: number;
+  code: { unchanged: number; revised: number; new: number; removed: number };
+  account: { unchanged: number; revised: number; new: number; removed: number } | null;
 }
 
 /**
@@ -136,6 +161,10 @@ export interface ReaderDoc {
    *  suppresses the category summary, the signal scales, and the attention bar. */
   authored: boolean;
   workflow: ReaderWorkflow | null;
+  /** Absent for a stage, and null for a promoted review nothing has moved under. */
+  drift?: ReaderDrift | null;
+  /** Absent for a stage, and null on the first revision of a lineage. */
+  movement?: ReaderMovement | null;
   /** "Version 3" or "Revision 1", as the nav head and the terminal say it. */
   standing: string;
   /** The same thing short enough for the focus header: "v3", "rev 1". */
@@ -509,14 +538,50 @@ function attentionBar(views: GroupView[]): string {
 
 /** What the reader says while nobody has answered yet. One short line, in the header,
  *  beside the source facts it belongs to — never a banner and never a document field. */
+const WITNESS_WORDS: Record<ReaderWorkflow["word"], string> = {
+  pending: "Witness pending",
+  retrying: "Witness retrying",
+  failed: "Witness failed",
+  // A later revision was published while this one was still waiting. Saying "pending"
+  // here would be a promise the workflow has already broken.
+  superseded: "Witness superseded",
+};
+
 function workflowLine(workflow: ReaderWorkflow | null): string {
   if (!workflow) return "";
-  const word = workflow.word === "pending"
-    ? "Witness pending"
-    : workflow.word === "retrying"
-      ? "Witness retrying"
-      : "Witness failed";
-  return `<p class="stage-workflow" data-witness-state="${esc(workflow.word)}">${esc(word)}${workflow.detail ? ` · ${esc(exactExcerpt(workflow.detail, 200).text)}` : ""}</p>`;
+  return `<p class="stage-workflow" data-witness-state="${esc(workflow.word)}">${esc(WITNESS_WORDS[workflow.word])}${workflow.detail ? ` · ${esc(exactExcerpt(workflow.detail, 200).text)}` : ""}</p>`;
+}
+
+/** The one line about newer source: a link when there is somewhere to go, a state when
+ *  there is not, and nothing at all when nothing moved. No banner, no pill, no modal. */
+function driftLine(drift: ReaderDrift | null | undefined): string {
+  if (!drift) return "";
+  if (drift.kind === "revision") {
+    return `<p class="stage-drift"><a href="${esc(drift.href)}">${esc(drift.label)}</a></p>`;
+  }
+  const detail = drift.kind === "capture" ? ` · capture ${drift.state}` : drift.kind === "refresh" ? " · refresh required" : "";
+  return `<p class="stage-drift" data-drift="${esc(drift.kind)}">${esc(`New source${detail}`)}</p>`;
+}
+
+/** `Since rev 2 · 9 unchanged · 2 revised · 1 new`. Zero labels are omitted, because a
+ *  count of nothing is not news. */
+function movementLine(movement: ReaderMovement | null | undefined): string {
+  if (!movement) return "";
+  const parts: string[] = [];
+  const add = (count: number, word: string): void => { if (count > 0) parts.push(`${count} ${word}`); };
+  add(movement.code.unchanged, "unchanged");
+  add(movement.code.revised, "revised");
+  add(movement.code.new, "new");
+  add(movement.code.removed, "removed");
+  if (movement.account) {
+    const account: string[] = [];
+    if (movement.account.revised > 0) account.push(`${movement.account.revised} revised`);
+    if (movement.account.new > 0) account.push(`${movement.account.new} new`);
+    if (movement.account.removed > 0) account.push(`${movement.account.removed} removed`);
+    if (account.length > 0) parts.push(`account ${account.join(", ")}`);
+  }
+  const tail = parts.length === 0 ? "" : ` · ${parts.join(" · ")}`;
+  return `<p class="stage-movement">${esc(`Since rev ${movement.previousRevision}${tail}`)}</p>`;
 }
 
 /**
@@ -722,7 +787,7 @@ export async function renderReaderPage(
     .join(" · ");
   const progress = changes.length === 0 ? 100 : Math.round(readCount / changes.length * 100);
   const accounts = `${doc.builder ? accountCard("Builder", doc.builder) : ""}${doc.witness ? accountCard("Witness", doc.witness) : ""}`;
-  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"><div data-stage-background><div class="stage-shell">${appBar(nav)}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${focusSection(doc, views, routes)}${evidenceSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, doc, readCount, changes.length)}</aside><main class="walkthrough">${groupCards}<footer class="terminal"><div><h2 data-unread-summary>${readCount === changes.length ? "Read" : `${changes.length - readCount} unread`}</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><p>${esc(doc.standing)} · ${inventory.files.length} files</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button><span data-progress>${readCount} / ${changes.length} read</span></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, views, readIds, routes, doc, null)}<script>${STAGE_CLIENT}</script></body></html>`;
+  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"><div data-stage-background><div class="stage-shell">${appBar(nav)}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${focusSection(doc, views, routes)}${evidenceSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, doc, readCount, changes.length)}</aside><main class="walkthrough">${groupCards}<footer class="terminal"><div><h2 data-unread-summary>${readCount === changes.length ? "Read" : `${changes.length - readCount} unread`}</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><p>${esc(doc.standing)} · ${inventory.files.length} files</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button><span data-progress>${readCount} / ${changes.length} read</span></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, views, readIds, routes, doc, null)}<script>${STAGE_CLIENT}</script></body></html>`;
   return html(page);
 }
 
@@ -810,6 +875,11 @@ export async function handleStagePage(
     evidence: [],
     authored: true,
     workflow: null,
+    // A stage has no pull request under it, so nothing can move beneath it and there is
+    // no earlier revision of it to have changed. Said rather than left absent, so the
+    // adapter states the answer instead of relying on a missing field to mean it.
+    drift: null,
+    movement: null,
     standing: `Version ${versionNumber}`,
     pin: `v${versionNumber}`,
     latest: versionNumber === stage.latest_version,
