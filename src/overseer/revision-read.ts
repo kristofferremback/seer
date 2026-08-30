@@ -13,7 +13,7 @@
 
 import { sessionEmail, sessionUser } from "../auth";
 import { db, getWorkspace, isMember, listUserWorkspaces } from "../db";
-import { SLUG_RE, STAGE_CHANGE_ID_RE, STF_ID_RE } from "../ids";
+import { RCJ_ID_RE, SLUG_RE, STAGE_CHANGE_ID_RE, STF_ID_RE } from "../ids";
 import { json, originOk } from "../http";
 import { appBar, softNotFoundPage, type NavContext } from "../pages";
 import {
@@ -41,7 +41,7 @@ import { STAGE_CSS } from "../stage/render-css";
 import { escapeHtml } from "../escape";
 import { agoWords } from "../relative-time";
 import { actorWords } from "./github-app";
-import { latestCaptureJob, type ReviewCaptureJobRow } from "./revision-jobs";
+import { latestCaptureJob, retryCaptureJob, scheduleActorQueue, type ReviewCaptureJobRow } from "./revision-jobs";
 import {
   getLineagePr,
   getObservation,
@@ -64,6 +64,7 @@ import {
   latestAccountForRevision,
   listAccountVersions,
   listRevisionReadChangeIds,
+  nextRevision,
   setRevisionChangeRead,
   workflowWord,
   type ReviewAccountRow,
@@ -97,12 +98,15 @@ function pathPrefix(paths: string[]): string {
   return first.slice(0, shared).join("/");
 }
 
+/** A seam's label is navigation: the one path, or the shared directory and how many
+ *  files sit under it. The reader draws it in body type, not as a title. */
 function seamTitle(files: StageCaptureFileRow[], part: number, parts: number): string {
   const suffix = parts > 1 ? ` (part ${part} of ${parts})` : "";
   if (files.length === 1) return `${files[0]!.path}${suffix}`;
   const prefix = pathPrefix(files.map((file) => file.path));
-  if (prefix !== "") return `${prefix}/${suffix}`;
-  return `${files.length} files${suffix}`;
+  const count = `${files.length} files`;
+  if (prefix !== "") return `${prefix}/ · ${count}${suffix}`;
+  return `${count}${suffix}`;
 }
 
 /**
@@ -353,9 +357,11 @@ function readerDrift(
   }
   if (!drift.moved) return null;
   if (drift.sourceRevision !== null) {
+    // Named by its subject, because the movement line directly under it also names a
+    // revision: this one is about where the pull request is NOW.
     return {
       kind: "revision",
-      label: `Source matches rev ${drift.sourceRevision}`,
+      label: `Pull request source matches rev ${drift.sourceRevision}`,
       href: `/${workspaceId}/r/${lineage.slug}/rev/${drift.sourceRevision}`,
     };
   }
@@ -373,11 +379,7 @@ function readerMovement(resolved: ResolvedPromotedRead): ReaderMovement | null {
     resolved.inventory,
   );
   if (!movement) return null;
-  return {
-    previousRevision: movement.previousRevision,
-    code: movement.code,
-    account: movement.account?.counts ?? null,
-  };
+  return { previousRevision: movement.previousRevision, code: movement.code };
 }
 
 function readerDoc(
@@ -471,8 +473,9 @@ const CAPTURE_WORDS: Record<ReviewCaptureJobRow["state"], string> = {
   completed: "Capture complete",
 };
 
+/** The same width the completed page uses for its pair. One grammar for one concept. */
 function shortSha(value: string): string {
-  return value.slice(0, 7);
+  return value.slice(0, 12);
 }
 
 /**
@@ -488,7 +491,9 @@ function shortSha(value: string): string {
  * a different kind of page.
  *
  * Nothing here needs JavaScript, there is no `/rev/` URL to link to yet, and the actor is
- * named by what kind of reader it is rather than by any credential id.
+ * named by what kind of reader it is rather than by any credential id. A reader is not
+ * left stuck on it either: a failed capture offers its retry to the member who may spend
+ * the credential, and a capture still in flight refreshes itself and says how to reload.
  */
 function pendingCapturePage(
   nav: NavContext,
@@ -497,10 +502,14 @@ function pendingCapturePage(
   observation: ReviewPrObservationRow | null,
   currentObservation: ReviewPrObservationRow | null,
   job: ReviewCaptureJobRow | null,
+  viewerId: string,
   now: number = Date.now(),
 ): Response {
   const esc = (value: unknown): string => escapeHtml(String(value ?? ""));
   const word = job ? CAPTURE_WORDS[job.state] : "Capture pending";
+  const path = `/${lineage.workspace_id}/r/${lineage.slug}`;
+  const inFlight = !job || job.state === "pending" || job.state === "running";
+  const mayRetry = !!job && job.state === "failed" && (job.actor_kind !== "user" || job.user_id === viewerId);
   const currentRepo = currentObservation && relation && currentObservation.repo_id === relation.repo_id
     ? currentObservation.repo
     : relation?.repo;
@@ -508,21 +517,26 @@ function pendingCapturePage(
     ? `<a class="source-pr" href="${esc(pullRequestUrl(currentRepo, relation.pr_number))}" rel="noreferrer noopener" ` +
       `aria-label="${esc(`${currentRepo}#${relation.pr_number}${observation ? `: ${observation.title}` : ""}`)}">#${esc(relation.pr_number)}</a>`
     : "";
+  // The refs, and the pinned head at the completed page's width. A delivery carries no
+  // merge base, so the completed page's merge-base-to-head pair cannot be promised here.
   const pinned = observation
-    ? `${esc(observation.base_ref)} ${esc(shortSha(observation.base_sha))} → ${esc(observation.head_ref)} ${esc(observation.head_sha)}`
+    ? `${esc(observation.base_ref)} → ${esc(observation.head_ref)} ${esc(shortSha(observation.head_sha))}`
     : `${esc(lineage.original_base_ref)} → ${esc(lineage.branch)}`;
   const standing = observation
     ? `${esc(observationStateWord(observation))}, observed ${esc(agoWords(now - observation.observed_at))}`
     : "";
   const facts = [
-    `<p><strong>Source</strong> ${pinned}</p>`,
-    relation ? `<p><strong>Read as</strong> ${esc(actorWords(readActorOf(relation)))}</p>` : "",
+    `<p><strong>Source</strong> ${pinned}${relation ? ` · via ${esc(actorWords(readActorOf(relation)))}` : ""}</p>`,
     job && job.state === "failed" && job.failure ? `<p><strong>Failure</strong> ${esc(job.failure)}</p>` : "",
+    mayRetry
+      ? `<form class="capture-retry" method="post" action="${esc(`${path}/capture-jobs/${job!.id}/retry`)}"><button type="submit">Retry capture</button></form>`
+      : "",
+    inFlight ? `<p><a href="${esc(path)}">Reload to check</a></p>` : "",
   ].join("");
   const body =
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">` +
-    `<meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script>` +
+    `<meta name="robots" content="noindex,nofollow">${inFlight ? `<meta http-equiv="refresh" content="30">` : ""}<script>${STAGE_THEME_BOOTSTRAP}</script>` +
     `<title>${esc(lineage.title)} · Seer</title><style>${STAGE_CSS}</style></head>` +
     `<body><div data-stage-background><div class="stage-shell">${appBar(nav)}</div>` +
     `<div class="stage-grid stage-overview"><header class="stage-header">` +
@@ -571,6 +585,7 @@ export async function handlePromotedReviewPage(
         job ? getObservation(workspaceId, job.observation_id) : null,
         latestObservation(workspaceId, shell.id),
         job,
+        user.id,
       );
     }
   }
@@ -602,9 +617,43 @@ export async function handlePromotedReviewPage(
     readIds,
     `review ${pinnedPath}`,
   );
-  // The reader's own miss is an HTML page; on this path every miss has to be the review
-  // soft miss instead, or a bad `?review=` would say whether the slug resolves.
-  return response.status === 404 ? softReviewPage() : response;
+  if (response.status !== 404) return response;
+  // The reader's own miss is an HTML page. Membership and the lineage already resolved
+  // here, so a stale `?review=` or `?change=` hides nothing — an account published since
+  // the link was made simply uses different group ids — and the honest answer is the
+  // page the link was pinned to, not "No such review".
+  const url = new URL(req.url);
+  if (url.searchParams.has("review") || url.searchParams.has("change")) {
+    return new Response(null, { status: 303, headers: { location: url.pathname, "cache-control": "no-store" } });
+  }
+  return softReviewPage();
+}
+
+/**
+ * POST /<workspace>/r/<slug>/capture-jobs/<id>/retry — the failed shell's own retry.
+ *
+ * The same guarded transition the API route takes, reached from a plain form so a member
+ * reading the failed page can recover without the OpenAPI document. A refusal lands back
+ * on the shell, which says the true state; a job that is not this review's is the same
+ * soft miss as any other wrong URL.
+ */
+export async function handleCaptureRetryPage(
+  req: Request,
+  workspaceId: string,
+  slug: string,
+  jobId: string,
+): Promise<Response> {
+  if (!originOk(req)) return new Response("Bad origin", { status: 403 });
+  const user = sessionUser(req);
+  if (!user || !isMember(workspaceId, user.id) || !SLUG_RE.test(slug) || !RCJ_ID_RE.test(jobId)) return softHtml(req);
+  const lineage = getLineage(workspaceId, slug);
+  const job = lineage ? latestCaptureJob(workspaceId, lineage.id) : null;
+  if (!lineage || !job || job.id !== jobId) return softHtml(req);
+  const retry = retryCaptureJob(workspaceId, jobId, user.id);
+  if (retry.kind === "missing") return softHtml(req);
+  if (retry.kind === "refused" && retry.status === 403) return new Response(retry.error, { status: 403, headers: { "cache-control": "no-store" } });
+  if (retry.kind === "retried") scheduleActorQueue(retry.job.actor_key);
+  return new Response(null, { status: 303, headers: { location: `/${workspaceId}/r/${slug}`, "cache-control": "no-store" } });
 }
 
 function softHtml(req: Request): Response {
@@ -641,6 +690,11 @@ export async function handleRevisionReadMutation(
   if (form === null) return readJson({ error: "Body must be form data." }, 400);
   const rawRead = form.get("read");
   if (rawRead !== "true" && rawRead !== "false") return readJson({ error: "read must be true or false" }, 422);
+  // A read on a revision that already has a successor carries forward through the stored
+  // equivalences. A successor published before those rows existed has them written here,
+  // once, so the carry is the same whether the successor's page was ever opened.
+  const successor = nextRevision(workspaceId, resolved.lineage.id, resolved.revision.revision);
+  if (successor) revisionMovement(workspaceId, resolved.lineage, successor);
   setRevisionChangeRead(workspaceId, resolved.revision.id, user.id, changeId, rawRead === "true");
   if ((req.headers.get("accept") ?? "").includes("application/json")) {
     return readJson({ changeId, read: rawRead === "true" });

@@ -28,11 +28,11 @@ const C = `chg_${"c".repeat(64)}`;
 const DRIFT_HREF = "/ws/r/mover/rev/4";
 
 function hunk(id: string, path: string): string {
-  return `<article class="hunk-review" data-change="${id}" data-read="false" data-collapsed="false"><header class="hunk-header"><button data-toggle-change="${id}" aria-expanded="true"></button><code>${path}</code><span class="dimensions"><span data-read-state><span></span><span>Unread</span></span></span><form class="read-form" action="/read"><input data-read-input name="read" value="true"><span data-read-failure></span><button data-read-button>Mark as read</button></form></header><div data-hunk-body><div data-diff-frame data-layout="unified"></div></div></article>`;
+  return `<article class="hunk-review" data-change="${id}" data-read="false" data-collapsed="false"><header class="hunk-header"><button data-toggle-change="${id}" aria-expanded="true"></button><code>${path}</code><span class="dimensions"><span data-read-state><span></span><span>Unread</span></span></span><form class="read-form" action="/read"><input data-read-input name="read" value="true"><span data-read-failure></span><button data-read-button>Mark read</button></form></header><div data-hunk-body><div data-diff-frame data-layout="unified"></div></div></article>`;
 }
 
 function ledger(id: string): string {
-  return `<article class="ledger-card" data-ledger-change="${id}" data-change="${id}" data-read="false"><button data-activate-change="${id}"></button><span data-read-state><span></span><span>Unread</span></span><form class="read-form" action="/read"><input data-read-input name="read" value="true"><span data-read-failure></span><button data-read-button>Mark as read</button></form></article>`;
+  return `<article class="ledger-card" data-ledger-change="${id}" data-change="${id}" data-read="false"><button data-activate-change="${id}"></button><span data-read-state><span></span><span>Unread</span></span><form class="read-form" action="/read"><input data-read-input name="read" value="true"><span data-read-failure></span><button data-read-button>Mark read</button></form></article>`;
 }
 
 function dialogContent(ids = [A, B]): string {
@@ -120,7 +120,7 @@ describe("a carried read behaves like any other read", () => {
     expect(carried.dataset.read).toBe("false");
     expect(document.querySelector("[data-progress]").textContent).toBe("0 / 3 read");
     expect(document.querySelector(`[data-ledger-change="${A}"]`).dataset.read).toBe("false");
-    expect(carried.querySelector("[data-read-button]").textContent).toBe("Mark as read");
+    expect(carried.querySelector("[data-read-button]").textContent).toBe("Mark read");
   });
 });
 
@@ -148,6 +148,16 @@ describe("the newer-source lines are inert", () => {
     await Bun.sleep(0);
     expect(dialog.open).toBe(false);
     expect(new URL(location.href).searchParams.get("review")).toBeNull();
+  });
+
+  test("the phone hunk header wraps its labels and the nav opener is a 44px target", () => {
+    // Both were measured in a real browser at 390px: `medium importa` clipped mid-word,
+    // and the pin word that opens group navigation was 14px wide. The rule that
+    // un-hides the label on phone has to undo the desktop clipping too, and the only way
+    // into navigation on a phone overview has to be a finger's width.
+    const phone = STAGE_CSS.slice(STAGE_CSS.indexOf("@media(max-width:760px)"));
+    expect(phone).toContain(".dimensions.in-header .dimension>span:last-child{position:static;width:auto;height:auto;clip-path:none;overflow:visible;white-space:normal}");
+    expect(phone).toContain(".mobile-bar button{min-height:44px;min-width:44px;");
   });
 
   test("neither line adds a phone control, and both read as the source facts above them", () => {

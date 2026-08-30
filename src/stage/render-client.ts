@@ -49,7 +49,7 @@ export const STAGE_CLIENT = String.raw`(()=>{
     document.querySelectorAll('[data-change]').forEach(node=>{
       const id=node.dataset.change;const read=readIds.has(id);node.dataset.read=String(read);node.classList.toggle('is-read',read);
       node.querySelectorAll('[data-read-input]').forEach(input=>input.value=read?'false':'true');
-      node.querySelectorAll('[data-read-button]').forEach(button=>button.textContent=read?'Mark unread':'Mark as read');
+      node.querySelectorAll('[data-read-button]').forEach(button=>button.textContent=read?'Mark unread':'Mark read');
       node.querySelectorAll('[data-read-state]>span:last-child').forEach(state=>state.textContent=read?'Read':'Unread');
     });
     document.querySelectorAll('.file-review').forEach(file=>{

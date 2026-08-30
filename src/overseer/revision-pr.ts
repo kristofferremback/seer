@@ -53,9 +53,11 @@ import {
   digestOf,
   getLineage,
   getRevision,
+  getRevisionMovement,
   latestAccountBeforeRevision,
   latestAccountForRevision,
   previousRevision,
+  storeRevisionMovement,
   type ReviewLineageRow,
   type ReviewRevisionRow,
 } from "./revision-db";
@@ -941,8 +943,15 @@ export interface RevisionMovement {
   account: { summary: AccountSummaryDelta; counts: DeltaCounts } | null;
 }
 
-/** What one revision changed about the one before it, from the two retained captures and
- *  the two immutable accounts. Reads rows; never GitHub. */
+/**
+ * What one revision changed about the one before it. Reads rows; never GitHub.
+ *
+ * The code counts are the stored movement the completion transaction wrote. A revision
+ * published before that row existed has it written the first time anything asks — the two
+ * captures are immutable and the engine deterministic, so computing it late says exactly
+ * what completion would have said — and every read after that is one row rather than two
+ * inventories and a delta over them.
+ */
 export function revisionMovement(
   workspaceId: string,
   lineage: ReviewLineageRow,
@@ -951,15 +960,30 @@ export function revisionMovement(
 ): RevisionMovement | null {
   const previous = previousRevision(workspaceId, lineage.id, revision.revision);
   if (!previous) return null;
-  const before = getStageCapture(previous.capture_id, workspaceId);
-  const after = currentInventory ?? getStageCapture(revision.capture_id, workspaceId);
-  if (!before || !after) return null;
+  let stored = getRevisionMovement(workspaceId, revision.id);
+  if (!stored) {
+    const before = getStageCapture(previous.capture_id, workspaceId);
+    const after = currentInventory ?? getStageCapture(revision.capture_id, workspaceId);
+    if (!before || !after) return null;
+    const delta = revisionCodeDelta(before, after);
+    db.transaction(() => storeRevisionMovement({
+      workspaceId,
+      lineageId: lineage.id,
+      previousRevisionId: previous.id,
+      revisionId: revision.id,
+      counts: delta.counts,
+      equivalences: delta.equivalences,
+      now: Date.now(),
+    }))();
+    stored = getRevisionMovement(workspaceId, revision.id);
+    if (!stored) throw new Error(`Revision ${revision.id} movement was not stored`);
+  }
   const current = latestAccountForRevision(workspaceId, revision.id);
   const prior = latestAccountBeforeRevision(workspaceId, lineage.id, revision.revision);
   const account = current && prior ? accountDelta(prior.doc, current.doc) : null;
   return {
     previousRevision: previous.revision,
-    code: revisionCodeDelta(before, after).counts,
+    code: { unchanged: stored.unchanged, revised: stored.revised, new: stored.new, removed: stored.removed },
     account: account ? { summary: account.summary, counts: account.counts } : null,
   };
 }

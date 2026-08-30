@@ -33,6 +33,7 @@ import {
   carryRevisionReads,
   getRevision,
   previousRevision,
+  storeRevisionMovement,
   supersedeOpenWitnessRequests,
   type ReviewLineageRow,
 } from "./revision-db";
@@ -433,12 +434,24 @@ export const completeCaptureJob = db.transaction((input: {
   const previous = previousRevision(job.workspace_id, job.lineage_id, appended.revision.revision);
   const previousInventory = previous ? getStageCapture(previous.capture_id, job.workspace_id) : null;
   if (previous && previousInventory) {
+    const delta = revisionCodeDelta(previousInventory, inventory);
+    // Written once, here, beside the revision it describes: the movement line and every
+    // later read that carries forward read these rows rather than the two inventories.
+    storeRevisionMovement({
+      workspaceId: job.workspace_id,
+      lineageId: job.lineage_id,
+      previousRevisionId: previous.id,
+      revisionId: appended.revision.id,
+      counts: delta.counts,
+      equivalences: delta.equivalences,
+      now,
+    });
     carried = carryRevisionReads({
       workspaceId: job.workspace_id,
       lineageId: job.lineage_id,
       sourceRevisionId: previous.id,
       targetRevisionId: appended.revision.id,
-      equivalences: revisionCodeDelta(previousInventory, inventory).equivalences,
+      equivalences: delta.equivalences,
       now,
     });
   }
@@ -535,7 +548,29 @@ export async function runCaptureJob(job: ReviewCaptureJobRow): Promise<void> {
       convergeCaptureJob({ jobId: job.id, leaseToken, revisionId: published.revision_id, captureId: revision?.capture_id ?? null });
       return true;
     };
-    if (convergeIfPublished()) return;
+    /**
+     * Finish without capturing when the lineage has already moved past this source.
+     *
+     * The same three-key order completion uses, asked BEFORE the first GitHub request:
+     * a failed job retried after a later push already published, or a sibling that
+     * lost the race, would otherwise spend a whole capture — up to the blob budget — to
+     * be told at completion that it was superseded. It points at the revision that
+     * overtook it, exactly as completion would have.
+     */
+    const convergeIfOvertaken = (): boolean => {
+      const incumbent = latestCapturedObservation(job.workspace_id, job.lineage_id);
+      if (!incumbent || observationIsAfter(observation!, incumbent)) return false;
+      const lineage = db.query<ReviewLineageRow, [string]>(
+        "SELECT * FROM review_lineages WHERE id = ?",
+      ).get(job.lineage_id);
+      const newest = lineage && lineage.latest_revision !== null
+        ? getRevision(job.workspace_id, lineage.slug, lineage.latest_revision)
+        : null;
+      if (!newest) return false;
+      convergeCaptureJob({ jobId: job.id, leaseToken, revisionId: newest.id, captureId: newest.capture_id });
+      return true;
+    };
+    if (convergeIfPublished() || convergeIfOvertaken()) return;
 
     const session = await openReadSession(
       job.workspace_id,
@@ -587,7 +622,18 @@ export async function runCaptureJob(job: ReviewCaptureJobRow): Promise<void> {
     // Asked again, because the enrichment above is the moment a webhook trigger first HAS
     // a source tuple to compare, and a refresh may have published exactly it in the
     // meantime.
-    if (convergeIfPublished()) return;
+    if (convergeIfPublished() || convergeIfOvertaken()) return;
+
+    // Asked between the metadata phase and the blob pool, and once per object inside it.
+    // Every heartbeat answer is acted on, and this one asks the database rather than
+    // waiting for the timer: a lease taken over while the trees were being read stops
+    // this worker before its first blob request, not after its thousandth.
+    const checkpoint = (): void => {
+      if (lost || !heartbeatCaptureJob(job.id, leaseToken)) {
+        lost = true;
+        throw new CaptureJobError(409, "This capture job's lease was taken over while it ran, so its capture was stopped.");
+      }
+    };
 
     const result = await captureSource(
       job.workspace_id,
@@ -599,6 +645,7 @@ export async function runCaptureJob(job: ReviewCaptureJobRow): Promise<void> {
       },
       {
         client: session.client,
+        checkpoint,
         // Derived from the job id, so one job is one capture however many times a lease
         // changes hands: a recovered worker re-running the same job replays the stage
         // capture rather than retaining a second copy of the same bytes.
@@ -753,20 +800,21 @@ export function stopCaptureSweep(): void {
  * Whether this job's result was of source the lineage had already moved past.
  *
  * Asked of the STORED rows rather than remembered from the run, so a job read back
- * a week later answers the same way. A webhook trigger that has not been enriched yet
- * carries no merge base and therefore no comparable tuple, so it is not superseded — it is
- * simply not finished. Convergence onto a revision published from the same tuple is not
- * supersession either: those are the same bytes, which is the point of the source tuple.
+ * a week later answers the same way. A job that has not finished points at no revision and
+ * is not superseded — it is simply not finished. Convergence onto a revision published from
+ * the same tuple is not supersession either: those are the same bytes, which is the point
+ * of the source tuple. A webhook trigger overtaken before it was ever enriched carries no
+ * merge base, so it is compared on the base and head it pinned.
  */
 function jobSuperseded(job: ReviewCaptureJobRow, observation: ReviewPrObservationRow | null): boolean {
-  if (!job.revision_id || !observation || observation.merge_base_sha === null) return false;
+  if (!job.revision_id || !observation) return false;
   const source = db.query<{ base_tip_sha: string; source_head_sha: string; merge_base_sha: string }, [string]>(
     "SELECT base_tip_sha, source_head_sha, merge_base_sha FROM review_revision_sources WHERE revision_id = ?",
   ).get(job.revision_id);
   if (!source) return false;
   return source.base_tip_sha !== observation.base_sha ||
     source.source_head_sha !== observation.head_sha ||
-    source.merge_base_sha !== observation.merge_base_sha;
+    (observation.merge_base_sha !== null && source.merge_base_sha !== observation.merge_base_sha);
 }
 
 export function captureJobView(job: ReviewCaptureJobRow, observation: ReviewPrObservationRow | null): unknown {
@@ -812,13 +860,59 @@ export function handleReadCaptureJob(req: Request, id: string): Response {
   return softNotFound();
 }
 
+export type CaptureRetry =
+  | { kind: "missing" }
+  | { kind: "refused"; status: 403 | 409; error: string }
+  | { kind: "retried"; job: ReviewCaptureJobRow };
+
 /**
- * POST /api/review-capture-jobs/:id/retry — a failed attempt goes back in the queue.
+ * A failed attempt goes back in the queue — and only a failed one.
+ *
+ * One guarded statement inside one transaction. The state is part of the WHERE clause
+ * rather than checked in JavaScript first, so a lane that claims the job between a read and
+ * a write cannot have its fresh lease stripped, a completion that lands in between cannot
+ * be flipped back to pending with its revision still attached, and a job that is merely
+ * queued cannot have its attempt count reset to zero by anybody who asks — which is what
+ * `MAX_CAPTURE_ATTEMPTS` exists to bound. A running job whose lease has expired is a
+ * failed attempt nobody has recorded yet, and may be retried the same way.
  *
  * A job that reads through a member's connected account may only be retried by that
  * member: retrying is asking for their credential to be spent again, and a workspace is a
- * group. Nothing about any completed document changes; this creates a new attempt.
+ * group. Nothing about any completed document changes; this creates a new attempt. The
+ * caller schedules the lane after this commits.
  */
+export const retryCaptureJob = db.transaction((
+  workspaceId: string,
+  jobId: string,
+  userId: string,
+  now: number = Date.now(),
+): CaptureRetry => {
+  const job = getCaptureJob(workspaceId, jobId);
+  if (!job) return { kind: "missing" };
+  if (job.actor_kind === "user" && job.user_id !== userId) {
+    return { kind: "refused", status: 403, error: "This capture reads through another member's GitHub connection, which only they can spend." };
+  }
+  const changed = db.run(
+    "UPDATE review_capture_jobs SET state = 'pending', failure = NULL, attempts = 0, lease_token = NULL, lease_expires_at = NULL, updated_at = ? " +
+      "WHERE id = ? AND (state = 'failed' OR (state = 'running' AND lease_expires_at <= ?))",
+    [now, job.id, now],
+  ).changes;
+  if (changed === 0) {
+    const held = getCaptureJob(workspaceId, jobId)!;
+    return {
+      kind: "refused",
+      status: 409,
+      error: held.state === "completed"
+        ? "This capture already published a source revision."
+        : held.state === "running"
+          ? "This capture is running."
+          : "This capture is queued.",
+    };
+  }
+  return { kind: "retried", job: getCaptureJob(workspaceId, jobId)! };
+}) as (workspaceId: string, jobId: string, userId: string, now?: number) => CaptureRetry;
+
+/** POST /api/review-capture-jobs/:id/retry. Every miss is the review soft 404. */
 export function handleRetryCaptureJob(req: Request, id: string): Response {
   const auth = requireApiKey(req);
   if (auth instanceof Response) {
@@ -826,24 +920,11 @@ export function handleRetryCaptureJob(req: Request, id: string): Response {
     return auth;
   }
   if (!RCJ_ID_RE.test(id)) return softNotFound();
-  const job = getCaptureJob(auth.workspaceId, id);
-  if (!job) return softNotFound();
-  if (job.actor_kind === "user" && job.user_id !== auth.userId) {
-    return jobJson({ error: "This capture reads through another member's GitHub connection, which only they can spend." }, 403);
-  }
-  if (job.state === "completed") {
-    return jobJson({ error: "This capture already published a source revision." }, 409);
-  }
-  if (job.state === "running" && job.lease_expires_at !== null && job.lease_expires_at > Date.now()) {
-    return jobJson({ error: "This capture is running." }, 409);
-  }
-  db.run(
-    "UPDATE review_capture_jobs SET state = 'pending', failure = NULL, attempts = 0, lease_token = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?",
-    [Date.now(), job.id],
-  );
-  const retried = getCaptureJob(auth.workspaceId, id)!;
-  scheduleActorQueue(retried.actor_key);
-  return jobJson(captureJobView(retried, getObservation(auth.workspaceId, retried.observation_id)), 202);
+  const retry = retryCaptureJob(auth.workspaceId, id, auth.userId);
+  if (retry.kind === "missing") return softNotFound();
+  if (retry.kind === "refused") return jobJson({ error: retry.error }, retry.status);
+  scheduleActorQueue(retry.job.actor_key);
+  return jobJson(captureJobView(retry.job, getObservation(auth.workspaceId, retry.job.observation_id)), 202);
 }
 
 /** What the lineage view lists. Reads only rows; never GitHub. */

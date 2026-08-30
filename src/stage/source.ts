@@ -79,6 +79,13 @@ export interface StageCaptureOptions {
   maxBlobRequests?: number;
   maxGithubRequests?: number;
   client?: GithubClient;
+  /**
+   * Asked before the blob pool starts, before the blob store is written, and once per
+   * object inside the pool. It throws to stop the capture. A worker whose lease was taken
+   * over passes one, so the metadata phase is the most a stale worker can spend rather
+   * than a thousand blob requests against a credential another process is already using.
+   */
+  checkpoint?: () => void;
   idempotencyKey?: string;
   requestHash?: string;
   builderUserId?: string;
@@ -643,11 +650,20 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
       : `${BUDGET_BLOB_REQUESTS} The capture permits at most ${blobRequestLimit} unique Git blob requests; this object was outside the first ${blobAllowance} eligible objects in deterministic retention order.`;
   }
   rest.spend(fetchObjects.length);
+  const checkpoint = options.checkpoint ?? ((): void => {});
+  checkpoint();
   const fetched = new Map<string, { bytes: Uint8Array | null; error: unknown }>();
   let nextObject = 0;
   let throttled: unknown = null;
+  let stopped: unknown = null;
   async function fetchWorker(): Promise<void> {
-    while (nextObject < fetchObjects.length && throttled === null) {
+    while (nextObject < fetchObjects.length && throttled === null && stopped === null) {
+      try {
+        checkpoint();
+      } catch (error) {
+        stopped = error;
+        return;
+      }
       const object = fetchObjects[nextObject++]!;
       try {
         fetched.set(object.id, { bytes: await client.getBlobBytes(request.repo, object.id), error: null });
@@ -658,6 +674,7 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
     }
   }
   await Promise.all(Array.from({ length: Math.min(STAGE_BLOB_CONCURRENCY, fetchObjects.length) }, () => fetchWorker()));
+  if (stopped !== null) throw stopped;
   if (throttled !== null) throw throttled;
   // Declared sizes made the byte decisions before any request. Reconcile responses in
   // deterministic order so actual bytes and error handling never depend on completion order.
@@ -752,6 +769,7 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
   // capture disappears for minutes. The pool is the same width as the fetch pool, and a
   // failure is reported by lowest retention index rather than by whichever worker lost
   // the race, so the same broken store fails the same capture the same way every time.
+  checkpoint();
   const writes = [...blobs];
   const writeErrors = new Map<number, unknown>();
   let nextWrite = 0;
@@ -804,13 +822,22 @@ function sameCanonicalChange(
     stored.context_fingerprint === derived.context_fingerprint && stored.source === derived.source;
 }
 
-/** Materialize the renderer lines and prove they reproduce every persisted identity.
- * The loader is the durable-storage seam; GitHub is not an allowed input. */
+/**
+ * Materialize the renderer lines and prove they reproduce every persisted identity.
+ * The loader is the durable-storage seam; GitHub is not an allowed input.
+ *
+ * `only` narrows the work to the files that hold those changes. A focus page reads one
+ * group, and materializing a thousand-file capture to draw one seam of it is what made
+ * every seam cost the whole capture. Proof is still per file: every canonical change of a
+ * materialized file is reproduced, whichever ones were asked for.
+ */
 export async function materializeCanonicalChanges(
   inventory: StageCaptureInventory,
   loadBlob: (sha256: string) => Promise<Uint8Array | null>,
+  only?: ReadonlySet<string>,
 ): Promise<MaterializedStageChange[]> {
-  const changedFileIds = new Set(inventory.changes.map((change) => change.file_id));
+  const wanted = only ? inventory.changes.filter((change) => only.has(change.id)) : inventory.changes;
+  const changedFileIds = new Set(wanted.map((change) => change.file_id));
   const reconstructedFileIds = new Set(inventory.changes.filter((change) => change.source === "reconstructed").map((change) => change.file_id));
   const changedFiles = inventory.files.filter((file) => changedFileIds.has(file.id));
   const patches = new Map<string, string>();
@@ -863,10 +890,11 @@ export async function materializeCanonicalChanges(
       made.set(stored.id, { change: stored, hunk: decision.hunks[index]! });
     }
   }
-  if (made.size !== inventory.changes.length) {
+  const expected = inventory.changes.filter((change) => changedFileIds.has(change.file_id));
+  if (made.size !== expected.length) {
     throw new StageMaterializationError("Retained material does not reproduce every canonical change.");
   }
-  return inventory.changes.map((change) => made.get(change.id)!);
+  return expected.map((change) => made.get(change.id)!);
 }
 
 /** Re-derive canonical anchors using only the stored patch and retained blobs. */

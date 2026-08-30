@@ -838,7 +838,7 @@ function reviewGroups(): ReviewLedgerGroup[] {
         {
           slug: "gate-rewrite",
           title: "The gate, rewritten",
-          latestVersion: 2,
+          latest: "v2",
           publishedAt: NOW,
           prs: [
             { repo: "acme/atlas", number: 12 },

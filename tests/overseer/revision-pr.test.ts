@@ -1163,22 +1163,30 @@ describe("one actor runs one capture at a time", () => {
     expect(getLineage(workspace, "pr-sweep")!.latest_revision).toBe(1);
   });
 
-  test("a worker that lost its lease publishes nothing", async () => {
+  test("a worker that lost its lease publishes nothing, and spends no blob request", async () => {
     const gate = holdOpenAt(2);
-    currentClient = githubFixture({ pullPayload: pull({ number: 48 }) });
+    const fixture = githubFixture({ pullPayload: pull({ number: 48 }) });
+    let blobRequests = 0;
+    currentClient = {
+      ...fixture,
+      async getBlobBytes(repo, object) { blobRequests += 1; return fixture.getBlobBytes!(repo, object); },
+    };
     const created = await ingest({ repo: REPO, number: 48, slug: "pr-lost-lease" }, "pr-lost-lease-1");
     expect(created.status).toBe(202);
     const job = await created.json() as any;
     expect(getCaptureJob(workspace, job.id)!.state).toBe("running");
 
     // Another process recovers the lease while this worker is mid-capture. Its heartbeat
-    // now answers false, which is the signal the worker has to act on.
+    // now answers false, which is the signal the worker has to act on — before the blob
+    // pool, not after it: the lease exists so two healthy workers never spend one
+    // credential on one capture, and "we discarded the result afterwards" is not that.
     db.run(
       "UPDATE review_capture_jobs SET lease_token = 'lse_takeover', lease_expires_at = ? WHERE id = ?",
       [Date.now() + CAPTURE_LEASE_MS, job.id],
     );
     gate.release();
     await settleCaptureJobs();
+    expect(blobRequests).toBe(0);
 
     const after = getCaptureJob(workspace, job.id)!;
     // The takeover's claim is untouched, and nothing was published under it.
