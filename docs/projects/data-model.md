@@ -67,13 +67,22 @@ sub-project. That migration is creating one and moving pointers, not a schema ev
 
 ### Membership
 
-A bundle, review, or staged walkthrough can belong to any number of projects; a join row carries each
-membership. The project holds no authored list on itself. Its page derives the contents
-by query, so there is one source of truth and nothing to drift.
+A bundle, review, promoted review, or staged walkthrough can belong to any number of
+projects; a join row carries each membership. The project holds no authored list on
+itself. Its page derives the contents by query, so there is one source of truth and
+nothing to drift.
 
 Memberships are written at upload or publish (`PUT /api/bundles/:slug?project=<slug>`,
-a `projects[]` field in a review or stage document). Bundle and review memberships are
-attachable or detachable later; stage membership is publication-only in this slice.
+a `projects[]` field in a review, stage, or promoted-review-lineage document). Bundle and
+review memberships are attachable or detachable later; stage and promoted-review
+memberships are publication-only in this slice.
+
+Legacy reviews and promoted reviews are counted and listed apart in the state — `reviews`
+and `reviewLineages` — because they resolve through different readers and a join that
+could mean either would have to guess. The human page composes them under one Reviews
+heading, because to a person they are the same thing. A promoted review whose witness has
+not published yet has no version to name, so the page says which revision is standing
+instead.
 
 Tasks and notes are the exception: each belongs to exactly one project, because they
 are the project's own content rather than assets that visit it.
@@ -197,7 +206,7 @@ contract test cover it, and the hosted skill docs grow with each slice.
   within the workspace and indistinguishable from missing
 - `parent` names a project in the same workspace that itself has no parent (one level),
   and never the project itself
-- membership joins name a bundle or review in the same workspace
+- membership joins name a bundle, review, promoted review, or stage in the same workspace
 - `kind` is set on first upload only; a later upload naming a different kind is a 409
 - status is one of `open | done | closed`; a task refusing `done` over an unmet gate is
   a 422 naming the gate

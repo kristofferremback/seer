@@ -28,7 +28,7 @@ import {
 } from "./db";
 import { json, originOk } from "./http";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
-import { SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE } from "./ids";
+import { RAC_ID_RE, RLN_ID_RE, RVR_ID_RE, SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE, WTR_ID_RE } from "./ids";
 import { requireApiKey } from "./auth";
 import { inspectZip, readZipEntry, saveImage, saveZip } from "./store";
 import { handleCreateShare, handleListShares, handleRevokeShare } from "./shares";
@@ -53,6 +53,15 @@ import { attachBundle, listProjectsForBundle } from "./projects/db";
 import { handleCreateStageCapture, handleReadStageCapture, handleReadStageObject } from "./stage/source";
 import { handlePublishStage, handleReadStage } from "./stage/publish";
 import { handleStageLines } from "./stage/read";
+import {
+  handleCreateReviewLineage,
+  handleFailWitnessRequest,
+  handlePublishReviewAccount,
+  handleReadReviewLineage,
+  handleReadReviewRevision,
+  handleRetryWitnessRequest,
+} from "./overseer/revision-routes";
+import { handleRevisionLines } from "./overseer/revision-read";
 
 // ---- the shape of an entry ----
 
@@ -455,8 +464,8 @@ const projectStateSchema = {
   type: "object",
   required: [
     "slug", "title", "description", "status", "parent", "workspace", "url",
-    "createdAt", "updatedAt", "children", "tasks", "plans", "bundles", "reviews", "stages",
-    "notes", "noteCount",
+    "createdAt", "updatedAt", "children", "tasks", "plans", "bundles", "reviews",
+    "reviewLineages", "stages", "notes", "noteCount",
   ],
   properties: {
     slug: { type: "string" },
@@ -473,13 +482,14 @@ const projectStateSchema = {
       description: "Shallow summaries, never recursive.",
       items: {
         type: "object",
-        required: ["slug", "title", "status", "bundles", "reviews", "stages", "tasks"],
+        required: ["slug", "title", "status", "bundles", "reviews", "reviewLineages", "stages", "tasks"],
         properties: {
           slug: { type: "string" },
           title: { type: "string" },
           status: PROJECT_STATUS_ENUM,
           bundles: { type: "integer" },
           reviews: { type: "integer" },
+          reviewLineages: { type: "integer" },
           stages: { type: "integer" },
           tasks: { type: "integer" },
         },
@@ -545,6 +555,26 @@ const projectStateSchema = {
           latestVersion: { type: "integer" },
           publishedAt: { type: "string", format: "date-time" },
           url: { type: "string", format: "uri" },
+        },
+      },
+    },
+    reviewLineages: {
+      type: "array",
+      description:
+        "Promoted reviews: a source revision reads at /rev/N and an account at /v/N. " +
+        "Listed apart from `reviews` because the two resolve through different readers.",
+      items: {
+        type: "object",
+        required: ["slug", "title", "latestRevision", "latestAccountVersion", "updatedAt", "url", "revisionUrl", "apiUrl"],
+        properties: {
+          slug: { type: "string" },
+          title: { type: "string" },
+          latestRevision: { type: "integer" },
+          latestAccountVersion: { type: ["integer", "null"], description: "Null while no witness has published." },
+          updatedAt: { type: "string", format: "date-time" },
+          url: { type: "string", format: "uri" },
+          revisionUrl: { type: "string", format: "uri" },
+          apiUrl: { type: "string", format: "uri" },
         },
       },
     },
@@ -737,6 +767,177 @@ const stageViewSchema = {
     apiUrl: { type: "string", format: "uri" }, apiVersionUrl: { type: "string", format: "uri" }, document: stageDocSchema,
   },
 };
+
+// ---- the promoted review ----
+
+const revisionDocSchema = {
+  type: "object",
+  required: ["identity", "source", "builder", "projects"],
+  additionalProperties: false,
+  properties: {
+    identity: {
+      type: "object", required: ["lineageId", "slug", "revision", "title", "createdAt"], additionalProperties: false,
+      properties: { lineageId: { type: "string", pattern: RLN_ID_RE.source }, slug: { type: "string", pattern: SLUG_RE.source }, revision: { type: "integer", minimum: 1 }, title: { type: "string", minLength: 1, maxLength: 80 }, createdAt: { type: "string", format: "date-time" } },
+    },
+    source: {
+      type: "object",
+      required: ["captureId", "repo", "repoId", "branch", "originalBaseRef", "originalBaseSha", "baseRef", "sourceHeadSha", "baseTipSha", "mergeBaseSha"],
+      additionalProperties: false,
+      properties: {
+        captureId: { type: "string", pattern: STG_ID_RE.source }, repo: { type: "string" }, repoId: { type: "integer" }, branch: { type: "string" },
+        originalBaseRef: { type: "string" }, originalBaseSha: { type: "string" }, baseRef: { type: "string" },
+        sourceHeadSha: { type: "string" }, baseTipSha: { type: "string" }, mergeBaseSha: { type: "string" },
+      },
+    },
+    builder: {
+      oneOf: [
+        {
+          type: "object", required: ["intent", "context", "agent", "userId", "keyId"], additionalProperties: false,
+          properties: {
+            intent: { type: "string" }, context: { type: "string" }, agent: stageBuilderSchema.properties.agent,
+            userId: { type: ["string", "null"] }, keyId: { type: ["string", "null"] },
+          },
+        },
+        { type: "null", description: "A revision over a capture no Seer builder initiated." },
+      ],
+    },
+    projects: { type: "array", maxItems: 16, items: { type: "string", pattern: SLUG_RE.source } },
+  },
+};
+
+const focusAnchorSchema = {
+  type: "object", required: ["type", "id"], additionalProperties: false,
+  properties: { type: { type: "string", enum: ["change", "material", "file"] }, id: { type: "string", minLength: 1, maxLength: 80 } },
+};
+
+const focusItemSchema = {
+  type: "object", required: ["id", "kind", "title", "body", "anchors"], additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: SLUG_RE.source },
+    kind: { type: "string", enum: ["decision", "risk"] },
+    title: { type: "string", minLength: 1, maxLength: 80, description: "Plain one-line text; inline code is allowed." },
+    body: { type: "string", minLength: 1, maxLength: 1200, description: "Constrained markdown." },
+    anchors: { type: "array", minItems: 1, maxItems: 16, items: focusAnchorSchema },
+  },
+};
+
+const evidenceRefInputSchema = {
+  oneOf: [
+    { type: "object", required: ["kind", "id"], additionalProperties: false, properties: { kind: { type: "string", enum: ["attachment"] }, id: { type: "string", minLength: 1, maxLength: 80 } } },
+    { type: "object", required: ["kind", "slug", "version"], additionalProperties: false, properties: { kind: { type: "string", enum: ["bundle"] }, slug: { type: "string", pattern: SLUG_RE.source }, version: { type: "integer", minimum: 1 } } },
+  ],
+};
+
+const evidenceRefSchema = {
+  oneOf: [
+    {
+      type: "object",
+      required: ["kind", "id", "reviewSlug", "mediaType", "bytes", "alt", "caption"],
+      additionalProperties: false,
+      properties: {
+        kind: { type: "string", enum: ["attachment"] }, id: { type: "string" },
+        reviewSlug: { type: "string", pattern: SLUG_RE.source }, mediaType: { type: "string" },
+        bytes: { type: "integer", minimum: 0 }, alt: { type: "string" }, caption: { type: "string" },
+      },
+    },
+    { type: "object", required: ["kind", "slug", "version"], additionalProperties: false, properties: { kind: { type: "string", enum: ["bundle"] }, slug: { type: "string", pattern: SLUG_RE.source }, version: { type: "integer", minimum: 1 } } },
+  ],
+};
+
+const accountDocSchema = {
+  type: "object",
+  required: ["identity", "witness", "groups", "focus", "evidence"],
+  additionalProperties: false,
+  properties: {
+    identity: {
+      type: "object", required: ["lineageId", "slug", "revision", "version", "createdAt"], additionalProperties: false,
+      properties: { lineageId: { type: "string", pattern: RLN_ID_RE.source }, slug: { type: "string", pattern: SLUG_RE.source }, revision: { type: "integer", minimum: 1 }, version: { type: "integer", minimum: 1 }, createdAt: { type: "string", format: "date-time" } },
+    },
+    witness: {
+      type: "object", required: ["summary", "agent", "userId", "keyId"], additionalProperties: false,
+      properties: { summary: { type: "string", minLength: 1, maxLength: 1200 }, agent: stageBuilderSchema.properties.agent, userId: { type: "string" }, keyId: { type: "string" } },
+    },
+    groups: { type: "array", minItems: 1, maxItems: 16, items: stageGroupSchema },
+    focus: { type: "array", maxItems: 24, items: focusItemSchema },
+    evidence: { type: "array", maxItems: 16, items: evidenceRefSchema },
+  },
+};
+
+const witnessRequestSchema = {
+  type: "object",
+  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "updatedAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: WTR_ID_RE.source },
+    workspace: { type: "string" },
+    slug: { type: "string", pattern: SLUG_RE.source },
+    revision: { type: "integer", minimum: 1 },
+    state: { type: "string", enum: ["pending", "failed", "retrying", "published"], description: "`retrying` is derived: pending after at least one failure." },
+    retryCount: { type: "integer", minimum: 0 },
+    failure: { type: ["string", "null"] },
+    accountId: { type: ["string", "null"], pattern: RAC_ID_RE.source },
+    updatedAt: { type: "string", format: "date-time" },
+  },
+};
+
+const revisionViewSchema = {
+  type: "object",
+  required: ["id", "lineage", "slug", "workspace", "revision", "schemaVersion", "digest", "url", "apiUrl", "createdAt", "document", "witness"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: RVR_ID_RE.source }, lineage: { type: "string", pattern: RLN_ID_RE.source },
+    slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
+    revision: { type: "integer", minimum: 1 }, schemaVersion: { type: "integer", minimum: 1 }, digest: { type: "string" },
+    url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" },
+    createdAt: { type: "string", format: "date-time" },
+    document: revisionDocSchema, witness: witnessRequestSchema,
+  },
+};
+
+const accountViewSchema = {
+  type: "object",
+  required: ["id", "lineage", "slug", "workspace", "revision", "version", "schemaVersion", "digest", "url", "revisionUrl", "createdAt", "document", "witness"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: RAC_ID_RE.source }, lineage: { type: "string", pattern: RLN_ID_RE.source },
+    slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
+    revision: { type: "integer", minimum: 1 }, version: { type: "integer", minimum: 1 },
+    schemaVersion: { type: "integer", minimum: 1 }, digest: { type: "string" },
+    url: { type: "string", format: "uri" }, revisionUrl: { type: "string", format: "uri" },
+    createdAt: { type: "string", format: "date-time" },
+    document: accountDocSchema, witness: witnessRequestSchema,
+  },
+};
+
+const lineageViewSchema = {
+  type: "object",
+  required: ["id", "slug", "workspace", "title", "repo", "repoId", "branch", "originalBaseRef", "originalBaseSha", "latestRevision", "latestAccountVersion", "url", "apiUrl", "projects", "revisions", "accounts"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: RLN_ID_RE.source }, slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
+    title: { type: "string" }, repo: { type: "string" }, repoId: { type: "integer" }, branch: { type: "string" },
+    originalBaseRef: { type: "string" }, originalBaseSha: { type: "string" },
+    latestRevision: { type: ["integer", "null"], minimum: 1 }, latestAccountVersion: { type: ["integer", "null"], minimum: 1 },
+    url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" },
+    projects: { type: "array", items: { type: "string", pattern: SLUG_RE.source } },
+    revisions: {
+      type: "array",
+      items: {
+        type: "object", required: ["revision", "captureId", "createdAt", "url", "apiUrl"], additionalProperties: false,
+        properties: { revision: { type: "integer", minimum: 1 }, captureId: { type: "string", pattern: STG_ID_RE.source }, createdAt: { type: "string", format: "date-time" }, url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" } },
+      },
+    },
+    accounts: {
+      type: "array",
+      items: {
+        type: "object", required: ["version", "revision", "createdAt", "url"], additionalProperties: false,
+        properties: { version: { type: "integer", minimum: 1 }, revision: { type: "integer", minimum: 1 }, createdAt: { type: "string", format: "date-time" }, url: { type: "string", format: "uri" } },
+      },
+    },
+  },
+};
+
+const revisionParam = { name: "revision", in: "path", required: true, schema: { type: "string", pattern: "^[1-9][0-9]{0,8}$" } };
 
 /** One membership operation's doc. The four share everything but their nouns, and a
  *  builder keeps the four descriptions from drifting apart one edit at a time. */
@@ -988,7 +1189,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
                     type: "object",
                     required: [
                       "slug", "title", "status", "parent", "workspace", "url",
-                      "updatedAt", "bundles", "reviews", "stages", "children",
+                      "updatedAt", "bundles", "reviews", "reviewLineages", "stages", "children",
                     ],
                     properties: {
                       slug: { type: "string" },
@@ -1000,6 +1201,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
                       updatedAt: { type: "string", format: "date-time" },
                       bundles: { type: "integer" },
                       reviews: { type: "integer" },
+                      reviewLineages: { type: "integer" },
                       stages: { type: "integer" },
                       children: { type: "integer" },
                     },
@@ -1460,6 +1662,180 @@ export const API_ROUTES: readonly ApiRoute[] = [
         },
       },
       run: (req) => handleStageLines(req, req.params.slug, req.params.version, req.params.fileId),
+    },
+  }),
+
+  // The promoted review: a completed capture becomes an immutable, readable source
+  // revision before any witness has finished, and an account is published over it after.
+  route("/api/review-lineages", {
+    POST: {
+      doc: {
+        operationId: "createReviewLineage",
+        summary: "Publish the first source revision of a promoted review",
+        description:
+          "Creates the lineage, the immutable evidence document, a pending witness request, and any " +
+          "Project joins in one transaction. The capture may already back a stage version; nothing is " +
+          "consumed. The requested slug may differ from the capture's, so a Stage or legacy collision " +
+          "can be resolved explicitly, but it must not already name a review or a lineage in this " +
+          "workspace. Replaying the same capture with the same normalized fields returns the existing " +
+          "revision; replaying it with different fields is a 409.",
+        security: "key",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: {
+            type: "object",
+            required: ["captureId", "slug", "title"],
+            additionalProperties: false,
+            properties: {
+              captureId: { type: "string", pattern: STG_ID_RE.source },
+              slug: { type: "string", pattern: SLUG_RE.source },
+              title: { type: "string", minLength: 1, maxLength: 80 },
+              projects: { type: "array", maxItems: 16, items: { type: "string", pattern: SLUG_RE.source }, description: "Normalized to a sorted unique list, so input order does not change a replay." },
+            },
+          } } },
+        },
+        responses: {
+          "200": { description: "The immutable source revision and its witness request.", content: { "application/json": { schema: revisionViewSchema } } },
+          "400": errorResponse, "401": errorResponse, "404": errorResponse, "409": errorResponse, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handleCreateReviewLineage(req),
+    },
+  }),
+
+  route("/api/review-lineages/:slug", {
+    GET: {
+      doc: {
+        operationId: "readReviewLineage",
+        summary: "Read one promoted review lineage",
+        description: "Its revisions, its account versions, and the Projects it belongs to. Missing, malformed, and cross-workspace slugs share the review soft 404.",
+        security: "keyOrSession",
+        parameters: [slugParam],
+        responses: {
+          "200": { description: "The lineage and what it holds.", content: { "application/json": { schema: lineageViewSchema } } },
+          "404": reviewNotFound,
+        },
+      },
+      run: (req) => handleReadReviewLineage(req, req.params.slug),
+    },
+  }),
+
+  route("/api/review-lineages/:slug/revisions/:revision", {
+    GET: {
+      doc: {
+        operationId: "readReviewRevision",
+        summary: "Read one exact evidence revision",
+        description: "The immutable evidence document and the current witness workflow state, which is read beside the document rather than stored in it.",
+        security: "keyOrSession",
+        parameters: [slugParam, revisionParam],
+        responses: {
+          "200": { description: "The exact evidence document and workflow state.", content: { "application/json": { schema: revisionViewSchema } } },
+          "404": reviewNotFound,
+        },
+      },
+      run: (req) => handleReadReviewRevision(req, req.params.slug, req.params.revision),
+    },
+  }),
+
+  route("/api/review-lineages/:slug/revisions/:revision/accounts", {
+    POST: {
+      doc: {
+        operationId: "publishReviewAccount",
+        summary: "Publish one witness account over a source revision",
+        description:
+          "The groups must partition the revision's capture exactly once, exactly as a stage walkthrough " +
+          "does. Focus items are bounded decisions and risks with unique slug ids and one or more anchors " +
+          "into that same capture; anchors may overlap and own nothing. Evidence references must already " +
+          "exist in this workspace. Publishing moves the witness request to `published` in the same " +
+          "transaction. Exact replay returns the existing account; a different one is a 409.",
+        security: "key",
+        parameters: [slugParam, revisionParam],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: {
+            type: "object",
+            required: ["witness", "summary", "groups"],
+            additionalProperties: false,
+            properties: {
+              witness: { type: "object", required: ["name", "model"], additionalProperties: false, properties: { name: { type: "string", minLength: 1, maxLength: 80 }, model: { type: "string", minLength: 1, maxLength: 80 } } },
+              summary: { type: "string", minLength: 1, maxLength: 1200, description: "Constrained markdown." },
+              groups: { type: "array", minItems: 1, maxItems: 16, items: stageGroupSchema },
+              focus: { type: "array", maxItems: 24, items: focusItemSchema },
+              evidence: { type: "array", maxItems: 16, items: evidenceRefInputSchema },
+            },
+          } } },
+        },
+        responses: {
+          "200": { description: "The immutable account and the published witness request.", content: { "application/json": { schema: accountViewSchema } } },
+          "400": errorResponse, "401": errorResponse, "404": reviewNotFound, "409": errorResponse, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handlePublishReviewAccount(req, req.params.slug, req.params.revision),
+    },
+  }),
+
+  route("/api/review-lineages/:slug/revisions/:revision/files/:fileId", {
+    GET: {
+      doc: {
+        operationId: "readReviewRevisionFileLines",
+        summary: "Read retained lines from one file of a source revision",
+        description: "The opaque file id must belong to this revision's capture. Paths, repositories, Git object ids, and storage digests are never accepted as authority. This route never calls GitHub.",
+        security: "keyOrSession",
+        parameters: [
+          slugParam,
+          revisionParam,
+          { name: "fileId", in: "path", required: true, schema: { type: "string", pattern: STF_ID_RE.source } },
+          { name: "side", in: "query", required: true, schema: { type: "string", enum: ["old", "new"] } },
+          { name: "start", in: "query", required: false, schema: { type: "integer", minimum: 1 } },
+          { name: "end", in: "query", required: false, schema: { type: "integer", minimum: 1 } },
+        ],
+        responses: {
+          "200": { description: "At most 400 retained text lines.", content: { "application/json": { schema: stageLinesSchema } } },
+          "404": reviewNotFound, "422": errorResponse, "500": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handleRevisionLines(req, req.params.slug, req.params.revision, req.params.fileId),
+    },
+  }),
+
+  route("/api/review-witness-requests/:id/fail", {
+    POST: {
+      doc: {
+        operationId: "failWitnessRequest",
+        summary: "Record that a witness could not produce an account",
+        description: "Pending becomes failed, carrying bounded text a reader is shown. A request that already published is a 409. The query carries the key's workspace, so a request id from elsewhere misses rather than resolving.",
+        security: "key",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: WTR_ID_RE.source } }],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: {
+            type: "object", required: ["error"], additionalProperties: false,
+            properties: { error: { type: "string", minLength: 1, maxLength: 600, description: "What went wrong, as a reader will see it." } },
+          } } },
+        },
+        responses: {
+          "200": { description: "The failed witness request.", content: { "application/json": { schema: witnessRequestSchema } } },
+          "400": errorResponse, "401": errorResponse, "404": reviewNotFound, "409": errorResponse, "422": errorResponse,
+        },
+      },
+      run: (req) => handleFailWitnessRequest(req, req.params.id),
+    },
+  }),
+
+  route("/api/review-witness-requests/:id/retry", {
+    POST: {
+      doc: {
+        operationId: "retryWitnessRequest",
+        summary: "Put a failed witness request back in the queue",
+        description: "Failed becomes pending and counts one retry, which is what makes a reader say `retrying` rather than `pending`. Retrying an already-pending request changes nothing and says so; a published one is a 409.",
+        security: "key",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: WTR_ID_RE.source } }],
+        responses: {
+          "200": { description: "The pending witness request.", content: { "application/json": { schema: witnessRequestSchema } } },
+          "401": errorResponse, "404": reviewNotFound, "409": errorResponse,
+        },
+      },
+      run: (req) => handleRetryWitnessRequest(req, req.params.id),
     },
   }),
 

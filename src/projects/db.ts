@@ -206,7 +206,7 @@ export function listProjectEvents(projectId: string): ProjectEvent[] {
 
 // ---- membership ----
 
-type MembershipTable = "project_bundles" | "project_reviews" | "project_stages";
+type MembershipTable = "project_bundles" | "project_reviews" | "project_stages" | "project_review_lineages";
 
 function attach(table: MembershipTable, project: ProjectRow, slug: string): boolean {
   const before = db
@@ -260,6 +260,19 @@ export function listProjectReviewSlugs(projectId: string): string[] {
     .map((r) => r.slug);
 }
 
+/** The promoted reviews a project holds. A separate list from `project_reviews` rather
+ *  than a widening of it: the two name different tables, resolve to different readers,
+ *  and a join that could mean either would have to guess. The Project page composes them
+ *  under one heading, which is a presentation decision and stays one. */
+export function listProjectReviewLineageSlugs(wsId: string, projectId: string): string[] {
+  return db
+    .query<{ slug: string }, [string, string]>(
+      "SELECT slug FROM project_review_lineages WHERE workspace_id = ? AND project_id = ? ORDER BY created_at ASC",
+    )
+    .all(wsId, projectId)
+    .map((r) => r.slug);
+}
+
 /** Which projects hold this bundle — the upload response says where an upload landed. */
 export function listProjectsForBundle(wsId: string, slug: string): ProjectRow[] {
   return db
@@ -273,6 +286,7 @@ export function listProjectsForBundle(wsId: string, slug: string): ProjectRow[] 
 export interface ProjectCounts {
   bundles: number;
   reviews: number;
+  reviewLineages: number;
   stages: number;
   children: number;
   tasks: number;
@@ -281,13 +295,15 @@ export interface ProjectCounts {
 export function projectCounts(projectId: string): ProjectCounts {
   const count = (sql: string) =>
     db.query<{ n: number }, [string]>(sql).get(projectId)?.n ?? 0;
-  const stages = db.query<{ n: number }, [string, string]>(
-    "SELECT COUNT(*) AS n FROM project_stages WHERE project_id = ? AND workspace_id = (SELECT workspace_id FROM projects WHERE id = ?)",
-  ).get(projectId, projectId)?.n ?? 0;
+  const scoped = (table: string) =>
+    db.query<{ n: number }, [string, string]>(
+      `SELECT COUNT(*) AS n FROM ${table} WHERE project_id = ? AND workspace_id = (SELECT workspace_id FROM projects WHERE id = ?)`,
+    ).get(projectId, projectId)?.n ?? 0;
   return {
     bundles: count("SELECT COUNT(*) AS n FROM project_bundles WHERE project_id = ?"),
     reviews: count("SELECT COUNT(*) AS n FROM project_reviews WHERE project_id = ?"),
-    stages,
+    reviewLineages: scoped("project_review_lineages"),
+    stages: scoped("project_stages"),
     children: count("SELECT COUNT(*) AS n FROM projects WHERE parent_id = ?"),
     tasks: count("SELECT COUNT(*) AS n FROM project_tasks WHERE project_id = ?"),
   };

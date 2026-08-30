@@ -112,7 +112,7 @@ function softJson(): Response {
   });
 }
 
-function stageJson(value: unknown, status = 200): Response {
+export function stageJson(value: unknown, status = 200): Response {
   const response = json(value, status);
   response.headers.set("cache-control", "no-store");
   return response;
@@ -136,24 +136,23 @@ function sideDigest(file: StageCaptureFileRow, side: "old" | "new"): {
     : { availability: file.new_availability, digest: file.new_blob_sha, reason: file.new_reason, path: file.path };
 }
 
-/** Read retained text only through a file id owned by this immutable version. */
-export async function handleStageLines(
-  req: Request,
-  slug: string,
-  rawVersion: string,
-  fileId: string,
+/**
+ * A bounded retained-line window out of one file the caller has already been authorized
+ * to read. Shared by the stage route and the promoted review's revision route: the
+ * authorization differs between them — a stage version owns the file, a revision's
+ * capture does — but what a line window is does not, and a second copy of the budget
+ * would be a second place for it to drift.
+ *
+ * Every refusal here is a 4xx/5xx about the file, never a 404: the caller reached this
+ * far by naming a file the surface actually owns.
+ */
+export async function retainedLinesResponse(
+  workspaceId: string,
+  file: StageCaptureFileRow,
+  url: URL,
+  label: string,
 ): Promise<Response> {
-  if (!STF_ID_RE.test(fileId)) return softJson();
-  let resolved: ResolvedStageVersion | null = null;
-  let file: StageCaptureFileRow | null = null;
-  for (const workspaceId of readableWorkspaces(req)) {
-    const candidate = resolveStageVersion([workspaceId], slug, rawVersion);
-    const candidateFile = candidate?.inventory.files.find((item) => item.id === fileId) ?? null;
-    if (candidate && candidateFile) { resolved = candidate; file = candidateFile; break; }
-  }
-  if (!resolved || !file) return softJson();
-
-  const params = new URL(req.url).searchParams;
+  const params = url.searchParams;
   const side = params.get("side");
   if (side !== "old" && side !== "new") return stageJson({ error: "side must be old or new" }, 422);
   const start = positive(params.get("start"), 1);
@@ -166,8 +165,9 @@ export async function handleStageLines(
   if (selected.availability !== "retained" || selected.digest === null) {
     return stageJson({ error: selected.reason ?? `${side} side is unavailable` }, 422);
   }
+  const fileId = file.id;
   try {
-    const window = retainedLineWindow(await loadStageBytes(resolved.workspaceId, selected.digest), start, end);
+    const window = retainedLineWindow(await loadStageBytes(workspaceId, selected.digest), start, end);
     if (window === null) return stageJson({ error: `${side} side is binary` }, 422);
     if (window.tooLarge) return stageJson({ error: "requested lines exceed the retained-line response budget" }, 422);
     if (window.totalLines === 0) {
@@ -186,10 +186,29 @@ export async function handleStageLines(
       lines: window.lines.map((text, index) => ({ number: start + index, text })),
     });
   } catch (err) {
-    console.error(`[seer] retained lines failed for ${resolved.workspaceId}/${slug}/v/${rawVersion}/${fileId}:`, err);
+    console.error(`[seer] retained lines failed for ${label}/${fileId}:`, err);
     if (err instanceof StageStoreUnavailable) return stageJson({ error: "Stage storage is temporarily unavailable." }, 502);
     return stageJson({ error: "Stage storage is corrupt." }, 500);
   }
+}
+
+/** Read retained text only through a file id owned by this immutable version. */
+export async function handleStageLines(
+  req: Request,
+  slug: string,
+  rawVersion: string,
+  fileId: string,
+): Promise<Response> {
+  if (!STF_ID_RE.test(fileId)) return softJson();
+  let resolved: ResolvedStageVersion | null = null;
+  let file: StageCaptureFileRow | null = null;
+  for (const workspaceId of readableWorkspaces(req)) {
+    const candidate = resolveStageVersion([workspaceId], slug, rawVersion);
+    const candidateFile = candidate?.inventory.files.find((item) => item.id === fileId) ?? null;
+    if (candidate && candidateFile) { resolved = candidate; file = candidateFile; break; }
+  }
+  if (!resolved || !file) return softJson();
+  return retainedLinesResponse(resolved.workspaceId, file, new URL(req.url), `${resolved.workspaceId}/${slug}/v/${rawVersion}`);
 }
 
 function softHtml(req: Request): Response {

@@ -62,10 +62,32 @@ before the new Git blob. Duplicate Git object ids are fetched,
 counted, and retained once, at the first occurrence in that order. The default logical-byte
 limit is 50 MiB and tests may inject a smaller value. An object that would pass the limit is
 left out with a budget reason; later objects cannot displace it. After byte and GitHub's
-100 MiB object decisions, at most 64 unique Git blob requests are selected in that same
-order and fetched through a pool of at most 16 calls. Later eligible objects are left out
-with an object-count reason. This makes retries and re-derivation stable while keeping the
-capture inside the request and idle-time budget. Git tree objects, submodule commit ids, and
+100 MiB object decisions, the request budgets choose how many objects are fetched, in that
+same order, through a pool of at most 16 calls. Retained objects are written through a
+second pool of the same width; a write failure is reported by lowest retention index, so a
+broken store fails the same capture the same way every time. Later eligible objects are
+left out with a machine-stable budget reason. This makes retries and re-derivation stable
+while bounding the number of external calls and writes one capture can start.
+
+Two request ceilings bound one capture, and they bound different things. `STAGE_MAX_BLOB_REQUESTS`
+(default 1,000) is how many unique Git blob requests it may make, which is how much source
+it retains; 1,000 is 20% of GitHub's shared 5,000-request hourly installation budget.
+`STAGE_MAX_GITHUB_REQUESTS` (default 1,024) is every known REST call the capture makes,
+metadata included: the repository, both refs, compare, both trees, and the pinned compare
+diff, seven in total. At the defaults the total leaves 24 calls of headroom over the blob
+ceiling, so the blob ceiling is the one that normally binds; under a lower injected or
+configured total the total binds on its own. Both overrides are validated at boot and a
+non-integer value fails loudly naming the variable. The total must allow the seven required
+metadata calls; the blob limit must be positive. An object left out
+carries a reason prefixed `[budget:blob_requests]`, `[budget:github_requests]`,
+`[budget:logical_bytes]`, or `[budget:github_blob_ceiling]`, so which ceiling bound is
+machine-readable while the rest of the sentence still explains it to a person.
+
+A GitHub primary or secondary rate-limit refusal aborts the capture rather than being
+recorded against the object that happened to be in flight. Writing it per object would
+turn one throttle into hundreds of `bytes_unavailable` rows that read exactly like source
+GitHub does not have — a permanent-looking claim about a transient condition, in the one
+record that is supposed to be trustworthy. Git tree objects, submodule commit ids, and
 modes remain metadata even when they have no retainable file bytes. Binary and symlink bytes
 may be retained, while their unavailable line representation carries a concrete reason.
 
@@ -93,5 +115,13 @@ does not sweep or delete them.
 Publication validates the witness document before the transaction. Project slugs are normalized as a sorted unique list, so input order and repeated names do not change an otherwise identical replay. The transaction checks Project slugs again, creates the stage and version, and inserts Project joins. The version's
 resolved document carries source facts and opaque capture ids, not patches, bytes, or line
 arrays. The retained patch and old/new blobs are read through `GET /api/stage-captures/:id/objects/:sha256` only when that exact capture names their SHA-256. The member page re-materializes persisted changes from those bytes and refuses a mismatch. Its retained-line API accepts only an opaque file id belonging to the exact immutable version; it never accepts a path or object digest as authority. Marking a change read writes only the current member's `stage_change_reads` row.
+
+## A capture may also be promoted
+
+The same completed capture can back a promoted review's source revision, independently of
+any stage version it already backs. `review_revisions.capture_id UNIQUE` is that table's
+own rule and says nothing about `stage_versions.capture_id`: neither consumes the other,
+and the promoted slug may differ from the capture slug so an existing collision can be
+resolved by naming a new one. See docs/overseer/data-model.md.
 
 A capture is consumed by the unique `stage_versions.capture_id` rule. Publication assumes one SQLite writer process; uniqueness remains the final integrity guard, not a cross-process race protocol. Repeating an identical normalized narrative returns the existing version; a different narrative is a conflict. Later versions, shares, comments, missing-material acknowledgement, approval, deltas, and pull request attachments are deferred.

@@ -16,7 +16,7 @@ import { IMAGE_TYPES, processImage, sniffOk } from "../images";
 import { saveAttachment } from "../store";
 import { tinyId } from "../ids";
 import { requireApiKey } from "../auth";
-import { createAttachment, createReviewVersion, getReview, getReviewVersion, type ReviewDoc } from "./db";
+import { createAttachment, createReviewVersion, getReview, getReviewVersion, ReviewSlugTaken, type ReviewDoc } from "./db";
 import { setReviewPrs, sweepOrphanPrStatus, upsertPrStatus } from "./installations";
 import { attachReview, getProject, type ProjectRow } from "../projects/db";
 import {
@@ -856,7 +856,7 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   // Row then bytes, as bundles and images do: the version and its attachment rows land
   // in one transaction, and the blobs follow. A row without its blob is loud
   // corruption on read; a blob without its row is garbage nothing points at.
-  const version = db.transaction(() => {
+  const write = db.transaction(() => {
     const v = createReviewVersion(ws, slug, doc);
     // The pull request set this review names, replaced wholesale in the same
     // transaction: a republish that drops #4 and adds #9 must delete #4's row, or an
@@ -905,7 +905,16 @@ export async function handlePublishReview(req: Request): Promise<Response> {
     // lands in. Idempotent, so a republish naming the same projects is a no-op.
     for (const project of namedProjects) attachReview(project, slug);
     return v;
-  })();
+  });
+  let version: number;
+  try {
+    version = write();
+  } catch (err) {
+    // The slug belongs to a promoted review. A 409 rather than a 422: nothing in the
+    // payload is wrong, the name is taken, and the fix is a different slug.
+    if (err instanceof ReviewSlugTaken) return json({ error: err.message }, 409);
+    throw err;
+  }
   for (const a of resolved.attachments) {
     await saveAttachment(ws, a.id, a.bytes);
   }

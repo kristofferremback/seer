@@ -9,6 +9,7 @@ import { SLUG_RE, TSK_ID_RE } from "../ids";
 import { requireApiKey, sessionUser } from "../auth";
 import { normalize as normalizeMarkdown, validate as validateMarkdown } from "../overseer/markdown";
 import { getReview, getReviewVersion } from "../overseer/db";
+import { getLineage } from "../overseer/revision-db";
 import {
   ANONYMOUS_OBSERVER,
   findPrStatus,
@@ -45,6 +46,7 @@ import {
   getProjectById,
   listChildren,
   listProjectBundleSlugs,
+  listProjectReviewLineageSlugs,
   listProjectReviewSlugs,
   listProjects,
   projectCounts,
@@ -68,7 +70,11 @@ export interface ProjectChildSummary {
   title: string;
   status: ProjectStatus;
   bundles: number;
+  /** Legacy reviews and promoted lineages are counted apart, because they resolve
+   *  through different readers. The page adds them up under one heading; the state does
+   *  not, so a caller can still tell which kind it is looking at. */
   reviews: number;
+  reviewLineages: number;
   stages: number;
   tasks: number;
 }
@@ -86,6 +92,17 @@ export interface ProjectReviewEntry {
   latestVersion: number;
   publishedAt: number;
   url: string;
+}
+
+export interface ProjectReviewLineageEntry {
+  slug: string;
+  title: string;
+  latestRevision: number;
+  latestAccountVersion: number | null;
+  updatedAt: number;
+  url: string;
+  revisionUrl: string;
+  apiUrl: string;
 }
 
 export interface ProjectStageEntry {
@@ -108,6 +125,7 @@ export interface ProjectState {
   plans: ProjectBundleEntry[];
   bundles: ProjectBundleEntry[];
   reviews: ProjectReviewEntry[];
+  reviewLineages: ProjectReviewLineageEntry[];
   stages: ProjectStageEntry[];
   /** The most recent NOTES_TAIL notes, oldest first so they read chronologically. */
   notes: NoteView[];
@@ -224,6 +242,22 @@ export function projectState(project: ProjectRow): ProjectState {
     });
   }
 
+  const reviewLineages: ProjectReviewLineageEntry[] = [];
+  for (const slug of listProjectReviewLineageSlugs(ws, project.id)) {
+    const lineage = getLineage(ws, slug);
+    if (!lineage || lineage.latest_revision === null) continue;
+    reviewLineages.push({
+      slug,
+      title: lineage.title,
+      latestRevision: lineage.latest_revision,
+      latestAccountVersion: lineage.latest_account_version,
+      updatedAt: lineage.updated_at,
+      url: `${config.baseUrl}/${ws}/r/${slug}`,
+      revisionUrl: `${config.baseUrl}/${ws}/r/${slug}/rev/${lineage.latest_revision}`,
+      apiUrl: `${config.baseUrl}/api/review-lineages/${slug}`,
+    });
+  }
+
   const reviews: ProjectReviewEntry[] = [];
   for (const slug of listProjectReviewSlugs(project.id)) {
     const review = getReview(ws, slug);
@@ -251,6 +285,7 @@ export function projectState(project: ProjectRow): ProjectState {
         status: child.status,
         bundles: counts.bundles,
         reviews: counts.reviews,
+        reviewLineages: counts.reviewLineages,
         stages: counts.stages,
         tasks: counts.tasks,
       };
@@ -259,6 +294,7 @@ export function projectState(project: ProjectRow): ProjectState {
     plans,
     bundles,
     reviews,
+    reviewLineages,
     stages,
     notes: listNotesTail(project.id, NOTES_TAIL).map(noteView),
     noteCount: countNotes(project.id),
@@ -322,6 +358,16 @@ function stateJson(state: ProjectState): unknown {
       latestVersion: r.latestVersion,
       publishedAt: new Date(r.publishedAt).toISOString(),
       url: r.url,
+    })),
+    reviewLineages: state.reviewLineages.map((r) => ({
+      slug: r.slug,
+      title: r.title,
+      latestRevision: r.latestRevision,
+      latestAccountVersion: r.latestAccountVersion,
+      updatedAt: new Date(r.updatedAt).toISOString(),
+      url: r.url,
+      revisionUrl: r.revisionUrl,
+      apiUrl: r.apiUrl,
     })),
     notes: state.notes.map(noteJson),
     noteCount: state.noteCount,
@@ -463,6 +509,7 @@ export function handleListProjects(req: Request): Response {
         updatedAt: new Date(p.updated_at).toISOString(),
         bundles: counts.bundles,
         reviews: counts.reviews,
+        reviewLineages: counts.reviewLineages,
         stages: counts.stages,
         children: counts.children,
       };

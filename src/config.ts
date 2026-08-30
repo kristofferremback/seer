@@ -8,6 +8,29 @@ function required(name: string): string {
 
 const authDisabled = process.env.AUTH_DISABLED === "true";
 
+/**
+ * A capture request ceiling, read from the environment or left at its default.
+ *
+ * Validated rather than coerced: `Number("many")` is NaN and `Number("")` is 0, and both
+ * would sail past a `??` into a capture that either fetches nothing or never stops. An
+ * operator who mistypes one of these finds out at boot, naming the variable, rather than
+ * at the first capture of a large branch.
+ */
+export function requestLimit(
+  name: string,
+  fallback: number,
+  env: Record<string, string | undefined> = process.env,
+  minimum = 1,
+): number {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(`${name} must be a whole number of at least ${minimum} requests; got ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
+
 // Blob store: when S3_BUCKET is set, bundle zips and images live in S3 and the
 // only durable local state is SQLite (auth + metadata). Credentials/region come
 // from the standard env names (S3_* preferred, AWS_* accepted). Misconfiguration
@@ -135,6 +158,14 @@ export const config = {
     .split(",")
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean),
+
+  // What one capture may spend at GitHub. Blob requests are the bulk of it; the total
+  // is every known REST call the capture makes, metadata included, so a branch that
+  // changes a thousand files cannot quietly become a thousand-and-something-call burst
+  // against a budget the whole installation shares. See docs/stage/data-model.md.
+  stageBlobRequestLimit: requestLimit("STAGE_MAX_BLOB_REQUESTS", 1000),
+  // Seven metadata calls are required before a blob can be selected.
+  stageGithubRequestLimit: requestLimit("STAGE_MAX_GITHUB_REQUESTS", 1024, process.env, 7),
 
   maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES ?? 50 * 1024 * 1024),
   cacheTtlMs: Number(process.env.CACHE_TTL_MS ?? 30 * 60 * 1000),
