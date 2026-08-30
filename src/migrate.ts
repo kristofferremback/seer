@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 15 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 16 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -61,6 +61,12 @@ import { hashKey, tinyId } from "./ids";
 // become one, per-revision read state, and Project membership. Purely additive — a
 // StageDoc V1 row, a legacy ReviewDoc row, and every read and join beside them are
 // untouched, and a capture that already backs a stage version may back a revision too.
+//
+// v16 adds the pull request a lineage reviews: the one normalized relation, the immutable
+// observations of that pull request, the source tuple a revision was captured from, the
+// capture job workflow, client idempotency, and witness claim leases. Purely additive —
+// every v15 table, constraint and stored document is untouched, and a lineage that never
+// names a pull request keeps working with all six tables empty.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -532,8 +538,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 15) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 15`);
+  if (uv > 16) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 16`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -550,6 +556,7 @@ export function migrate(): void {
   if (userVersion() < 13) migrateToV13();
   if (userVersion() < 14) migrateToV14();
   if (userVersion() < 15) migrateToV15();
+  if (userVersion() < 16) migrateToV16();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -1065,6 +1072,177 @@ function migrateToV15(): void {
     db.run("PRAGMA user_version = 15");
   })();
   console.log("[seer] migrated to schema v15 (promoted review revisions).");
+}
+
+// The pull request a lineage reviews, and the workflow that gets one there.
+//
+// `review_lineage_prs` is the ONE normalized relationship. Route resolution, webhook
+// filtering, reconciliation and orphan retention all join it, so a second table naming
+// the same fact would be a second place for the join to drift. The primary key is the
+// lineage, which is what makes "at most one current pull request" a constraint rather
+// than a convention; the partial unique index is the other half — one live pull request
+// cannot be owned by two lineages in a workspace, and a later explicit detach releases it
+// by stamping `detached_at` rather than by deleting the history.
+//
+// `review_pr_observations` is immutable, and the digest is what makes re-reading cheap
+// without making it dishonest: it covers the normalized GitHub facts AND the exact actor,
+// but not Seer's own `observed_at`. Reading unchanged facts through the same actor reuses
+// the row; reading them through a different one records a separately attributed
+// observation, because who was allowed to see it is part of what was seen.
+//
+// `review_revision_sources` is the source-tuple arbiter and the reason task 5 needs no V2
+// revision document. A revision points at the observation it was captured from, so PR
+// identity has one stored home; the unique tuple is what stops a second capture result
+// publishing a duplicate revision of bytes already published.
+//
+// `review_capture_jobs` is workflow state, deliberately outside both documents: a pending
+// or failed job is visible and retryable and is not a source revision. `actor_key` is the
+// queue lane — one actor runs one capture at a time — and the lease is what lets another
+// process recover an abandoned claim without two healthy workers spending one credential.
+//
+// `review_pr_idempotency` replays the client's operation; the source tuple replays the
+// capture. Two identities on purpose: the same user request must return the same answer,
+// and two different requests that observe the same bytes must not publish twice.
+//
+// `review_witness_claims` is keyed by `(request, retry count)` because the retry count is
+// what makes a second attempt a different piece of work. A same-key claim renews its
+// lease; an expired one may be taken over without touching the count.
+const V16_REVIEW_LINEAGE_PRS = `
+  CREATE TABLE IF NOT EXISTS review_lineage_prs (
+    lineage_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    repo_id INTEGER NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL CHECK (pr_number >= 1),
+    head_ref TEXT NOT NULL,
+    base_ref TEXT NOT NULL,
+    actor_kind TEXT NOT NULL CHECK (actor_kind IN ('installation','user','anonymous')),
+    installation_id INTEGER,
+    user_id TEXT,
+    credential_id TEXT,
+    attached_at INTEGER NOT NULL,
+    detached_at INTEGER,
+    CHECK (
+      (actor_kind = 'installation' AND installation_id IS NOT NULL AND user_id IS NULL AND credential_id IS NULL) OR
+      (actor_kind = 'user' AND installation_id IS NULL AND user_id IS NOT NULL AND credential_id IS NOT NULL) OR
+      (actor_kind = 'anonymous' AND installation_id IS NULL AND user_id IS NULL AND credential_id IS NULL)
+    )
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_review_lineage_prs_live
+    ON review_lineage_prs (workspace_id, repo_id, pr_number) WHERE detached_at IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_review_lineage_prs_join
+    ON review_lineage_prs (pr_number, repo_id);
+  CREATE INDEX IF NOT EXISTS idx_review_lineage_prs_workspace
+    ON review_lineage_prs (workspace_id, slug);
+
+  CREATE TABLE IF NOT EXISTS review_pr_observations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    repo_id INTEGER NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL CHECK (pr_number >= 1),
+    title TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open','closed')),
+    merged INTEGER NOT NULL CHECK (merged IN (0,1)),
+    draft INTEGER NOT NULL CHECK (draft IN (0,1)),
+    base_ref TEXT NOT NULL,
+    base_sha TEXT NOT NULL,
+    head_ref TEXT NOT NULL,
+    head_sha TEXT NOT NULL,
+    -- Nullable, and only ever null on a webhook observation. A delivery does not carry a
+    -- merge base and Seer must not invent one: a fabricated merge base would let a
+    -- delivery be mistaken for a capturable source tuple, which is the one thing an
+    -- unasked-for observation must never be.
+    merge_base_sha TEXT,
+    github_updated_at INTEGER NOT NULL,
+    observed_at INTEGER NOT NULL,
+    actor_kind TEXT NOT NULL CHECK (actor_kind IN ('installation','user','anonymous')),
+    installation_id INTEGER,
+    user_id TEXT,
+    credential_id TEXT,
+    digest TEXT NOT NULL,
+    UNIQUE (lineage_id, digest)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_pr_observations_lineage
+    ON review_pr_observations (workspace_id, lineage_id, observed_at);
+
+  CREATE TABLE IF NOT EXISTS review_revision_sources (
+    revision_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    observation_id TEXT NOT NULL UNIQUE,
+    base_tip_sha TEXT NOT NULL,
+    source_head_sha TEXT NOT NULL,
+    merge_base_sha TEXT NOT NULL,
+    attached_at INTEGER NOT NULL,
+    UNIQUE (lineage_id, base_tip_sha, source_head_sha, merge_base_sha)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_sources_lineage
+    ON review_revision_sources (workspace_id, lineage_id);
+
+  CREATE TABLE IF NOT EXISTS review_capture_jobs (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    observation_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending','running','failed','completed')),
+    actor_kind TEXT NOT NULL CHECK (actor_kind IN ('installation','user','anonymous')),
+    installation_id INTEGER,
+    user_id TEXT,
+    credential_id TEXT,
+    actor_key TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    failure TEXT,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    capture_id TEXT,
+    revision_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (lineage_id, observation_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_capture_jobs_lane
+    ON review_capture_jobs (actor_key, state, created_at);
+  CREATE INDEX IF NOT EXISTS idx_review_capture_jobs_lineage
+    ON review_capture_jobs (workspace_id, lineage_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS review_pr_idempotency (
+    workspace_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('create','attach','refresh')),
+    lineage_id TEXT NOT NULL,
+    observation_id TEXT NOT NULL,
+    capture_job_id TEXT,
+    revision_id TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, idempotency_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS review_witness_claims (
+    request_id TEXT NOT NULL,
+    retry_count INTEGER NOT NULL CHECK (retry_count >= 0),
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    lease_expires_at INTEGER NOT NULL,
+    claimed_at INTEGER NOT NULL,
+    PRIMARY KEY (request_id, retry_count)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_witness_claims_workspace
+    ON review_witness_claims (workspace_id, request_id);
+`;
+
+function migrateToV16(): void {
+  db.transaction(() => {
+    db.exec(V16_REVIEW_LINEAGE_PRS);
+    db.run("PRAGMA user_version = 16");
+  })();
+  console.log("[seer] migrated to schema v16 (pull request review lineage).");
 }
 
 /**

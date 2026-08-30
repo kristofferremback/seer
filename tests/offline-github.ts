@@ -6,7 +6,7 @@
 // Type-only import on purpose: this module is loaded by preloads that must finish
 // setting env before any app module is imported.
 import type { GithubClient } from "../src/overseer/github";
-import type { GithubClientFactory } from "../src/overseer/github-app";
+import type { GithubClientFactory, ReadRouter } from "../src/overseer/github-app";
 import type { GithubOAuth } from "../src/overseer/github-oauth";
 import type { GithubUserOAuth } from "../src/overseer/github-user-oauth";
 import type { GithubPatIdentity } from "../src/overseer/github-user-pat";
@@ -37,6 +37,29 @@ export function offlineGithubClient(): GithubClient {
  */
 export function offlineGithubClientFactory(): GithubClientFactory {
   return () => offlineGithubClient();
+}
+
+/**
+ * The fifth seam. A promoted review resolves a read ACTOR and later reopens exactly that
+ * one, and neither call goes through the client factory above — so without an offline
+ * default here, resolving an actor would route a repository name against the real App
+ * credentials, silently, exactly as the factory's absence once would have.
+ */
+export function offlineReadRouter(): ReadRouter {
+  return {
+    async resolve(): Promise<never> {
+      throw new Error(
+        "[tests] GitHub is offline in tests: a read actor was resolved with no fake installed. " +
+          "Install one with setReadRouter().",
+      );
+    },
+    async open(): Promise<never> {
+      throw new Error(
+        "[tests] GitHub is offline in tests: a read session was opened with no fake installed. " +
+          "Install one with setReadRouter().",
+      );
+    },
+  };
 }
 
 /** The OAuth leg is not a GithubClient, so it needs its own offline default. */

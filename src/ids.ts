@@ -56,6 +56,10 @@ export const RLN_ID_RE = new RegExp(`^rln_${TINY}$`);
 export const RVR_ID_RE = new RegExp(`^rvr_${TINY}$`);
 export const RAC_ID_RE = new RegExp(`^rac_${TINY}$`);
 export const WTR_ID_RE = new RegExp(`^wtr_${TINY}$`);
+// A pull request joined to a lineage: one immutable observation of it, and the capture
+// job that turns an observation into a source revision.
+export const POB_ID_RE = new RegExp(`^pob_${TINY}$`);
+export const RCJ_ID_RE = new RegExp(`^rcj_${TINY}$`);
 export const STAGE_CHANGE_ID_RE = /^chg_[a-f0-9]{64}$/;
 export const API_KEY_RE = /^seer_sk_[A-Za-z0-9_-]{32}$/;
 export const SHARE_TOKEN_RE = /^seer_sh_[A-Za-z0-9_-]{32}$/;

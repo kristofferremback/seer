@@ -26,7 +26,10 @@ export interface GithubPull {
   draft?: boolean;
   merged?: boolean;
   user: GithubUser | null;
-  head: { sha: string; ref: string };
+  /** `repo` is absent on a head whose repository has been deleted, and names a
+   *  DIFFERENT repository on a fork. Both are facts a same-repository review has to be
+   *  able to see, which is why the typed shape carries it rather than dropping it. */
+  head: { sha: string; ref: string; repo?: GithubRepoRef | null };
   /** `repo` is absent only on a pull request whose base repository is gone. */
   base: { sha: string; ref: string; repo?: GithubRepoRef | null };
   /** GitHub's own timestamp. Two observations of one pull request are ordered by this
@@ -478,6 +481,114 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
       const res = await request(`/repos/${repo}/pulls/${number}`, "application/vnd.github.diff");
       return res.text();
     },
+  };
+}
+
+// ---- a pull request, checked rather than trusted ----
+
+/**
+ * One pull request with every field this codebase turns into a stored fact validated.
+ *
+ * `GithubPull` is a partial view of a payload, and reading it is fine for the legacy
+ * derivation path, which re-derives everything from a diff. A promoted review is the
+ * opposite: it writes the numeric repository ids, the refs and the SHAs into an immutable
+ * row and then routes a capture through them, so a missing `head.repo` or a string where
+ * a number belongs must be a named refusal before anything is written — not `undefined`
+ * flowing into a URL.
+ */
+export interface ValidatedPull {
+  number: number;
+  title: string;
+  state: "open" | "closed";
+  merged: boolean;
+  draft: boolean;
+  /** GitHub's own timestamp in milliseconds. */
+  updatedAt: number;
+  base: { ref: string; sha: string; repo: GithubRepoRef };
+  head: { ref: string; sha: string; repo: GithubRepoRef };
+}
+
+/** A pull request title is stored and rendered, so it is bounded here rather than
+ *  wherever it lands. GitHub's own limit is 256. */
+export const PULL_TITLE_MAX = 256;
+
+/**
+ * A pull request payload this codebase cannot turn into stored facts.
+ *
+ * Its own class because it is the CALLER's problem and not the host's: a fork head, a
+ * deleted head repository, an unknown state and an unparseable timestamp are all things
+ * the person asking can see and act on, so they answer 422. A bare `GithubError` from the
+ * same call path — a malformed compare response, a transport fault — is a genuine 502,
+ * and blanket-mapping the two together would have an automated client either retry a call
+ * that can never succeed or give up on one that would.
+ */
+export class GithubPullPayloadError extends GithubError {
+  constructor(message: string) {
+    super(message, 0, "");
+    this.name = "GithubPullPayloadError";
+  }
+}
+
+function pullRepoRef(value: unknown, label: string, where: string): GithubRepoRef {
+  const repo = value as Record<string, unknown> | null | undefined;
+  if (!repo || typeof repo !== "object" || !Number.isInteger(repo.id) || (repo.id as number) <= 0 ||
+      typeof repo.full_name !== "string") {
+    throw new GithubPullPayloadError(`GitHub returned no usable ${label} repository for ${where}.`);
+  }
+  try {
+    assertRepo(repo.full_name);
+  } catch {
+    throw new GithubPullPayloadError(`GitHub returned an invalid ${label} repository name for ${where}.`);
+  }
+  return { id: repo.id as number, full_name: repo.full_name };
+}
+
+function pullSide(value: unknown, label: string, where: string): { ref: string; sha: string; repo: GithubRepoRef } {
+  const side = value as Record<string, unknown> | null | undefined;
+  if (!side || typeof side !== "object") {
+    throw new GithubPullPayloadError(`GitHub returned no ${label} for ${where}.`);
+  }
+  if (typeof side.sha !== "string" || !/^[0-9a-f]{40}$/i.test(side.sha)) {
+    throw new GithubPullPayloadError(`GitHub returned an invalid ${label} commit id for ${where}.`);
+  }
+  if (typeof side.ref !== "string") {
+    throw new GithubPullPayloadError(`GitHub returned an invalid ${label} ref for ${where}.`);
+  }
+  try {
+    assertRef(side.ref);
+  } catch {
+    throw new GithubPullPayloadError(`GitHub returned an invalid ${label} ref for ${where}.`);
+  }
+  return { ref: side.ref, sha: side.sha, repo: pullRepoRef(side.repo, label, where) };
+}
+
+export function parseGithubPull(raw: unknown, where: string): ValidatedPull {
+  const pull = raw as Record<string, unknown> | null | undefined;
+  if (!pull || typeof pull !== "object" || Array.isArray(pull)) {
+    throw new GithubPullPayloadError(`GitHub returned no pull request for ${where}.`);
+  }
+  if (!Number.isInteger(pull.number) || (pull.number as number) <= 0) {
+    throw new GithubPullPayloadError(`GitHub returned an invalid pull request number for ${where}.`);
+  }
+  if (typeof pull.title !== "string" || pull.title.length === 0 || pull.title.length > PULL_TITLE_MAX) {
+    throw new GithubPullPayloadError(`GitHub returned an invalid pull request title for ${where}.`);
+  }
+  if (pull.state !== "open" && pull.state !== "closed") {
+    throw new GithubPullPayloadError(`GitHub returned an unknown pull request state for ${where}.`);
+  }
+  const updatedAt = typeof pull.updated_at === "string" ? Date.parse(pull.updated_at) : NaN;
+  if (!Number.isFinite(updatedAt)) {
+    throw new GithubPullPayloadError(`GitHub returned an invalid pull request update time for ${where}.`);
+  }
+  return {
+    number: pull.number as number,
+    title: pull.title,
+    state: pull.state,
+    merged: pull.merged === true,
+    draft: pull.draft === true,
+    updatedAt,
+    base: pullSide(pull.base, "base", where),
+    head: pullSide(pull.head, "head", where),
   };
 }
 

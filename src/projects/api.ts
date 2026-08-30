@@ -10,6 +10,7 @@ import { requireApiKey, sessionUser } from "../auth";
 import { normalize as normalizeMarkdown, validate as validateMarkdown } from "../overseer/markdown";
 import { getReview, getReviewVersion } from "../overseer/db";
 import { getLineage } from "../overseer/revision-db";
+import { latestCaptureJob } from "../overseer/revision-jobs";
 import {
   ANONYMOUS_OBSERVER,
   findPrStatus,
@@ -94,14 +95,30 @@ export interface ProjectReviewEntry {
   url: string;
 }
 
+/**
+ * One promoted review a project holds.
+ *
+ * `latestRevision` is nullable because a review made FROM a pull request joins its
+ * projects the moment its shell is created, before the pinned capture has published
+ * anything. Dropping those entries was the alternative, and it was the worse one: the
+ * project's own count included them, so a project would say it held three reviews and
+ * list two, with nothing anywhere naming the third or saying its capture had failed.
+ *
+ * A revision that exists carries the same fields it always did, so a task-4 entry is
+ * byte-identical to what it was.
+ */
 export interface ProjectReviewLineageEntry {
   slug: string;
   title: string;
-  latestRevision: number;
+  /** Null until the first source revision is published. */
+  latestRevision: number | null;
   latestAccountVersion: number | null;
+  /** Where the capture has got to, and null once there is a revision to read. */
+  captureState: "pending" | "running" | "failed" | null;
   updatedAt: number;
   url: string;
-  revisionUrl: string;
+  /** Null while `latestRevision` is: there is no pinned document to link to yet. */
+  revisionUrl: string | null;
   apiUrl: string;
 }
 
@@ -245,15 +262,21 @@ export function projectState(project: ProjectRow): ProjectState {
   const reviewLineages: ProjectReviewLineageEntry[] = [];
   for (const slug of listProjectReviewLineageSlugs(ws, project.id)) {
     const lineage = getLineage(ws, slug);
-    if (!lineage || lineage.latest_revision === null) continue;
+    // A membership row whose lineage has vanished is still skipped. A lineage with no
+    // revision YET is not that: it is a real review whose capture is outstanding, and it
+    // is listed with the state of that capture.
+    if (!lineage) continue;
+    const pending = lineage.latest_revision === null;
+    const job = pending ? latestCaptureJob(ws, lineage.id) : null;
     reviewLineages.push({
       slug,
       title: lineage.title,
       latestRevision: lineage.latest_revision,
       latestAccountVersion: lineage.latest_account_version,
+      captureState: pending ? (job && job.state !== "completed" ? job.state : "pending") : null,
       updatedAt: lineage.updated_at,
       url: `${config.baseUrl}/${ws}/r/${slug}`,
-      revisionUrl: `${config.baseUrl}/${ws}/r/${slug}/rev/${lineage.latest_revision}`,
+      revisionUrl: pending ? null : `${config.baseUrl}/${ws}/r/${slug}/rev/${lineage.latest_revision}`,
       apiUrl: `${config.baseUrl}/api/review-lineages/${slug}`,
     });
   }
@@ -364,6 +387,7 @@ function stateJson(state: ProjectState): unknown {
       title: r.title,
       latestRevision: r.latestRevision,
       latestAccountVersion: r.latestAccountVersion,
+      captureState: r.captureState,
       updatedAt: new Date(r.updatedAt).toISOString(),
       url: r.url,
       revisionUrl: r.revisionUrl,

@@ -47,8 +47,32 @@ export interface StageCaptureRequest {
   builder?: StageBuilderPacket;
 }
 
+/**
+ * A source that has already been resolved, pinned, and verified elsewhere.
+ *
+ * Branch mode asks GitHub what two branch names point at right now. A pull request review
+ * must not: the observation it was queued from named exact commits, and a branch that
+ * moved between the observation and the capture would silently produce a revision of
+ * different code under the same PR. So this carries the canonical repository identity and
+ * both sides as SHAs, and the engine spends its metadata calls confirming them rather
+ * than resolving refs.
+ *
+ * Internal: no route accepts it, and the Stage capture API is unchanged.
+ */
+export interface ResolvedCaptureSource {
+  repoId: number;
+  /** GitHub's canonical "owner/name" at observation time. */
+  repo: string;
+  baseRef: string;
+  baseTipSha: string;
+  sourceHeadSha: string;
+  mergeBaseSha: string;
+}
+
 export interface StageCaptureOptions {
   maxLogicalBytes?: number;
+  /** Pinned-ref mode. See ResolvedCaptureSource. */
+  resolved?: ResolvedCaptureSource;
   /** Test seams for the two request ceilings. Production reads them from config, where
    *  they carry validated environment overrides; a fixture injects a small one so the
    *  cap it means to prove binds without a thousand-file tree. */
@@ -419,18 +443,25 @@ const BUDGET_GITHUB_REQUESTS = "[budget:github_requests]";
 const BUDGET_LOGICAL_BYTES = "[budget:logical_bytes]";
 const BUDGET_GITHUB_BLOB_CEILING = "[budget:github_blob_ceiling]";
 
-/** Every known REST call a capture makes, counted as it is made. */
+/** Every known REST call a capture makes, counted as it is made. The required count
+ *  differs by mode — pinned-ref capture skips both branch-ref lookups — and the refusal
+ *  reports the count that actually applies rather than one mode's number in both. */
 class RestBudget {
   spent = 0;
-  constructor(readonly total: number) {}
+  constructor(readonly total: number, readonly required: number) {}
   spend(calls = 1): void {
     if (this.spent + calls > this.total) {
-      throw new StageCaptureError(400, `The stage capture GitHub-request limit must allow the 7 required metadata calls.`);
+      throw new StageCaptureError(400, `The stage capture GitHub-request limit must allow the ${this.required} required metadata calls.`);
     }
     this.spent += calls;
   }
   get remaining(): number { return this.total - this.spent; }
 }
+
+/** Repository, compare, both trees, and the pinned diff, plus the two branch refs when
+ *  the capture has to resolve them. */
+const BRANCH_METADATA_CALLS = 7;
+const PINNED_METADATA_CALLS = 5;
 
 function positiveLimit(name: string, value: number, minimum = 1): number {
   if (!Number.isSafeInteger(value) || value < minimum) {
@@ -466,8 +497,10 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
     }
   }
   const client = stageClient(options.client ?? githubClientFor(workspaceId));
+  const pinned = options.resolved ?? null;
+  const metadataCalls = pinned ? PINNED_METADATA_CALLS : BRANCH_METADATA_CALLS;
   const blobRequestLimit = positiveLimit("The stage capture blob-request limit", options.maxBlobRequests ?? config.stageBlobRequestLimit);
-  const rest = new RestBudget(positiveLimit("The stage capture GitHub-request limit", options.maxGithubRequests ?? config.stageGithubRequestLimit, 7));
+  const rest = new RestBudget(positiveLimit("The stage capture GitHub-request limit", options.maxGithubRequests ?? config.stageGithubRequestLimit, metadataCalls), metadataCalls);
   let repo: Awaited<ReturnType<StageClient["getRepository"]>>;
   let sourceRef: Awaited<ReturnType<StageClient["getRef"]>>;
   let baseRefResult: Awaited<ReturnType<StageClient["getRef"]>>;
@@ -475,19 +508,42 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
   try {
     rest.spend();
     repo = await client.getRepository(request.repo);
-    if (repo.full_name.toLowerCase() !== request.repo.toLowerCase()) throw new StageCaptureError(422, `GitHub resolved ${request.repo} to a different repository, ${repo.full_name}.`);
-    const baseRef = request.baseRef || repo.default_branch;
-    assertRef(baseRef);
-    rest.spend(2);
-    [sourceRef, baseRefResult] = await Promise.all([client.getRef(request.repo, request.branch), client.getRef(request.repo, baseRef)]);
+    if (!pinned && repo.full_name.toLowerCase() !== request.repo.toLowerCase()) {
+      throw new StageCaptureError(422, `GitHub resolved ${request.repo} to a different repository, ${repo.full_name}.`);
+    }
+    if (pinned) {
+      // The repository is still confirmed — a name that now resolves to a different
+      // numeric id is a different repository wearing the same name, and capturing it
+      // under this review's identity would be the silent substitution the pin exists to
+      // prevent. Both branch refs are NOT resolved: the observation already named the
+      // commits, and asking a moving ref again is exactly what must not happen.
+      if (repo.id !== pinned.repoId) {
+        throw new StageCaptureError(422, `GitHub now resolves ${request.repo} to repository ${repo.id} (${repo.full_name}), not the observed ${pinned.repoId} (${pinned.repo}).`);
+      }
+      // Still checked, even though nothing is resolved through them: both names are
+      // stored on the capture and read back later, and the branch-mode path only ever
+      // validated them as a side effect of asking GitHub to resolve them.
+      assertRef(request.branch);
+      assertRef(pinned.baseRef);
+      sourceRef = { ref: `refs/heads/${request.branch}`, sha: pinned.sourceHeadSha, type: "commit" };
+      baseRefResult = { ref: `refs/heads/${pinned.baseRef}`, sha: pinned.baseTipSha, type: "commit" };
+    } else {
+      const branchBaseRef = request.baseRef || repo.default_branch;
+      assertRef(branchBaseRef);
+      rest.spend(2);
+      [sourceRef, baseRefResult] = await Promise.all([client.getRef(request.repo, request.branch), client.getRef(request.repo, branchBaseRef)]);
+    }
     rest.spend();
     comparison = await client.compare(request.repo, baseRefResult.sha, sourceRef.sha);
+    if (pinned && comparison.merge_base_commit.sha.toLowerCase() !== pinned.mergeBaseSha.toLowerCase()) {
+      throw new StageCaptureError(422, `The observed merge base ${pinned.mergeBaseSha} no longer holds; GitHub now reports ${comparison.merge_base_commit.sha}.`);
+    }
   } catch (err) {
     if (err instanceof StageCaptureError) throw err;
     if (err instanceof GithubError && err.status === 404) throw new StageCaptureError(422, `GitHub could not resolve the requested repository or ref: ${err.message}`);
     throw err;
   }
-  const baseRef = request.baseRef || repo.default_branch;
+  const baseRef = pinned ? pinned.baseRef : (request.baseRef || repo.default_branch);
   assertRef(baseRef);
   rest.spend(2);
   const [oldTree, newTree] = await Promise.all([
@@ -583,7 +639,7 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
     const state = objectState.get(object.id)!;
     state.skipped = true;
     state.reason = boundByRest
-      ? `${BUDGET_GITHUB_REQUESTS} The capture permits at most ${rest.total} GitHub REST calls in total, of which ${rest.spent} were spent resolving the repository, refs, compare, trees, and pinned diff; this object was outside the first ${blobAllowance} eligible objects in deterministic retention order.`
+      ? `${BUDGET_GITHUB_REQUESTS} The capture permits at most ${rest.total} GitHub REST calls in total, of which ${rest.spent} were spent resolving ${pinned ? "the repository, compare, trees, and pinned diff" : "the repository, refs, compare, trees, and pinned diff"}; this object was outside the first ${blobAllowance} eligible objects in deterministic retention order.`
       : `${BUDGET_BLOB_REQUESTS} The capture permits at most ${blobRequestLimit} unique Git blob requests; this object was outside the first ${blobAllowance} eligible objects in deterministic retention order.`;
   }
   rest.spend(fetchObjects.length);

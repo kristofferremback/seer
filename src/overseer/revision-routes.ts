@@ -17,6 +17,7 @@ import { readableWorkspaces, softNotFound } from "./read";
 import {
   MAX_FAILURE_TEXT,
   RevisionWriteError,
+  claimWitnessRequest,
   failWitnessRequest,
   getLineage,
   getRevision,
@@ -32,6 +33,8 @@ import {
   type ReviewRevisionRow,
   type WitnessRequestRow,
 } from "./revision-db";
+import { lineageCaptureJobViews } from "./revision-jobs";
+import { lineagePullRequestView, revisionPullRequestView } from "./revision-pr";
 import type { RevisionBuilder } from "./revision-types";
 import { validateAccountPublish, validateLineageCreate } from "./revision-validate";
 import { db } from "../db";
@@ -75,6 +78,11 @@ function revisionView(
     apiUrl: `${config.baseUrl}/api/review-lineages/${lineage.slug}/revisions/${revision.revision}`,
     createdAt: new Date(revision.created_at).toISOString(),
     document: revision.doc,
+    // Beside the V1 document rather than inside it. The document's digest covers the
+    // immutable bytes it was published with; the pull request identity it was captured
+    // from has one stored home of its own, and a V2 document duplicating it would soft-404
+    // every old reader during a mixed-image deploy for nothing.
+    pullRequest: revisionPullRequestView(lineage.workspace_id, revision.id),
     witness: witnessView(request, lineage.slug),
   };
 }
@@ -124,6 +132,8 @@ function lineageView(lineage: ReviewLineageRow): unknown {
     url: `${config.baseUrl}/${workspaceId}/r/${lineage.slug}`,
     apiUrl: `${config.baseUrl}/api/review-lineages/${lineage.slug}`,
     projects,
+    pullRequest: lineagePullRequestView(workspaceId, lineage.id),
+    captureJobs: lineageCaptureJobViews(workspaceId, lineage.id),
     revisions: revisions.map((row) => ({
       revision: row.revision,
       captureId: row.capture_id,
@@ -302,7 +312,10 @@ export async function handlePublishReviewAccount(
 
 /** The key's workspace and the request id are both in the query, so a request id from
  *  another workspace misses rather than resolving. */
-function resolveRequest(req: Request, id: string): { request: WitnessRequestRow; slug: string } | Response {
+function resolveRequest(
+  req: Request,
+  id: string,
+): { request: WitnessRequestRow; slug: string; userId: string; keyId: string } | Response {
   const auth = requireApiKey(req);
   if (auth instanceof Response) {
     auth.headers.set("cache-control", "no-store");
@@ -315,7 +328,43 @@ function resolveRequest(req: Request, id: string): { request: WitnessRequestRow;
     "SELECT slug FROM review_revisions WHERE workspace_id = ? AND id = ?",
   ).get(auth.workspaceId, request.revision_id);
   if (!revision) return softNotFound();
-  return { request, slug: revision.slug };
+  return { request, slug: revision.slug, userId: auth.userId, keyId: auth.keyId };
+}
+
+// ---- POST /api/review-witness-requests/:id/claim ----
+
+/**
+ * Take, renew, or recover the claim on one attempt of a witness request.
+ *
+ * The attempt is `(request, retry count)`, so an agent that failed attempt zero holds
+ * nothing over attempt one. A same-key call renews the lease, which is how a working
+ * agent keeps its claim without a second concept; an expired lease may be recovered by
+ * anyone without touching the retry count, because the count records failures rather than
+ * handovers.
+ */
+export function handleClaimWitnessRequest(req: Request, id: string): Response {
+  const resolved = resolveRequest(req, id);
+  if (resolved instanceof Response) return resolved;
+  try {
+    const result = claimWitnessRequest({
+      workspaceId: resolved.request.workspace_id,
+      requestId: resolved.request.id,
+      userId: resolved.userId,
+      keyId: resolved.keyId,
+    });
+    return reviewJson({
+      ...(witnessView(result.request, resolved.slug) as Record<string, unknown>),
+      claim: {
+        retryCount: result.claim.retry_count,
+        claimed: result.created,
+        leaseExpiresAt: new Date(result.claim.lease_expires_at).toISOString(),
+        claimedAt: new Date(result.claim.claimed_at).toISOString(),
+      },
+    });
+  } catch (err) {
+    if (err instanceof RevisionWriteError) return reviewJson({ error: err.message }, err.status);
+    throw err;
+  }
 }
 
 export async function handleFailWitnessRequest(req: Request, id: string): Promise<Response> {
@@ -336,7 +385,8 @@ export async function handleFailWitnessRequest(req: Request, id: string): Promis
     return reviewJson({ error: `error is over budget: ${raw.length} of at most ${MAX_FAILURE_TEXT} characters` }, 422);
   }
   try {
-    const updated = failWitnessRequest(resolved.request.workspace_id, resolved.request, raw.trim());
+    const updated = failWitnessRequest(resolved.request.workspace_id, resolved.request, raw.trim(),
+      { userId: resolved.userId, keyId: resolved.keyId });
     return reviewJson(witnessView(updated, resolved.slug));
   } catch (err) {
     if (err instanceof RevisionWriteError) return reviewJson({ error: err.message }, err.status);

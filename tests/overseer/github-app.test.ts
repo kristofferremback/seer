@@ -20,9 +20,12 @@ import {
   GithubRoutingError,
   GithubSuspendedError,
   JWT_BACKDATE_SECONDS,
+  openReadSession,
   resetAnonymousReachability,
   ROUTING_CACHE_MAX,
+  setAppApi,
   setGithubClientFactory,
+  setReadRouter,
   setWorkspaceHoldings,
   TOKEN_REMINT_EARLY_MS,
   type AppApi,
@@ -32,7 +35,7 @@ import { githubOAuth } from "../../src/overseer/github-oauth";
 import { dbWorkspaceHoldings } from "../../src/overseer/installations";
 import { githubUserOAuth } from "../../src/overseer/github-user-oauth";
 import { identify } from "../../src/overseer/github-user-pat";
-import { offlineGithubClientFactory } from "../offline-github";
+import { offlineGithubClientFactory, offlineReadRouter } from "../offline-github";
 
 migrate();
 
@@ -564,20 +567,52 @@ test("a token minted by repository id is not served to the repository named that
 
 // ---- the test seam successor ----
 
-// Four seams now. The PAT identifier joined them last: it is a bare function rather than
-// a client, it fell through to a real fetch, and the request it would have made carries
-// the fine-grained token someone pasted into the form. The user OAuth transport arrived without an offline default,
+// Five seams now. The promoted review read router joins the four older seams: it resolves
+// and reopens a stored actor without going through the GithubClient factory. The PAT
+// identifier is a bare function rather than a client, so a leak there would carry the
+// fine-grained token someone pasted into the form. The user OAuth transport arrived without an offline default,
 // so githubUserOAuth() fell through to a real fetch client — and nothing noticed, because
 // no test in the suite touches the callback route yet. The leak was latent rather than
 // live, which is the worst kind to rely on noticing: the first test to exercise that route
 // would have opened a socket to github.com with the configured client secret, silently.
 // The count in this test's name has been wrong once already, so it is spelled out.
-test("the suite cannot reach the network through any of the four seams", async () => {
+test("the suite cannot reach the network through any of the five seams", async () => {
   expect(() => githubClientFor("ws_a").getPull(REPO, 1723)).toThrow(/GitHub is offline/);
   expect(() => githubOAuth().exchangeCode("code")).toThrow(/GitHub is offline/);
   expect(() => githubOAuth().listUserInstallations("tok")).toThrow(/GitHub is offline/);
   expect(() => githubUserOAuth().exchangeAndIdentify("code")).toThrow(/GitHub is offline/);
   await expect(identify("github_pat_whatever")).rejects.toThrow(/GitHub is offline/);
+  await expect(openReadSession("ws_a", { kind: "anonymous" }, REPO, REPO_ID)).rejects.toThrow(/GitHub is offline/);
+});
+
+test("an exact installation reopens a renamed repository by stored id", async () => {
+  let mintedScope: unknown = null;
+  const app: AppApi = {
+    async installationForRepo() { return INSTALLATION; },
+    async installationToken(_installationId, scope) {
+      mintedScope = scope;
+      return "ghs_exact_installation";
+    },
+    noteRepositoryId() {},
+    repositoryId() { return undefined; },
+    invalidateRouting() {},
+  };
+  setReadRouter(null);
+  setWorkspaceHoldings({ installationIds: () => [INSTALLATION] });
+  setAppApi(app);
+  try {
+    await openReadSession(
+      "ws_a",
+      { kind: "installation", installationId: INSTALLATION },
+      "threahq/old-name",
+      REPO_ID,
+    );
+    expect(mintedScope).toEqual({ repositoryIds: [REPO_ID] });
+  } finally {
+    setReadRouter(offlineReadRouter());
+    setAppApi(null);
+    setWorkspaceHoldings(dbWorkspaceHoldings());
+  }
 });
 
 test("with no factory installed, no client is built without a holdings source", () => {

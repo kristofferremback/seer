@@ -544,6 +544,51 @@ export function matchTaskPrs(
     .all(prNumber, repoId, repoFullName.toLowerCase());
 }
 
+/**
+ * A promoted review's pull request, as the join sees it.
+ *
+ * The third table that names a pull request, and it lives here beside the other two on
+ * purpose: an observation is kept when ANY of them names it and a status row is retired
+ * only when NONE of them does, so the three readings have to be one paragraph of code
+ * rather than three that can drift.
+ *
+ * Unlike the other two there is no transitional half: `repo_id` is INTEGER NOT NULL and a
+ * promoted relation is written from a validated payload, so the numeric id is always
+ * available and matching on the name as well could only ever add a FALSE positive. A
+ * repository renamed away frees its old name, and the next repository created under that
+ * name is a different repository with a different id; joining a delivery for it to this
+ * lineage would store an observation of somebody else's pull request as this review's.
+ * The stored name stays a historical display fact and is never a key.
+ */
+export interface LineagePrRow {
+  workspace_id: string;
+  lineage_id: string;
+  slug: string;
+  repo_id: number;
+  repo: string;
+  pr_number: number;
+}
+
+export function matchLineagePrs(repoId: number, prNumber: number): LineagePrRow[] {
+  return db
+    .query<LineagePrRow, [number, number]>(
+      "SELECT workspace_id, lineage_id, slug, repo_id, repo, pr_number FROM review_lineage_prs " +
+        "WHERE pr_number = ? AND detached_at IS NULL AND repo_id = ?",
+    )
+    .all(prNumber, repoId);
+}
+
+/** Every pull request any promoted review in this workspace currently reviews. What
+ *  reconciliation walks beside reviews and tasks. */
+export function listWorkspaceLineagePrs(wsId: string): LineagePrRow[] {
+  return db
+    .query<LineagePrRow, [string]>(
+      "SELECT workspace_id, lineage_id, slug, repo_id, repo, pr_number FROM review_lineage_prs " +
+        "WHERE workspace_id = ? AND detached_at IS NULL",
+    )
+    .all(wsId);
+}
+
 /** Heal a task pointer the first time an observation names its numeric id — the same
  *  ending path healReviewPrRepoId walks, for the same reason. */
 export function healTaskPrRepoId(
@@ -773,23 +818,30 @@ export function observePullRequest(installationId: number, obs: PrObservation): 
   if (!install || install.workspace_id === null) return 0;
   const wsId = install.workspace_id;
 
-  // Reviews and tasks both name pull requests, and either naming keeps the
-  // observation; a pull request neither mentions is acknowledged and dropped, which
-  // is the growth bound the comment above promises.
+  // Reviews, tasks and promoted lineages all name pull requests, and any one naming
+  // keeps the observation; a pull request none of them mentions is acknowledged and
+  // dropped, which is the growth bound the comment above promises.
   const named = matchReviewPrs(obs.repoId, obs.repo, obs.prNumber).filter(
     (row) => row.workspace_id === wsId,
   );
   const namedByTasks = matchTaskPrs(obs.repoId, obs.repo, obs.prNumber).filter(
     (row) => row.workspace_id === wsId,
   );
-  if (named.length === 0 && namedByTasks.length === 0) return 0;
+  const namedByLineages = matchLineagePrs(obs.repoId, obs.prNumber).filter(
+    (row) => row.workspace_id === wsId,
+  );
+  if (named.length === 0 && namedByTasks.length === 0 && namedByLineages.length === 0) return 0;
   for (const row of named) {
     healReviewPrRepoId(row.workspace_id, row.slug, obs.repo, obs.prNumber, obs.repoId);
   }
   for (const row of namedByTasks) {
     healTaskPrRepoId(row.workspace_id, row.task_id, obs.repo, obs.prNumber, obs.repoId);
   }
-  return upsertPrStatus(wsId, installationId, obs) ? named.length + namedByTasks.length : 0;
+  // Promoted relations need no healing: their numeric id was written from a validated
+  // payload at attachment and is never null.
+  return upsertPrStatus(wsId, installationId, obs)
+    ? named.length + namedByTasks.length + namedByLineages.length
+    : 0;
 }
 
 /**
@@ -802,8 +854,9 @@ export function observePullRequest(installationId: number, obs: PrObservation): 
  * runs inside the publish transaction that changed the answer.
  */
 export function sweepOrphanPrStatus(wsId: string): number {
-  // Tasks name pull requests too, so a status row survives as long as EITHER table
-  // names it: sweeping on reviews alone would delete the fact a task still renders.
+  // Tasks and promoted reviews name pull requests too, so a status row survives as long
+  // as ANY of the three tables names it: sweeping on reviews alone would delete the fact
+  // a task or a promoted review still renders.
   return db.run(
     "DELETE FROM github_pr_status WHERE workspace_id = ? AND NOT EXISTS (" +
       "SELECT 1 FROM review_prs r WHERE r.workspace_id = github_pr_status.workspace_id " +
@@ -812,7 +865,14 @@ export function sweepOrphanPrStatus(wsId: string): number {
       "AND NOT EXISTS (" +
       "SELECT 1 FROM project_task_prs t WHERE t.workspace_id = github_pr_status.workspace_id " +
       "AND t.pr_number = github_pr_status.pr_number " +
-      "AND (t.repo_id = github_pr_status.repo_id OR lower(t.repo) = lower(github_pr_status.repo)))",
+      "AND (t.repo_id = github_pr_status.repo_id OR lower(t.repo) = lower(github_pr_status.repo))) " +
+      // By numeric id alone, matching matchLineagePrs: a promoted relation always carries
+      // one, so a name arm here could only keep a status row alive for a repository this
+      // workspace reviews nothing in.
+      "AND NOT EXISTS (" +
+      "SELECT 1 FROM review_lineage_prs l WHERE l.workspace_id = github_pr_status.workspace_id " +
+      "AND l.detached_at IS NULL AND l.pr_number = github_pr_status.pr_number " +
+      "AND l.repo_id = github_pr_status.repo_id)",
     [wsId],
   ).changes;
 }

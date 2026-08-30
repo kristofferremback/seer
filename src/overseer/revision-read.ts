@@ -15,7 +15,7 @@ import { sessionEmail, sessionUser } from "../auth";
 import { getWorkspace, isMember, listUserWorkspaces } from "../db";
 import { SLUG_RE, STAGE_CHANGE_ID_RE, STF_ID_RE } from "../ids";
 import { json, originOk } from "../http";
-import { softNotFoundPage, type NavContext } from "../pages";
+import { appBar, softNotFoundPage, type NavContext } from "../pages";
 import {
   getStageCaptureForWorkspaces,
   type StageCaptureChangeRow,
@@ -30,9 +30,27 @@ import {
   type ReaderDoc,
   type ReaderGroup,
   type ReaderMember,
+  type ReaderPullRequest,
   type ReaderRoutes,
   type ReaderWorkflow,
 } from "../stage/render";
+import { STAGE_THEME_BOOTSTRAP } from "../stage/render-client";
+import { STAGE_CSS } from "../stage/render-css";
+import { escapeHtml } from "../escape";
+import { agoWords } from "../relative-time";
+import { actorWords } from "./github-app";
+import { latestCaptureJob, type ReviewCaptureJobRow } from "./revision-jobs";
+import {
+  getLineagePr,
+  getObservation,
+  latestObservation,
+  observationForRevision,
+  observationStateWord,
+  pullRequestUrl,
+  readActorOf,
+  type ReviewLineagePrRow,
+  type ReviewPrObservationRow,
+} from "./revision-pr";
 import { MAX_EVIDENCE_PAGE_ITEMS } from "./revision-types";
 import {
   getAccount,
@@ -301,6 +319,26 @@ function readerDoc(resolved: ResolvedPromotedRead, pinnedKind: "revision" | "acc
   const latest = account
     ? account.version === lineage.latest_account_version
     : revision.revision === lineage.latest_revision;
+  // The revision's OWN observation, read through its immutable source association. Never
+  // the relation's latest: a later merge is not a fact about the code on this page, so a
+  // pinned revision may go on saying "open, observed …" long after the pull request
+  // merged. Task 6 owns the separate newer-observation notice.
+  const observed = observationForRevision(resolved.workspaceId, revision.id);
+  const currentObservation = observed ? latestObservation(resolved.workspaceId, lineage.id) : null;
+  const currentRepo = currentObservation && observed && currentObservation.repo_id === observed.repo_id
+    ? currentObservation.repo
+    : observed?.repo;
+  const pullRequest: ReaderPullRequest | null = observed
+    ? {
+        repo: currentRepo ?? observed.repo,
+        number: observed.pr_number,
+        title: observed.title,
+        url: pullRequestUrl(currentRepo ?? observed.repo, observed.pr_number),
+        state: observationStateWord(observed),
+        observedAt: observed.observed_at,
+        headSha: observed.head_sha,
+      }
+    : null;
   return {
     title: revision.doc.identity.title,
     source: {
@@ -309,6 +347,7 @@ function readerDoc(resolved: ResolvedPromotedRead, pinnedKind: "revision" | "acc
       sourceHeadSha: source.sourceHeadSha,
       mergeBaseSha: source.mergeBaseSha,
     },
+    pullRequest,
     builder: builder ? { agent: builder.agent, body: builder.intent, context: builder.context } : null,
     witness: account ? { agent: account.doc.witness.agent, body: account.doc.witness.summary } : null,
     groups: account ? account.doc.groups.map(readerGroupOf) : evidenceSeams(resolved.inventory),
@@ -334,6 +373,83 @@ function readerDoc(resolved: ResolvedPromotedRead, pinnedKind: "revision" | "acc
 
 // ---- the page ----
 
+// ---- the shell a lineage has before its first capture completes ----
+
+const CAPTURE_WORDS: Record<ReviewCaptureJobRow["state"], string> = {
+  pending: "Capture pending",
+  running: "Capturing",
+  failed: "Capture failed",
+  // Unreachable in practice — a completed capture is a revision, and a lineage with one
+  // never renders this page — but a word that would be wrong if it ever showed is worse
+  // than one that is merely surprising.
+  completed: "Capture complete",
+};
+
+function shortSha(value: string): string {
+  return value.slice(0, 7);
+}
+
+/**
+ * A promoted review whose first source revision does not exist yet.
+ *
+ * Deliberately its own page rather than a `ReaderDoc` with an empty group list. A reader
+ * document promises a walkthrough over a capture; there is no capture, so constructing
+ * one would mean inventing an empty partition, a source rail with no history, read state
+ * over nothing, and a witness request that has not been created. The shell says the four
+ * true things instead — what this review is, which pull request it reviews, what source
+ * it is pinned to, and where the capture has got to — using the same app bar and page
+ * tokens the completed page uses, so it reads as this review's page early rather than as
+ * a different kind of page.
+ *
+ * Nothing here needs JavaScript, there is no `/rev/` URL to link to yet, and the actor is
+ * named by what kind of reader it is rather than by any credential id.
+ */
+function pendingCapturePage(
+  nav: NavContext,
+  lineage: ReviewLineageRow,
+  relation: ReviewLineagePrRow | null,
+  observation: ReviewPrObservationRow | null,
+  currentObservation: ReviewPrObservationRow | null,
+  job: ReviewCaptureJobRow | null,
+  now: number = Date.now(),
+): Response {
+  const esc = (value: unknown): string => escapeHtml(String(value ?? ""));
+  const word = job ? CAPTURE_WORDS[job.state] : "Capture pending";
+  const currentRepo = currentObservation && relation && currentObservation.repo_id === relation.repo_id
+    ? currentObservation.repo
+    : relation?.repo;
+  const prLink = relation && currentRepo
+    ? `<a class="source-pr" href="${esc(pullRequestUrl(currentRepo, relation.pr_number))}" rel="noreferrer noopener" ` +
+      `aria-label="${esc(`${currentRepo}#${relation.pr_number}${observation ? `: ${observation.title}` : ""}`)}">#${esc(relation.pr_number)}</a>`
+    : "";
+  const pinned = observation
+    ? `${esc(observation.base_ref)} ${esc(shortSha(observation.base_sha))} → ${esc(observation.head_ref)} ${esc(observation.head_sha)}`
+    : `${esc(lineage.original_base_ref)} → ${esc(lineage.branch)}`;
+  const standing = observation
+    ? `${esc(observationStateWord(observation))}, observed ${esc(agoWords(now - observation.observed_at))}`
+    : "";
+  const facts = [
+    `<p><strong>Source</strong> ${pinned}</p>`,
+    relation ? `<p><strong>Read as</strong> ${esc(actorWords(readActorOf(relation)))}</p>` : "",
+    job && job.state === "failed" && job.failure ? `<p><strong>Failure</strong> ${esc(job.failure)}</p>` : "",
+  ].join("");
+  const body =
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">` +
+    `<meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script>` +
+    `<title>${esc(lineage.title)} · Seer</title><style>${STAGE_CSS}</style></head>` +
+    `<body><div data-stage-background><div class="stage-shell">${appBar(nav)}</div>` +
+    `<div class="stage-grid stage-overview"><header class="stage-header">` +
+    `<p class="stage-context">${esc(lineage.repo)} · ${esc(lineage.branch)}${prLink === "" ? "" : ` · ${prLink}`}</p>` +
+    `<h1>${esc(lineage.title)}</h1>` +
+    `<div class="stage-source"><span>${esc(word)}</span>${standing === "" ? "" : `<span class="source-observation">${standing}</span>`}</div>` +
+    `</header><section class="pending-facts" aria-label="Capture">${facts}</section></div></div></body></html>`;
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
 /**
  * `/<workspace>/r/<slug>`, `/rev/<n>` and `/v/<n>` for a promoted review.
  *
@@ -350,15 +466,31 @@ export async function handlePromotedReviewPage(
   const user = sessionUser(req);
   const workspace = getWorkspace(workspaceId);
   if (!user || !workspace || !isMember(workspaceId, user.id)) return softReviewPage();
-  const resolved = resolvePromoted(workspaceId, slug, pin);
-  if (!resolved) return softReviewPage();
-
   const nav: NavContext = {
     email: user.email,
     workspaces: listUserWorkspaces(user.id).map((item) => ({ id: item.id, name: item.name })),
     current: { id: workspace.id, name: workspace.name },
     section: "reviews",
   };
+  // The latest URL of a lineage whose first capture has not completed. A pinned `/rev/`
+  // or `/v/` is still a miss: those name documents, and there are none yet.
+  if (pin === null && SLUG_RE.test(slug)) {
+    const shell = getLineage(workspaceId, slug);
+    if (shell && shell.latest_revision === null) {
+      const job = latestCaptureJob(workspaceId, shell.id);
+      return pendingCapturePage(
+        nav,
+        shell,
+        getLineagePr(workspaceId, shell.id),
+        job ? getObservation(workspaceId, job.observation_id) : null,
+        latestObservation(workspaceId, shell.id),
+        job,
+      );
+    }
+  }
+  const resolved = resolvePromoted(workspaceId, slug, pin);
+  if (!resolved) return softReviewPage();
+
   const doc = readerDoc(resolved, pin === null ? "latest" : pin.kind);
   const { lineage, revision, account } = resolved;
   const pinnedPath = account

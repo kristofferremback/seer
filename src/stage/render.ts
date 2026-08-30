@@ -20,6 +20,7 @@ import { render as renderMarkdown } from "../overseer/markdown";
 import { codeHtml, langOfPath, stats } from "../overseer/render-diff";
 import type { Hunk, HunkLine } from "../overseer/types";
 import { appBar, softNotFoundPage, type NavContext } from "../pages";
+import { agoWords } from "../relative-time";
 import {
   getStage,
   getStageCaptureForWorkspaces,
@@ -101,9 +102,31 @@ export interface ReaderWorkflow {
   detail: string | null;
 }
 
+/**
+ * The pull request a promoted review's source came from, as the reader states it.
+ *
+ * Stored facts only. This is the observation the REVISION was captured from, not the
+ * relation's newest one, so a pinned page keeps saying what was true when it was
+ * published — a merge that lands afterwards does not rewrite it. Task 6 owns the separate
+ * notice that a newer observation exists.
+ */
+export interface ReaderPullRequest {
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  state: "open" | "closed" | "merged" | "draft";
+  /** When Seer read it, in milliseconds. Rendered as an age, because the point is that
+   *  this is a reading rather than live state. */
+  observedAt: number;
+  headSha: string;
+}
+
 export interface ReaderDoc {
   title: string;
   source: { repo: string; branch: string; sourceHeadSha: string; mergeBaseSha: string };
+  /** Absent for a stage, and for a promoted review no pull request is attached to. */
+  pullRequest?: ReaderPullRequest | null;
   builder: ReaderAccount | null;
   witness: ReaderAccount | null;
   groups: ReaderGroup[];
@@ -496,6 +519,29 @@ function workflowLine(workflow: ReaderWorkflow | null): string {
   return `<p class="stage-workflow" data-witness-state="${esc(workflow.word)}">${esc(word)}${workflow.detail ? ` · ${esc(exactExcerpt(workflow.detail, 200).text)}` : ""}</p>`;
 }
 
+/**
+ * The pull request, in as few words as it can be said in.
+ *
+ * A short native link — `#41` — beside the repository and branch, because that is how
+ * everybody already writes it, and the accessible name carries the whole of what the
+ * abbreviation stands for. No panel, no banner, no pill.
+ */
+function pullRequestLink(pr: ReaderPullRequest): string {
+  return `<a class="source-pr" href="${esc(pr.url)}" rel="noreferrer noopener" ` +
+    `aria-label="${esc(`${pr.repo}#${pr.number}: ${pr.title}`)}">#${esc(pr.number)}</a>`;
+}
+
+/** Status and age together, because either alone would be read as live state. */
+function pullRequestStanding(pr: ReaderPullRequest, now: number = Date.now()): string {
+  return `${pr.state}, observed ${agoWords(now - pr.observedAt)}`;
+}
+
+/** On phone the PR citation moves out of the compact focus header and into Details. */
+function focusPullRequest(pr: ReaderPullRequest | null | undefined): string {
+  if (!pr) return "";
+  return `<p class="focus-pr-source">${pullRequestLink(pr)} · ${esc(pullRequestStanding(pr))}</p>`;
+}
+
 /** Decisions and risks, each one a link into the code it stands on. Anchors overlap and
  *  own nothing, so this is a second way into the same changes rather than a partition. */
 function focusSection(doc: ReaderDoc, views: GroupView[], routes: ReaderRoutes): string {
@@ -613,7 +659,7 @@ function focusDialog(
   const headTitle = selected.group.category === null
     ? `${doc.title} · ${String(selected.index + 1).padStart(2, "0")}`
     : `${doc.title} · ${groupSequence(selected)}`;
-  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}" data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="/bundles">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong></div><div class="focus-head-actions"><span>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span><button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}</div>${diffStat(selected.added, selected.removed)}</header>${files.map(({ file, changes }) => fileReview(selected, file, changes, readIds, routes)).join("")}${extraMaterialHtml(selected, true)}</main><aside class="focus-right" aria-label="Review details"><header><button type="button" data-filter-unread aria-pressed="false">Unread</button><button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${focusLedger(selected, readIds, routes)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
+  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}" data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="/bundles">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong></div><div class="focus-head-actions"><span${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span>${doc.pullRequest ? pullRequestLink(doc.pullRequest) : ""}<button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}</div>${diffStat(selected.added, selected.removed)}</header>${files.map(({ file, changes }) => fileReview(selected, file, changes, readIds, routes)).join("")}${extraMaterialHtml(selected, true)}</main><aside class="focus-right" aria-label="Review details"><header><button type="button" data-filter-unread aria-pressed="false">Unread</button><button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${focusPullRequest(doc.pullRequest)}${focusLedger(selected, readIds, routes)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
 }
 
 function storageFailurePage(nav: NavContext, title: string, status: number): Response {
@@ -676,7 +722,7 @@ export async function renderReaderPage(
     .join(" · ");
   const progress = changes.length === 0 ? 100 : Math.round(readCount / changes.length * 100);
   const accounts = `${doc.builder ? accountCard("Builder", doc.builder) : ""}${doc.witness ? accountCard("Witness", doc.witness) : ""}`;
-  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"><div data-stage-background><div class="stage-shell">${appBar(nav)}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span></div>${workflowLine(doc.workflow)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${focusSection(doc, views, routes)}${evidenceSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, doc, readCount, changes.length)}</aside><main class="walkthrough">${groupCards}<footer class="terminal"><div><h2 data-unread-summary>${readCount === changes.length ? "Read" : `${changes.length - readCount} unread`}</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><p>${esc(doc.standing)} · ${inventory.files.length} files</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code>${esc(shortSha(doc.source.sourceHeadSha))}</code></section></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button><span data-progress>${readCount} / ${changes.length} read</span></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, views, readIds, routes, doc, null)}<script>${STAGE_CLIENT}</script></body></html>`;
+  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"><div data-stage-background><div class="stage-shell">${appBar(nav)}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${focusSection(doc, views, routes)}${evidenceSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, doc, readCount, changes.length)}</aside><main class="walkthrough">${groupCards}<footer class="terminal"><div><h2 data-unread-summary>${readCount === changes.length ? "Read" : `${changes.length - readCount} unread`}</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><p>${esc(doc.standing)} · ${inventory.files.length} files</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button><span data-progress>${readCount} / ${changes.length} read</span></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, views, readIds, routes, doc, null)}<script>${STAGE_CLIENT}</script></body></html>`;
   return html(page);
 }
 

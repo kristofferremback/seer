@@ -19,7 +19,11 @@ import {
   type GithubClient,
   type GithubPull,
 } from "./github";
-import { createUserGithubClient } from "./github-user";
+import {
+  createUserGithubClient,
+  exactUserGithubClient,
+  findUserCredentialFor,
+} from "./github-user";
 
 // ---- the app JWT ----
 
@@ -439,75 +443,89 @@ export function resetAnonymousReachability(): void {
   anonymousUnreachable.clear();
 }
 
+/** Transport-only options, shared by every client this module builds. */
+export interface GithubTransportOptions {
+  apiBase?: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+/**
+ * The client for a repository no installation of this workspace's covers: no token at
+ * all, which is what makes the fallback safe rather than a hole. An unauthenticated
+ * request can only ever be answered with bytes GitHub already serves to the world, so
+ * no workspace reaches anything it could not have read from a browser — while a public
+ * repository stays reviewable, which it was before the App existed.
+ *
+ * The cost is the budget: GitHub allows roughly sixty unauthenticated requests an hour
+ * per IP, shared by everything on this host. A repository an installation does cover
+ * must therefore always be reached through that installation, never through here.
+ *
+ * At module scope rather than inside the workspace client because the promoted review's
+ * `anonymous` read actor is the same thing: a stored decision to read this repository
+ * with no credential at all, reopened later by a worker that has no workspace client.
+ */
+export function anonymousGithubClient(repo: string, options: GithubTransportOptions = {}): GithubClient {
+  const client = createFetchGithubClient(options);
+  const refusal = () =>
+    new GithubRoutingError(
+      `${repo} is not reachable anonymously, and no GitHub App installation this workspace ` +
+        `holds covers it. If the repository is private, install the app on the ` +
+        `${accountOf(repo)} account and connect it in workspace settings — or connect a ` +
+        `GitHub account that can read ${repo}.`,
+    );
+  // When the anonymous read fails the way a private repository fails, the refusal the
+  // routing check would have thrown is still the actionable half of the answer, so it
+  // is said here — with GitHub's own words kept as the cause. GitHub also answers 403
+  // when the unauthenticated budget itself is spent, and that is a different sentence
+  // with a different remedy: the repository is not at fault and must not be remembered
+  // as unreadable.
+  async function guard<T>(call: () => Promise<T>): Promise<T> {
+    const barred = anonymousUnreachable.get(repo.toLowerCase());
+    if (barred !== undefined && barred > Date.now()) throw refusal();
+    try {
+      return await call();
+    } catch (err) {
+      if (err instanceof GithubError && err.status === 403 && /rate limit/i.test(err.message)) {
+        throw new GithubRateLimitError(
+          "GitHub's anonymous request budget for this host is exhausted. It is shared by " +
+            "everything here that reads public repositories without an installation, and it " +
+            "resets on GitHub's own schedule. Nothing was read, and no repository is at fault.",
+        );
+      }
+      if (err instanceof GithubError && (err.status === 404 || err.status === 403)) {
+        anonymousUnreachable.set(repo.toLowerCase(), Date.now() + ANONYMOUS_NEGATIVE_TTL_MS);
+        bound(anonymousUnreachable, ROUTING_CACHE_MAX, (until) => until, Date.now());
+        throw new GithubRoutingError(`${refusal().message} GitHub answered: ${err.message}`);
+      }
+      throw err;
+    }
+  }
+  return {
+    getPull: (r, n) => guard(() => client.getPull(r, n)),
+    listCommits: (r, n) => guard(() => client.listCommits(r, n)),
+    listFiles: (r, n) => guard(() => client.listFiles(r, n)),
+    listReviewComments: (r, n) => guard(() => client.listReviewComments(r, n)),
+    getFileAtSha: (r, p, sha) => guard(() => client.getFileAtSha(r, p, sha)),
+    getPullDiff: (r, n) => guard(() => client.getPullDiff(r, n)),
+    getRepository: (r) => guard(() => client.getRepository!(r)),
+    getRef: (r, ref) => guard(() => client.getRef!(r, ref)),
+    getTree: (r, sha, recursive) => guard(() => client.getTree!(r, sha, recursive)),
+    getBlobBytes: (r, sha) => guard(() => client.getBlobBytes!(r, sha)),
+    compare: (r, base, head) => guard(() => client.compare!(r, base, head)),
+    compareDiff: (r, base, head) => guard(() => client.compareDiff!(r, base, head)),
+  };
+}
+
 export function createWorkspaceGithubClient(options: WorkspaceClientOptions): GithubClient {
   const { workspaceId, holdings, app } = options;
 
-  /**
-   * The client for a repository no installation of this workspace's covers: no token at
-   * all, which is what makes the fallback safe rather than a hole. An unauthenticated
-   * request can only ever be answered with bytes GitHub already serves to the world, so
-   * no workspace reaches anything it could not have read from a browser — while a public
-   * repository stays reviewable, which it was before the App existed.
-   *
-   * The cost is the budget: GitHub allows roughly sixty unauthenticated requests an hour
-   * per IP, shared by everything on this host. A repository an installation does cover
-   * must therefore always be reached through that installation, never through here.
-   */
-  function anonymous(repo: string): GithubClient {
-    const client = createFetchGithubClient({
+  const anonymous = (repo: string): GithubClient =>
+    anonymousGithubClient(repo, {
       apiBase: options.apiBase,
       fetchImpl: options.fetchImpl,
       timeoutMs: options.timeoutMs,
     });
-    const refusal = () =>
-      new GithubRoutingError(
-        `${repo} is not reachable anonymously, and no GitHub App installation this workspace ` +
-          `holds covers it. If the repository is private, install the app on the ` +
-          `${accountOf(repo)} account and connect it in workspace settings — or connect a ` +
-          `GitHub account that can read ${repo}.`,
-      );
-    // When the anonymous read fails the way a private repository fails, the refusal the
-    // routing check would have thrown is still the actionable half of the answer, so it
-    // is said here — with GitHub's own words kept as the cause. GitHub also answers 403
-    // when the unauthenticated budget itself is spent, and that is a different sentence
-    // with a different remedy: the repository is not at fault and must not be remembered
-    // as unreadable.
-    async function guard<T>(call: () => Promise<T>): Promise<T> {
-      const barred = anonymousUnreachable.get(repo.toLowerCase());
-      if (barred !== undefined && barred > Date.now()) throw refusal();
-      try {
-        return await call();
-      } catch (err) {
-        if (err instanceof GithubError && err.status === 403 && /rate limit/i.test(err.message)) {
-          throw new GithubRateLimitError(
-            "GitHub's anonymous request budget for this host is exhausted. It is shared by " +
-              "everything here that reads public repositories without an installation, and it " +
-              "resets on GitHub's own schedule. Nothing was read, and no repository is at fault.",
-          );
-        }
-        if (err instanceof GithubError && (err.status === 404 || err.status === 403)) {
-          anonymousUnreachable.set(repo.toLowerCase(), Date.now() + ANONYMOUS_NEGATIVE_TTL_MS);
-          bound(anonymousUnreachable, ROUTING_CACHE_MAX, (until) => until, Date.now());
-          throw new GithubRoutingError(`${refusal().message} GitHub answered: ${err.message}`);
-        }
-        throw err;
-      }
-    }
-    return {
-      getPull: (r, n) => guard(() => client.getPull(r, n)),
-      listCommits: (r, n) => guard(() => client.listCommits(r, n)),
-      listFiles: (r, n) => guard(() => client.listFiles(r, n)),
-      listReviewComments: (r, n) => guard(() => client.listReviewComments(r, n)),
-      getFileAtSha: (r, p, sha) => guard(() => client.getFileAtSha(r, p, sha)),
-      getPullDiff: (r, n) => guard(() => client.getPullDiff(r, n)),
-      getRepository: (r) => guard(() => client.getRepository!(r)),
-      getRef: (r, ref) => guard(() => client.getRef!(r, ref)),
-      getTree: (r, sha, recursive) => guard(() => client.getTree!(r, sha, recursive)),
-      getBlobBytes: (r, sha) => guard(() => client.getBlobBytes!(r, sha)),
-      compare: (r, base, head) => guard(() => client.compare!(r, base, head)),
-      compareDiff: (r, base, head) => guard(() => client.compareDiff!(r, base, head)),
-    };
-  }
 
   const userClient =
     options.userClient ??
@@ -727,4 +745,142 @@ export function setAppApi(app: AppApi | null): void {
 
 export function setGithubClientFactory(factory: GithubClientFactory | null): void {
   injectedFactory = factory;
+}
+
+// ---- the routed read session: a client, and the name of who it is ----
+//
+// `githubClientFor` answers "give me something that can read this workspace's
+// repositories" and decides per call, silently falling from installation to credential to
+// anonymity. That is right for a read that happens once and is rendered immediately.
+//
+// It is wrong for work that outlives the request. A promoted review observes a pull
+// request now, queues a capture, and completes it in another process minutes later — and
+// the two must be the same reader. So this seam answers a different question: WHO is
+// reading, as a value that can be stored, and later, open exactly that one and nothing
+// else. There is no fallback in `open` on purpose: falling back would mean the stored
+// attribution and the credential actually spent had come apart.
+
+/** A stored read identity. Narrow by construction: an installation this workspace holds,
+ *  one credential of one person, or no credential at all. */
+export type ReadActor =
+  | { kind: "installation"; installationId: number }
+  | { kind: "user"; userId: string; credentialId: string }
+  | { kind: "anonymous" };
+
+export interface GithubReadSession {
+  actor: ReadActor;
+  client: GithubClient;
+}
+
+export interface ReadRouter {
+  /** Who this workspace should read `repo` as, for the person asking. */
+  resolve(workspaceId: string, repo: string, askingUserId: string | null): Promise<ReadActor>;
+  /** A client for exactly that actor, or a visible refusal. Never a different actor.
+   *  A stored repository id keeps installation scoping valid after a rename. */
+  open(workspaceId: string, actor: ReadActor, repo: string, repoId?: number): Promise<GithubClient>;
+}
+
+/** The lane a capture job queues on. Two jobs for one actor serialize; jobs for
+ *  different actors may overlap. Workspace-scoped because an installation and a
+ *  credential are both claimed by exactly one workspace, and anonymity is only ever
+ *  spending the host's shared budget on this workspace's behalf. */
+export function actorQueueKey(workspaceId: string, actor: ReadActor): string {
+  if (actor.kind === "installation") {
+    return [workspaceId, "installation", String(actor.installationId)].join("/");
+  }
+  if (actor.kind === "user") return [workspaceId, "user", actor.userId, actor.credentialId].join("/");
+  return [workspaceId, "anonymous"].join("/");
+}
+
+/** How a reader names the actor. Never a credential id: settings owns that, and a
+ *  review page is read by every member of the workspace. */
+export function actorWords(actor: ReadActor): string {
+  if (actor.kind === "installation") return "the GitHub App installation";
+  if (actor.kind === "user") return "the owning member's GitHub connection";
+  return "public GitHub";
+}
+
+function defaultReadRouter(): ReadRouter {
+  return {
+    async resolve(workspaceId, repo, askingUserId) {
+      assertRepo(repo);
+      if (!holdingsSource) {
+        throw new Error(
+          "No workspace holdings source is installed, so no workspace can be routed to an installation.",
+        );
+      }
+      defaultApp ??= createAppApi({ credentials: appCredentials() });
+      const installationId = await defaultApp.installationForRepo(repo);
+      if (installationId !== null) {
+        const held = await holdingsSource.installationIds(workspaceId);
+        if (held.includes(installationId)) return { kind: "installation", installationId };
+      }
+      if (askingUserId) {
+        const credentialId = await findUserCredentialFor(askingUserId, repo);
+        if (credentialId) return { kind: "user", userId: askingUserId, credentialId };
+      }
+      return { kind: "anonymous" };
+    },
+
+    async open(workspaceId, actor, repo, repoId) {
+      assertRepo(repo);
+      if (actor.kind === "anonymous") return anonymousGithubClient(repo);
+      if (actor.kind === "user") return exactUserGithubClient(actor.userId, actor.credentialId);
+      if (!holdingsSource) {
+        throw new Error(
+          "No workspace holdings source is installed, so no workspace can be routed to an installation.",
+        );
+      }
+      const held = await holdingsSource.installationIds(workspaceId);
+      if (!held.includes(actor.installationId)) {
+        throw new GithubRoutingError(
+          `This review reads ${repo} through GitHub App installation ${actor.installationId}, which ` +
+            "this workspace no longer holds. Reconnect that installation in workspace settings, or " +
+            "attach the pull request again through a reader that can reach it.",
+        );
+      }
+      defaultApp ??= createAppApi({ credentials: appCredentials() });
+      const id = repoId ?? defaultApp.repositoryId(repo);
+      const token = await defaultApp.installationToken(
+        actor.installationId,
+        id === undefined ? { repositories: [repo.split("/")[1]!] } : { repositoryIds: [id] },
+      );
+      return createFetchGithubClient({ token });
+    },
+  };
+}
+
+let injectedReadRouter: ReadRouter | null = null;
+
+/** Test seam. The suite installs an offline router at preload for the same reason it
+ *  installs an offline client factory: without one, resolving an actor would route a
+ *  repository name against the real App credentials. */
+export function setReadRouter(router: ReadRouter | null): void {
+  injectedReadRouter = router;
+}
+
+function readRouter(): ReadRouter {
+  return injectedReadRouter ?? defaultReadRouter();
+}
+
+/** Resolve one actor and bind it in the same breath, so the caller holds a session it
+ *  can both store and read through. */
+export async function resolveReadSession(
+  workspaceId: string,
+  repo: string,
+  askingUserId: string | null,
+): Promise<GithubReadSession> {
+  const router = readRouter();
+  const actor = await router.resolve(workspaceId, repo, askingUserId);
+  return { actor, client: await router.open(workspaceId, actor, repo) };
+}
+
+/** Reopen an exact stored actor. A worker never reroutes. */
+export async function openReadSession(
+  workspaceId: string,
+  actor: ReadActor,
+  repo: string,
+  repoId?: number,
+): Promise<GithubReadSession> {
+  return { actor, client: await readRouter().open(workspaceId, actor, repo, repoId) };
 }
