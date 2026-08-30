@@ -60,7 +60,22 @@ export const WTR_ID_RE = new RegExp(`^wtr_${TINY}$`);
 // job that turns an observation into a source revision.
 export const POB_ID_RE = new RegExp(`^pob_${TINY}$`);
 export const RCJ_ID_RE = new RegExp(`^rcj_${TINY}$`);
+// A stack of promoted reviews: the stack, one immutable manifest of it, one account over a
+// manifest, the witness request waiting to become that account, one receipt-owned stack
+// observation, and the installation-owned refresh job it queues. Each prefix is its own,
+// so no stack route can resolve a row of another table.
+export const RSK_ID_RE = new RegExp(`^rsk_${TINY}$`);
+export const RSM_ID_RE = new RegExp(`^rsm_${TINY}$`);
+export const RSA_ID_RE = new RegExp(`^rsa_${TINY}$`);
+export const RSW_ID_RE = new RegExp(`^rsw_${TINY}$`);
+// One provider stack-membership reading from an accepted webhook receipt.
+export const RSO_ID_RE = new RegExp(`^rso_${TINY}$`);
+export const RSJ_ID_RE = new RegExp(`^rsj_${TINY}$`);
 export const STAGE_CHANGE_ID_RE = /^chg_[a-f0-9]{64}$/;
+/** A member's change or file inside a stack reader, namespaced by the member's position:
+ *  canonical ids are content-derived and two layers can hold identical hunks. */
+export const STACK_CHANGE_ID_RE = /^l[1-9][0-9]?-chg_[a-f0-9]{64}$/;
+export const STACK_FILE_ID_RE = new RegExp(`^l[1-9][0-9]?-stf_${TINY}$`);
 export const API_KEY_RE = /^seer_sk_[A-Za-z0-9_-]{32}$/;
 export const SHARE_TOKEN_RE = /^seer_sh_[A-Za-z0-9_-]{32}$/;
 

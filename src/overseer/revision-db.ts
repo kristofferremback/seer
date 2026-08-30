@@ -10,7 +10,8 @@ import { createHash } from "node:crypto";
 import { db } from "../db";
 import { RLN_ID_RE, SLUG_RE, STG_ID_RE, tinyId } from "../ids";
 import { getProject } from "../projects/db";
-import { lineageOwnsSlug } from "./db";
+import { lineageOwnsSlug, stackOwnsSlug } from "./db";
+import { onMemberAccountPublished } from "./stack-db";
 import type { StageGroup } from "../stage/types";
 import type {
   AccountDoc,
@@ -757,6 +758,9 @@ export const publishFirstRevision = db.transaction((input: PublishRevisionInput)
   if (lineageOwnsSlug(workspaceId, slug)) {
     throw new RevisionWriteError(409, `Review slug "${slug}" already names another promoted review`);
   }
+  if (stackOwnsSlug(workspaceId, slug)) {
+    throw new RevisionWriteError(409, `Review slug "${slug}" already names a review stack`);
+  }
   if (input.legacyOwnsSlug(slug)) {
     throw new RevisionWriteError(409, `Review slug "${slug}" already names a review in this workspace`);
   }
@@ -993,6 +997,10 @@ export const publishAccount = db.transaction((input: PublishAccountInput): Publi
   const account = getAccount(workspaceId, lineage.slug, version);
   const publishedRequest = getWitnessRequestForRevision(workspaceId, revision.id);
   if (!account || !publishedRequest) throw new Error("Account publication did not write every row");
+  // Inside this transaction, not after it: a stack whose last member just gained its account
+  // publishes its account-ready manifest with the account that made it ready, or with none
+  // of it. Serialized by SQLite's writer lock, so two final members cannot both be last.
+  onMemberAccountPublished(workspaceId, lineage.id, revision.id);
   return { account, request: publishedRequest, created: true };
 }) as (input: PublishAccountInput) => PublishedAccount;
 

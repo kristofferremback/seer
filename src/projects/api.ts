@@ -11,6 +11,7 @@ import { normalize as normalizeMarkdown, validate as validateMarkdown } from "..
 import { getReview, getReviewVersion } from "../overseer/db";
 import { getLineage } from "../overseer/revision-db";
 import { latestCaptureJob } from "../overseer/revision-jobs";
+import { getStack, listStackAccountTimes } from "../overseer/stack-db";
 import {
   ANONYMOUS_OBSERVER,
   findPrStatus,
@@ -57,6 +58,9 @@ import {
   type ProjectPatch,
   type ProjectRow,
   type ProjectStatus,
+  attachReviewStack,
+  detachReviewStack,
+  listProjectReviewStackSlugs,
 } from "./db";
 
 export const TITLE_MAX = 80;
@@ -76,6 +80,7 @@ export interface ProjectChildSummary {
    *  not, so a caller can still tell which kind it is looking at. */
   reviews: number;
   reviewLineages: number;
+  reviewStacks: number;
   stages: number;
   tasks: number;
 }
@@ -122,6 +127,18 @@ export interface ProjectReviewLineageEntry {
   apiUrl: string;
 }
 
+/** One stack of promoted reviews a project holds. */
+export interface ProjectReviewStackEntry {
+  slug: string;
+  title: string;
+  latestManifestVersion: number;
+  /** Null while no manifest of this stack has an account. */
+  latestAccountVersion: number | null;
+  updatedAt: number;
+  url: string;
+  apiUrl: string;
+}
+
 export interface ProjectStageEntry {
   slug: string;
   title: string;
@@ -143,6 +160,7 @@ export interface ProjectState {
   bundles: ProjectBundleEntry[];
   reviews: ProjectReviewEntry[];
   reviewLineages: ProjectReviewLineageEntry[];
+  reviewStacks: ProjectReviewStackEntry[];
   stages: ProjectStageEntry[];
   /** The most recent NOTES_TAIL notes, oldest first so they read chronologically. */
   notes: NoteView[];
@@ -281,6 +299,21 @@ export function projectState(project: ProjectRow): ProjectState {
     });
   }
 
+  const reviewStacks: ProjectReviewStackEntry[] = [];
+  for (const slug of listProjectReviewStackSlugs(ws, project.id)) {
+    const stack = getStack(ws, slug);
+    if (!stack) continue;
+    reviewStacks.push({
+      slug,
+      title: stack.title,
+      latestManifestVersion: stack.latest_manifest_version,
+      latestAccountVersion: listStackAccountTimes(ws, slug).at(-1)?.version ?? null,
+      updatedAt: stack.updated_at,
+      url: `${config.baseUrl}/${ws}/r-stacks/${slug}`,
+      apiUrl: `${config.baseUrl}/api/review-stacks/${slug}`,
+    });
+  }
+
   const reviews: ProjectReviewEntry[] = [];
   for (const slug of listProjectReviewSlugs(project.id)) {
     const review = getReview(ws, slug);
@@ -309,6 +342,7 @@ export function projectState(project: ProjectRow): ProjectState {
         bundles: counts.bundles,
         reviews: counts.reviews,
         reviewLineages: counts.reviewLineages,
+        reviewStacks: counts.reviewStacks,
         stages: counts.stages,
         tasks: counts.tasks,
       };
@@ -318,6 +352,7 @@ export function projectState(project: ProjectRow): ProjectState {
     bundles,
     reviews,
     reviewLineages,
+    reviewStacks,
     stages,
     notes: listNotesTail(project.id, NOTES_TAIL).map(noteView),
     noteCount: countNotes(project.id),
@@ -392,6 +427,15 @@ function stateJson(state: ProjectState): unknown {
       url: r.url,
       revisionUrl: r.revisionUrl,
       apiUrl: r.apiUrl,
+    })),
+    reviewStacks: state.reviewStacks.map((s) => ({
+      slug: s.slug,
+      title: s.title,
+      latestManifestVersion: s.latestManifestVersion,
+      latestAccountVersion: s.latestAccountVersion,
+      updatedAt: new Date(s.updatedAt).toISOString(),
+      url: s.url,
+      apiUrl: s.apiUrl,
     })),
     notes: state.notes.map(noteJson),
     noteCount: state.noteCount,
@@ -534,6 +578,7 @@ export function handleListProjects(req: Request): Response {
         bundles: counts.bundles,
         reviews: counts.reviews,
         reviewLineages: counts.reviewLineages,
+        reviewStacks: counts.reviewStacks,
         stages: counts.stages,
         children: counts.children,
       };
@@ -616,7 +661,7 @@ export async function handleUpdateProject(req: Request, slug: string): Promise<R
 export function handleProjectMembership(
   req: Request,
   slug: string,
-  kind: "bundle" | "review",
+  kind: "bundle" | "review" | "review-stack",
   target: string,
   act: "attach" | "detach",
 ): Response {
@@ -629,14 +674,16 @@ export function handleProjectMembership(
   const exists =
     kind === "bundle"
       ? getBundle(auth.workspaceId, target) !== null
-      : getReview(auth.workspaceId, target) !== null;
-  if (!exists) return json({ error: `No ${kind} "${target}" in this workspace` }, 404);
+      : kind === "review"
+        ? getReview(auth.workspaceId, target) !== null
+        : getStack(auth.workspaceId, target) !== null;
+  if (!exists) return json({ error: `No ${kind === "review-stack" ? "stack" : kind} "${target}" in this workspace` }, 404);
 
-  const changed =
-    act === "attach"
-      ? (kind === "bundle" ? attachBundle : attachReview)(project, target)
-      : (kind === "bundle" ? detachBundle : detachReview)(project, target);
-  return json({ project: slug, [kind]: target, [act === "attach" ? "attached" : "detached"]: changed });
+  const attachers = { bundle: attachBundle, review: attachReview, "review-stack": attachReviewStack };
+  const detachers = { bundle: detachBundle, review: detachReview, "review-stack": detachReviewStack };
+  const changed = (act === "attach" ? attachers : detachers)[kind](project, target);
+  const noun = kind === "review-stack" ? "stack" : kind;
+  return json({ project: slug, [noun]: target, [act === "attach" ? "attached" : "detached"]: changed });
 }
 
 // ---- tasks ----

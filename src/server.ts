@@ -88,6 +88,7 @@ import {
   promotedOwnsSlug,
 } from "./overseer/revision-read";
 import { latestCaptureJob, recoverCaptureJobs, startCaptureSweep } from "./overseer/revision-jobs";
+import { handleStackPage, handleStackReadMutation } from "./overseer/stack-render";
 import { listLineages } from "./overseer/revision-db";
 import { getLineagePr, latestObservation, observationStateWord } from "./overseer/revision-pr";
 import {
@@ -153,6 +154,15 @@ const WS_REVISION_READ_RE = new RegExp(
 // The failed-capture shell's retry form, on the review's own path so it needs no key.
 const WS_CAPTURE_RETRY_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/capture-jobs/([^/]+)/retry/?$`,
+);
+// A stack of promoted reviews: /<ws_id>/r-stacks/<slug>[/v/<n>[/account]], and the read
+// mark on one member's change through the manifest. Its own segment, so it never competes
+// with /r/<slug>.
+const WS_STACK_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)(?:/v/([^/]+)(?:/(account))?)?/?$`,
+);
+const WS_STACK_READ_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)/v/([^/]+)/m/([^/]+)/changes/([^/]+)/read/?$`,
 );
 const WS_STAGE_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/st/([^/]+)(?:/v/([^/]+))?/?$`,
@@ -595,9 +605,8 @@ function projectLedgerGroups(userId: string): ProjectLedgerGroup[] {
         status: p.status,
         updatedAt: p.updated_at,
         bundles: counts.bundles,
-        // Both kinds, added: the ledger cell says how many reviews this project holds,
-        // and to a reader a promoted one is a review.
-        reviews: counts.reviews + counts.reviewLineages,
+        // Legacy reviews, promoted lineages and stacks share the Reviews tally.
+        reviews: counts.reviews + counts.reviewLineages + counts.reviewStacks,
         tasks: counts.tasks,
         children,
       };
@@ -670,6 +679,7 @@ function handleProjectPage(req: Request, wsId: string, slug: string): Response {
     bundles: state.bundles,
     reviews: state.reviews,
     reviewLineages: state.reviewLineages,
+    reviewStacks: state.reviewStacks,
     stages: state.stages,
     // The record's tail: notes and derived status events, oldest first. Note bodies
     // render through the same constrained renderer, same corruption fallback.
@@ -1226,6 +1236,16 @@ export async function startServer() {
       // not knowable until the token says which kind of asset it opens.
       if (url.pathname.startsWith("/s/")) return handleShareRequest(req);
 
+      const stackRead = url.pathname.match(WS_STACK_READ_RE);
+      if (stackRead) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleStackReadMutation(req, stackRead[1]!, stackRead[2]!, stackRead[3]!, stackRead[4]!, stackRead[5]!);
+      }
+      const stackPage = url.pathname.match(WS_STACK_RE);
+      if (stackPage) {
+        if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
+        return handleStackPage(req, stackPage[1]!, stackPage[2]!, stackPage[3] === undefined ? null : { version: stackPage[3], account: stackPage[4] === "account" });
+      }
       const stageRead = url.pathname.match(WS_STAGE_READ_RE);
       if (stageRead) {
         if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });

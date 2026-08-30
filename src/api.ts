@@ -28,7 +28,7 @@ import {
 } from "./db";
 import { json, originOk } from "./http";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
-import { POB_ID_RE, RAC_ID_RE, RCJ_ID_RE, RLN_ID_RE, RVR_ID_RE, SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE, WTR_ID_RE } from "./ids";
+import { POB_ID_RE, RAC_ID_RE, RCJ_ID_RE, RLN_ID_RE, RSA_ID_RE, RSJ_ID_RE, RSK_ID_RE, RSM_ID_RE, RSO_ID_RE, RSW_ID_RE, RVR_ID_RE, SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE, WTR_ID_RE } from "./ids";
 import { requireApiKey } from "./auth";
 import { inspectZip, readZipEntry, saveImage, saveZip } from "./store";
 import { handleCreateShare, handleListShares, handleRevokeShare } from "./shares";
@@ -70,6 +70,19 @@ import {
 } from "./overseer/revision-pr";
 import { handleReadCaptureJob, handleRetryCaptureJob } from "./overseer/revision-jobs";
 import { handleRevisionLines } from "./overseer/revision-read";
+import {
+  handleClaimStackWitnessRequest,
+  handleCreateStack,
+  handleFailStackWitnessRequest,
+  handlePublishStackAccount,
+  handleReadStack,
+  handleReadStackAccount,
+  handleReadStackManifest,
+  handleRefreshStack,
+  handleRetryStackWitnessRequest,
+  handleStackMemberLines,
+} from "./overseer/stack-routes";
+import { handleReadStackRefreshJob, handleRetryStackRefreshJob } from "./overseer/stack-jobs";
 
 // ---- the shape of an entry ----
 
@@ -473,7 +486,7 @@ const projectStateSchema = {
   required: [
     "slug", "title", "description", "status", "parent", "workspace", "url",
     "createdAt", "updatedAt", "children", "tasks", "plans", "bundles", "reviews",
-    "reviewLineages", "stages", "notes", "noteCount",
+    "reviewLineages", "reviewStacks", "stages", "notes", "noteCount",
   ],
   properties: {
     slug: { type: "string" },
@@ -490,7 +503,7 @@ const projectStateSchema = {
       description: "Shallow summaries, never recursive.",
       items: {
         type: "object",
-        required: ["slug", "title", "status", "bundles", "reviews", "reviewLineages", "stages", "tasks"],
+        required: ["slug", "title", "status", "bundles", "reviews", "reviewLineages", "reviewStacks", "stages", "tasks"],
         properties: {
           slug: { type: "string" },
           title: { type: "string" },
@@ -498,6 +511,7 @@ const projectStateSchema = {
           bundles: { type: "integer" },
           reviews: { type: "integer" },
           reviewLineages: { type: "integer" },
+          reviewStacks: { type: "integer" },
           stages: { type: "integer" },
           tasks: { type: "integer" },
         },
@@ -590,6 +604,25 @@ const projectStateSchema = {
           updatedAt: { type: "string", format: "date-time" },
           url: { type: "string", format: "uri" },
           revisionUrl: { type: ["string", "null"], description: "Null while `latestRevision` is." },
+          apiUrl: { type: "string", format: "uri" },
+        },
+      },
+    },
+    reviewStacks: {
+      type: "array",
+      description:
+        "Stacks of promoted reviews. A stack reads at /r-stacks/<slug>; its manifests at /v/N and " +
+        "the one account over a manifest at /v/N/account.",
+      items: {
+        type: "object",
+        required: ["slug", "title", "latestManifestVersion", "latestAccountVersion", "updatedAt", "url", "apiUrl"],
+        properties: {
+          slug: { type: "string" },
+          title: { type: "string" },
+          latestManifestVersion: { type: "integer", minimum: 1 },
+          latestAccountVersion: { type: ["integer", "null"], description: "Null while no manifest of this stack has an account." },
+          updatedAt: { type: "string", format: "date-time" },
+          url: { type: "string", format: "uri" },
           apiUrl: { type: "string", format: "uri" },
         },
       },
@@ -1336,18 +1369,19 @@ const idempotencyKeyParam = {
 
 /** One membership operation's doc. The four share everything but their nouns, and a
  *  builder keeps the four descriptions from drifting apart one edit at a time. */
-function membershipDoc(kind: "bundle" | "review", act: "attach" | "detach"): Omit<Operation, "operationId"> {
+function membershipDoc(kind: "bundle" | "review" | "review-stack", act: "attach" | "detach"): Omit<Operation, "operationId"> {
   const flag = act === "attach" ? "attached" : "detached";
+  const noun = kind === "review-stack" ? "stack" : kind;
   return {
-    summary: `${act === "attach" ? "Attach" : "Detach"} one ${kind}`,
+    summary: `${act === "attach" ? "Attach" : "Detach"} one ${noun}`,
     description:
       `Idempotent: \`${flag}\` says whether this call changed anything, and repeating ` +
-      `it changes nothing and says so. The ${kind} must live in the key's workspace.`,
+      `it changes nothing and says so. The ${noun} must live in the key's workspace.`,
     security: "key",
     parameters: [
       slugParam,
       {
-        name: kind,
+        name: noun,
         in: "path",
         required: true,
         schema: { type: "string", pattern: SLUG_RE.source },
@@ -1360,10 +1394,10 @@ function membershipDoc(kind: "bundle" | "review", act: "attach" | "detach"): Omi
           "application/json": {
             schema: {
               type: "object",
-              required: ["project", kind, flag],
+              required: ["project", noun, flag],
               properties: {
                 project: { type: "string" },
-                [kind]: { type: "string" },
+                [noun]: { type: "string" },
                 [flag]: { type: "boolean" },
               },
             },
@@ -1375,6 +1409,233 @@ function membershipDoc(kind: "bundle" | "review", act: "attach" | "detach"): Omi
     },
   };
 }
+
+
+// ---- the stack of promoted reviews ----
+
+const stackMemberSnapshotSchema = {
+  type: "object",
+  required: ["lineageId", "lineageSlug", "prNumber", "title", "revisionId", "revision", "accountId", "accountVersion", "baseRef", "headRef", "headSha", "status", "removedReason"],
+  additionalProperties: false,
+  properties: {
+    lineageId: { type: "string", pattern: RLN_ID_RE.source }, lineageSlug: { type: "string", pattern: SLUG_RE.source },
+    prNumber: { type: "integer", minimum: 1 }, title: { type: "string" },
+    revisionId: { type: "string", pattern: RVR_ID_RE.source }, revision: { type: "integer", minimum: 1 },
+    accountId: { type: ["string", "null"], pattern: RAC_ID_RE.source }, accountVersion: { type: ["integer", "null"], minimum: 1 },
+    baseRef: { type: "string" }, headRef: { type: "string" }, headSha: { type: "string" },
+    status: { type: "string", enum: ["live", "merged", "removed"] },
+    removedReason: { type: ["string", "null"], enum: ["unstacked", "merged", "closed", "detached", null] },
+  },
+};
+
+const stackManifestDocSchema = {
+  type: "object",
+  required: ["identity", "repository", "source", "members", "projects"],
+  additionalProperties: false,
+  properties: {
+    identity: {
+      type: "object", required: ["stackId", "slug", "title", "version", "predecessorVersion", "reason", "createdAt"], additionalProperties: false,
+      properties: {
+        stackId: { type: "string", pattern: RSK_ID_RE.source }, slug: { type: "string", pattern: SLUG_RE.source }, title: { type: "string" },
+        version: { type: "integer", minimum: 1 }, predecessorVersion: { type: "integer", minimum: 0 },
+        reason: { type: "string", enum: ["created", "refresh", "account-ready"] }, createdAt: { type: "string", format: "date-time" },
+      },
+    },
+    repository: { type: "object", required: ["repo", "repoId", "baseRef"], additionalProperties: false, properties: { repo: { type: "string" }, repoId: { type: "integer" }, baseRef: { type: "string" } } },
+    source: {
+      type: "object", required: ["kind", "providerStackId", "providerStackNumber", "observedAt"], additionalProperties: false,
+      description: "Provenance. A native and an inferred reading of one chain pin identical members and differ only here.",
+      properties: {
+        kind: { type: "string", enum: ["native", "inferred"] },
+        providerStackId: { type: ["integer", "null"] }, providerStackNumber: { type: ["integer", "null"] },
+        observedAt: { type: ["string", "null"] },
+      },
+    },
+    members: { type: "array", minItems: 1, items: stackMemberSnapshotSchema, description: "Bottom to top. Index plus one is the member position used in ids and routes." },
+    projects: { type: "array", items: { type: "string", pattern: SLUG_RE.source } },
+  },
+};
+
+const stackGroupRefSchema = {
+  type: "object", required: ["lineageId", "revision", "accountVersion", "groupId"], additionalProperties: false,
+  properties: {
+    lineageId: { type: "string", pattern: RLN_ID_RE.source }, revision: { type: "integer", minimum: 1 },
+    accountVersion: { type: "integer", minimum: 1 }, groupId: { type: "string", pattern: SLUG_RE.source },
+  },
+};
+
+const stackGroupSchema = {
+  type: "object", required: ["id", "title", "body", "examples", "members"], additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: SLUG_RE.source },
+    title: { type: "string", minLength: 1, maxLength: 60 },
+    body: { type: "string", minLength: 1, maxLength: 1600, description: "Constrained markdown." },
+    attention: { type: "string", maxLength: 300 },
+    examples: { type: "array", maxItems: 5, items: { type: "object", required: ["code", "text"], additionalProperties: false, properties: { code: { type: "string", minLength: 1, maxLength: 500 }, text: { type: "string", minLength: 1, maxLength: 300 } } } },
+    members: {
+      type: "array", minItems: 1, maxItems: 256, items: stackGroupRefSchema,
+      description: "Member account groups, in bottom-to-top member order then that account's group order. Every pinned member account group appears exactly once across all stack groups.",
+    },
+  },
+};
+
+const stackAccountDocSchema = {
+  type: "object", required: ["identity", "witness", "groups"], additionalProperties: false,
+  properties: {
+    identity: {
+      type: "object", required: ["stackId", "slug", "manifestId", "version", "createdAt"], additionalProperties: false,
+      properties: { stackId: { type: "string", pattern: RSK_ID_RE.source }, slug: { type: "string" }, manifestId: { type: "string", pattern: RSM_ID_RE.source }, version: { type: "integer", minimum: 1 }, createdAt: { type: "string", format: "date-time" } },
+    },
+    witness: {
+      type: "object", required: ["summary", "agent", "userId", "keyId"], additionalProperties: false,
+      properties: { summary: { type: "string" }, agent: { type: "object", required: ["name", "model"], properties: { name: { type: "string" }, model: { type: "string" } } }, userId: { type: "string" }, keyId: { type: "string" } },
+    },
+    groups: { type: "array", minItems: 1, maxItems: 16, items: stackGroupSchema },
+  },
+};
+
+const stackWitnessRequestSchema = {
+  type: "object",
+  required: ["id", "workspace", "slug", "version", "state", "retryCount", "failure", "accountId", "updatedAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: RSW_ID_RE.source }, workspace: { type: "string" }, slug: { type: "string", pattern: SLUG_RE.source },
+    version: { type: "integer", minimum: 1, description: "The manifest this request waits to become the account of." },
+    state: { type: "string", enum: ["pending", "failed", "retrying", "published", "superseded"], description: "`superseded` is derived: a later manifest was published while this request was open." },
+    retryCount: { type: "integer", minimum: 0 }, failure: { type: ["string", "null"] },
+    accountId: { type: ["string", "null"], pattern: RSA_ID_RE.source }, updatedAt: { type: "string", format: "date-time" },
+  },
+};
+
+const stackWitnessClaimSchema = {
+  type: "object",
+  required: [...stackWitnessRequestSchema.required, "manifestId", "manifestUrl", "claim"],
+  additionalProperties: false,
+  properties: {
+    ...stackWitnessRequestSchema.properties,
+    manifestId: { type: "string", pattern: RSM_ID_RE.source },
+    manifestUrl: { type: "string", format: "uri" },
+    claim: {
+      type: "object", required: ["retryCount", "claimed", "leaseExpiresAt", "claimedAt"], additionalProperties: false,
+      properties: { retryCount: { type: "integer", minimum: 0 }, claimed: { type: "boolean" }, leaseExpiresAt: { type: "string", format: "date-time" }, claimedAt: { type: "string", format: "date-time" } },
+    },
+  },
+};
+
+const stackDriftSchema = {
+  type: "object",
+  required: ["latestManifestVersion", "latestManifestUrl", "newerRevisions", "newerAccounts", "membershipChanged", "removed", "refreshRequired"],
+  additionalProperties: false,
+  description: "What moved under this manifest, from retained rows only. Never a GitHub call.",
+  properties: {
+    latestManifestVersion: { type: ["integer", "null"], minimum: 1 },
+    latestManifestUrl: { type: ["string", "null"] },
+    newerRevisions: { type: "array", items: { type: "object", required: ["position", "lineageSlug", "revision", "url"], properties: { position: { type: "integer" }, lineageSlug: { type: "string" }, revision: { type: "integer" }, url: { type: "string", format: "uri" } } } },
+    newerAccounts: { type: "array", items: { type: "object", required: ["position", "lineageSlug", "accountVersion"], properties: { position: { type: "integer" }, lineageSlug: { type: "string" }, accountVersion: { type: "integer" } } } },
+    membershipChanged: { type: "array", items: { type: "object", required: ["position", "lineageSlug"], properties: { position: { type: "integer" }, lineageSlug: { type: "string" } } } },
+    removed: { type: "array", items: { type: "object", required: ["position", "lineageSlug", "reason"], properties: { position: { type: "integer" }, lineageSlug: { type: "string" }, reason: { type: "string", enum: ["unstacked", "merged", "closed", "detached"] } } } },
+    refreshRequired: { type: "boolean" },
+  },
+};
+
+const stackMemberViewSchema = {
+  type: "object",
+  required: [...stackMemberSnapshotSchema.required, "position", "witness", "changes", "progress", "url", "accountUrl", "apiUrl"],
+  additionalProperties: false,
+  properties: {
+    ...stackMemberSnapshotSchema.properties,
+    position: { type: "integer", minimum: 1 },
+    witness: { type: ["string", "null"], enum: ["pending", "failed", "retrying", "published", "superseded", null] },
+    changes: { type: "integer", minimum: 0 },
+    progress: {
+      oneOf: [{ type: "object", required: ["read", "total"], additionalProperties: false, properties: { read: { type: "integer" }, total: { type: "integer" } } }, { type: "null" }],
+      description: "The asking MEMBER's reads on this exact pinned revision. Null for an API key.",
+    },
+    url: { type: "string", format: "uri" }, accountUrl: { type: ["string", "null"] }, apiUrl: { type: "string", format: "uri" },
+  },
+};
+
+const stackManifestViewSchema = {
+  type: "object",
+  required: ["id", "stack", "slug", "workspace", "version", "predecessorVersion", "reason", "schemaVersion", "digest", "url", "accountUrl", "apiUrl", "createdAt", "document", "members", "progress", "witness", "account", "drift"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: RSM_ID_RE.source }, stack: { type: "string", pattern: RSK_ID_RE.source },
+    slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
+    version: { type: "integer", minimum: 1 }, predecessorVersion: { type: "integer", minimum: 0 },
+    reason: { type: "string", enum: ["created", "refresh", "account-ready"] },
+    schemaVersion: { type: "integer", minimum: 1 }, digest: { type: "string" },
+    url: { type: "string", format: "uri" }, accountUrl: { type: ["string", "null"] }, apiUrl: { type: "string", format: "uri" },
+    createdAt: { type: "string", format: "date-time" },
+    document: stackManifestDocSchema,
+    members: { type: "array", items: stackMemberViewSchema },
+    progress: { oneOf: [{ type: "object", required: ["read", "total"], properties: { read: { type: "integer" }, total: { type: "integer" } } }, { type: "null" }], description: "The sum of the asking member's reads over every pinned member. Null for an API key." },
+    witness: { oneOf: [stackWitnessRequestSchema, { type: "null" }], description: "Null until every pinned member has an account on its pinned revision." },
+    account: { oneOf: [{ type: "object", required: ["id", "version", "url"], properties: { id: { type: "string", pattern: RSA_ID_RE.source }, version: { type: "integer" }, url: { type: "string", format: "uri" } } }, { type: "null" }] },
+    drift: stackDriftSchema,
+  },
+};
+
+const stackAccountViewSchema = {
+  type: "object",
+  required: ["id", "stack", "manifest", "slug", "workspace", "version", "schemaVersion", "digest", "url", "manifestUrl", "createdAt", "document", "witness"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: RSA_ID_RE.source }, stack: { type: "string", pattern: RSK_ID_RE.source }, manifest: { type: "string", pattern: RSM_ID_RE.source },
+    slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
+    version: { type: "integer", minimum: 1 }, schemaVersion: { type: "integer", minimum: 1 }, digest: { type: "string" },
+    url: { type: "string", format: "uri" }, manifestUrl: { type: "string", format: "uri" }, createdAt: { type: "string", format: "date-time" },
+    document: stackAccountDocSchema, witness: stackWitnessRequestSchema,
+  },
+};
+
+const stackRefreshJobSchema = {
+  type: "object",
+  required: ["id", "workspace", "stack", "slug", "state", "attempts", "failure", "actor", "stackObservationId", "pullRequestObservationId", "resultManifest", "resultManifestUrl", "retryUrl", "createdAt", "updatedAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: RSJ_ID_RE.source }, workspace: { type: "string" }, stack: { type: "string", pattern: RSK_ID_RE.source }, slug: { type: ["string", "null"] },
+    state: { type: "string", enum: ["pending", "running", "failed", "completed"] }, attempts: { type: "integer", minimum: 0 }, failure: { type: ["string", "null"] },
+    actor: { type: "string", enum: ["installation"] },
+    stackObservationId: { type: ["string", "null"], pattern: RSO_ID_RE.source },
+    pullRequestObservationId: { type: ["string", "null"], pattern: POB_ID_RE.source },
+    resultManifest: { type: ["integer", "null"] }, resultManifestUrl: { type: ["string", "null"] }, retryUrl: { type: "string", format: "uri" },
+    createdAt: { type: "string", format: "date-time" }, updatedAt: { type: "string", format: "date-time" },
+  },
+};
+
+const stackViewProperties = {
+  id: { type: "string", pattern: RSK_ID_RE.source }, slug: { type: "string", pattern: SLUG_RE.source }, workspace: { type: "string" },
+  title: { type: "string" }, repo: { type: "string" }, repoId: { type: "integer" }, baseRef: { type: "string" },
+  source: { type: "string", enum: ["native", "inferred"] }, providerStackNumber: { type: ["integer", "null"] },
+  actor: { type: "string", enum: ["installation", "user", "anonymous"] }, actorLabel: { type: "string" },
+  latestManifestVersion: { type: "integer", minimum: 1 }, latestAccountVersion: { type: ["integer", "null"] },
+  url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" },
+  projects: { type: "array", items: { type: "string", pattern: SLUG_RE.source } },
+  members: { type: "array", items: { type: "object", required: ["lineageId", "lineageSlug", "prNumber", "live", "removedReason", "addedManifestId", "removedManifestId"], additionalProperties: false, properties: { lineageId: { type: "string" }, lineageSlug: { type: "string" }, prNumber: { type: "integer" }, live: { type: "boolean" }, removedReason: { type: ["string", "null"] }, addedManifestId: { type: "string" }, removedManifestId: { type: ["string", "null"] } } }, description: "Live membership rows, unordered: order is the manifest's." },
+  manifests: { type: "array", items: { type: "object", required: ["version", "reason", "createdAt", "witness", "account", "url", "apiUrl"], additionalProperties: false, properties: { version: { type: "integer" }, reason: { type: "string" }, createdAt: { type: "string", format: "date-time" }, witness: { type: ["string", "null"] }, account: { type: "boolean" }, url: { type: "string", format: "uri" }, apiUrl: { type: "string", format: "uri" } } } },
+  manifest: stackManifestViewSchema,
+  account: { oneOf: [stackAccountViewSchema, { type: "null" }], description: "The account over the latest manifest, or null while it has none." },
+  refreshJobs: { type: "array", items: stackRefreshJobSchema },
+};
+
+const stackViewSchema = {
+  type: "object",
+  required: Object.keys(stackViewProperties),
+  additionalProperties: false,
+  properties: stackViewProperties,
+};
+
+const stackRefreshViewSchema = {
+  type: "object",
+  required: ["created", "replayed", ...Object.keys(stackViewProperties)],
+  additionalProperties: false,
+  properties: { created: { type: "boolean", description: "Whether this refresh published a successor manifest." }, replayed: { type: "boolean" }, ...stackViewProperties },
+};
+
+const stackSlugParam = { name: "slug", in: "path", required: true, schema: { type: "string", pattern: SLUG_RE.source } };
+const stackVersionParam = { name: "version", in: "path", required: true, schema: { type: "integer", minimum: 1 }, description: "A manifest version." };
+const stackRequestIdParam = { name: "id", in: "path", required: true, schema: { type: "string", pattern: RSW_ID_RE.source } };
 
 // ---- the table ----
 
@@ -1584,7 +1845,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
                     type: "object",
                     required: [
                       "slug", "title", "status", "parent", "workspace", "url",
-                      "updatedAt", "bundles", "reviews", "reviewLineages", "stages", "children",
+                      "updatedAt", "bundles", "reviews", "reviewLineages", "reviewStacks", "stages", "children",
                     ],
                     properties: {
                       slug: { type: "string" },
@@ -1597,6 +1858,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
                       bundles: { type: "integer" },
                       reviews: { type: "integer" },
                       reviewLineages: { type: "integer" },
+                      reviewStacks: { type: "integer" },
                       stages: { type: "integer" },
                       children: { type: "integer" },
                     },
@@ -2421,6 +2683,245 @@ export const API_ROUTES: readonly ApiRoute[] = [
         },
       },
       run: (req) => handleRetryWitnessRequest(req, req.params.id),
+    },
+  }),
+
+  // The stack of promoted reviews: one ordered chain, one immutable manifest per reading,
+  // one account per manifest. Members own everything else.
+  route("/api/review-stacks", {
+    POST: {
+      doc: {
+        operationId: "createReviewStack",
+        summary: "Create a stack of promoted reviews",
+        description:
+          "Either `members`, a bottom-to-top list of 2 to 16 promoted review slugs proved from retained " +
+          "rows and never GitHub, or `native: { seed }`, one member whose native GitHub stack is read " +
+          "through the asking member's own credential or the repository's installation. Both normalize to " +
+          "identical member snapshots; the manifest's `source` says which reading it was. Each member " +
+          "must review a live same-repository pull request and have a completed revision; a fork, fan, " +
+          "cycle, break, duplicate, cross-repository member, or more than 16 is a 422 naming the member. " +
+          "Manifest 1 is published in one transaction with the stack; a witness request is opened only " +
+          "once every member already carries an account on its pinned revision. `Idempotency-Key` replays.",
+        security: "key",
+        parameters: [idempotencyKeyParam],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: {
+            type: "object", required: ["slug"], additionalProperties: false,
+            properties: {
+              slug: { type: "string", pattern: SLUG_RE.source },
+              title: { type: "string", minLength: 1, maxLength: 80, description: "Defaults to the bottom member's title." },
+              projects: { type: "array", maxItems: 16, items: { type: "string", pattern: SLUG_RE.source } },
+              members: { type: "array", minItems: 2, maxItems: 16, items: { type: "string", pattern: SLUG_RE.source }, description: "Bottom to top. Exactly one of members and native." },
+              native: { type: "object", required: ["seed"], additionalProperties: false, properties: { seed: { type: "string", pattern: SLUG_RE.source } } },
+            },
+          } } },
+        },
+        responses: {
+          "201": { description: "The stack and its first manifest.", content: { "application/json": { schema: stackViewSchema } } },
+          "200": { description: "An exact replay of an earlier create.", content: { "application/json": { schema: stackViewSchema } } },
+          "400": errorResponse, "401": errorResponse, "409": errorResponse, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handleCreateStack(req),
+    },
+  }),
+
+  route("/api/review-stacks/:slug", {
+    GET: {
+      doc: {
+        operationId: "readReviewStack",
+        summary: "Read one stack",
+        description: "The stack, its live members, every manifest, the latest manifest with its members' workflow and the asking member's progress, the latest account when published, and drift from retained rows. Missing, malformed, and cross-workspace slugs share the review soft 404.",
+        security: "keyOrSession",
+        parameters: [stackSlugParam],
+        responses: { "200": { description: "The stack.", content: { "application/json": { schema: stackViewSchema } } }, "404": reviewNotFound },
+      },
+      run: (req) => handleReadStack(req, req.params.slug),
+    },
+  }),
+
+  route("/api/review-stacks/:slug/manifests/:version", {
+    GET: {
+      doc: {
+        operationId: "readReviewStackManifest",
+        summary: "Read one immutable manifest",
+        description: "The manifest document, each pinned member's witness word and the asking member's progress on that exact revision, and what has moved since. Progress is null for an API key.",
+        security: "keyOrSession",
+        parameters: [stackSlugParam, stackVersionParam],
+        responses: { "200": { description: "The manifest.", content: { "application/json": { schema: stackManifestViewSchema } } }, "404": reviewNotFound },
+      },
+      run: (req) => handleReadStackManifest(req, req.params.slug, req.params.version),
+    },
+  }),
+
+  route("/api/review-stacks/:slug/manifests/:version/account", {
+    GET: {
+      doc: {
+        operationId: "readReviewStackAccount",
+        summary: "Read the account over one manifest",
+        description: "The one stack account a manifest carries. The review soft 404 until it is published.",
+        security: "keyOrSession",
+        parameters: [stackSlugParam, stackVersionParam],
+        responses: { "200": { description: "The account.", content: { "application/json": { schema: stackAccountViewSchema } } }, "404": reviewNotFound },
+      },
+      run: (req) => handleReadStackAccount(req, req.params.slug, req.params.version),
+    },
+    POST: {
+      doc: {
+        operationId: "publishReviewStackAccount",
+        summary: "Publish the one account over a manifest",
+        description:
+          "The stack groups must reference every pinned member account group exactly once, each by the exact " +
+          "lineage, revision, account version and group id the manifest pins, in bottom-to-top member order " +
+          "then that account's group order. Out-of-order references are refused, never reordered. Exact " +
+          "replay returns the existing account; a different one, a superseded request, or a manifest that is " +
+          "not account-ready is a 409.",
+        security: "key",
+        parameters: [stackSlugParam, stackVersionParam],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: {
+            type: "object", required: ["witness", "summary", "groups"], additionalProperties: false,
+            properties: {
+              witness: { type: "object", required: ["name", "model"], additionalProperties: false, properties: { name: { type: "string", minLength: 1, maxLength: 80 }, model: { type: "string", minLength: 1, maxLength: 80 } } },
+              summary: { type: "string", minLength: 1, maxLength: 1200, description: "Constrained markdown." },
+              groups: { type: "array", minItems: 1, maxItems: 16, items: stackGroupSchema },
+            },
+          } } },
+        },
+        responses: {
+          "200": { description: "The immutable stack account.", content: { "application/json": { schema: stackAccountViewSchema } } },
+          "400": errorResponse, "401": errorResponse, "404": reviewNotFound, "409": errorResponse, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handlePublishStackAccount(req, req.params.slug, req.params.version),
+    },
+  }),
+
+  route("/api/review-stacks/:slug/refresh", {
+    POST: {
+      doc: {
+        operationId: "refreshReviewStack",
+        summary: "Read the chain again and publish a successor when it moved",
+        description:
+          "An inferred stack is re-proved from retained rows. A native stack is read through the actor stored " +
+          "at creation; one attached through a member's connected account may only be refreshed by that " +
+          "member. Each member resolves to its newest completed revision and that revision's account. Equal " +
+          "snapshots publish nothing and answer `created: false`; otherwise one successor manifest is " +
+          "published, the predecessor's open witness request is superseded, and a new request is opened when " +
+          "every member has an account. `Idempotency-Key` replays.",
+        security: "key",
+        parameters: [stackSlugParam, idempotencyKeyParam],
+        responses: {
+          "200": { description: "The stack after the refresh.", content: { "application/json": { schema: stackRefreshViewSchema } } },
+          "400": errorResponse, "401": errorResponse, "403": errorResponse, "404": reviewNotFound, "409": errorResponse, "422": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handleRefreshStack(req, req.params.slug),
+    },
+  }),
+
+  route("/api/review-stacks/:slug/manifests/:version/members/:position/files/:fileId", {
+    GET: {
+      doc: {
+        operationId: "readReviewStackMemberFileLines",
+        summary: "Read retained lines from one member's file through the manifest",
+        description: "Resolves manifest, member position and the member's own capture file id. A file id another member or capture owns is the review soft 404. This route never calls GitHub.",
+        security: "keyOrSession",
+        parameters: [
+          stackSlugParam, stackVersionParam,
+          { name: "position", in: "path", required: true, schema: { type: "integer", minimum: 1, maximum: 64 } },
+          { name: "fileId", in: "path", required: true, schema: { type: "string", pattern: STF_ID_RE.source } },
+          { name: "side", in: "query", required: true, schema: { type: "string", enum: ["old", "new"] } },
+          { name: "start", in: "query", required: false, schema: { type: "integer", minimum: 1 } },
+          { name: "end", in: "query", required: false, schema: { type: "integer", minimum: 1 } },
+        ],
+        responses: {
+          "200": { description: "At most 400 retained text lines.", content: { "application/json": { schema: stageLinesSchema } } },
+          "404": reviewNotFound, "422": errorResponse, "500": errorResponse, "502": errorResponse,
+        },
+      },
+      run: (req) => handleStackMemberLines(req, req.params.slug, req.params.version, req.params.position, req.params.fileId),
+    },
+  }),
+
+  route("/api/review-stack-witness-requests/:id/claim", {
+    POST: {
+      doc: {
+        operationId: "claimStackWitnessRequest",
+        summary: "Claim one attempt of a stack witness request",
+        description: "The same grammar as a member request: the attempt is the request and its retry count, a same-key call renews, an expired lease may be recovered, a healthy foreign claim is a 409. A superseded request is a 409.",
+        security: "key",
+        parameters: [stackRequestIdParam],
+        responses: { "200": { description: "The request and the claim.", content: { "application/json": { schema: stackWitnessClaimSchema } } }, "401": errorResponse, "404": reviewNotFound, "409": errorResponse },
+      },
+      run: (req) => handleClaimStackWitnessRequest(req, req.params.id),
+    },
+  }),
+
+  route("/api/review-stack-witness-requests/:id/fail", {
+    POST: {
+      doc: {
+        operationId: "failStackWitnessRequest",
+        summary: "Record that a stack witness could not produce an account",
+        security: "key",
+        parameters: [stackRequestIdParam],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["error"], additionalProperties: false, properties: { error: { type: "string", minLength: 1, maxLength: 600 } } } } } },
+        responses: { "200": { description: "The failed request.", content: { "application/json": { schema: stackWitnessRequestSchema } } }, "400": errorResponse, "401": errorResponse, "404": reviewNotFound, "409": errorResponse, "422": errorResponse },
+      },
+      run: (req) => handleFailStackWitnessRequest(req, req.params.id),
+    },
+  }),
+
+  route("/api/review-stack-witness-requests/:id/retry", {
+    POST: {
+      doc: {
+        operationId: "retryStackWitnessRequest",
+        summary: "Put a failed stack witness request back in the queue",
+        security: "key",
+        parameters: [stackRequestIdParam],
+        responses: { "200": { description: "The pending request.", content: { "application/json": { schema: stackWitnessRequestSchema } } }, "401": errorResponse, "404": reviewNotFound, "409": errorResponse },
+      },
+      run: (req) => handleRetryStackWitnessRequest(req, req.params.id),
+    },
+  }),
+
+  route("/api/review-stack-refresh-jobs/:id", {
+    GET: {
+      doc: {
+        operationId: "readStackRefreshJob",
+        summary: "Read one installation-owned stack refresh job",
+        security: "keyOrSession",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: RSJ_ID_RE.source } }],
+        responses: { "200": { description: "The job.", content: { "application/json": { schema: stackRefreshJobSchema } } }, "404": reviewNotFound },
+      },
+      run: (req) => handleReadStackRefreshJob(req, req.params.id),
+    },
+  }),
+
+  route("/api/review-stack-refresh-jobs/:id/retry", {
+    POST: {
+      doc: {
+        operationId: "retryStackRefreshJob",
+        summary: "Queue a failed stack refresh again",
+        description: "A new attempt through the same stored installation. A completed job and a running one with a healthy lease are each a 409.",
+        security: "key",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: RSJ_ID_RE.source } }],
+        responses: { "202": { description: "The requeued job.", content: { "application/json": { schema: stackRefreshJobSchema } } }, "401": errorResponse, "404": reviewNotFound, "409": errorResponse },
+      },
+      run: (req) => handleRetryStackRefreshJob(req, req.params.id),
+    },
+  }),
+
+  route("/api/projects/:slug/review-stacks/:stack", {
+    PUT: {
+      doc: { operationId: "attachProjectReviewStack", ...membershipDoc("review-stack", "attach") },
+      run: (req) => handleProjectMembership(req, req.params.slug, "review-stack", req.params.stack, "attach"),
+    },
+    DELETE: {
+      doc: { operationId: "detachProjectReviewStack", ...membershipDoc("review-stack", "detach") },
+      run: (req) => handleProjectMembership(req, req.params.slug, "review-stack", req.params.stack, "detach"),
     },
   }),
 

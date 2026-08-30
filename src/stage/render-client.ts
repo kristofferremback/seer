@@ -79,7 +79,7 @@ export const STAGE_CLIENT = String.raw`(()=>{
     const url=new URL(location.href);for(const key of ['review','change','panel','tree','detail'])url.searchParams.delete(key);url.hash='';return url;
   };
   const urlForReview=(review,change=null)=>{
-    const url=baseUrl();url.searchParams.set('review',review);if(change)url.searchParams.set('change',change);url.hash=change||'review-'+review;return url;
+    const url=baseUrl();url.searchParams.delete('page');url.searchParams.set('review',review);if(change)url.searchParams.set('change',change);url.hash=change||'review-'+review;return url;
   };
   const findChange=(selector,id)=>[...document.querySelectorAll(selector)].find(node=>(node.dataset.change||node.dataset.ledgerChange||node.dataset.activateChange)===id)||null;
   const scrollInside=(container,node,block='nearest')=>{
@@ -141,12 +141,12 @@ export const STAGE_CLIENT = String.raw`(()=>{
 
   const installDialog=next=>{
     dialog.replaceChildren(...[...next.childNodes].map(node=>node.cloneNode(true)));
-    dialog.dataset.review=next.dataset.review||'';dialog.dataset.activeChange=next.dataset.activeChange||'';dialog.setAttribute('aria-label',next.getAttribute('aria-label')||'Group review');
+    dialog.dataset.review=next.dataset.review||'';dialog.dataset.layer=next.dataset.layer||'';dialog.dataset.page=next.dataset.page||'';dialog.dataset.activeChange=next.dataset.activeChange||'';dialog.setAttribute('aria-label',next.getAttribute('aria-label')||'Group review');
   };
 
   const openReview=async(review,change,{mode='push'}={})=>{
     if(!dialog||!review)return;
-    const target=urlForReview(review,change);if(mode==='replace'&&dialog.open){const current=new URL(location.href);for(const key of ['tree','detail'])if(current.searchParams.has(key))target.searchParams.set(key,current.searchParams.get(key))}const same=dialog.dataset.review===review&&dialog.querySelector('.hunk-review[data-change]');
+    const target=mode==='none'?new URL(location.href):urlForReview(review,change);if(mode==='replace'&&dialog.open){const current=new URL(location.href);for(const key of ['tree','detail'])if(current.searchParams.has(key))target.searchParams.set(key,current.searchParams.get(key))}const same=dialog.dataset.review===review&&(dialog.dataset.layer||'')===(target.searchParams.get('layer')||'')&&(dialog.dataset.page||'')===(target.searchParams.get('page')||'')&&dialog.querySelector('.hunk-review[data-change]');
     if(!same){
       const request=++reviewRequest;
       let response;try{response=await fetch(target,{headers:{accept:'text/html'}})}catch(error){location.assign(target);return}
@@ -155,17 +155,14 @@ export const STAGE_CLIENT = String.raw`(()=>{
       if(request!==reviewRequest)return;if(!next){location.assign(target);return}installDialog(next);
     }
     if(!dialog.open)opener=document.activeElement;
-    if(mode==='push')history.pushState({stageReview:true,directReview:false},'',target);else if(mode==='replace')history.replaceState({stageReview:true,directReview:history.state?.directReview===true},'',target);
+    if(mode==='push')history.pushState({stageReview:true,directReview:false},'',target);else if(mode==='replace')history.replaceState({...history.state,stageReview:true,directReview:history.state?.directReview===true},'',target);
     ensureModal();prepareDialog();if(change)activateChange(change,{scrollCode:true,scrollLedger:true});
   };
 
-  const closeFocus=()=>{
+  const closeFocus=(direct=false)=>{
     if(!dialog?.open)return;reviewRequest++;
-    if(history.state?.stageFocusPanel){
-      dialog.close();setReviewOpen(false);activeObserver?.disconnect?.();if(opener instanceof HTMLElement)opener.focus();
-      if(history.state.directReview){pendingPanelAction=()=>{if(background)history.replaceState(null,'',baseUrl());else location.replace(baseUrl())};history.back()}else history.go(-2);
-      return;
-    }
+    if(history.state?.stageFocusPanel){if(direct){pendingPanelAction=()=>closeFocus(true);history.back()}else closeFocusPanel();return}
+    if(new URL(location.href).searchParams.has('layer')){if(direct&&history.state?.stageLayer){pendingPanelAction=()=>closeFocus(true);history.back()}else closeLayer();return}
     if(!background){if(history.state?.stageReview&&!history.state?.directReview)history.back();else location.replace(baseUrl());return}
     if(history.state?.directReview){history.replaceState(null,'',baseUrl());dialog.close();setReviewOpen(false);activeObserver?.disconnect?.();if(opener instanceof HTMLElement)opener.focus();return}
     if(history.state?.stageReview)history.back();else{history.replaceState(null,'',baseUrl());dialog.close();setReviewOpen(false);activeObserver?.disconnect?.();if(opener instanceof HTMLElement)opener.focus()}
@@ -174,7 +171,7 @@ export const STAGE_CLIENT = String.raw`(()=>{
   const syncUrl=async()=>{
     const url=new URL(location.href);const review=url.searchParams.get('review');
     if(review){
-      if(dialog?.dataset.review!==review)await openReview(review,url.searchParams.get('change'),{mode:'none'});
+      if(dialog?.dataset.review!==review||(dialog.dataset.layer||'')!==(url.searchParams.get('layer')||'')||(dialog.dataset.page||'')!==(url.searchParams.get('page')||''))await openReview(review,url.searchParams.get('change'),{mode:'none'});
       else{ensureModal();prepareDialog();const change=url.searchParams.get('change');if(change)activateChange(change)}
     }else if(dialog?.open){dialog.close();setReviewOpen(false);activeObserver?.disconnect?.();if(opener instanceof HTMLElement)opener.focus()}else if(!review)setReviewOpen(false);
     const pagePanel=!review&&url.searchParams.get('panel')==='review-navigation';if(reviewNav)reviewNav.dataset.open=String(pagePanel);if(pageScrim){pageScrim.dataset.open=String(pagePanel);pageScrim.hidden=!pagePanel}
@@ -186,13 +183,32 @@ export const STAGE_CLIENT = String.raw`(()=>{
   const openFocusPanel=side=>{
     const url=new URL(location.href);const current=url.searchParams.get('panel');
     if(current===side){if(history.state?.stageFocusPanel)history.back();else{url.searchParams.delete('panel');history.replaceState(history.state,'',url);syncUrl()}return}
-    url.searchParams.set('panel',side);const panelState={stageFocusPanel:true,directReview:history.state?.directReview??!history.state?.stageReview};if(current)history.replaceState(panelState,'',url);else history.pushState(panelState,'',url);syncUrl();
+    url.searchParams.set('panel',side);const panelState={...history.state,stageFocusPanel:true,directReview:history.state?.directReview??!history.state?.stageReview};if(current)history.replaceState(panelState,'',url);else history.pushState(panelState,'',url);syncUrl();
   };
   const closeFocusPanel=()=>{
     if(history.state?.stageFocusPanel)history.back();else{const url=new URL(location.href);url.searchParams.delete('panel');history.replaceState(history.state,'',url);syncUrl()}
   };
   const afterFocusPanel=action=>{
     if(history.state?.stageFocusPanel){pendingPanelAction=action;history.back()}else action();
+  };
+
+  // The layer is a history rung between the panel and the review: Back and Escape drop it
+  // before they close the review. Switching layer replaces the rung; leaving it pops it.
+  const layerState=()=>({stageLayer:true,stageReview:true,directReview:history.state?.directReview===true});
+  const closeLayer=()=>{
+    if(history.state?.stageLayer){history.back();return}
+    const url=new URL(location.href);url.searchParams.delete('layer');url.searchParams.delete('page');url.searchParams.delete('change');url.hash='review-'+(url.searchParams.get('review')||'');history.replaceState(history.state,'',url);syncUrl();
+  };
+  const openLayer=slug=>{
+    if(!dialog?.open)return;if(!slug){closeLayer();return}
+    const url=new URL(location.href);if(!url.searchParams.get('review'))return;
+    url.searchParams.set('layer',slug);url.searchParams.delete('page');url.searchParams.delete('change');url.hash='review-'+url.searchParams.get('review');
+    if(history.state?.stageLayer)history.replaceState(layerState(),'',url);else history.pushState(layerState(),'',url);syncUrl();
+  };
+  const stepLayer=direction=>{
+    const options=[...(dialog?.querySelectorAll('[data-scope] option')||[])].map(option=>option.value).filter(Boolean);if(!options.length)return;
+    const current=options.indexOf(new URL(location.href).searchParams.get('layer')||'');const next=direction>0?Math.min(current+1,options.length-1):current-1;
+    if(next===current)return;openLayer(next<0?null:options[next]);
   };
 
   const loadContext=async button=>{
@@ -208,14 +224,15 @@ export const STAGE_CLIENT = String.raw`(()=>{
     const pageGroup=target.closest('.group-links a[href^="#"]');if(pageGroup&&reviewNav?.dataset.open==='true'){event.preventDefault();const url=new URL(location.href);url.searchParams.delete('panel');url.hash=pageGroup.hash;history.replaceState(null,'',url);syncUrl();document.getElementById(pageGroup.hash.slice(1))?.scrollIntoView?.({behavior:'smooth',block:'start'});return}
     const focus=target.closest('[data-focus-link]');if(focus){event.preventDefault();openReview(focus.dataset.review,focus.dataset.change||null,{mode:dialog?.open?'replace':'push'});return}
     const group=target.closest('[data-focus-group-link]');if(group){event.preventDefault();const review=group.dataset.review;afterFocusPanel(()=>{applyFocusPanels(new URL(location.href));openReview(review,null,{mode:'replace'})});return}
-    if(target.closest('[data-focus-close]')){event.preventDefault();closeFocus();return}
+    if(target.closest('[data-focus-close]')){event.preventDefault();closeFocus(true);return}
+    const pageLink=target.closest('[data-page-link]');if(pageLink&&dialog?.open){event.preventDefault();if(pageLink.getAttribute('aria-disabled')==='true')return;const url=new URL(pageLink.getAttribute('href'),location.href);history.replaceState({...history.state,stageReview:true,directReview:history.state?.directReview===true},'',url);syncUrl();return}
     if(target.closest('[data-review-nav-open]')){const url=new URL(location.href);url.searchParams.set('panel','review-navigation');history.pushState({stagePagePanel:true},'',url);syncUrl();return}
     if(target.closest('[data-review-nav-close]')||target.closest('[data-page-scrim]')){closePagePanel();return}
     const toggle=target.closest('[data-focus-toggle]');if(toggle&&dialog?.open){const side=toggle.dataset.focusToggle;if(isMobile())openFocusPanel(side);else{const url=new URL(location.href);const key=side==='tree'?'tree':'detail';url.searchParams.get(key)==='closed'?url.searchParams.delete(key):url.searchParams.set(key,'closed');history.replaceState(history.state,'',url);applyFocusPanels(url)}return}
     if(target.closest('[data-focus-panel-close]')){closeFocusPanel();return}
-    const activate=target.closest('[data-activate-change]');if(activate&&dialog?.open){event.preventDefault();const id=activate.dataset.activateChange;const scrollLedger=!activate.closest('[data-ledger-change]');afterFocusPanel(()=>{const url=new URL(location.href);url.searchParams.delete('panel');url.searchParams.set('change',id);url.hash=id;history.replaceState({stageReview:true,directReview:history.state?.directReview===true},'',url);applyFocusPanels(url);activateChange(id,{scrollCode:true,scrollLedger})});return}
+    const activate=target.closest('[data-activate-change]');if(activate&&dialog?.open){event.preventDefault();const id=activate.dataset.activateChange;const scrollLedger=!activate.closest('[data-ledger-change]');afterFocusPanel(()=>{const url=new URL(location.href);url.searchParams.delete('panel');url.searchParams.set('change',id);url.hash=id;history.replaceState({...history.state,stageReview:true,directReview:history.state?.directReview===true},'',url);applyFocusPanels(url);activateChange(id,{scrollCode:true,scrollLedger})});return}
     const step=target.closest('[data-change-step]');if(step&&dialog?.open){const hunks=[...dialog.querySelectorAll('.hunk-review[data-change]')];if(hunks.length){const current=Math.max(0,hunks.findIndex(hunk=>hunk.dataset.change===dialog.dataset.activeChange));const direction=step.dataset.changeStep==='next'?1:-1;const next=hunks[(current+direction+hunks.length)%hunks.length];activateChange(next.dataset.change,{scrollCode:true,scrollLedger:true,writeUrl:true})}return}
-    const file=target.closest('[data-scroll-file]');if(file&&dialog?.open){event.preventDefault();const anchor=file.dataset.scrollFile;afterFocusPanel(()=>{scrollInside(dialog.querySelector('[data-focus-stream]'),document.getElementById(anchor),'start');if(isMobile()){const url=new URL(location.href);url.searchParams.delete('panel');history.replaceState({stageReview:true,directReview:history.state?.directReview===true},'',url);applyFocusPanels(url)}});return}
+    const file=target.closest('[data-scroll-file]');if(file&&dialog?.open){event.preventDefault();const anchor=file.dataset.scrollFile;afterFocusPanel(()=>{scrollInside(dialog.querySelector('[data-focus-stream]'),document.getElementById(anchor),'start');if(isMobile()){const url=new URL(location.href);url.searchParams.delete('panel');history.replaceState({...history.state,stageReview:true,directReview:history.state?.directReview===true},'',url);applyFocusPanels(url)}});return}
     const disclosure=target.closest('[data-toggle-change]');if(disclosure){const hunk=findChange('.hunk-review[data-change]',disclosure.dataset.toggleChange);setCollapsed(hunk,hunk?.dataset.collapsed!=='true');return}
     const filter=target.closest('[data-filter-unread]');if(filter){filter.setAttribute('aria-pressed',String(filter.getAttribute('aria-pressed')!=='true'));applyUnreadFilter();return}
     const context=target.closest('[data-context-trigger]');if(context){loadContext(context);return}
@@ -230,7 +247,8 @@ export const STAGE_CLIENT = String.raw`(()=>{
   dialog?.addEventListener('pointerover',event=>{const linked=event.target.closest?.('.hunk-review[data-change],[data-ledger-change]');if(!linked)return;const id=linked.dataset.change||linked.dataset.ledgerChange;findChange('.hunk-review[data-change]',id)?.classList.add('is-linked-hover');findChange('[data-ledger-change]',id)?.classList.add('is-linked-hover')});
   dialog?.addEventListener('pointerout',event=>{const linked=event.target.closest?.('.hunk-review[data-change],[data-ledger-change]');if(!linked)return;const id=linked.dataset.change||linked.dataset.ledgerChange;findChange('.hunk-review[data-change]',id)?.classList.remove('is-linked-hover');findChange('[data-ledger-change]',id)?.classList.remove('is-linked-hover')});
   dialog?.addEventListener('cancel',event=>{event.preventDefault();closeFocus()});
-  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&dialog?.open){event.preventDefault();closeFocus()}});
+  document.addEventListener('change',event=>{const select=event.target;if(select instanceof HTMLSelectElement&&select.matches('[data-scope]')&&dialog?.open){event.preventDefault();openLayer(select.value||null)}});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&dialog?.open){event.preventDefault();closeFocus();return}if((event.key==='['||event.key===']')&&dialog?.open&&!(event.target instanceof HTMLInputElement||event.target instanceof HTMLSelectElement||event.target instanceof HTMLTextAreaElement)){event.preventDefault();stepLayer(event.key===']'?1:-1)}});
   addEventListener('popstate',()=>{if(pendingPanelAction){const action=pendingPanelAction;pendingPanelAction=null;action()}else syncUrl()});
   const initialUrl=new URL(location.href);if(initialUrl.searchParams.has('review')&&!background)history.replaceState({directReview:true},'',initialUrl);else if(initialUrl.searchParams.has('review')&&!history.state?.stageReview&&!history.state?.directReview)history.replaceState({directReview:true},'',initialUrl);
   theme();refreshProgress();syncUrl();

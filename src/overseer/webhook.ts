@@ -43,7 +43,7 @@ import {
   type PrObservation,
 } from "./installations";
 import { githubClientFor } from "./github-app";
-import type { GithubPull } from "./github";
+import { assertRef, type GithubPull } from "./github";
 import { getLineage } from "./revision-db";
 import { scheduleActorQueue } from "./revision-jobs";
 import {
@@ -53,6 +53,9 @@ import {
   type ObservationFacts,
 } from "./revision-pr";
 import { parseUpdatedAt } from "./derive";
+import { openStackRefreshJob, scheduleStackLane } from "./stack-jobs";
+import { recordStackObservation, type ProviderStackFacts } from "./stack-pr";
+import { getStackById, matchStackMembers } from "./stack-db";
 
 export const WEBHOOK_PATH = "/api/github/webhook";
 
@@ -67,6 +70,9 @@ const PR_ACTIONS = new Set([
   "synchronize",
   "converted_to_draft",
   "ready_for_review",
+  // A pull request joined or left a native stack. It carries the same pull request payload,
+  // plus a `stack` object — or, after an unstack, none.
+  "stacked",
 ]);
 
 // ---- the signature ----
@@ -123,6 +129,9 @@ interface WebhookPayload {
      *  all of it and the legacy status row needs none of it. */
     head?: { sha?: string; ref?: string; repo?: { id?: number; full_name?: string } | null };
     base?: { sha?: string; ref?: string; repo?: { id?: number; full_name?: string } | null };
+    /** The native stack this pull request is in, when it is in one. Its ABSENCE is the only
+     *  unstack signal GitHub sends, so absence is recorded rather than ignored. */
+    stack?: unknown;
   };
 }
 
@@ -147,6 +156,8 @@ interface Effects {
    *  commits: a lane driven from inside it would be capturing against rows that may
    *  still roll back, spending an installation token on a delivery that never landed. */
   lanes: string[];
+  /** Stack refresh lanes, on the same terms. */
+  stackLanes: string[];
 }
 
 /** Both halves of what a payload says about a repository, because a review's rows are
@@ -158,13 +169,13 @@ export interface ReconcileRepos {
   names: string[];
 }
 
-const NOTHING: Effects = { touched: [], invalidate: [], reconcile: null, lanes: [] };
+const NOTHING: Effects = { touched: [], invalidate: [], reconcile: null, lanes: [], stackLanes: [] };
 
 function repoNames(list: { full_name?: string }[] | undefined): string[] {
   return (list ?? []).map((r) => r.full_name).filter((n): n is string => typeof n === "string");
 }
 
-function applyPullRequest(installationId: number, payload: WebhookPayload): Effects {
+function applyPullRequest(installationId: number, payload: WebhookPayload, deliveryId: string): Effects {
   const pr = payload.pull_request;
   const repo = payload.repository;
   if (!pr || !repo || typeof repo.id !== "number" || typeof repo.full_name !== "string") {
@@ -204,13 +215,94 @@ function applyPullRequest(installationId: number, payload: WebhookPayload): Effe
   // to overwrite is still a reading that happened, and dropping it would lose the base-only
   // movement that carries no new GitHub timestamp at all.
   const applied = observePullRequest(installationId, obs);
-  const lanes = recordPromotedObservation(wsId, installationId, payload, obs);
+  const promoted = recordPromotedObservation(wsId, installationId, payload, obs, deliveryId);
+  const stackLanes = recordStackMembership(wsId, payload, obs, deliveryId, promoted.observationIds);
   return {
     touched: applied === 0 ? [] : reviewsNaming(wsId, obs.repoId, obs.repo, obs.prNumber).map((slug) => `${wsId}\0${slug}`),
     invalidate: [],
     reconcile: null,
-    lanes,
+    lanes: promoted.lanes,
+    stackLanes,
   };
+}
+
+type ParsedProviderStack =
+  | { kind: "absent" }
+  | { kind: "valid"; facts: ProviderStackFacts }
+  | { kind: "invalid" };
+
+/** A stack field has three states. Only property absence is an unstack signal. A present
+ * value with an unknown shape is ignored rather than turned into false membership drift. */
+function providerStackFacts(payload: WebhookPayload): ParsedProviderStack {
+  const pr = payload.pull_request;
+  if (!pr || !Object.prototype.hasOwnProperty.call(pr, "stack")) return { kind: "absent" };
+  const stack = pr.stack;
+  if (!stack || typeof stack !== "object" || Array.isArray(stack)) return { kind: "invalid" };
+  const value = stack as Record<string, unknown>;
+  const positiveInteger = (fact: unknown): fact is number => Number.isInteger(fact) && (fact as number) > 0;
+  const supplied = (object: Record<string, unknown>, key: string): boolean => Object.prototype.hasOwnProperty.call(object, key);
+  if (!positiveInteger(value.id) || !positiveInteger(value.number)) return { kind: "invalid" };
+  if (supplied(value, "position") && !positiveInteger(value.position)) return { kind: "invalid" };
+  if (supplied(value, "size") && !positiveInteger(value.size)) return { kind: "invalid" };
+
+  let base: Record<string, unknown> | null = null;
+  if (supplied(value, "base")) {
+    if (!value.base || typeof value.base !== "object" || Array.isArray(value.base)) return { kind: "invalid" };
+    base = value.base as Record<string, unknown>;
+    if (supplied(base, "ref")) {
+      if (typeof base.ref !== "string") return { kind: "invalid" };
+      try { assertRef(base.ref); } catch { return { kind: "invalid" }; }
+    }
+    if (supplied(base, "sha") && (typeof base.sha !== "string" || !/^[0-9a-f]{40}$/i.test(base.sha))) return { kind: "invalid" };
+  }
+
+  return { kind: "valid", facts: {
+    stackId: value.id,
+    stackNumber: value.number,
+    position: supplied(value, "position") ? value.position as number : null,
+    size: supplied(value, "size") ? value.size as number : null,
+    baseRef: base && supplied(base, "ref") ? base.ref as string : null,
+    baseSha: base && supplied(base, "sha") ? base.sha as string : null,
+  } };
+}
+
+/**
+ * The stack half of a `pull_request` delivery, for every live stack membership of this pull
+ * request in this workspace: one membership observation beside the pull request observation
+ * the delivery recorded, and — for a stack that reads through an installation — one
+ * persistent refresh job keyed on that observation. A user-actor stack records the
+ * observation and shows drift; nobody's credential is spent unasked.
+ *
+ * Not a transaction of its own, for the same reason as the promoted half: the delivery id
+ * commits with every effect of the delivery or with none of them.
+ */
+function recordStackMembership(
+  wsId: string,
+  payload: WebhookPayload,
+  obs: PrObservation,
+  receiptId: string,
+  observationIds: Map<string, string>,
+): string[] {
+  const members = matchStackMembers(obs.repoId, obs.prNumber).filter((row) => row.workspace_id === wsId);
+  if (members.length === 0) return [];
+  const parsed = providerStackFacts(payload);
+  if (parsed.kind === "invalid") return [];
+  const pullRequestObservationId = observationIds.get(members[0]!.lineage_id) ?? null;
+  const stackObservation = recordStackObservation({
+    workspaceId: wsId,
+    receiptId,
+    pullRequestObservationId,
+    repoId: obs.repoId,
+    prNumber: obs.prNumber,
+    stack: parsed.kind === "valid" ? parsed.facts : null,
+  });
+  const lanes: string[] = [];
+  for (const member of members) {
+    const stack = getStackById(member.stack_id);
+    if (!stack || stack.actor_kind !== "installation") continue;
+    lanes.push(openStackRefreshJob(stack, { kind: "stack" as const, observationId: stackObservation.id }, Date.now()).job.actor_key);
+  }
+  return lanes;
 }
 
 /** The complete base and head identity a promoted observation needs, or null when the
@@ -260,7 +352,8 @@ function promotedFacts(payload: WebhookPayload, obs: PrObservation): Observation
  * lineage to belong to. And the payload must carry complete base and head identity: a
  * promoted observation is what a capture is later pinned to, so one invented from half a
  * payload would be indistinguishable from one that was read. A payload missing it still
- * updates the legacy status row above, which needs none of it.
+ * updates legacy status and, when valid stack facts are present, writes the receipt-owned
+ * membership observation with a null promoted-observation link.
  *
  * Attribution is the installation in the signed payload and nothing else. A webhook never
  * spends a personal credential: nobody asked for it. That is also why the capture job below
@@ -278,20 +371,23 @@ function recordPromotedObservation(
   installationId: number,
   payload: WebhookPayload,
   obs: PrObservation,
-): string[] {
+  deliveryId: string,
+): { lanes: string[]; observationIds: Map<string, string> } {
+  const observationIds = new Map<string, string>();
   const relations = matchLineagePrs(obs.repoId, obs.prNumber).filter((row) => row.workspace_id === wsId);
-  if (relations.length === 0) return [];
+  if (relations.length === 0) return { lanes: [], observationIds };
   const facts = promotedFacts(payload, obs);
-  if (!facts) return [];
+  if (!facts) return { lanes: [], observationIds };
   const lanes: string[] = [];
   for (const row of relations) {
     const lineage = getLineage(wsId, row.slug);
     const relation = getLineagePr(wsId, row.lineage_id);
     if (!lineage || !relation) continue;
-    const outcome = recordUnaskedObservation({ workspaceId: wsId, lineage, relation, installationId, facts });
+    const outcome = recordUnaskedObservation({ workspaceId: wsId, lineage, relation, installationId, facts, receiptId: deliveryId });
+    observationIds.set(lineage.id, outcome.observation.id);
     if (outcome.actorKey) lanes.push(outcome.actorKey);
   }
-  return lanes;
+  return { lanes, observationIds };
 }
 
 function applyInstallation(installationId: number, payload: WebhookPayload): Effects {
@@ -310,7 +406,7 @@ function applyInstallation(installationId: number, payload: WebhookPayload): Eff
         accountType: account?.type ?? "User",
         repositorySelection: payload.installation?.repository_selection ?? "selected",
       });
-      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null, lanes: [] };
+      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null, lanes: [], stackLanes: [] };
     case "deleted":
       // Its status rows go with it, found by installation_id — the glyph disappears
       // rather than showing the last thing that was true about a repository we can no
@@ -318,14 +414,14 @@ function applyInstallation(installationId: number, payload: WebhookPayload): Eff
       // observations with it.
       deletePrStatusForInstallation(installationId);
       markInstallationRemoved(installationId);
-      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null, lanes: [] };
+      return { touched: [], invalidate: repoNames(payload.repositories), reconcile: null, lanes: [], stackLanes: [] };
     case "suspend":
       setInstallationSuspended(installationId, true);
       return NOTHING;
     case "unsuspend":
       // Already cleared by the delivery itself; this is where the sweep is triggered,
       // because everything that happened while it was suspended was never delivered.
-      return { touched: [], invalidate: [], reconcile: { installationId, repos: null }, lanes: [] };
+      return { touched: [], invalidate: [], reconcile: { installationId, repos: null }, lanes: [], stackLanes: [] };
     case "new_permissions_accepted":
       // Recorded by the delivery row and nothing more: nothing here needs a write
       // permission yet, and it matters when annotation mirroring does.
@@ -356,10 +452,11 @@ function applyInstallationRepositories(installationId: number, payload: WebhookP
         ? { installationId, repos: { ids: addedIds, names: added } }
         : null,
     lanes: [],
+    stackLanes: [],
   };
 }
 
-function applyEvent(event: string, payload: WebhookPayload): Effects {
+function applyEvent(event: string, payload: WebhookPayload, deliveryId: string): Effects {
   const installationId = payload.installation?.id;
   if (typeof installationId !== "number" || !Number.isInteger(installationId)) return NOTHING;
 
@@ -368,7 +465,7 @@ function applyEvent(event: string, payload: WebhookPayload): Effects {
   // before the event is applied, so `suspend` still sets it in the same breath.
   setInstallationSuspended(installationId, false);
 
-  const effects = dispatchEvent(event, installationId, payload);
+  const effects = dispatchEvent(event, installationId, payload, deliveryId);
 
   // The same proof, kept rather than merely acted on: settings reports the age of this
   // stamp, and with no polling left that report is the only way anyone finds out the
@@ -383,11 +480,11 @@ function applyEvent(event: string, payload: WebhookPayload): Effects {
   return effects;
 }
 
-function dispatchEvent(event: string, installationId: number, payload: WebhookPayload): Effects {
+function dispatchEvent(event: string, installationId: number, payload: WebhookPayload, deliveryId: string): Effects {
   switch (event) {
     case "pull_request":
       return PR_ACTIONS.has(payload.action ?? "")
-        ? applyPullRequest(installationId, payload)
+        ? applyPullRequest(installationId, payload, deliveryId)
         : NOTHING;
     case "installation":
       return applyInstallation(installationId, payload);
@@ -417,11 +514,14 @@ const applyDelivery = db.transaction(
       )
       .get(deliveryId);
     if (seen) return { ...NOTHING, duplicate: true };
+    const receivedAt = Date.now();
     db.run("INSERT INTO github_deliveries (delivery_id, received_at) VALUES (?, ?)", [
       deliveryId,
-      Date.now(),
+      receivedAt,
     ]);
-    return { ...applyEvent(event, payload), duplicate: false };
+    // The delivery table is age-bounded. If GitHub redelivers this id after its row was
+    // swept, that is a new accepted receipt and must still get a fresh observation.
+    return { ...applyEvent(event, payload, `${deliveryId}\0${receivedAt}`), duplicate: false };
   },
 ) as (deliveryId: string, event: string, payload: WebhookPayload) => Outcome;
 
@@ -500,6 +600,7 @@ export async function handleGithubWebhook(req: Request): Promise<Response> {
   // The persistent job row is what makes this replayable: the lane is a hint that work is
   // waiting now, and a restart that loses the hint still finds the row on its next sweep.
   for (const lane of new Set(outcome.lanes)) scheduleActorQueue(lane);
+  for (const lane of new Set(outcome.stackLanes)) scheduleStackLane(lane);
   if (outcome.reconcile) {
     const { installationId, repos } = outcome.reconcile;
     // Detached, and guarded: reconcileInstallation's per-pull-request catch does not
@@ -668,6 +769,17 @@ function sweepPromotedObservation(
     if (!lineage || !relation) continue;
     const outcome = recordSweptObservation({ workspaceId: wsId, lineage, relation, installationId, facts });
     if (outcome.actorKey) lanes.push(outcome.actorKey);
+    // A sweep heals a missed `stacked` delivery the same way it heals a missed push: an
+    // installation-owned stack this pull request is in gets one refresh job keyed on the
+    // observation the sweep just recorded. No membership observation is written here. A
+    // `getPull` answer carries no stack facts, and NULL would read as an unstack.
+    for (const member of matchStackMembers(repoId, prNumber)) {
+      if (member.workspace_id !== wsId) continue;
+      const stack = getStackById(member.stack_id);
+      if (!stack || stack.actor_kind !== "installation") continue;
+      const queued = db.transaction(() => openStackRefreshJob(stack, { kind: "pull-request", observationId: outcome.observation.id }, Date.now()))();
+      scheduleStackLane(queued.job.actor_key);
+    }
   }
   return lanes;
 }

@@ -206,7 +206,7 @@ export function listProjectEvents(projectId: string): ProjectEvent[] {
 
 // ---- membership ----
 
-type MembershipTable = "project_bundles" | "project_reviews" | "project_stages" | "project_review_lineages";
+type MembershipTable = "project_bundles" | "project_reviews" | "project_stages" | "project_review_lineages" | "project_review_stacks";
 
 function attach(table: MembershipTable, project: ProjectRow, slug: string): boolean {
   const before = db
@@ -240,6 +240,10 @@ export const attachReview = (project: ProjectRow, slug: string) =>
   attach("project_reviews", project, slug);
 export const detachReview = (project: ProjectRow, slug: string) =>
   detach("project_reviews", project, slug);
+export const attachReviewStack = (project: ProjectRow, slug: string) =>
+  attach("project_review_stacks", project, slug);
+export const detachReviewStack = (project: ProjectRow, slug: string) =>
+  detach("project_review_stacks", project, slug);
 
 /** The slugs a project holds, oldest attachment first — the order they arrived. */
 export function listProjectBundleSlugs(projectId: string): string[] {
@@ -273,6 +277,16 @@ export function listProjectReviewLineageSlugs(wsId: string, projectId: string): 
     .map((r) => r.slug);
 }
 
+/** The stacks a project holds, on the same terms as its promoted reviews. */
+export function listProjectReviewStackSlugs(wsId: string, projectId: string): string[] {
+  return db
+    .query<{ slug: string }, [string, string]>(
+      "SELECT slug FROM project_review_stacks WHERE workspace_id = ? AND project_id = ? ORDER BY created_at ASC",
+    )
+    .all(wsId, projectId)
+    .map((r) => r.slug);
+}
+
 /** Which projects hold this bundle — the upload response says where an upload landed. */
 export function listProjectsForBundle(wsId: string, slug: string): ProjectRow[] {
   return db
@@ -287,6 +301,7 @@ export interface ProjectCounts {
   bundles: number;
   reviews: number;
   reviewLineages: number;
+  reviewStacks: number;
   stages: number;
   children: number;
   tasks: number;
@@ -303,6 +318,7 @@ export function projectCounts(projectId: string): ProjectCounts {
     bundles: count("SELECT COUNT(*) AS n FROM project_bundles WHERE project_id = ?"),
     reviews: count("SELECT COUNT(*) AS n FROM project_reviews WHERE project_id = ?"),
     reviewLineages: scoped("project_review_lineages"),
+    reviewStacks: scoped("project_review_stacks"),
     stages: scoped("project_stages"),
     children: count("SELECT COUNT(*) AS n FROM projects WHERE parent_id = ?"),
     tasks: count("SELECT COUNT(*) AS n FROM project_tasks WHERE project_id = ?"),

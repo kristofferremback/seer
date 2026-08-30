@@ -38,6 +38,7 @@ import {
   type ReviewLineageRow,
 } from "./revision-db";
 import { revisionCodeDelta } from "./revision-delta";
+import { recoverStackRefreshJobs } from "./stack-jobs";
 import {
   enrichWebhookObservation,
   getLineagePr,
@@ -755,6 +756,8 @@ export async function settleCaptureJobs(): Promise<void> {
  * for the next ingest for that same actor or for a restart.
  */
 export function recoverCaptureJobs(now: number = Date.now()): number {
+  // The stack refresh jobs share this sweep: one timer, both tables.
+  recoverStackRefreshJobs(now);
   const released = db.run(
     "UPDATE review_capture_jobs SET state = 'pending', lease_token = NULL, lease_expires_at = NULL, updated_at = ? " +
       "WHERE state = 'running' AND lease_expires_at <= ?",

@@ -11,9 +11,9 @@
 //   * The RELATION says which pull request this lineage reviews. One per lineage, one
 //     live owner per pull request.
 //   * The OBSERVATION says what GitHub said, when, and TO WHOM. Its digest covers the
-//     normalized facts and the exact read actor but not Seer's clock, so re-reading
-//     unchanged facts through the same actor is free while a different actor stays
-//     honestly attributed as a different reading.
+//     normalized facts and the exact read actor but not Seer's clock, so ordinary
+//     re-reading of unchanged facts through the same actor is free. A signed webhook
+//     receipt adds its delivery id because stack membership may be the only changed fact.
 //   * The SOURCE TUPLE says which bytes a revision was captured from. It is what stops a
 //     second capture of the same base tip, head and merge base publishing a duplicate
 //     revision — and it is why a branch-first review that a pull request is later
@@ -30,7 +30,7 @@ import { db } from "../db";
 import { json } from "../http";
 import { hashKey, SLUG_RE, tinyId } from "../ids";
 import { getProject } from "../projects/db";
-import { getReview, lineageOwnsSlug } from "./db";
+import { getReview, lineageOwnsSlug, stackOwnsSlug } from "./db";
 import {
   actorQueueKey,
   actorWords,
@@ -402,8 +402,10 @@ function insertObservation(
   facts: ObservationFacts,
   actor: ReadActor,
   now: number,
+  receiptId?: string,
 ): ReviewPrObservationRow {
-  const digest = observationDigest(facts, actor);
+  const factsDigest = observationDigest(facts, actor);
+  const digest = receiptId === undefined ? factsDigest : hashKey(`${factsDigest}\0webhook\0${receiptId}`);
   const existing = getObservationByDigest(lineageId, digest);
   if (existing) return existing;
   const stored = storedActorOf(actor);
@@ -418,7 +420,7 @@ function insertObservation(
       facts.mergeBaseSha, facts.githubUpdatedAt, now,
       stored.actor_kind, stored.installation_id, stored.user_id, stored.credential_id, digest],
   );
-  return getObservationByDigest(lineageId, digest)!;
+  return getObservation(workspaceId, id)!;
 }
 
 /** Attach the relation, or prove the one already there is the same pull request. The
@@ -511,6 +513,9 @@ export const ingestPullRequest = db.transaction((input: PrIngestInput): PrIngest
   if (input.operation === "create") {
     if (lineageOwnsSlug(workspaceId, input.slug)) {
       throw new PrIngestError(409, `Review slug "${input.slug}" already names another promoted review`);
+    }
+    if (stackOwnsSlug(workspaceId, input.slug)) {
+      throw new PrIngestError(409, `Review slug "${input.slug}" already names a review stack`);
     }
     if (input.legacyOwnsSlug(input.slug)) {
       throw new PrIngestError(409, `Review slug "${input.slug}" already names a review in this workspace`);
@@ -734,6 +739,9 @@ export interface UnaskedObservationInput {
   relation: ReviewLineagePrRow;
   installationId: number;
   facts: ObservationFacts;
+  /** Present only for a signed webhook. It makes every accepted delivery a distinct
+   * observation even when pull request facts match and only stack membership changed. */
+  receiptId?: string;
 }
 
 export interface UnaskedObservation {
@@ -763,7 +771,7 @@ export function recordUnaskedObservation(input: UnaskedObservationInput): Unaske
   const { workspaceId, lineage, relation, facts } = input;
   const now = Date.now();
   const observation = insertObservation(workspaceId, lineage.id, facts,
-    { kind: "installation", installationId: input.installationId }, now);
+    { kind: "installation", installationId: input.installationId }, now, input.receiptId);
 
   const actor = readActorOf(relation);
   if (actor.kind !== "installation") return { observation, actorKey: null };
@@ -1253,6 +1261,9 @@ export async function handleCreatePullRequestLineage(req: Request): Promise<Resp
       }
       if (getReview(auth.workspaceId, slug)) {
         return prJson({ error: `Review slug "${slug}" already names a review in this workspace` }, 409);
+      }
+      if (stackOwnsSlug(auth.workspaceId, slug)) {
+        return prJson({ error: `Review slug "${slug}" already names a review stack` }, 409);
       }
       for (const project of projects) {
         if (!getProject(auth.workspaceId, project)) {

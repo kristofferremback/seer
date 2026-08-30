@@ -404,6 +404,23 @@ describe("a 200 matches the schema the document declares for it", () => {
     refreshReviewLineagePullRequest: "needs a stored read actor and a GitHub fixture; driven and schema-checked in tests/overseer/revision-pr.test.ts",
     readReviewCaptureJob: "a capture job only exists behind an ingested pull request; driven and schema-checked in tests/overseer/revision-pr.test.ts",
     retryReviewCaptureJob: "a failed capture job only exists behind an ingested pull request; driven in tests/overseer/revision-pr.test.ts",
+    // A stack needs several ingested pull requests with completed revisions and accounts.
+    // Every one of these is driven, and its body checked against these same schemas, in
+    // tests/overseer/stack.test.ts.
+    createReviewStack: "needs ingested pull request lineages; driven and schema-checked in tests/overseer/stack.test.ts",
+    readReviewStack: "needs a created stack; driven and schema-checked in tests/overseer/stack.test.ts",
+    readReviewStackManifest: "needs a created stack; driven and schema-checked in tests/overseer/stack.test.ts",
+    readReviewStackAccount: "needs a published stack account; driven and schema-checked in tests/overseer/stack.test.ts",
+    publishReviewStackAccount: "needs an account-ready manifest; driven and schema-checked in tests/overseer/stack.test.ts",
+    refreshReviewStack: "needs a created stack; driven and schema-checked in tests/overseer/stack.test.ts",
+    readReviewStackMemberFileLines: "needs a created stack; driven and schema-checked in tests/overseer/stack.test.ts",
+    claimStackWitnessRequest: "needs an account-ready manifest; driven and schema-checked in tests/overseer/stack.test.ts",
+    failStackWitnessRequest: "needs an account-ready manifest; driven in tests/overseer/stack.test.ts",
+    retryStackWitnessRequest: "needs an account-ready manifest; driven in tests/overseer/stack.test.ts",
+    readStackRefreshJob: "a refresh job only exists behind a stack membership delivery; driven and schema-checked in tests/overseer/stack.test.ts",
+    retryStackRefreshJob: "a failed refresh job only exists behind a stack membership delivery; driven in tests/overseer/stack.test.ts",
+    attachProjectReviewStack: "needs a created stack; driven in tests/overseer/stack.test.ts",
+    detachProjectReviewStack: "needs a created stack; driven in tests/overseer/stack.test.ts",
   };
 
   let ajv: Ajv2020;

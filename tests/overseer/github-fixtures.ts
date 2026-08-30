@@ -10,6 +10,7 @@ import type {
   GithubCommit,
   GithubFile,
   GithubPull,
+  GithubPullStack,
   GithubReviewComment,
 } from "../../src/overseer/github";
 
@@ -55,6 +56,8 @@ export interface FakeGithubOptions {
   diff?: string;
   blobs?: Record<string, string>;
   onDiff?: () => void;
+  /** Native stacks keyed by pull request number. A number with no entry is in no stack. */
+  stacks?: Record<number, GithubPullStack>;
 }
 
 /** A GithubClient backed by fixtures. Anything not supplied throws rather than lies. */
@@ -83,6 +86,9 @@ export function fakeGithubClient(options: FakeGithubOptions = {}): GithubClient 
     async getPullDiff() {
       options.onDiff?.();
       return need(options.diff, "diff");
+    },
+    async getPullStack(_repo, number) {
+      return need(options.stacks, "stacks")[number] ?? null;
     },
   };
 }

@@ -428,8 +428,8 @@ heading, which is a presentation decision and stays one. Creation owns the promo
 in this slice; separate attach and detach routes are deferred until promoted lineage
 management needs them.
 
-Deferred here on purpose: repeated source revisions, stacks, sharing, local discussion,
-judgments, and any GitHub write.
+Deferred here on purpose: sharing, local discussion, judgments, and any GitHub write.
+Stacks of promoted reviews are their own section below.
 
 ### One pull request, one review lineage
 
@@ -665,6 +665,126 @@ request, and its page says `superseded` rather than pending forever.
 A fresh witness claim is handed `priorAccount`: the exact latest account published over a
 revision **lower** than this one, whole, or null. Never an account from this revision,
 never a later one, and never a rewritten summary.
+
+### A stack keeps the whole and every layer
+
+A **stack** groups review lineages: one same-repository chain of 2 to 16 pull requests,
+bottom to top, read as one completed change without losing the layer each pull request is.
+It owns nothing a member owns. Source revisions, accounts, reads, witness workflow and later
+comments stay the lineage's; the stack pins ORDER and publishes a WHOLE. There is no stack
+read table: progress is the sum of the asking member's reads on the exact member revisions
+a manifest pins, and a read marked through the stack route is written on the member
+revision, where the member's own page reads it too.
+
+Five rows carry it, all in v19 and all workspace-scoped.
+
+- `review_stacks` is the identity: slug (unique across reviews, lineages and stacks
+  together, enforced by every write path), title, repository, the stack base ref, the
+  provenance (`native` with GitHub's stack id and number, or `inferred`), the exact read
+  actor stored at creation, and the latest manifest version.
+- `review_stack_members` is the live membership webhooks and reconciliation join by
+  `(repo_id, pr_number)`. A lineage is in at most one live stack, held by a partial unique
+  index. It carries no position on purpose: order is the manifest's, and a row that said
+  otherwise would be a second place for the order to drift. A member that leaves is stamped
+  `removed_at` with a reason (`unstacked`, `merged`, `closed`, `detached`) and the manifest
+  that recorded it; nothing is deleted. A same-stack rejoin clears those fields. A successor
+  is refused before publication if another live stack owns any member it claims.
+- `review_stack_manifests` is the evidence: one immutable document per reading, pinning
+  each member's lineage, pull request, exact revision id and number, exact account id and
+  version when one exists, normalized base and head refs, head SHA, and status (`live`,
+  `merged`, `removed` with a reason). `UNIQUE (stack_id, predecessor_version)` is what makes
+  "exactly one successor per predecessor" a constraint whichever writer commits first:
+  a loser re-reads the current manifest and decides once more, and a second loss is a 500
+  the race test shows never fires. A successor replaces each predecessor slot in place,
+  including a departure with its removed stub. Native additions follow GitHub's order
+  around those historical slots, so removal never rewrites every surviving position.
+- `review_stack_accounts` is what a witness published over ONE manifest: summary, agent,
+  and stack groups whose references partition every pinned member account group exactly
+  once. There is one account per manifest, so a manifest version is the only counter a
+  stack has and `/v/<n>/account` is where its account reads. Prose may cross layers; the
+  code stream orders references bottom-to-top, then member group order, and an account that
+  lists them otherwise is refused rather than reordered.
+- `review_stack_witness_requests`, its claims and its supersessions mirror the member
+  workflow with their own `rsw_` ids. A request opens only on a manifest whose every pinned
+  member carries an account; a successor manifest supersedes an open request through a join,
+  never a fourth stored state; claim, publish, fail and retry refuse a superseded request.
+
+**Chain facts come from retained rows.** Each member's newest `review_pr_observations` row
+gives its base and head; member N's base must be member N-1's head, except that a merged
+member satisfies its successor with the stack base, because GitHub retargets survivors to
+trunk after a merge. Position 1 sits on the stack base. Every other shape is a named 422:
+`cross-repository`, `fork`, `fan`, `cycle`, `broken-chain`, `duplicate`, `no-lineage`,
+`no-pull-request`, `no-revision`, `too-few-members`, `too-many-members`, and for the native
+path `ambiguous-native`, `unresolved-native-member` and `no-native-stack`. The inferred path
+never calls GitHub. The native path reads `GET /repos/{owner}/{repo}/stacks?pull_request=N`
+under API version `2026-03-10` through the asking member's own credential or the
+repository's installation, takes GitHub's order, and still pins every fact from Seer's own
+observation of each member, so the two paths produce byte-equal member snapshots and differ
+only in the manifest's `source`. Seer never calls create, add or unstack.
+
+**Movement marks a manifest behind and rewrites nothing.** A newer member revision, a
+newer account on a pinned revision, a membership observation that disagrees with the stored
+stack, and a removed member are drift, read from rows and said beside the document. An
+explicit refresh re-normalizes — rows for an inferred stack, one provider read through the
+stored actor for a native one — resolves each member to its newest completed revision and
+that revision's account, and publishes a successor only when the snapshots differ. A native
+stack attached through a member's connected account may only be refreshed by that member.
+The first time every pinned member revision has an account, one `account-ready` successor
+carrying those account ids and one pending stack witness request publish INSIDE the member
+account's own transaction, so the manifest that made the stack ready and the account that
+made it ready commit together. Both provider behaviours after a merge are handled: a merged
+pull request GitHub still lists is a `merged` member, and one it dropped is a removed stub
+whose reason Seer's newest observation decides.
+
+**Membership deliveries are observations, and refreshes are jobs.** `PR_ACTIONS` gains
+`stacked`. Every accepted `pull_request` delivery for a live stack member writes one
+`review_stack_pr_observations` row with its own `rso_` identity and receipt id. Its
+`pull_request_observation_id` is a nullable link to the complete promoted observation from
+the same receipt. A payload can still identify the repository, pull request, head SHA and
+stack after a head repository disappears, so that accepted membership reading remains
+honest without copying an older observation or inventing capturable source facts. The row
+stores the provider's stack id, number, position and size when a valid `stack` object is
+present, or NULL provider columns only when the property is absent, which is GitHub's
+unstack signal. A malformed present object is ignored and never recorded as an unstack.
+Drift reads the newest valid row inside the stack's workspace.
+
+For a stack that reads through an installation, one `review_stack_refresh_jobs` row is
+inserted-or-ignored keyed on the new stack observation. A newly accepted receipt therefore
+cannot reuse an older completed job. A user-actor stack records the observation and shows
+drift; nobody's credential is spent unasked. Reconciliation has no stack facts, so its job
+uses the complete pull request observation its sweep recorded and writes no membership
+observation. A `getPull` answer cannot make NULL mean unstack. The capture sweep recovers
+abandoned refresh leases too.
+
+**Reading is one composite of retained rows.** A stack page loads each pinned member's
+capture inventory from rows and namespaces its ids by position — `chg_…` becomes
+`l2-chg_…`, `stf_…` becomes `l2-stf_…` — because canonical ids are content-derived and two
+layers can hold identical hunks; the prefix keeps them distinct into the DOM, the read forms
+and the URLs. The whole-stack focus is one stream with sticky member seams above the file
+bands; `layer=<lineage-slug>` filters the same stream to one member and hides the seams;
+`review` names a stack group, or an evidence seam of one member on a manifest with no
+account; `change` names a namespaced anchor; `page` a bounded page. Retained lines are read
+through the manifest, the member position and the member's own file id, and a foreign file
+id is the same soft miss. Rendering, progress, paging and drift never call GitHub.
+
+**Paging is a row-derived plan with a measured limit.** Units are stack-group references
+(or evidence seams); pages fill greedily under `MAX_STACK_PAGE_CHANGES` (100) and
+`MAX_STACK_PAGE_HUNK_LINES` (8 000, summed over `stage_capture_changes`), break only at unit
+seams. A unit over either row bound is served alone and marked `overBudget`; member-group
+ownership is never split for ordinary paging. Rows can bound counts, but a diff line is
+unbounded, so the 2 MiB `STACK_PAGE_HTML_TARGET_BYTES` is measured on the response
+(`x-seer-page-bytes`) rather than promised by the plan. A page over the 4 MiB
+`STACK_PAGE_HTML_MAX_BYTES` hard limit is replaced with a list of every change, material
+item and leaf file. Each item links through its exact member account group, or through its
+pinned revision and evidence seam when the stack has no account. The emergency list is
+itself packed into deterministic `fallback-page` responses by encoded byte length. A label
+that cannot fit alone is explicitly replaced by the item's bounded id, never by a truncated
+response. Every item remains linked, and every fallback response is measured against the
+same hard limit. The measured cost is about
+620 bytes per rendered diff line, so the line bound and the byte target are not the same
+promise; a line-byte cap stored at capture time is the change that would make them one.
+
+Deferred here on purpose: sharing a stack, discussion, judgment, and any GitHub write.
 
 ## Privacy differs from Seer
 
