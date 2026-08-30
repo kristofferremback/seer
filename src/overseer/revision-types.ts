@@ -19,7 +19,11 @@ import type { StageGroup } from "../stage/types";
  *  stored: it is `pending` with a nonzero retry count, so one row cannot claim to be
  *  waiting for a first answer and waiting for a second at once. */
 export type WitnessRequestState = "pending" | "failed" | "published";
-export type WitnessWorkflowWord = "pending" | "failed" | "retrying" | "published";
+/** `superseded` is derived too, and from a different table again: a later revision was
+ *  appended while this request was still unanswered, so the code it was asked about is no
+ *  longer the newest. It is not a stored state, because the stored CHECK is what a
+ *  previous image reads and a word it does not know would refuse the whole review. */
+export type WitnessWorkflowWord = "pending" | "failed" | "retrying" | "published" | "superseded";
 
 export interface RevisionAgent {
   name: string;

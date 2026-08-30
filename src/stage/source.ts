@@ -692,6 +692,9 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
   const fileRows: CaptureInsert["files"] = [];
   const changes: CaptureInsert["changes"] = [];
   const incomplete: CaptureInsert["incomplete"] = [];
+  // One row per tree. Both remain capture-level snapshot facts, preserving the shipped
+  // Stage inventory shape; duplicate exact delta keys may classify as unchanged without
+  // authorizing handling carry.
   if (oldTree.incomplete) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "snapshot_incomplete", path: null, side: "snapshot", reason: oldTree.incomplete });
   if (newTree.incomplete) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "snapshot_incomplete", path: null, side: "snapshot", reason: newTree.incomplete });
   if (comparison.files.length >= 300) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "metadata_incomplete", path: null, side: "snapshot", reason: "GitHub compare returned its 300-file ceiling; tree facts are complete, but omitted rename and patch metadata may exist." });

@@ -12,7 +12,7 @@
 // second address; it does not redirect the first or replace the code stream under it.
 
 import { sessionEmail, sessionUser } from "../auth";
-import { getWorkspace, isMember, listUserWorkspaces } from "../db";
+import { db, getWorkspace, isMember, listUserWorkspaces } from "../db";
 import { SLUG_RE, STAGE_CHANGE_ID_RE, STF_ID_RE } from "../ids";
 import { json, originOk } from "../http";
 import { appBar, softNotFoundPage, type NavContext } from "../pages";
@@ -28,8 +28,10 @@ import {
   readerGroupOf,
   renderReaderPage,
   type ReaderDoc,
+  type ReaderDrift,
   type ReaderGroup,
   type ReaderMember,
+  type ReaderMovement,
   type ReaderPullRequest,
   type ReaderRoutes,
   type ReaderWorkflow,
@@ -44,10 +46,12 @@ import {
   getLineagePr,
   getObservation,
   latestObservation,
+  lineageDrift,
   observationForRevision,
   observationStateWord,
   pullRequestUrl,
   readActorOf,
+  revisionMovement,
   type ReviewLineagePrRow,
   type ReviewPrObservationRow,
 } from "./revision-pr";
@@ -197,23 +201,49 @@ export function evidenceSeams(inventory: StageCaptureInventory): ReaderGroup[] {
 interface HistoryInput {
   workspaceId: string;
   slug: string;
-  latestRevision: number;
-  accounts: { version: number; revision: number }[];
+  revisions: { revision: number; created_at: number }[];
+  accounts: { version: number; created_at: number }[];
   current: { kind: "revision" | "account"; number: number };
 }
 
+/**
+ * The source rail: every revision and every account of this review, in the order they
+ * happened.
+ *
+ * Chronological across both, rather than all the revisions and then all the accounts. Once
+ * a pull request can move, those two orders diverge — an account published over revision 1
+ * is older than revision 2, and listing it after would say the walkthrough came later than
+ * the code it does not describe. Ties break towards the revision, because an account cannot
+ * exist before the revision it accounts for.
+ */
 function history(input: HistoryInput): { label: string; href: string; current: boolean }[] {
-  const revisions = Array.from({ length: input.latestRevision }, (_, index) => index + 1).map((number) => ({
-    label: `rev ${number}`,
-    href: `/${input.workspaceId}/r/${input.slug}/rev/${number}`,
-    current: input.current.kind === "revision" && input.current.number === number,
-  }));
-  const accounts = input.accounts.map((account) => ({
-    label: `v${account.version}`,
-    href: `/${input.workspaceId}/r/${input.slug}/v/${account.version}`,
-    current: input.current.kind === "account" && input.current.number === account.version,
-  }));
-  return [...revisions, ...accounts];
+  const entries = [
+    ...input.revisions.map((row) => ({
+      at: row.created_at,
+      rank: 0,
+      number: row.revision,
+      label: `rev ${row.revision}`,
+      href: `/${input.workspaceId}/r/${input.slug}/rev/${row.revision}`,
+      current: input.current.kind === "revision" && input.current.number === row.revision,
+    })),
+    ...input.accounts.map((row) => ({
+      at: row.created_at,
+      rank: 1,
+      number: row.version,
+      label: `v${row.version}`,
+      href: `/${input.workspaceId}/r/${input.slug}/v/${row.version}`,
+      current: input.current.kind === "account" && input.current.number === row.version,
+    })),
+  ];
+  entries.sort((left, right) => left.at - right.at || left.rank - right.rank || left.number - right.number);
+  return entries.map((entry) => ({ label: entry.label, href: entry.href, current: entry.current }));
+}
+
+/** When each revision of this lineage was published, for the chronological rail. */
+function listRevisionTimes(workspaceId: string, slug: string): { revision: number; created_at: number }[] {
+  return db.query<{ revision: number; created_at: number }, [string, string]>(
+    "SELECT revision, created_at FROM review_revisions WHERE workspace_id = ? AND slug = ? ORDER BY revision ASC",
+  ).all(workspaceId, slug);
 }
 
 /** Reads belong to the member and the source revision, so the read action is
@@ -300,7 +330,61 @@ export function promotedOwnsSlug(workspaceId: string, slug: string): boolean {
   return SLUG_RE.test(slug) && getLineage(workspaceId, slug) !== null;
 }
 
-function readerDoc(resolved: ResolvedPromotedRead, pinnedKind: "revision" | "account" | "latest"): ReaderDoc {
+/**
+ * What this page says about source that arrived after it.
+ *
+ * The one place the answer depends on WHO is reading, and only in the last arm. A member
+ * whose teammate attached the review through their own GitHub connection cannot spend that
+ * credential, so offering them "refresh required" would be offering an action the API will
+ * refuse. They are told the same true thing in fewer words.
+ */
+function readerDrift(
+  resolved: ResolvedPromotedRead,
+  viewerId: string,
+): ReaderDrift | null {
+  const { workspaceId, lineage, revision } = resolved;
+  const drift = lineageDrift(workspaceId, lineage, revision.revision);
+  if (drift.newerRevision !== null) {
+    return {
+      kind: "revision",
+      label: `Revision ${drift.newerRevision} available`,
+      href: `/${workspaceId}/r/${lineage.slug}/rev/${drift.newerRevision}`,
+    };
+  }
+  if (!drift.moved) return null;
+  if (drift.sourceRevision !== null) {
+    return {
+      kind: "revision",
+      label: `Source matches rev ${drift.sourceRevision}`,
+      href: `/${workspaceId}/r/${lineage.slug}/rev/${drift.sourceRevision}`,
+    };
+  }
+  if (drift.capture !== null) return { kind: "capture", state: drift.capture };
+  if (!drift.refreshRequired) return { kind: "source" };
+  if (drift.ownerUserId === null || drift.ownerUserId === viewerId) return { kind: "refresh" };
+  return { kind: "source" };
+}
+
+function readerMovement(resolved: ResolvedPromotedRead): ReaderMovement | null {
+  const movement = revisionMovement(
+    resolved.workspaceId,
+    resolved.lineage,
+    resolved.revision,
+    resolved.inventory,
+  );
+  if (!movement) return null;
+  return {
+    previousRevision: movement.previousRevision,
+    code: movement.code,
+    account: movement.account?.counts ?? null,
+  };
+}
+
+function readerDoc(
+  resolved: ResolvedPromotedRead,
+  pinnedKind: "revision" | "account" | "latest",
+  viewerId: string,
+): ReaderDoc {
   const { lineage, revision, account } = resolved;
   const source = revision.doc.source;
   const builder = revision.doc.builder;
@@ -365,6 +449,8 @@ function readerDoc(resolved: ResolvedPromotedRead, pinnedKind: "revision" | "acc
         }) : [],
     authored: account !== null,
     workflow,
+    drift: readerDrift(resolved, viewerId),
+    movement: readerMovement(resolved),
     standing,
     pin,
     latest: pinnedKind === "latest" ? true : latest,
@@ -491,7 +577,7 @@ export async function handlePromotedReviewPage(
   const resolved = resolvePromoted(workspaceId, slug, pin);
   if (!resolved) return softReviewPage();
 
-  const doc = readerDoc(resolved, pin === null ? "latest" : pin.kind);
+  const doc = readerDoc(resolved, pin === null ? "latest" : pin.kind, user.id);
   const { lineage, revision, account } = resolved;
   const pinnedPath = account
     ? `/${workspaceId}/r/${slug}/v/${account.version}`
@@ -499,7 +585,7 @@ export async function handlePromotedReviewPage(
   const routes = routesFor(workspaceId, lineage, revision, pinnedPath, {
     workspaceId,
     slug,
-    latestRevision: lineage.latest_revision ?? revision.revision,
+    revisions: listRevisionTimes(workspaceId, slug),
     accounts: listAccountVersions(workspaceId, slug),
     current: account
       ? { kind: "account", number: account.version }

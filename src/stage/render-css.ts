@@ -63,6 +63,10 @@ code,pre{font-family:var(--mono)}
 .attention-bar>span{color:hsl(var(--accent))}.attention-bar a{color:hsl(var(--muted));text-decoration:none}.attention-bar a:hover{text-decoration:underline}.attention-bar details{position:relative}.attention-bar details>summary{cursor:pointer;color:hsl(var(--muted));list-style:none}.attention-bar details>summary::-webkit-details-marker{display:none}.attention-bar details>div{position:absolute;z-index:20;top:24px;right:0;width:min(300px,80vw);padding:8px;border:1px solid hsl(var(--line));background:hsl(var(--paper));box-shadow:0 12px 30px #0003}.attention-bar details>div a{display:block;padding:5px}
 .stage-workflow{margin:14px 0 0;font:11px var(--mono);color:hsl(var(--muted))}
 .stage-workflow[data-witness-state=failed]{color:hsl(var(--accent))}
+/* Newer source, and what this revision changed about the one before it. Same weight and
+   type as the workflow line above them: three facts about the same source, one grammar. */
+.stage-drift,.stage-movement{margin:6px 0 0;font:11px var(--mono);color:hsl(var(--muted))}
+.stage-drift a{color:inherit;text-decoration:underline;text-underline-offset:2px}
 /* The pull request reads as a link and nothing more: no pill, no colour of its own. */
 .source-pr{color:inherit;text-decoration:underline;text-underline-offset:2px}.focus-pr-source{display:none}
 /* A lineage whose capture has not finished. Same tokens as the header above it, so the

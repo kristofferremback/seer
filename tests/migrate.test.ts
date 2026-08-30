@@ -61,10 +61,16 @@ test("a populated v14 database survives v15 and rolls back by restore", async ()
   expect(out).toContain("all assertions passed");
 });
 
-// The release this slice ships. Additive DDL is only half the claim; the other half is
-// that going back is a database restore, which is the only rollback this repo has.
 test("a populated v15 promoted review survives v16 and rolls back by restore", async () => {
   const { code, out } = await runScenario("v15");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
+// The release this slice ships. Additive DDL is only half the claim; the other half is
+// that going back is a database restore, which is the only rollback this repo has.
+test("a populated v16 pull request lineage survives v17 and rolls back by restore", async () => {
+  const { code, out } = await runScenario("v16");
   expect(code).toBe(0);
   expect(out).toContain("all assertions passed");
 });

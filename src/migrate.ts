@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 16 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 17 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -67,6 +67,12 @@ import { hashKey, tinyId } from "./ids";
 // capture job workflow, client idempotency, and witness claim leases. Purely additive —
 // every v15 table, constraint and stored document is untouched, and a lineage that never
 // names a pull request keeps working with all six tables empty.
+//
+// v17 adds what a MOVING pull request needs: the provenance beside a carried read, and the
+// record that appending a revision superseded an earlier revision's unpublished witness
+// request. Purely additive — no v16 table, constraint, job row, observation or stored
+// document is touched, and the existing witness-request CHECK is deliberately not rebuilt,
+// because `superseded` is derived from a join rather than stored as a fourth state.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -538,8 +544,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 16) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 16`);
+  if (uv > 17) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 17`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -557,6 +563,7 @@ export function migrate(): void {
   if (userVersion() < 14) migrateToV14();
   if (userVersion() < 15) migrateToV15();
   if (userVersion() < 16) migrateToV16();
+  if (userVersion() < 17) migrateToV17();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -1243,6 +1250,67 @@ function migrateToV16(): void {
     db.run("PRAGMA user_version = 16");
   })();
   console.log("[seer] migrated to schema v16 (pull request review lineage).");
+}
+
+// What a MOVING pull request leaves behind.
+//
+// `review_revision_read_carries` is provenance and only provenance. The ACTIVE read is
+// still one `review_revision_change_reads` row, written in the same transaction as the row
+// here, so there is exactly one place that answers "has this member handled this change".
+// This table answers a different question — why did that read arrive without anybody
+// clicking — and it is immutable: unmarking a carried read removes the active row and
+// leaves this one standing, because the history still happened. The key digest is the
+// exact equivalence key the carry was proved on, so a later reader can say what was
+// matched rather than trusting that something was.
+//
+// Its primary key omits the workspace deliberately. A revision id is globally unique, so
+// `(target revision, member, target change)` already names one carry; adding the workspace
+// would let the same carry exist twice if a revision id were ever reused across
+// workspaces, which is the opposite of what a uniqueness constraint is for. The column is
+// still carried, because every read on this path is workspace-scoped.
+//
+// `review_witness_supersessions` is the other half. Appending revision N leaves any
+// unpublished witness request for an earlier revision working on code that is no longer
+// the newest; `superseded` is that fact, and it is a JOIN rather than a fourth state in
+// the v16 CHECK. Rebuilding that CHECK would mean rewriting every stored request row to
+// add a word the requests themselves never take, and a v16 image reading a request whose
+// state it did not recognise would refuse the whole promoted review. The request id is the
+// primary key, so the FIRST successor is preserved: a second append inserts-or-ignores and
+// cannot rewrite which revision superseded it.
+const V17_REVIEW_MOVEMENT = `
+  CREATE TABLE IF NOT EXISTS review_revision_read_carries (
+    target_revision_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    target_change_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    source_revision_id TEXT NOT NULL,
+    source_change_id TEXT NOT NULL,
+    key_digest TEXT NOT NULL,
+    carried_at INTEGER NOT NULL,
+    PRIMARY KEY (target_revision_id, user_id, target_change_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_read_carries_source
+    ON review_revision_read_carries (source_revision_id, user_id);
+
+  CREATE TABLE IF NOT EXISTS review_witness_supersessions (
+    request_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    superseded_revision_id TEXT NOT NULL,
+    successor_revision_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_witness_supersessions_lineage
+    ON review_witness_supersessions (workspace_id, lineage_id);
+`;
+
+function migrateToV17(): void {
+  db.transaction(() => {
+    db.exec(V17_REVIEW_MOVEMENT);
+    db.run("PRAGMA user_version = 17");
+  })();
+  console.log("[seer] migrated to schema v17 (moving pull request handling).");
 }
 
 /**

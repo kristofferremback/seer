@@ -302,6 +302,38 @@ export function latestAccountForRevision(workspaceId: string, revisionId: string
   return row ? parseAccount(row) : null;
 }
 
+/** The revision immediately before this one in the same lineage, or null on the first.
+ *  What the retained code delta is measured against. */
+export function previousRevision(
+  workspaceId: string,
+  lineageId: string,
+  revision: number,
+): ReviewRevisionRow | null {
+  const row = db.query<Raw<ReviewRevisionRow>, [string, string, number]>(
+    "SELECT * FROM review_revisions WHERE workspace_id = ? AND lineage_id = ? AND revision < ? ORDER BY revision DESC LIMIT 1",
+  ).get(workspaceId, lineageId, revision);
+  return row ? parseRevision(row) : null;
+}
+
+/**
+ * The exact latest account published over a revision LOWER than this one, or null.
+ *
+ * Never an account from the target revision itself and never a later one: a fresh witness
+ * asking what the last walkthrough said must be handed the last walkthrough, not the one
+ * somebody else is writing beside them.
+ */
+export function latestAccountBeforeRevision(
+  workspaceId: string,
+  lineageId: string,
+  revision: number,
+): ReviewAccountRow | null {
+  const row = db.query<Raw<ReviewAccountRow>, [string, string, number]>(
+    "SELECT * FROM review_accounts WHERE workspace_id = ? AND lineage_id = ? AND revision < ? " +
+      "ORDER BY revision DESC, version DESC LIMIT 1",
+  ).get(workspaceId, lineageId, revision);
+  return row ? parseAccount(row) : null;
+}
+
 export function listAccountVersions(workspaceId: string, slug: string): { version: number; revision: number; created_at: number }[] {
   return db.query<{ version: number; revision: number; created_at: number }, [string, string]>(
     "SELECT version, revision, created_at FROM review_accounts WHERE workspace_id = ? AND slug = ? ORDER BY version ASC",
@@ -320,12 +352,159 @@ export function getWitnessRequestForRevision(workspaceId: string, revisionId: st
   ).get(workspaceId, revisionId);
 }
 
-/** The word a reader is shown. `retrying` is pending after at least one failure, which
- *  is a different thing to say than "we have not heard yet". */
+/**
+ * The word a reader is shown.
+ *
+ * `retrying` is pending after at least one failure, which is a different thing to say than
+ * "we have not heard yet". `superseded` is a later revision having been appended while this
+ * request was still open, which is a third thing again: nobody is coming, and saying
+ * "pending" forever would be a promise the workflow has already broken. Published wins over
+ * both, because an account that exists is not waiting for anything.
+ */
 export function workflowWord(request: WitnessRequestRow | null): WitnessWorkflowWord | null {
   if (!request) return null;
-  if (request.state !== "pending") return request.state;
+  if (request.state === "published") return "published";
+  if (isWitnessRequestSuperseded(request.id)) return "superseded";
+  if (request.state === "failed") return "failed";
   return request.retry_count > 0 ? "retrying" : "pending";
+}
+
+// ---- supersession ----
+
+export interface WitnessSupersessionRow {
+  request_id: string;
+  workspace_id: string;
+  lineage_id: string;
+  superseded_revision_id: string;
+  successor_revision_id: string;
+  created_at: number;
+}
+
+export function getWitnessSupersession(requestId: string): WitnessSupersessionRow | null {
+  return db.query<WitnessSupersessionRow, [string]>(
+    "SELECT * FROM review_witness_supersessions WHERE request_id = ?",
+  ).get(requestId);
+}
+
+export function isWitnessRequestSuperseded(requestId: string): boolean {
+  return getWitnessSupersession(requestId) !== null;
+}
+
+/**
+ * Record that appending one revision left every earlier unpublished request behind.
+ *
+ * INSERT OR IGNORE, so the FIRST successor is preserved: revision 3 arriving does not
+ * rewrite revision 1's request to say it was superseded by 3 when it was in fact 2 that
+ * overtook it. Published requests are skipped, because an account that exists was not
+ * overtaken — it finished.
+ *
+ * Not a transaction of its own: the only caller is the completion transaction, which has
+ * to commit this with the revision that caused it or with none of it.
+ */
+export function supersedeOpenWitnessRequests(
+  workspaceId: string,
+  lineageId: string,
+  successorRevisionId: string,
+  successorRevision: number,
+  now: number,
+): number {
+  const open = db.query<WitnessRequestRow, [string, string, number]>(
+    "SELECT * FROM review_witness_requests WHERE workspace_id = ? AND lineage_id = ? AND revision < ? AND state != 'published'",
+  ).all(workspaceId, lineageId, successorRevision);
+  let written = 0;
+  for (const request of open) {
+    written += db.run(
+      "INSERT OR IGNORE INTO review_witness_supersessions (request_id, workspace_id, lineage_id, superseded_revision_id, successor_revision_id, created_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?)",
+      [request.id, workspaceId, lineageId, request.revision_id, successorRevisionId, now],
+    ).changes;
+  }
+  return written;
+}
+
+// ---- carried reads ----
+
+/** Why a read arrived on a revision nobody had opened yet. Immutable: unmarking the
+ *  active read removes that row and leaves this one, because the carry still happened. */
+export interface RevisionReadCarryRow {
+  target_revision_id: string;
+  user_id: string;
+  target_change_id: string;
+  workspace_id: string;
+  lineage_id: string;
+  source_revision_id: string;
+  source_change_id: string;
+  key_digest: string;
+  carried_at: number;
+}
+
+export function listRevisionReadCarries(
+  workspaceId: string,
+  revisionId: string,
+  userId: string,
+): RevisionReadCarryRow[] {
+  return db.query<RevisionReadCarryRow, [string, string, string]>(
+    "SELECT * FROM review_revision_read_carries WHERE workspace_id = ? AND target_revision_id = ? AND user_id = ? " +
+      "ORDER BY target_change_id ASC",
+  ).all(workspaceId, revisionId, userId);
+}
+
+export function countRevisionReadCarries(
+  workspaceId: string,
+  revisionId: string,
+  userId: string,
+): number {
+  return db.query<{ n: number }, [string, string, string]>(
+    "SELECT COUNT(*) AS n FROM review_revision_read_carries WHERE workspace_id = ? AND target_revision_id = ? AND user_id = ?",
+  ).get(workspaceId, revisionId, userId)!.n;
+}
+
+/**
+ * Carry every member's read from one revision onto the next, where — and only where — a
+ * unique exact equivalence proves the change is the same change.
+ *
+ * The active read and its provenance are written together, one statement apart, inside the
+ * caller's transaction: a read whose reason did not commit would be a mark nobody can
+ * account for, and a reason whose read did not commit would be a claim about a state that
+ * does not exist.
+ *
+ * `equivalences` is keyed by the SOURCE change id, which is what a stored read names. The
+ * shape is structural rather than imported, so persistence does not depend on the delta
+ * engine that computes it.
+ *
+ * Not a transaction of its own, for the same reason as the supersession above.
+ */
+export function carryRevisionReads(input: {
+  workspaceId: string;
+  lineageId: string;
+  sourceRevisionId: string;
+  targetRevisionId: string;
+  equivalences: ReadonlyMap<string, { targetChangeId: string; digest: string }>;
+  now: number;
+}): number {
+  if (input.equivalences.size === 0) return 0;
+  const reads = db.query<{ user_id: string; change_id: string }, [string, string]>(
+    "SELECT user_id, change_id FROM review_revision_change_reads WHERE workspace_id = ? AND revision_id = ? " +
+      "ORDER BY user_id ASC, change_id ASC",
+  ).all(input.workspaceId, input.sourceRevisionId);
+  let carried = 0;
+  for (const read of reads) {
+    const match = input.equivalences.get(read.change_id);
+    if (!match) continue;
+    db.run(
+      "INSERT INTO review_revision_change_reads (workspace_id, revision_id, user_id, change_id, read_at) VALUES (?, ?, ?, ?, ?) " +
+        "ON CONFLICT(workspace_id, revision_id, user_id, change_id) DO NOTHING",
+      [input.workspaceId, input.targetRevisionId, read.user_id, match.targetChangeId, input.now],
+    );
+    db.run(
+      "INSERT INTO review_revision_read_carries (target_revision_id, user_id, target_change_id, workspace_id, lineage_id, source_revision_id, source_change_id, key_digest, carried_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(target_revision_id, user_id, target_change_id) DO NOTHING",
+      [input.targetRevisionId, read.user_id, match.targetChangeId, input.workspaceId, input.lineageId,
+        input.sourceRevisionId, read.change_id, match.digest, input.now],
+    );
+    carried += 1;
+  }
+  return carried;
 }
 
 // ---- read state ----
@@ -359,6 +538,11 @@ export const setRevisionChangeRead = db.transaction((
 });
 
 // ---- writes ----
+
+/** One sentence for every path that refuses superseded work, so a witness reading a 409
+ *  from claim, publish, fail or retry is told the same thing each time. */
+export const SUPERSEDED_MESSAGE =
+  "A later source revision was published while this witness request was open, so it has been superseded.";
 
 export class RevisionWriteError extends Error {
   constructor(readonly status: 404 | 409 | 422, message: string) {
@@ -636,6 +820,9 @@ export const publishAccount = db.transaction((input: PublishAccountInput): Publi
       ? "Retry the failed witness request before publishing an account"
       : "This witness request already published an account");
   }
+  if (isWitnessRequestSuperseded(request.id)) {
+    throw new RevisionWriteError(409, SUPERSEDED_MESSAGE);
+  }
   // Atomically claim and consume the attempt. A key that already holds the claim simply
   // renews it, so task 4's single-agent path is unchanged; a key that does not, while
   // somebody else's lease is still healthy, is refused rather than allowed to publish an
@@ -782,6 +969,9 @@ export const claimWitnessRequest = db.transaction((input: {
   if (request.state === "failed") {
     throw new RevisionWriteError(409, "Retry the failed witness request before claiming it");
   }
+  if (isWitnessRequestSuperseded(request.id)) {
+    throw new RevisionWriteError(409, SUPERSEDED_MESSAGE);
+  }
   const held = getWitnessClaim(request.id, request.retry_count);
   const created = !held || held.key_id !== input.keyId;
   const claim = takeClaim(input.workspaceId, request, input.userId, input.keyId, now);
@@ -816,6 +1006,9 @@ export const failWitnessRequest = db.transaction((
   if (current.state === "published") {
     throw new RevisionWriteError(409, "This witness request already published an account");
   }
+  if (isWitnessRequestSuperseded(current.id)) {
+    throw new RevisionWriteError(409, SUPERSEDED_MESSAGE);
+  }
   const now = Date.now();
   if (claimant) takeClaim(workspaceId, current, claimant.userId, claimant.keyId, now);
   db.run(
@@ -836,6 +1029,9 @@ export const retryWitnessRequest = db.transaction((
   if (!current) throw new RevisionWriteError(404, "No such witness request in this workspace");
   if (current.state === "published") {
     throw new RevisionWriteError(409, "This witness request already published an account");
+  }
+  if (isWitnessRequestSuperseded(current.id)) {
+    throw new RevisionWriteError(409, SUPERSEDED_MESSAGE);
   }
   if (current.state === "failed") {
     db.run(
