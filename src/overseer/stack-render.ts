@@ -45,7 +45,6 @@ import {
   getWitnessRequestForRevision,
   listRevisionReadChangeIds,
   nextRevision,
-  setRevisionChangeRead,
   workflowWord,
   type ReviewAccountRow,
   type ReviewLineageRow,
@@ -68,6 +67,12 @@ import {
 } from "./stack-db";
 import { getLineageById, stackDrift } from "./stack-pr";
 import { stackPages, type StackPageUnit, type StackUnit } from "./stack-read";
+import { writeRevisionReadHandling } from "./review-handling";
+import { mergeMappedGithubConversation } from "./github-thread-sync";
+import {
+  githubProjectionForReader,
+  githubThreadActionsForReader,
+} from "./github-projection-read";
 import { MAX_STACK_MEMBER_POSITIONS, STACK_PAGE_HTML_MAX_BYTES, type StackMemberSnapshot } from "./stack-types";
 import type { StackCapability } from "./capability-types";
 import { latestImportedConversation } from "./conversation-import";
@@ -75,6 +80,7 @@ import { createConversationReadContext, readCapabilityConversation, readPinnedLi
 import { listLocalThreadsForStackAccount, projectLocalThread, workspaceMemberLabels } from "./thread-db";
 import { projectAgent } from "./actor-projection";
 import {
+  getMyRevisionJudgment,
   getMyStackJudgment,
   listStackJudgments,
   stackAcknowledgementState,
@@ -602,9 +608,15 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
       accountId: layerMember.account?.id ?? null,
       headSha: layerMember.revision.doc.source.sourceHeadSha,
     }, user.id, conversationContext, memberLabels);
+    const projectedConversation = mergeMappedGithubConversation(
+      workspaceId,
+      layerMember.lineage.id,
+      pinnedConversation.local,
+      pinnedConversation.imported,
+    );
     doc.conversation = {
-      local: pinnedConversation.local,
-      imported: pinnedConversation.imported,
+      local: projectedConversation.local,
+      imported: projectedConversation.imported,
       reviews: pinnedConversation.reviews,
       importState: importedState?.state ?? "never", complete: importedState?.complete === 1, truncated: importedState?.truncated === 1,
       exactRevisionId: layerMember.revision.id, exactAccountId: null,
@@ -613,6 +625,14 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
       resolutionAction: (threadId) => `/${workspaceId}/review-threads/${threadId}/resolution`,
       refreshAction: null, returnTo: url.pathname + url.search,
       overviewAnchor: { anchorKind: "review" },
+      githubActions: githubThreadActionsForReader({
+        workspaceId,
+        lineage: layerMember.lineage,
+        revision: layerMember.revision,
+        inventory: layerMember.inventory,
+        userId: user.id,
+        threads: projectedConversation.local,
+      }),
       changeIdOf: (id) => splitStackId(id)?.bare ?? id,
       fileIdOf: (id) => splitStackId(id)?.bare ?? id,
     };
@@ -725,6 +745,13 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
       return `${stackPath(workspaceId, slug, resolved.manifest.version)}/members/${parts?.position ?? 0}/items/${parts?.bare ?? item.id}/acknowledge`;
     },
     returnTo: url.pathname + url.search,
+    github: layerMember ? githubProjectionForReader({
+      workspaceId,
+      lineage: layerMember.lineage,
+      revision: layerMember.revision,
+      userId: user.id,
+      localComment: getMyRevisionJudgment(workspaceId, layerMember.revision.id, user.id)?.comment ?? "",
+    }) : null,
     judgment: {
       mine,
       others: judgments.filter((judgment) => judgment.id !== mine?.id),
@@ -982,7 +1009,14 @@ export async function handleStackReadMutation(req: Request, workspaceId: string,
   if (rawRead !== "true" && rawRead !== "false") return readJson({ error: "read must be true or false" }, 422);
   const successor = nextRevision(workspaceId, member.lineage.id, member.revision.revision);
   if (successor) revisionMovement(workspaceId, member.lineage, successor);
-  setRevisionChangeRead(workspaceId, member.revision.id, user.id, parts.bare, rawRead === "true");
+  writeRevisionReadHandling({
+    workspaceId,
+    lineageId: member.lineage.id,
+    revisionId: member.revision.id,
+    userId: user.id,
+    changeId: parts.bare,
+    read: rawRead === "true",
+  });
   if ((req.headers.get("accept") ?? "").includes("application/json")) {
     return readJson({ changeId, memberChangeId: parts.bare, read: rawRead === "true" });
   }

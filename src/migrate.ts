@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 22 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 23 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -92,6 +92,10 @@ import { hashKey, tinyId } from "./ids";
 // revisions and stack manifests. Active acknowledgement rows remain separate from their
 // append-only carry provenance, explicit target boundaries, and judgment snapshots. A
 // nullable marker backfills material/file equivalences on movement rows written by v21.
+//
+// v23 adds explicit personal GitHub projection. Preferences bind one member and lineage
+// to one exact personal credential. Viewed ownership, retry jobs, explicit submissions,
+// and local-to-GitHub mappings are workflow and audit rows beside immutable Seer facts.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -569,7 +573,7 @@ export function assertDatabaseVersionSupported(maxVersion: number): void {
 }
 
 export function migrate(): void {
-  assertDatabaseVersionSupported(22);
+  assertDatabaseVersionSupported(23);
   const uv = userVersion();
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -593,6 +597,7 @@ export function migrate(): void {
   if (userVersion() < 20) migrateToV20();
   if (userVersion() < 21) migrateToV21();
   if (userVersion() < 22) migrateToV22();
+  if (userVersion() < 23) migrateToV23();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -2139,6 +2144,278 @@ function migrateToV22(): void {
     db.run("PRAGMA user_version = 22");
   })();
   console.log("[seer] migrated to schema v22 (review acknowledgements and judgments).");
+}
+
+// v23: explicit personal GitHub projection.
+//
+// These rows never become evidence. Local reads, acknowledgements, discussion and
+// judgments remain authoritative when GitHub refuses or times out. Jobs and submissions
+// retain the exact member, revision, head and request digest. Credential rebind history
+// records each actor generation so recovery can refuse ambiguity instead of guessing.
+const V23_GITHUB_PROJECTION = `
+  -- v21 deduplicated thread observations by value. That cannot represent an ABA
+  -- resolution sequence, so v23 keeps repeated state events and deduplicates only the
+  -- current state in the importer.
+  CREATE TABLE review_github_thread_observations_v23 (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('graphql','webhook')),
+    source_id TEXT NOT NULL,
+    source_observed_at INTEGER NOT NULL,
+    path TEXT,
+    side TEXT CHECK (side IN ('old','new')),
+    start_line INTEGER,
+    end_line INTEGER,
+    original_start_line INTEGER,
+    original_end_line INTEGER,
+    commit_sha TEXT,
+    original_commit_sha TEXT,
+    resolved INTEGER NOT NULL CHECK (resolved IN (0,1)),
+    outdated INTEGER NOT NULL CHECK (outdated IN (0,1)),
+    deleted INTEGER NOT NULL CHECK (deleted IN (0,1)),
+    github_url TEXT,
+    digest TEXT NOT NULL,
+    observed_at INTEGER NOT NULL
+  );
+  INSERT INTO review_github_thread_observations_v23
+    SELECT * FROM review_github_thread_observations;
+  DROP TABLE review_github_thread_observations;
+  ALTER TABLE review_github_thread_observations_v23 RENAME TO review_github_thread_observations;
+  CREATE INDEX idx_review_github_thread_observations_latest
+    ON review_github_thread_observations (workspace_id, thread_id, source_observed_at, observed_at);
+
+  CREATE TABLE IF NOT EXISTS review_github_projection_preferences (
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    viewed_enabled INTEGER NOT NULL CHECK (viewed_enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (lineage_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_github_projection_preferences_user
+    ON review_github_projection_preferences (workspace_id, user_id);
+
+  CREATE TABLE IF NOT EXISTS github_graphql_rate_limits (
+    credential_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    limit_value INTEGER,
+    used_value INTEGER,
+    remaining_value INTEGER,
+    last_cost INTEGER,
+    reset_at INTEGER,
+    retry_after INTEGER,
+    observed_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_github_graphql_rate_limits_user
+    ON github_graphql_rate_limits (user_id, observed_at);
+
+  CREATE TABLE IF NOT EXISTS review_github_viewed_jobs (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    head_sha TEXT NOT NULL,
+    desired TEXT NOT NULL CHECK (desired IN ('viewed','unviewed')),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    state TEXT NOT NULL CHECK (state IN
+      ('pending','running','synced','foreign','failed','refused','unknown','stale')),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    failure_code TEXT,
+    failure TEXT,
+    retry_at INTEGER,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (lineage_id, user_id, path)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_github_viewed_jobs_queue
+    ON review_github_viewed_jobs (state, retry_at, lease_expires_at, updated_at);
+  CREATE INDEX IF NOT EXISTS idx_review_github_viewed_jobs_user
+    ON review_github_viewed_jobs (workspace_id, user_id, updated_at);
+
+  CREATE TABLE IF NOT EXISTS review_github_viewed_ownership (
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    head_sha TEXT NOT NULL,
+    path TEXT NOT NULL,
+    pre_state TEXT NOT NULL CHECK (pre_state IN ('UNVIEWED','DISMISSED')),
+    mark_job_id TEXT NOT NULL,
+    marked_at INTEGER NOT NULL,
+    unmarked_at INTEGER,
+    lost_at INTEGER,
+    PRIMARY KEY (lineage_id, user_id, path)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_github_viewed_ownership_active
+    ON review_github_viewed_ownership (workspace_id, user_id, lineage_id)
+    WHERE unmarked_at IS NULL AND lost_at IS NULL;
+
+  CREATE TABLE IF NOT EXISTS review_github_viewed_credential_substitutions (
+    job_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    ownership_credential_id TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    account_login TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    substituted_at INTEGER NOT NULL,
+    PRIMARY KEY (job_id, generation),
+    CHECK (ownership_credential_id <> credential_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_github_viewed_substitutions_user
+    ON review_github_viewed_credential_substitutions (workspace_id, user_id, substituted_at);
+
+  CREATE TABLE IF NOT EXISTS review_github_submissions (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+      ('thread','reply','resolve','unresolve','approve','request_changes')),
+    local_thread_id TEXT,
+    local_entry_id TEXT,
+    projection_key TEXT,
+    commit_sha TEXT NOT NULL,
+    body TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    actor_generation INTEGER NOT NULL DEFAULT 1 CHECK (actor_generation >= 1),
+    state TEXT NOT NULL CHECK (state IN
+      ('pending','running','submitted','submitted_stale','failed','refused','unknown')),
+    github_review_id TEXT,
+    github_thread_id TEXT,
+    github_comment_id TEXT,
+    head_before TEXT,
+    head_after TEXT,
+    mutation_started_at INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    failure_code TEXT,
+    failure TEXT,
+    retry_at INTEGER,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK (
+      (kind = 'thread' AND local_thread_id IS NOT NULL AND local_entry_id IS NOT NULL AND projection_key IS NULL) OR
+      (kind = 'reply' AND local_thread_id IS NOT NULL AND local_entry_id IS NOT NULL AND projection_key IS NULL) OR
+      (kind IN ('resolve','unresolve') AND local_thread_id IS NOT NULL AND projection_key IS NOT NULL) OR
+      (kind IN ('approve','request_changes') AND local_thread_id IS NULL AND local_entry_id IS NULL AND projection_key IS NULL)
+    )
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_review_github_submission_thread
+    ON review_github_submissions (local_thread_id) WHERE kind = 'thread';
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_review_github_submission_entry
+    ON review_github_submissions (local_entry_id) WHERE local_entry_id IS NOT NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_review_github_submission_resolution
+    ON review_github_submissions (projection_key) WHERE kind IN ('resolve','unresolve');
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_review_github_submission_verdict
+    ON review_github_submissions (revision_id, user_id, kind)
+    WHERE kind IN ('approve','request_changes');
+  CREATE INDEX IF NOT EXISTS idx_review_github_submissions_queue
+    ON review_github_submissions (state, retry_at, lease_expires_at, updated_at);
+  CREATE INDEX IF NOT EXISTS idx_review_github_submissions_user
+    ON review_github_submissions (workspace_id, user_id, updated_at);
+
+  CREATE TABLE IF NOT EXISTS review_github_submission_rebinds (
+    submission_id TEXT NOT NULL,
+    actor_generation INTEGER NOT NULL CHECK (actor_generation >= 1),
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    from_credential_id TEXT NOT NULL,
+    to_credential_id TEXT NOT NULL,
+    prior_attempts INTEGER NOT NULL CHECK (prior_attempts >= 0),
+    prior_failure_code TEXT,
+    prior_failure TEXT,
+    prior_head_before TEXT,
+    prior_head_after TEXT,
+    prior_mutation_started_at INTEGER,
+    rebound_at INTEGER NOT NULL,
+    PRIMARY KEY (submission_id, actor_generation),
+    CHECK (from_credential_id <> to_credential_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_github_submission_rebinds_user
+    ON review_github_submission_rebinds (workspace_id, user_id, rebound_at);
+
+  CREATE TABLE IF NOT EXISTS review_github_resolution_requests (
+    workspace_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    local_thread_id TEXT NOT NULL,
+    target_state TEXT NOT NULL CHECK (target_state IN ('open','resolved')),
+    submission_id TEXT,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, idempotency_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_github_resolution_requests_thread
+    ON review_github_resolution_requests (workspace_id, local_thread_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS review_local_github_threads (
+    local_thread_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    submission_id TEXT NOT NULL UNIQUE,
+    github_review_id TEXT NOT NULL,
+    github_thread_id TEXT NOT NULL UNIQUE,
+    github_first_comment_id TEXT NOT NULL UNIQUE,
+    imported_thread_id TEXT,
+    commit_sha TEXT NOT NULL,
+    mapped_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_local_github_threads_lineage
+    ON review_local_github_threads (workspace_id, lineage_id, mapped_at);
+
+  CREATE TABLE IF NOT EXISTS review_local_github_message_links (
+    github_comment_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    local_thread_id TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('out','in')),
+    local_message_id TEXT,
+    imported_comment_id TEXT,
+    submission_id TEXT,
+    github_database_id TEXT,
+    linked_at INTEGER NOT NULL,
+    CHECK (
+      (direction = 'out' AND local_message_id IS NOT NULL AND submission_id IS NOT NULL) OR
+      (direction = 'in' AND imported_comment_id IS NOT NULL)
+    )
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_review_local_github_message_local
+    ON review_local_github_message_links (local_message_id)
+    WHERE local_message_id IS NOT NULL;
+
+  CREATE TABLE IF NOT EXISTS review_local_github_resolution_links (
+    submission_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    local_thread_id TEXT NOT NULL,
+    local_entry_id TEXT,
+    github_thread_id TEXT NOT NULL,
+    resolved INTEGER NOT NULL CHECK (resolved IN (0,1)),
+    linked_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_review_local_github_resolution_entry
+    ON review_local_github_resolution_links (local_entry_id)
+    WHERE local_entry_id IS NOT NULL;
+`;
+
+function migrateToV23(): void {
+  db.transaction(() => {
+    db.exec(V23_GITHUB_PROJECTION);
+    db.run("PRAGMA user_version = 23");
+  })();
+  console.log("[seer] migrated to schema v23 (personal GitHub projection).");
 }
 
 /**

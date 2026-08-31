@@ -9,7 +9,6 @@ import { db, isMember } from "../db";
 import { json, originOk } from "../http";
 import { SLUG_RE, STF_ID_RE, STI_ID_RE } from "../ids";
 import { getStageCaptureForWorkspaces, type StageCaptureInventory } from "../stage/db";
-import { setRevisionAcknowledgement } from "./acknowledgements-db";
 import {
   JudgmentWriteError,
   judgeRevision,
@@ -34,6 +33,7 @@ import {
   storeRevisionMovement,
 } from "./revision-db";
 import { requiredAcknowledgements, revisionCodeDelta } from "./revision-delta";
+import { writeRevisionAcknowledgementHandling } from "./review-handling";
 import { softNotFound as softPageNotFound } from "./render";
 import {
   getStack,
@@ -180,7 +180,7 @@ export async function handleRevisionAcknowledgement(
   const value = form.get("acknowledged");
   if (value !== "true" && value !== "false") return response({ error: "acknowledged must be true or false." }, 422);
   ensureSuccessorEquivalences(workspaceId, slug, resolved.revision.revision);
-  setRevisionAcknowledgement({
+  writeRevisionAcknowledgementHandling({
     workspaceId,
     lineageId: resolved.lineage.id,
     revisionId: resolved.revision.id,
@@ -229,7 +229,7 @@ export async function handleStackAcknowledgement(
   const value = form.get("acknowledged");
   if (value !== "true" && value !== "false") return response({ error: "acknowledged must be true or false." }, 422);
   ensureSuccessorEquivalences(workspaceId, resolved.revision.slug, resolved.revision.revision);
-  setRevisionAcknowledgement({
+  writeRevisionAcknowledgementHandling({
     workspaceId,
     lineageId: resolved.revision.lineage_id,
     revisionId: resolved.revision.id,

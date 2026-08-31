@@ -6,6 +6,11 @@ import { openGraphqlReadSession, type ReadActor } from "./github-app";
 import type { GithubConversationSnapshot, GithubReviewObservation, GithubReviewThread } from "./github-graphql";
 import { digestOf, type ReviewLineageRow } from "./revision-db";
 import { readActorOf, type ReviewPrObservationRow } from "./revision-pr";
+import {
+  attachImportedGithubThread,
+  confirmImportedGithubResolution,
+  linkImportedGithubComment,
+} from "./github-thread-sync";
 
 export interface ConversationImportRow {
   id: string;
@@ -98,23 +103,37 @@ function threadIdentity(workspaceId: string, lineageId: string, repoId: number, 
   ).get(workspaceId, lineageId, firstId);
   if (row) {
     if (row.github_node_id === null) db.run("UPDATE review_github_threads SET github_node_id = ? WHERE id = ? AND github_node_id IS NULL", [thread.nodeId, row.id]);
+    attachImportedGithubThread(workspaceId, lineageId, thread.nodeId, row.id);
     return row.id;
   }
   const id = tinyId("rgt");
   db.run("INSERT INTO review_github_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [id, workspaceId, lineageId, repoId, prNumber, thread.nodeId, firstId, observedAt]);
+  attachImportedGithubThread(workspaceId, lineageId, thread.nodeId, id);
   return id;
 }
 
 function insertThreadObservation(workspaceId: string, threadId: string, sourceKind: "graphql" | "webhook", sourceId: string, sourceAt: number, value: Omit<GithubThreadObservationRow, "id" | "workspace_id" | "thread_id" | "source_kind" | "source_id" | "source_observed_at" | "digest" | "observed_at">): string {
   const normalized = { ...value, resolved: value.resolved ? 1 : 0, outdated: value.outdated ? 1 : 0, deleted: value.deleted ? 1 : 0 };
   const digest = digestOf(normalized);
-  const existing = db.query<{ id: string }, [string, string]>("SELECT id FROM review_github_thread_observations WHERE thread_id = ? AND digest = ?").get(threadId, digest);
-  if (existing) return existing.id;
+  // Deduplicate only the current state. A resolved, reopened, resolved sequence needs
+  // two exact resolved events; collapsing the last one into the first replays stale state.
+  const existing = latestThreadObservation(workspaceId, threadId);
+  if (existing?.digest === digest) {
+    const github = db.query<{ github_node_id: string | null }, [string, string]>(
+      "SELECT github_node_id FROM review_github_threads WHERE workspace_id=? AND id=?",
+    ).get(workspaceId, threadId);
+    if (github?.github_node_id) confirmImportedGithubResolution(workspaceId, github.github_node_id, normalized.resolved === 1, sourceAt);
+    return existing.id;
+  }
   const id = tinyId("rgo");
   db.run(
     "INSERT INTO review_github_thread_observations (id, workspace_id, thread_id, source_kind, source_id, source_observed_at, path, side, start_line, end_line, original_start_line, original_end_line, commit_sha, original_commit_sha, resolved, outdated, deleted, github_url, digest, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [id, workspaceId, threadId, sourceKind, sourceId, sourceAt, normalized.path, normalized.side, normalized.start_line, normalized.end_line, normalized.original_start_line, normalized.original_end_line, normalized.commit_sha, normalized.original_commit_sha, normalized.resolved, normalized.outdated, normalized.deleted, normalized.github_url, digest, Date.now()],
   );
+  const github = db.query<{ github_node_id: string | null }, [string, string]>(
+    "SELECT github_node_id FROM review_github_threads WHERE workspace_id=? AND id=?",
+  ).get(workspaceId, threadId);
+  if (github?.github_node_id) confirmImportedGithubResolution(workspaceId, github.github_node_id, normalized.resolved === 1, sourceAt);
   return id;
 }
 
@@ -122,9 +141,9 @@ function commentIdentity(workspaceId: string, threadId: string, comment: GithubR
   const held = db.query<{ id: string }, [string, string, string, string]>(
     "SELECT id FROM review_github_comments WHERE workspace_id = ? AND thread_id = ? AND (github_node_id = ? OR github_database_id = ?) LIMIT 1",
   ).get(workspaceId, threadId, comment.nodeId, comment.databaseId);
-  if (held) return held.id;
-  const id = tinyId("rgc");
-  db.run("INSERT INTO review_github_comments VALUES (?, ?, ?, ?, ?, ?, ?)", [id, workspaceId, threadId, comment.databaseId, comment.nodeId, comment.createdAt, observedAt]);
+  const id = held?.id ?? tinyId("rgc");
+  if (!held) db.run("INSERT INTO review_github_comments VALUES (?, ?, ?, ?, ?, ?, ?)", [id, workspaceId, threadId, comment.databaseId, comment.nodeId, comment.createdAt, observedAt]);
+  linkImportedGithubComment({ workspaceId, importedThreadId: threadId, importedCommentId: id, githubCommentId: comment.nodeId, githubDatabaseId: comment.databaseId, authorLogin: comment.authorLogin, body: comment.body, now: observedAt });
   return id;
 }
 
@@ -256,6 +275,7 @@ export function recordGithubThreadWebhook(input: { workspaceId: string; lineageI
   const id = held?.id ?? tinyId("rgt");
   if (!held) db.run("INSERT INTO review_github_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [id, input.workspaceId, input.lineageId, input.repoId, input.prNumber, input.nodeId, input.firstCommentDatabaseId, input.sourceAt]);
   else if (input.nodeId) db.run("UPDATE review_github_threads SET github_node_id = ? WHERE id = ? AND github_node_id IS NULL", [input.nodeId, id]);
+  if (input.nodeId) attachImportedGithubThread(input.workspaceId, input.lineageId, input.nodeId, id);
   // A comment webhook can establish an unknown identity but carries no thread state. It
   // must not reopen a thread merely because a newer comment arrived.
   if (held && input.nodeId === null) return id;
@@ -265,7 +285,7 @@ export function recordGithubThreadWebhook(input: { workspaceId: string; lineageI
 }
 
 export function recordGithubCommentWebhook(input: { workspaceId: string; threadId: string; sourceId: string; sourceAt: number; databaseId: string; nodeId: string; createdAt: number; updatedAt: number; authorLogin: string | null; body: string | null; githubUrl: string | null; deleted: boolean }): string {
-  const fake = { databaseId: input.databaseId, nodeId: input.nodeId, createdAt: input.createdAt } as GithubReviewThread["comments"][number];
+  const fake = { databaseId: input.databaseId, nodeId: input.nodeId, createdAt: input.createdAt, authorLogin: input.authorLogin, body: input.body } as GithubReviewThread["comments"][number];
   const id = commentIdentity(input.workspaceId, input.threadId, fake, input.sourceAt);
   insertCommentObservation({ workspaceId: input.workspaceId, commentId: id, sourceKind: "webhook", sourceId: input.sourceId, sourceAt: input.sourceAt, author: input.authorLogin, body: input.body, url: input.githubUrl, updatedAt: input.updatedAt, deleted: input.deleted });
   return id;

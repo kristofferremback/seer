@@ -597,7 +597,8 @@ describe("a 200 matches the schema the document declares for it", () => {
     );
   });
 
-  test("judgment APIs", async () => {
+  test("judgment and projection APIs", async () => {
+    await check("readReviewGithubProjection", () => fetch(`${base}/api/review-lineages/${CONVERSATION_SLUG}/github-projection`, { headers: auth() }));
     await check("readReviewRevisionJudgments", () => fetch(`${base}/api/review-lineages/${CONVERSATION_SLUG}/revisions/1/judgments`, { headers: auth() }));
     await check("readReviewStackJudgments", () => fetch(`${base}/api/review-stacks/${CONVERSATION_STACK}/manifests/1/judgments`, { headers: auth() }));
   });
@@ -659,6 +660,7 @@ describe("a 200 matches the schema the document declares for it", () => {
       "createNote",
       "listNotes",
       "replyToReviewThread",
+      "readReviewGithubProjection",
       "readReviewRevisionJudgments",
       "readReviewStackJudgments",
       "readReviewConversation",

@@ -30,6 +30,7 @@ import {
 } from "./thread-db";
 import { digestOf, getLineage, getRevision, getRevisionById, type ReviewLineageRow, type ReviewRevisionRow } from "./revision-db";
 import { getStackAccount, type StackManifestRow } from "./stack-db";
+import { mergeMappedGithubConversation } from "./github-thread-sync";
 
 interface GithubThreadRow { id: string; workspace_id: string; lineage_id: string; repo_id: number; pr_number: number; github_node_id: string | null; first_comment_database_id: string | null; first_observed_at: number }
 interface GithubCommentRow { id: string; workspace_id: string; thread_id: string; github_database_id: string; github_node_id: string; github_created_at: number; first_observed_at: number }
@@ -203,10 +204,19 @@ export function listImportedReviews(
   lineageId: string,
   options: { commitShas?: ReadonlySet<string> } = {},
 ): ProjectedGithubReview[] {
+  const wrappers = new Set(db.query<{ github_review_id: string }, [string, string]>(
+    "SELECT github_review_id FROM review_local_github_threads WHERE workspace_id=? AND lineage_id=?",
+  ).all(workspaceId, lineageId).map((row) => row.github_review_id));
   const projected = db.query<GithubReviewRow, [string, string]>(
     "SELECT * FROM review_github_reviews WHERE workspace_id = ? AND lineage_id = ? ORDER BY first_observed_at, rowid",
-  ).all(workspaceId, lineageId)
-    .map((row) => projectReview(workspaceId, row)).filter((row): row is ProjectedGithubReview => row !== null);
+  ).all(workspaceId, lineageId).flatMap((stored) => {
+    const review = projectReview(workspaceId, stored);
+    if (!review) return [];
+    // Posting one thread through addPullRequestReview creates an otherwise empty
+    // COMMENTED review. Hide only that wrapper. A body or verdict remains conversation.
+    if (wrappers.has(stored.github_node_id) && review.state === "commented" && (review.body ?? "").trim() === "") return [];
+    return [review];
+  });
   return options.commitShas ? projected.filter((row) => row.commitSha !== null && options.commitShas!.has(row.commitSha)) : projected;
 }
 
@@ -253,10 +263,11 @@ export async function witnessConversationContext(
     .filter((thread) => !thread.deleted && !thread.resolved);
   const records = pin ? pinnedLocalThreads(workspaceId, pin) : listLocalThreadsForLineage(workspaceId, lineage.id);
   const local = records.filter((thread) => localThreadState(thread) === "open").map((thread) => projectLocalThread(thread, null));
+  const projected = mergeMappedGithubConversation(workspaceId, lineage.id, local, imported);
   const latest = latestImportedConversation(workspaceId, lineage.id);
   return {
-    local,
-    imported,
+    local: projected.local,
+    imported: projected.imported,
     reviews: listImportedReviews(workspaceId, lineage.id, pin ? { commitShas: new Set([pin.headSha]) } : {}).filter((review) => !review.deleted),
     import: latest === null ? { state: "never", complete: false, truncated: false, observedAt: null } : {
       state: latest.state === "running" ? "failed" : latest.state,

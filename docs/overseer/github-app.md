@@ -840,12 +840,22 @@ conversation events, even when its workspace also holds that App installation. H
 append rows and make no GitHub call. Missing App subscriptions degrade to the explicit
 conversation refresh route.
 
-The GraphQL conversation transport is read-only and exports no mutation operation. It
-pages review threads and reviews within fixed page, comment, and logical-body limits. One
+The App-routed GraphQL conversation transport remains read-only. Its personal mutation
+sibling opens one exact member credential and is unreachable from installation, anonymous,
+API-key, capability, render, and import paths. The conversation reader pages review threads
+and reviews within fixed page, comment, and logical-body limits. One
 import gets a 60-second total deadline across every page while each call keeps its
 20-second timeout. A total deadline returns the retained partial snapshot with
 `complete=false` and `truncated=true`; it does not fail the import or tombstone missing
 identities.
+
+The personal mutation transport records query cost from GraphQL `rateLimit` and mutation
+budget from HTTP headers. One durable lane permits one mutation at a time for a credential
+across Viewed and review submissions. An HTTP-200 `errors` payload is a parsed refusal and
+has `mayHaveLeftProcess=false`. Fetch throws and non-OK mutation responses are the only
+uncertain transport outcomes. Malformed JSON, missing fields, and preflight query failures
+are definite failures. HTTP 401 marks the exact personal credential dead; no second
+credential, App installation, or anonymous client is tried.
 
 Installation actors reopen the exact installation. PAT actors reopen the exact owner's
 stored credential. Execution reads that actor from the authorized import row, never from

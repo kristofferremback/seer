@@ -26,21 +26,37 @@ GitHub describes it as *full control of private repositories* — it grants push
 hooks, and delete. A fine-grained PAT can be "read the contents and pull requests of these
 three repositories, and nothing else"; an OAuth App cannot express that at all.
 
-So the credential Seer holds for your employer's code would be one that could also write to
-it. Overseer never writes, and nothing in this design does, but that is a property of the
-code rather than of the grant, and the grant is what an employer's security team would ask
-about.
+So the credential Seer holds for your employer's code may also be able to write to it.
+Seer uses that power only for an explicit personal GitHub action: Viewed projection,
+posting a local thread or reply, changing a mapped thread's resolution, or submitting a
+commit-pinned review. Those calls use the selected owner's exact credential and recheck the
+live pull request target. The grant is still wider than any one action, which is what an
+employer's security team would ask about.
 
 **Both are therefore built, and they are the same feature.** One table, one routing rule,
 one envelope, two ways to fill it:
 
 - **Connect with GitHub** — the button, the OAuth flow, `repo` scope. The default.
 - **Paste a fine-grained token** — for a repository where the wider grant is not acceptable,
-  which is a judgement only the person holding it can make.
+  which is a judgement only the person holding it can make. Stored scopes are display facts,
+  not proof of write permission; GitHub decides each mutation.
 
 That costs one extra `kind` column and a second form. It buys a design that does not force
 the wider grant on someone who has a reason to refuse it, and the day an employer asks
 "what can this thing do to our code", there is an answer that is not "everything".
+
+A revoked, dead, missing, or expired credential is not treated as a moved pull request.
+Personal projection stores `credential_dead`; Viewed sync turns off and renders the other
+live credential choices. No replacement credential is opened until the member chooses it.
+`Remove Seer marks` may use that chosen current preference when the ownership credential is
+dead, but only when both stored credentials have the same numeric GitHub account id and
+case-insensitive login. The ownership fact stays on the original credential and an
+immutable per-job-generation row records the substitution. A different account is never
+opened. A definite refused submission with no GitHub review, thread, or comment id may be retried
+through another live credential owned by that member. The rebind appends its old actor,
+attempt count, failure, and head readings to audit history. An unknown or GitHub-linked
+submission keeps its original actor because its side effect may already belong to that
+account.
 
 ## The constraint everything else follows from
 

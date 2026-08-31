@@ -92,6 +92,19 @@ import { latestCaptureJob, recoverCaptureJobs, startCaptureSweep } from "./overs
 import { handleStackPage, handleStackReadMutation } from "./overseer/stack-render";
 import { handleCreateReviewThread, handleCreateStackThread, handleSessionThreadMutation } from "./overseer/thread-routes";
 import {
+  handleGithubReview,
+  handleGithubSubmissionRetry,
+  handleGithubThreadEvent,
+  handleGithubThreadPublish,
+  handleGithubThreadReply,
+  handleGithubViewedPreference,
+  handleGithubViewedRetry,
+} from "./overseer/github-projection-routes";
+import {
+  recoverGithubProjectionJobs,
+  startGithubProjectionSweep,
+} from "./overseer/github-projection-worker";
+import {
   handleRevisionAcknowledgement,
   handleRevisionJudgment,
   handleStackAcknowledgement,
@@ -171,6 +184,21 @@ const WS_REVISION_JUDGMENT_RE = new RegExp(
 );
 const WS_REVIEW_THREADS_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/(rev|v)/([^/]+)/threads/?$`,
+);
+const WS_GITHUB_VIEWED_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/github/viewed(?:/(retry))?/?$`,
+);
+const WS_GITHUB_THREAD_PUBLISH_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/threads/([^/]+)/github/?$`,
+);
+const WS_GITHUB_THREAD_MUTATION_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/threads/([^/]+)/(messages|events)/github/?$`,
+);
+const WS_GITHUB_REVIEW_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/rev/([^/]+)/github/review/?$`,
+);
+const WS_GITHUB_SUBMISSION_RETRY_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/github/submissions/([^/]+)/retry/?$`,
 );
 const WS_THREAD_MUTATION_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/review-threads/([^/]+)/(replies|resolution)/?$`,
@@ -804,10 +832,12 @@ export async function startServer() {
   // released and re-queued; a healthy lease is left alone, because another container may
   // be halfway through it.
   recoverCaptureJobs();
+  recoverGithubProjectionJobs();
   // And again, on a timer. A lane this process left because another container held the
   // lease has nothing else that would look at it: without the sweep, "another process may
   // recover an abandoned claim" would only be true at boot.
   startCaptureSweep();
+  startGithubProjectionSweep();
 
   // Only the sockets a share opened, so revocation can find them. Membership-gated
   // sockets are not in here: nothing revokes a membership mid-connection today, and a
@@ -1275,6 +1305,35 @@ export async function startServer() {
       // not knowable until the token says which kind of asset it opens.
       if (url.pathname.startsWith("/s/")) return handleShareRequest(req);
 
+      const githubViewed = url.pathname.match(WS_GITHUB_VIEWED_RE);
+      if (githubViewed) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return githubViewed[3]
+          ? handleGithubViewedRetry(req, githubViewed[1]!, githubViewed[2]!)
+          : handleGithubViewedPreference(req, githubViewed[1]!, githubViewed[2]!);
+      }
+      const githubThreadPublish = url.pathname.match(WS_GITHUB_THREAD_PUBLISH_RE);
+      if (githubThreadPublish) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleGithubThreadPublish(req, githubThreadPublish[1]!, githubThreadPublish[2]!, githubThreadPublish[3]!);
+      }
+      const githubThreadMutation = url.pathname.match(WS_GITHUB_THREAD_MUTATION_RE);
+      if (githubThreadMutation) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return githubThreadMutation[3] === "messages"
+          ? handleGithubThreadReply(req, githubThreadMutation[1]!, githubThreadMutation[2]!)
+          : handleGithubThreadEvent(req, githubThreadMutation[1]!, githubThreadMutation[2]!);
+      }
+      const githubReview = url.pathname.match(WS_GITHUB_REVIEW_RE);
+      if (githubReview) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleGithubReview(req, githubReview[1]!, githubReview[2]!, githubReview[3]!);
+      }
+      const githubSubmissionRetry = url.pathname.match(WS_GITHUB_SUBMISSION_RETRY_RE);
+      if (githubSubmissionRetry) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleGithubSubmissionRetry(req, githubSubmissionRetry[1]!, githubSubmissionRetry[2]!, githubSubmissionRetry[3]!);
+      }
       const threadMutation = url.pathname.match(WS_THREAD_MUTATION_RE);
       if (threadMutation) {
         if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });

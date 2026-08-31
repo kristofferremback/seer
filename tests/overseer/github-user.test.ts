@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, expect, test } from "bun:test";
 import { generateKey, setKeyring } from "../../src/envelope";
 import { db } from "../../src/db";
 import { migrate } from "../../src/migrate";
-import { createUserGithubClient, resetUserRouting } from "../../src/overseer/github-user";
+import { createUserGithubClient, exactUserGithubClient, resetUserRouting } from "../../src/overseer/github-user";
 import {
   createGithubUserCredential,
   getGithubUserCredential,
@@ -61,6 +61,30 @@ test("user B cannot fetch through user A's credential while A can", async () => 
   await expect(b.getPull("acme/private", 3)).rejects.toBeInstanceOf(GithubRoutingError);
   expect(seen.length).toBe(before); // B had no credential, so A's token never reached transport.
   expect(seen.filter((entry) => entry.includes(`Bearer ${token}`))).toHaveLength(2);
+});
+
+test("the exact personal REST transport never probes or falls through to another credential", async () => {
+  const userId = "usr_exact_rest";
+  const first = credentialFor(userId, "github_pat_exact_first");
+  const second = credentialFor(userId, "github_pat_exact_second");
+  const seen: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const auth = new Headers(init?.headers).get("authorization") ?? "none";
+    seen.push(`${auth} ${url}`);
+    if (auth === "Bearer github_pat_exact_first") return new Response("Bad credentials", { status: 401 });
+    return Response.json({
+      number: 3, title: "exact", body: null, state: "open", user: { login: "octocat" },
+      head: { sha: "a".repeat(40), ref: "topic" },
+      base: { sha: "b".repeat(40), ref: "main", repo: { id: 7, full_name: "acme/private" } },
+      updated_at: "2025-01-01T00:00:00Z",
+    });
+  }) as typeof fetch;
+  const client = exactUserGithubClient(userId, first, { apiBase: "https://github.test", fetchImpl });
+  await expect(client.getPull("acme/private", 3)).rejects.toBeInstanceOf(GithubCredentialDeadError);
+  expect(seen).toEqual(["Bearer github_pat_exact_first https://github.test/repos/acme/private/pulls/3"]);
+  expect(getGithubUserCredential(first, userId)?.dead_at).toBeNumber();
+  expect(getGithubUserCredential(second, userId)?.dead_at).toBeNull();
 });
 
 // ---- the tests above prove less than they look like they prove ----

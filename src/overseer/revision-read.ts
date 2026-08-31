@@ -46,6 +46,11 @@ import { actorWords } from "./github-app";
 import { latestImportedConversation } from "./conversation-import";
 import { createConversationReadContext, listImportedReviews, listImportedThreads } from "./conversation-read";
 import { getLocalThread, listLocalThreadsForLineage, projectLocalThread, workspaceMemberLabels } from "./thread-db";
+import { mergeMappedGithubConversation } from "./github-thread-sync";
+import {
+  githubProjectionForReader,
+  githubThreadActionsForReader,
+} from "./github-projection-read";
 import { latestCaptureJob, retryCaptureJob, scheduleActorQueue, type ReviewCaptureJobRow } from "./revision-jobs";
 import {
   getLineagePr,
@@ -70,7 +75,6 @@ import {
   listAccountVersions,
   listRevisionReadChangeIds,
   nextRevision,
-  setRevisionChangeRead,
   workflowWord,
   type ReviewAccountRow,
   type ReviewLineageRow,
@@ -83,6 +87,7 @@ import {
   revisionAcknowledgementState,
 } from "./judgments-db";
 import { softNotFound as softReviewPage } from "./render";
+import { writeRevisionReadHandling } from "./review-handling";
 
 const NUMBER_RE = /^[1-9][0-9]{0,8}$/;
 
@@ -613,9 +618,15 @@ export async function handlePromotedReviewPage(
   const memberLabels = workspaceMemberLabels(workspaceId);
   const conversationContext = createConversationReadContext(workspaceId);
   const canRefresh = relation !== null && relation.actor_kind !== "anonymous" && (relation.actor_kind !== "user" || relation.user_id === user.id);
+  const projectedConversation = mergeMappedGithubConversation(
+    workspaceId,
+    lineage.id,
+    listLocalThreadsForLineage(workspaceId, lineage.id).map((thread) => projectLocalThread(thread, user.id, thread.thread.append_version, memberLabels)),
+    await listImportedThreads(workspaceId, lineage, { context: conversationContext }),
+  );
   doc.conversation = {
-    local: listLocalThreadsForLineage(workspaceId, lineage.id).map((thread) => projectLocalThread(thread, user.id, thread.thread.append_version, memberLabels)),
-    imported: await listImportedThreads(workspaceId, lineage, { context: conversationContext }),
+    local: projectedConversation.local,
+    imported: projectedConversation.imported,
     reviews: listImportedReviews(workspaceId, lineage.id),
     importState: importedState?.state ?? "never",
     complete: importedState?.complete === 1,
@@ -627,6 +638,14 @@ export async function handlePromotedReviewPage(
     resolutionAction: (threadId) => `/${workspaceId}/review-threads/${threadId}/resolution`,
     refreshAction: canRefresh ? `/api/review-lineages/${lineage.slug}/conversations/refresh?workspace=${workspaceId}` : null,
     returnTo: new URL(req.url).pathname + new URL(req.url).search,
+    githubActions: githubThreadActionsForReader({
+      workspaceId,
+      lineage,
+      revision,
+      inventory: resolved.inventory,
+      userId: user.id,
+      threads: projectedConversation.local,
+    }),
   };
   const routes = routesFor(workspaceId, lineage, revision, pinnedPath, {
     workspaceId,
@@ -664,6 +683,13 @@ export async function handlePromotedReviewPage(
     acknowledgements: acknowledgementState.acknowledgements,
     acknowledgementAction: (item) => `/${workspaceId}/r/${slug}/rev/${revision.revision}/items/${item.id}/acknowledge`,
     returnTo: new URL(req.url).pathname + new URL(req.url).search,
+    github: githubProjectionForReader({
+      workspaceId,
+      lineage,
+      revision,
+      userId: user.id,
+      localComment: mine?.comment ?? "",
+    }),
     judgment: {
       mine,
       others: judgments.filter((judgment) => judgment.id !== mine?.id),
@@ -765,7 +791,14 @@ export async function handleRevisionReadMutation(
   // once, so the carry is the same whether the successor's page was ever opened.
   const successor = nextRevision(workspaceId, resolved.lineage.id, resolved.revision.revision);
   if (successor) revisionMovement(workspaceId, resolved.lineage, successor);
-  setRevisionChangeRead(workspaceId, resolved.revision.id, user.id, changeId, rawRead === "true");
+  writeRevisionReadHandling({
+    workspaceId,
+    lineageId: resolved.lineage.id,
+    revisionId: resolved.revision.id,
+    userId: user.id,
+    changeId,
+    read: rawRead === "true",
+  });
   if ((req.headers.get("accept") ?? "").includes("application/json")) {
     return readJson({ changeId, read: rawRead === "true" });
   }

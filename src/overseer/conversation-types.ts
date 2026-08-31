@@ -77,12 +77,17 @@ export interface ProjectedThreadEntry {
   author: ProjectedActor;
   body: string | null;
   createdAt: string;
+  /** Present only for an inbound GitHub reply merged into a mapped local thread. */
+  github?: true;
+  deletedOnGithub?: boolean;
 }
 
 export interface ProjectedLocalThread {
   id: string;
   anchor: Omit<ThreadAnchorRow, "workspace_id">;
   state: "open" | "resolved";
+  /** Stored GitHub state for a mapped thread. It never rewrites local resolution. */
+  githubState?: "open" | "resolved";
   entries: ProjectedThreadEntry[];
   createdAt: string;
 }

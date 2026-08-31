@@ -13,6 +13,7 @@ import { getLineagePr, latestObservation, readActorOf } from "./revision-pr";
 import { getConversationImport, runConversationImport, startConversationImport } from "./conversation-import";
 import { createConversationReadContext, listImportedReviews, listImportedThreads, readPinnedLineageConversation } from "./conversation-read";
 import { softNotFound } from "./render";
+import { mergeMappedGithubConversation } from "./github-thread-sync";
 
 function response(value: unknown, status = 200): Response {
   const result = json(value, status); result.headers.set("cache-control", "no-store"); return result;
@@ -182,7 +183,13 @@ export async function handleLineageConversations(req: Request, slug: string): Pr
   const lineage = getLineage(gate.workspaceId, slug)!;
   const localRows = db.query<{ id: string }, [string, string]>("SELECT id FROM review_threads WHERE workspace_id = ? AND lineage_id = ? ORDER BY created_at, id").all(gate.workspaceId, lineage.id);
   const context = createConversationReadContext(gate.workspaceId);
-  return response({ local: localRows.flatMap((row) => { const held = getLocalThread(gate.workspaceId, row.id); return held ? [projectLocalThread(held, gate.userId)] : []; }), imported: await listImportedThreads(gate.workspaceId, lineage, { context }), reviews: listImportedReviews(gate.workspaceId, lineage.id) });
+  const projected = mergeMappedGithubConversation(
+    gate.workspaceId,
+    lineage.id,
+    localRows.flatMap((row) => { const held = getLocalThread(gate.workspaceId, row.id); return held ? [projectLocalThread(held, gate.userId)] : []; }),
+    await listImportedThreads(gate.workspaceId, lineage, { context }),
+  );
+  return response({ local: projected.local, imported: projected.imported, reviews: listImportedReviews(gate.workspaceId, lineage.id) });
 }
 
 export async function handleStackConversations(req: Request, slug: string, rawVersion: string): Promise<Response> {
@@ -217,8 +224,9 @@ export async function handleStackConversations(req: Request, slug: string, rawVe
       accountId: member.accountId,
       headSha: revision.doc.source.sourceHeadSha,
     }, viewerId, context);
-    for (const thread of pinned.local) local.set(thread.id, thread);
-    imported.push(...pinned.imported);
+    const projected = mergeMappedGithubConversation(workspaceId, lineage.id, pinned.local, pinned.imported);
+    for (const thread of projected.local) local.set(thread.id, thread);
+    imported.push(...projected.imported);
     reviews.push(...pinned.reviews);
   }
   return response({ local: [...local.values()], imported, reviews });
