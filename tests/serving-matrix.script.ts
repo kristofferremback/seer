@@ -4,10 +4,8 @@
 //
 // Exits 0 on success, 1 on the first failed assertion (message on stderr).
 import "./app-env";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { zipSync, strToU8 } from "fflate";
+import { createTestDataDir } from "./test-data-dir";
 
 process.env.API_TOKEN = "test-token";
 delete process.env.AUTH_DISABLED;
@@ -17,7 +15,7 @@ process.env.SESSION_SECRET = "super-secret-for-tests";
 process.env.ALLOWED_EMAILS = "root@example.com";
 process.env.BASE_URL = "http://localhost:3000";
 process.env.PORT = "0";
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-serving-"));
+process.env.DATA_DIR = createTestDataDir("seer-tests-serving-");
 
 const { sessionCookie } = await import("../src/auth");
 const { db, legacyWorkspaceId, createVersion, createImage } = await import("../src/db");

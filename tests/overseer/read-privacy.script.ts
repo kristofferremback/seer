@@ -6,9 +6,7 @@
 //
 // Exits 0 on success, 1 on the first failed assertion (message on stderr).
 import "../app-env";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createTestDataDir } from "../test-data-dir";
 
 process.env.API_TOKEN = "test-token";
 delete process.env.AUTH_DISABLED;
@@ -18,7 +16,7 @@ process.env.SESSION_SECRET = "super-secret-for-tests";
 process.env.ALLOWED_EMAILS = "root@example.com";
 process.env.BASE_URL = "http://localhost:3000";
 process.env.PORT = "0";
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-read-privacy-"));
+process.env.DATA_DIR = createTestDataDir("seer-tests-read-privacy-");
 
 // This process does not get bunfig's test preload, so it installs the same offline
 // GitHub client itself: rendering a review page kicks a freshness check, and no test
