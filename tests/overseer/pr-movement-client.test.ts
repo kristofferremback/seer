@@ -104,7 +104,7 @@ afterAll(async () => GlobalRegistrator.unregister());
 describe("a carried read behaves like any other read", () => {
   test("it is read on arrival, everywhere the page counts reads", () => {
     run();
-    expect(document.querySelector("[data-progress]").textContent).toBe("1 / 3 read");
+    expect(document.querySelector("[data-progress]").textContent).toBe("1 / 3 handled");
     expect(document.querySelector(`.hunk-review[data-change="${A}"]`).dataset.read).toBe("true");
     expect(document.querySelector(`[data-ledger-change="${A}"]`).dataset.read).toBe("true");
     // And its form offers the reversal rather than the mark.
@@ -118,7 +118,7 @@ describe("a carried read behaves like any other read", () => {
     carried.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await Bun.sleep(0);
     expect(carried.dataset.read).toBe("false");
-    expect(document.querySelector("[data-progress]").textContent).toBe("0 / 3 read");
+    expect(document.querySelector("[data-progress]").textContent).toBe("0 / 3 handled");
     expect(document.querySelector(`[data-ledger-change="${A}"]`).dataset.read).toBe("false");
     expect(carried.querySelector("[data-read-button]").textContent).toBe("Mark read");
   });

@@ -771,7 +771,7 @@ describe("reads and progress", () => {
 
     // The member's own page shares the mark: it is one read, not a copy.
     const memberPage = visible(await (await fetch(`${base}/${workspace}/r/pr-12/rev/1`, { headers: { cookie } })).text());
-    expect(memberPage).toContain("1 / 2 read");
+    expect(memberPage).toContain("1 / 2 handled");
     const bySession = await (await fetch(`${base}/api/review-stacks/stack-a/manifests/2`, { headers: { cookie } })).json() as any;
     validateResponse("readReviewStackManifest", bySession);
     expect(bySession.progress).toEqual({ read: 1, total: 8 });
@@ -781,9 +781,9 @@ describe("reads and progress", () => {
     expect(byKey.members.every((member: any) => member.progress === null)).toBe(true);
 
     const page = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a`, { headers: { cookie } })).text());
-    expect(page).toContain("1 / 8 read");
+    expect(page).toContain("1 / 8 handled");
     const layer = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a?layer=pr-12`, { headers: { cookie } })).text());
-    expect(layer).toContain("1 / 2 read");
+    expect(layer).toContain("1 / 2 handled");
     expect(layer).toMatch(/data-stage-change-ids="l2-chg_[a-f0-9]{64},l2-chg_[a-f0-9]{64}"/);
     expect((await fetch(`${base}/${workspace}/r-stacks/stack-a?layer=nobody`, { headers: { cookie } })).status).toBe(404);
 

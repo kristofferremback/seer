@@ -28,7 +28,7 @@ import {
 } from "./db";
 import { json, originOk } from "./http";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
-import { POB_ID_RE, RAC_ID_RE, RCJ_ID_RE, RLN_ID_RE, RSA_ID_RE, RSJ_ID_RE, RSK_ID_RE, RSM_ID_RE, RSO_ID_RE, RSW_ID_RE, RVR_ID_RE, SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE, WTR_ID_RE } from "./ids";
+import { POB_ID_RE, RAC_ID_RE, RCJ_ID_RE, RJD_ID_RE, RLN_ID_RE, RSA_ID_RE, RSJ_ID_RE, RSK_ID_RE, RSM_ID_RE, RSO_ID_RE, RSW_ID_RE, RVR_ID_RE, SJD_ID_RE, SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE, WTR_ID_RE } from "./ids";
 import { requireApiKey } from "./auth";
 import { inspectZip, readZipEntry, saveImage, saveZip } from "./store";
 import { handleCreateShare, handleListShares, handleRevokeShare } from "./shares";
@@ -84,6 +84,7 @@ import {
 } from "./overseer/stack-routes";
 import { handleReadStackRefreshJob, handleRetryStackRefreshJob } from "./overseer/stack-jobs";
 import { handleAgentThreadReply, handleLineageConversations, handleRefreshConversations, handleStackConversations } from "./overseer/thread-routes";
+import { handleRevisionJudgments, handleStackJudgments } from "./overseer/judgment-routes";
 
 // ---- the shape of an entry ----
 
@@ -1431,6 +1432,75 @@ const revisionDeltaViewSchema = {
 
 const revisionParam = { name: "revision", in: "path", required: true, schema: { type: "string", pattern: "^[1-9][0-9]{0,8}$" } };
 
+const acknowledgementViewSchema = {
+  type: "object",
+  required: ["itemId", "itemType", "provenance", "acknowledgedAt"],
+  additionalProperties: false,
+  properties: {
+    itemId: { type: "string" },
+    itemType: { type: "string", enum: ["material", "file"] },
+    provenance: {
+      oneOf: [
+        { type: "object", required: ["kind"], additionalProperties: false, properties: { kind: { const: "explicit" } } },
+        { type: "object", required: ["kind", "sourceRevision", "sourceItemId"], additionalProperties: false, properties: { kind: { const: "carried" }, sourceRevision: { type: "integer", minimum: 1 }, sourceItemId: { type: "string" } } },
+      ],
+    },
+    acknowledgedAt: { type: "string", format: "date-time" },
+  },
+};
+
+const judgmentViewSchema = {
+  type: "object",
+  required: ["id", "scope", "verdict", "comment", "by", "judgedAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: `^(?:${RJD_ID_RE.source.slice(1, -1)}|${SJD_ID_RE.source.slice(1, -1)})$` },
+    scope: {
+      oneOf: [
+        { type: "object", required: ["kind", "revision"], additionalProperties: false, properties: { kind: { const: "revision" }, revision: { type: "integer", minimum: 1 } } },
+        { type: "object", required: ["kind", "manifest"], additionalProperties: false, properties: { kind: { const: "stack" }, manifest: { type: "integer", minimum: 1 } } },
+      ],
+    },
+    verdict: { type: "string", enum: ["approved", "changes_requested"] },
+    comment: { type: "string", maxLength: 1200 },
+    by: conversationActorSchema,
+    judgedAt: { type: "string", format: "date-time" },
+  },
+};
+
+const revisionJudgmentsSchema = {
+  type: "object",
+  required: ["workspace", "slug", "revision", "judgments", "handling"],
+  additionalProperties: false,
+  properties: {
+    workspace: { type: "string" }, slug: { type: "string", pattern: SLUG_RE.source }, revision: { type: "integer", minimum: 1 },
+    judgments: { type: "array", items: judgmentViewSchema },
+    handling: {
+      oneOf: [
+        {
+          type: "object", required: ["required", "acknowledged", "acknowledgements", "blockers"], additionalProperties: false,
+          properties: {
+            required: { type: "integer", minimum: 0 }, acknowledged: { type: "integer", minimum: 0 },
+            acknowledgements: { type: "array", items: acknowledgementViewSchema },
+            blockers: { type: "array", items: { type: "object", required: ["itemId", "itemType"], additionalProperties: false, properties: { itemId: { type: "string" }, itemType: { type: "string", enum: ["material", "file"] } } } },
+          },
+        },
+        { type: "null" },
+      ],
+    },
+  },
+};
+
+const stackJudgmentsSchema = {
+  type: "object",
+  required: ["workspace", "slug", "manifest", "judgments"],
+  additionalProperties: false,
+  properties: {
+    workspace: { type: "string" }, slug: { type: "string", pattern: SLUG_RE.source }, manifest: { type: "integer", minimum: 1 },
+    judgments: { type: "array", items: judgmentViewSchema },
+  },
+};
+
 const idempotencyKeyParam = {
   name: "Idempotency-Key",
   in: "header",
@@ -2467,6 +2537,23 @@ export const API_ROUTES: readonly ApiRoute[] = [
     },
   }),
 
+  route("/api/review-lineages/:slug/revisions/:revision/judgments", {
+    GET: {
+      doc: {
+        operationId: "readReviewRevisionJudgments",
+        summary: "Read local judgments of one exact revision",
+        description: "Lists immutable member verdicts over this exact retained revision. Authors are projected as You or Member; API keys see Member and never an email address. A session also receives only its own active acknowledgement summary. An API key receives the verdict list with handling null. Reads and open threads are not verdicts and do not enter this response as one.",
+        security: "keyOrSession",
+        parameters: [slugParam, revisionParam],
+        responses: {
+          "200": { description: "The exact revision's local verdict history and optional personal handling summary.", content: { "application/json": { schema: revisionJudgmentsSchema } } },
+          "404": reviewNotFound,
+        },
+      },
+      run: (req) => handleRevisionJudgments(req, req.params.slug, req.params.revision),
+    },
+  }),
+
   route("/api/review-lineages/:slug/revisions/:revision/delta", {
     GET: {
       doc: {
@@ -2825,6 +2912,23 @@ export const API_ROUTES: readonly ApiRoute[] = [
         responses: { "200": { description: "The manifest.", content: { "application/json": { schema: stackManifestViewSchema } } }, "404": reviewNotFound },
       },
       run: (req) => handleReadStackManifest(req, req.params.slug, req.params.version),
+    },
+  }),
+
+  route("/api/review-stacks/:slug/manifests/:version/judgments", {
+    GET: {
+      doc: {
+        operationId: "readReviewStackJudgments",
+        summary: "Read local judgments of one exact stack manifest",
+        description: "Lists immutable member verdicts over this manifest's stored ordered revision set. Authors are projected as You or Member; API keys see Member and never an email address. It never follows live stack membership, a successor manifest, member verdicts, or GitHub state.",
+        security: "keyOrSession",
+        parameters: [stackSlugParam, stackVersionParam],
+        responses: {
+          "200": { description: "The exact manifest's local verdict history.", content: { "application/json": { schema: stackJudgmentsSchema } } },
+          "404": reviewNotFound,
+        },
+      },
+      run: (req) => handleStackJudgments(req, req.params.slug, req.params.version),
     },
   }),
 

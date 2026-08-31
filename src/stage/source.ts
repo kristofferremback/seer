@@ -36,6 +36,16 @@ import {
   type MaterialKind,
   type StageCaptureInventory,
 } from "./db";
+import {
+  GITHUB_COMPARE_FILE_CEILING,
+  RETAINED_TEXTUAL_SIDES_INSUFFICIENT,
+  captureReasonClasses,
+  compareLineChangesReason,
+  pinnedDiffFetchFailureReason,
+  pinnedDiffOverBudgetReason,
+  treePathTruncatedReason,
+  treeSnapshotTruncatedReason,
+} from "./capture-reasons";
 
 const MAX_KEY_LENGTH = 200;
 const MAX_GITHUB_BLOB_BYTES = 100 * 1024 * 1024;
@@ -254,7 +264,7 @@ async function treeAt(client: StageClient, repo: string, sha: string, sideName: 
     }
     return {
       entries: result.tree.filter((entry) => entry.type !== "tree").sort((a, b) => compareCodePoints(a.path, b.path)),
-      incomplete: result.truncated ? `GitHub truncated the ${sideName} commit tree; the path inventory is incomplete.` : null,
+      incomplete: result.truncated ? treeSnapshotTruncatedReason(sideName === "merge-base" ? "merge-base" : "source") : null,
     };
   } catch (err) {
     throw new StageCaptureError(502, `GitHub refused the ${sideName} commit tree: ${message(err)}`);
@@ -359,12 +369,12 @@ function compareLineChanges(file: ChangeFileFacts): boolean {
   return (file.additions ?? 0) > 0 || (file.deletions ?? 0) > 0;
 }
 
-function missingLineChangesReason(file: ChangeFileFacts): string {
-  return `GitHub compare reports ${file.additions ?? 0} additions and ${file.deletions ?? 0} deletions, but the canonical patch and retained textual sides could not represent those line changes.`;
+function missingLineChangesReason(file: ChangeFileFacts, alignmentLimit?: number): string {
+  return compareLineChangesReason(file.additions ?? 0, file.deletions ?? 0, alignmentLimit);
 }
 
 function isMissingLineChangesReason(reason: string | null): boolean {
-  return reason?.startsWith("GitHub compare reports ") ?? false;
+  return captureReasonClasses(reason ?? "")?.some((kind) => kind === "compare_lines_unrepresented" || kind === "compare_lines_alignment_limit") ?? false;
 }
 
 function combineReason(sideReason: string | null, decisionReason: string | null, lineChangesUnrepresented: boolean): string | null {
@@ -398,7 +408,7 @@ function chooseChange(file: ChangeFileFacts, path: string, patch: string | undef
     }
     if (linesOf(oldText).length + linesOf(newText).length > MAX_RECONSTRUCTED_LINES) {
       return { hunks: [], source: null, reason: compareLineChanges(file)
-        ? `${missingLineChangesReason(file)} Text reconstruction exceeds the ${MAX_RECONSTRUCTED_LINES}-line alignment limit.`
+        ? missingLineChangesReason(file, MAX_RECONSTRUCTED_LINES)
         : `Text reconstruction exceeds the ${MAX_RECONSTRUCTED_LINES}-line alignment limit.` };
     }
     return { hunks: reconstructedHunks(repo, path, headSha, oldText, newText), source: "reconstructed", reason: null };
@@ -407,7 +417,7 @@ function chooseChange(file: ChangeFileFacts, path: string, patch: string | undef
   if (file.status === "removed" && oldText !== null && newBytes === null) return { hunks: reconstructedHunks(repo, path, headSha, oldText, null), source: "reconstructed", reason: null };
   return { hunks: [], source: null, reason: compareLineChanges(file)
     ? missingLineChangesReason(file)
-    : "Retained textual sides were not sufficient to reconstruct line changes." };
+    : RETAINED_TEXTUAL_SIDES_INSUFFICIENT };
 }
 
 function compareFor(cmp: GithubCompare, path: string, oldPath: string | null): GithubFile | null {
@@ -598,14 +608,14 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
   try { rawPatch = await client.compareDiff(request.repo, comparison.merge_base_commit.sha, sourceRef.sha); }
   catch (err) {
     if (rateLimitRefusal(err)) throw err;
-    patchReason = `GitHub did not provide the pinned unified compare diff: ${message(err)}`;
+    patchReason = pinnedDiffFetchFailureReason(message(err));
   }
   const rawPatchBytes = rawPatch === null ? null : new TextEncoder().encode(rawPatch);
   const rawPatches = rawPatch && rawPatchBytes && rawPatchBytes.byteLength <= limit ? splitUnifiedDiff(rawPatch) : new Map<string, string>();
   let used = 0;
   const patchSha = rawPatchBytes && rawPatchBytes.byteLength <= limit ? sha256(rawPatchBytes) : null;
   if (rawPatchBytes && patchSha) used += rawPatchBytes.byteLength;
-  else if (rawPatchBytes) patchReason = `The pinned unified compare diff is ${rawPatchBytes.byteLength} logical bytes, over the ${limit}-byte capture budget.`;
+  else if (rawPatchBytes) patchReason = pinnedDiffOverBudgetReason(rawPatchBytes.byteLength, limit);
 
   const objectState = new Map<string, ObjectState>();
   const orderedObjects: { id: string; path: string; side: "old" | "new"; entry: GithubTreeEntry }[] = [];
@@ -714,7 +724,7 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
   // authorizing handling carry.
   if (oldTree.incomplete) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "snapshot_incomplete", path: null, side: "snapshot", reason: oldTree.incomplete });
   if (newTree.incomplete) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "snapshot_incomplete", path: null, side: "snapshot", reason: newTree.incomplete });
-  if (comparison.files.length >= 300) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "metadata_incomplete", path: null, side: "snapshot", reason: "GitHub compare returned its 300-file ceiling; tree facts are complete, but omitted rename and patch metadata may exist." });
+  if (comparison.files.length >= 300) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "metadata_incomplete", path: null, side: "snapshot", reason: GITHUB_COMPARE_FILE_CEILING });
   if (patchReason) incomplete.push({ id: freshIncompleteId(), workspace_id: workspaceId, capture_id: captureId, kind: "patch_unavailable", path: null, side: "snapshot", reason: patchReason });
 
   for (const candidate of candidates) {
@@ -727,7 +737,7 @@ export async function captureSource(workspaceId: string, request: StageCaptureRe
       if (!entry) {
         const compareEstablishesAbsence = (sideName === "old" && (status === "added" || status === "renamed")) || (sideName === "new" && (status === "removed" || status === "renamed"));
         if (compareEstablishesAbsence || !treeIncompleteFor(candidate, oldTree, newTree)) return { availability: "not_applicable", blob: null, reason: null };
-        return { availability: "unavailable", blob: null, reason: `The ${sideName} tree was truncated before this path could be established.` };
+        return { availability: "unavailable", blob: null, reason: treePathTruncatedReason(sideName) };
       }
       if (entry.type !== "blob") return entry.type === "commit"
         ? { availability: "not_applicable", blob: null, reason: "The submodule commit id is retained, but line changes are not represented for submodules." }

@@ -428,8 +428,8 @@ heading, which is a presentation decision and stays one. Creation owns the promo
 in this slice; separate attach and detach routes are deferred until promoted lineage
 management needs them.
 
-Deferred here on purpose: sharing, local discussion, judgments, and any GitHub write.
-Stacks of promoted reviews are their own section below.
+Sharing, local discussion, acknowledgements, and local judgment are additive state beside
+these immutable documents, described below. GitHub writes remain separate.
 
 ### One pull request, one review lineage
 
@@ -608,15 +608,16 @@ that lost the race, costs no capture. If GitHub later force-pushes back to retai
 matching earlier revision rather than asking for a refresh that cannot create another copy.
 
 **What moved is stored once.** `review_revision_movements` holds the four counts one
-revision's completion computed against the one before it, and
-`review_revision_equivalences` every exact text equivalence that computation found, keyed
-by the target change and indexed by the source. Both captures are immutable and the engine
-is deterministic over them, so these are facts rather than caches; the movement line and
-every API read say the stored counts instead of reloading two inventories, and a revision
-published before the rows existed has them written the first time anything asks.
-`review_revision_read_boundaries` records only that a member explicitly marked or
-unmarked one change on one revision; it is not active state, and it prevents an older
-revision from carrying over that later choice.
+revision's completion computed against the one before it. `review_revision_equivalences`
+holds every exact text equivalence, and `review_revision_item_equivalences` holds the
+material and leafless-file equivalences. Both captures are immutable and the engine is
+deterministic over them, so these are facts rather than caches. The movement line and API
+reads use the stored counts instead of reloading two inventories. Schema v22 adds nullable
+`items_computed_at` to the movement row and writes it only after item equivalences. A v21
+row has a null marker, backfills those equivalences on its first movement read or late
+acknowledgement, then skips that work. `review_revision_read_boundaries` records only that
+a member explicitly marked or unmarked one change on one revision. It is not active state,
+and it prevents an older revision from carrying over that later choice.
 
 **Read carry is per member and exact.** `review_revision_change_reads` is still the one
 active read; `review_revision_read_carries` is why one arrived. Both are written in the
@@ -634,20 +635,21 @@ capture records renames against the merge base and a pull request that renamed a
 carries that pair in every revision. Line positions and canonical ids do not participate.
 Changed bytes, the same fingerprint in another file, a split, a merge, a deletion, a
 duplicate candidate and an ambiguous rename all carry nothing. Duplicate exact evidence still classifies as unchanged
-movement, but its ambiguity creates no carry equivalence. Approval never carries, and no acknowledgement or
-judgment table exists yet, so this is the only carried state there is; a future handling
-write must cite the same equivalence key and source revision rather than infer from display
-text. Unmarking a carried read removes the active row and leaves the provenance standing —
-the history still says why it once arrived.
+movement, but its ambiguity creates no carry equivalence. Acknowledgement uses a separate
+material/file equivalence and approval never carries. Unmarking a carried read removes the
+active row and leaves the provenance standing — the history still says why it once arrived.
 
 Non-text equivalence uses rename-resolved path, side, object kind, mode and Git object id
 where one is known. Where none is, one stable machine reason code such as
-`[budget:blob_requests]` participates and display prose never does, so a stable binary or
-300-file limitation reads as unchanged rather than as permanent movement. The shipped
-old/new tree truncation rows both remain capture-level `snapshot` facts; duplicate exact
-rows classify as unchanged while their ambiguity authorizes no handling carry. Delta
-classification may pair two placements to say `revised`; **carry** only ever follows a
-unique exact match, which is the stricter of the two on purpose.
+`[budget:blob_requests]` participates and display prose never does. A shared typed capture
+reason module writes the existing prose and classifies it for acknowledgement identity.
+It distinguishes old and new tree snapshots and path truncation, retained-text failure,
+compare line loss with or without the alignment ceiling, pinned-diff fetch failure from an
+over-budget diff, and the 300-file ceiling. Variable counts, limits, and fetch messages do
+not participate. Existing old/new snapshot wording maps to the same side classes as the
+writer's merge-base/source wording, without changing stored captures or StageDoc prose.
+Duplicate evidence remains ambiguous and creates no carry. Delta classification may pair
+two placements to say `revised`; **carry** only follows a unique exact match.
 
 The account delta is a separate engine from the legacy `src/overseer/delta.ts`, whose
 rough-match ReviewDoc semantics are intentionally incompatible. Identity is the witness's
@@ -784,7 +786,77 @@ same hard limit. The measured cost is about
 620 bytes per rendered diff line, so the line bound and the byte target are not the same
 promise; a line-byte cap stored at capture time is the change that would make them one.
 
-Judgment and every GitHub write remain deferred. Schema v21 adds local and imported discussion without changing a stored review or stack document.
+Schema v21 adds local and imported discussion without changing a stored review or stack document.
+
+### Acknowledgement and exact local judgment
+
+Schema v22 keeps three personal facts separate. `review_revision_change_reads` says which
+canonical text changes a member read. `review_revision_acknowledgements` says which exact
+material and leafless file items they acknowledged. `review_revision_judgments` and
+`review_stack_judgments` say what they decided about one exact revision or manifest. None
+of those facts creates another one, and none writes to GitHub.
+
+Every `stage_capture_incomplete` row requires acknowledgement, including capture-level
+material whose path is null. A file row requires its own acknowledgement only when it has
+no canonical change and no incomplete material at its path, the same leafless-file rule the
+reader uses. Text changes remain reads. An active acknowledgement is reversible; an
+immutable carry row remains after reversal. An explicit acknowledgement replaces carried
+provenance in active state without rewriting carry history.
+`review_revision_acknowledgement_boundaries` records every explicit acknowledgement and
+reversal. Publication carry and late carry check the target boundary at each hop, so an
+older acknowledgement cannot restore a target the member explicitly reversed or continue
+through it to a later revision.
+
+The shared identity engine gives every item a standalone digest from its own immutable
+capture. Carry uses a different equivalence digest in the successor's rename-resolved path
+space. Material identity is kind, path, side, and exact object kind, mode, and Git object id
+when known. Without an object, one bracketed machine reason such as
+`[budget:blob_requests]` or one typed production reason class may prove identity. The
+shared writer and classifier preserve old/new sides and failure classes while ignoring
+variable counts, limits, and fetch messages. Existing stored prose remains unchanged.
+Other free prose cannot prove identity. Leafless-file identity uses path, status, and both
+sides' object kind, mode, and id. One key must occur exactly once on each side.
+Duplicate evidence, changed object or mode, changed machine reason, free prose, ambiguous
+rename, split, merge, and deletion carry nothing. Required-acknowledgement reads build only
+material and leafless-file identities; canonical change fingerprints are not hashed and
+thrown away on that path.
+
+A judgment transaction loads the exact retained inventories from SQLite, sorts every
+required item, validates the member's active acknowledgement type and standalone digest,
+and copies each acknowledgement and its provenance into immutable judgment-item rows. It
+then inserts the verdict and snapshot together. Missing or mismatched items write nothing.
+The first `(revision, member)` or `(manifest, member)` verdict is immutable. Replay identity
+is the exact target, member, verdict, and normalized comment. An exact replay returns the
+first row even if active acknowledgement timestamps later change. A different verdict or
+comment is a conflict. The first acknowledgement digest, count, and item rows remain the
+immutable history of what supported that judgment. Comments are optional constrained
+markdown up to 1,200 characters. There is no judgment update or delete function.
+
+A stack judgment reads the manifest document's stored member order and exact revision ids,
+not `review_stack_members`. It snapshots the sorted item list and acknowledgement rows each
+member's validation already returned, with no per-item acknowledgement query or second
+identity construction. Removed pinned members still contribute their retained gaps. Member
+revision verdicts do not satisfy or imply a manifest verdict, and a manifest verdict does
+not imply member verdicts. A successor revision and successor manifest start with no
+judgment. An older pinned scope remains judgeable and the reader states that newer source or
+an earlier manifest exists.
+
+Only workspace sessions acknowledge or judge. Judgment authors cross the same typed
+`ProjectedActor` seam as discussion. Private member HTML may show another member's stable
+workspace local-part label. Session APIs show `You` or `Member`, and API keys see only
+`Member`; no judgment response gives a key an email address. API keys receive no personal
+active handling. Capability and signed-out readers receive no acknowledgement or judgment
+data, controls, or routes. Rendering and every judgment read are retained-only. GitHub
+review state is imported conversation, not a Seer verdict, and no local verdict is
+projected to GitHub.
+
+The member reader reports one handled count over canonical reads plus required
+acknowledgements. Acknowledgement submits patch the form, blocker list, judgment buttons,
+and every handled count in place, including reversal. Scroll position and open disclosures
+stay put. Native forms still use POST and redirect when JavaScript is absent. The exact
+revision or manifest judgment appears once in the overview source rail, in the phone
+Details panel, and in focused review Details. The client moves that one form between the
+overview and focused hosts instead of duplicating forms or ids.
 
 ### Exact document capabilities
 

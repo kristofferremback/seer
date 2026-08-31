@@ -14,6 +14,8 @@ import { tinyId } from "../src/ids";
 import { openStageBlob, saveStageBlob, stageBlobPath } from "../src/store";
 import { getStageCapture, insertStageCapture } from "../src/stage/db";
 import { rederiveCanonicalChanges } from "../src/stage/source";
+import { captureReasonClasses, RETAINED_TEXTUAL_SIDES_INSUFFICIENT, type CaptureReasonClass } from "../src/stage/capture-reasons";
+import { revisionCodeDelta } from "../src/overseer/revision-delta";
 import { validateStagePublish } from "../src/stage/validate";
 import { createProject } from "../src/projects/db";
 import { openApiSpec } from "../src/agent-discovery";
@@ -165,6 +167,16 @@ async function rederiveStored(inventory: NonNullable<ReturnType<typeof getStageC
     const file = await openStageBlob(inventory.capture.workspace_id, sha);
     return file ? new Uint8Array(await new Response(file).arrayBuffer()) : null;
   });
+}
+
+async function captureInventory(slug: string, client: GithubClient, maxLogicalBytes?: number) {
+  const { captureSource } = await import("../src/stage/source");
+  const result = await captureSource(ws, { slug, repo: "Acme/Repo", branch: "feature/blue" }, {
+    client,
+    idempotencyKey: slug,
+    ...(maxLogicalBytes === undefined ? {} : { maxLogicalBytes }),
+  });
+  return getStageCapture(result.captureId, ws)!;
 }
 
 function validateOpenApiResponse(operationId: string, body: unknown): void {
@@ -455,6 +467,116 @@ describe("stage captures", () => {
     expect((await response.json() as any).complete).toBe(true);
   });
 
+  test("writer-produced deleted-binary and added-unavailable gaps carry by failure class", async () => {
+    const deletedBinaryClient = (deletions: number): GithubClient => {
+      const client = fixtureClient();
+      client.getTree = async (_repo, treeSha) => ({
+        sha: treeSha,
+        truncated: false,
+        tree: treeSha === HEAD ? [] : [{ path: "image.bin", mode: "100644", type: "blob", sha: B, size: bytes[B]!.byteLength }],
+      });
+      client.compare = async () => ({ merge_base_commit: { sha: MERGE }, files: [
+        { filename: "image.bin", status: "removed", additions: 0, deletions, changes: deletions },
+      ] });
+      client.compareDiff = async () => "";
+      return client;
+    };
+    const deletedFirst = await captureInventory("reason-deleted-binary-1", deletedBinaryClient(0));
+    const deletedSecond = await captureInventory("reason-deleted-binary-2", deletedBinaryClient(0));
+    const deletedDifferent = await captureInventory("reason-deleted-binary-different", deletedBinaryClient(3));
+    const absentNew = (inventory: typeof deletedFirst) => inventory.incomplete.find((item) => item.path === "image.bin" && item.side === "new")!;
+    expect(absentNew(deletedFirst).reason).toBe(RETAINED_TEXTUAL_SIDES_INSUFFICIENT);
+    expect(revisionCodeDelta(deletedFirst, deletedSecond).ackEquivalences.get(absentNew(deletedFirst).id)?.targetId).toBe(absentNew(deletedSecond).id);
+    expect(absentNew(deletedDifferent).reason).toBe("GitHub compare reports 0 additions and 3 deletions, but the canonical patch and retained textual sides could not represent those line changes.");
+    expect(captureReasonClasses(absentNew(deletedDifferent).reason)).toEqual(["compare_lines_unrepresented"]);
+    expect(revisionCodeDelta(deletedFirst, deletedDifferent).ackEquivalences.has(absentNew(deletedFirst).id)).toBe(false);
+
+    const addedUnavailableClient = (additions: number, message: string): GithubClient => {
+      const client = fixtureClient();
+      client.getTree = async (_repo, treeSha) => ({
+        sha: treeSha,
+        truncated: false,
+        tree: treeSha === HEAD ? [{ path: "added.bin", mode: "100644", type: "blob", sha: B, size: bytes[B]!.byteLength }] : [],
+      });
+      client.getBlobBytes = async () => { throw new Error(`blob ${message}`); };
+      client.compare = async () => ({ merge_base_commit: { sha: MERGE }, files: [
+        { filename: "added.bin", status: "added", additions, deletions: 0, changes: additions },
+      ] });
+      client.compareDiff = async () => { throw new Error(`diff ${message}`); };
+      return client;
+    };
+    const addedFirst = await captureInventory("reason-added-unavailable-1", addedUnavailableClient(1, "first"));
+    const addedSecond = await captureInventory("reason-added-unavailable-2", addedUnavailableClient(9, "second"));
+    const absentOld = (inventory: typeof addedFirst) => inventory.incomplete.find((item) => item.path === "added.bin" && item.side === "old")!;
+    const failedDiff = (inventory: typeof addedFirst) => inventory.incomplete.find((item) => item.kind === "patch_unavailable")!;
+    const addedDelta = revisionCodeDelta(addedFirst, addedSecond);
+    expect(absentOld(addedFirst).reason).toBe("GitHub compare reports 1 additions and 0 deletions, but the canonical patch and retained textual sides could not represent those line changes.");
+    expect(captureReasonClasses(absentOld(addedFirst).reason)).toEqual(["compare_lines_unrepresented"]);
+    expect(addedDelta.ackEquivalences.get(absentOld(addedFirst).id)?.targetId).toBe(absentOld(addedSecond).id);
+    expect(failedDiff(addedFirst).reason).toBe("GitHub did not provide the pinned unified compare diff: diff first");
+    expect(captureReasonClasses(failedDiff(addedFirst).reason)).toEqual(["pinned_diff_fetch_failure"]);
+    expect(addedDelta.ackEquivalences.get(failedDiff(addedFirst).id)?.targetId).toBe(failedDiff(addedSecond).id);
+  });
+
+  test("writer-produced tree truncation keeps old and new identities distinct", async () => {
+    const truncatedClient = (): GithubClient => {
+      const client = fixtureClient();
+      client.getTree = async (_repo, treeSha) => ({
+        sha: treeSha,
+        truncated: true,
+        tree: treeSha === HEAD
+          ? [{ path: "new-only.bin", mode: "100644", type: "blob", sha: B2, size: bytes[B2]!.byteLength }]
+          : [{ path: "old-only.bin", mode: "100644", type: "blob", sha: B, size: bytes[B]!.byteLength }],
+      });
+      client.compare = async () => ({ merge_base_commit: { sha: MERGE }, files: [] });
+      client.compareDiff = async () => "";
+      return client;
+    };
+    const first = await captureInventory("reason-truncated-1", truncatedClient());
+    const second = await captureInventory("reason-truncated-2", truncatedClient());
+    const classified = (inventory: typeof first, kind: CaptureReasonClass) => inventory.incomplete.find((item) => captureReasonClasses(item.reason)?.includes(kind))!;
+    const expected = ["tree_path_old", "tree_path_new", "tree_snapshot_old", "tree_snapshot_new"] as const;
+    const delta = revisionCodeDelta(first, second);
+    for (const kind of expected) {
+      const source = classified(first, kind);
+      const target = classified(second, kind);
+      expect(source).toBeDefined();
+      expect(delta.ackEquivalences.get(source.id)?.targetId).toBe(target.id);
+    }
+    expect(first.incomplete.filter((item) => item.kind === "snapshot_incomplete").map((item) => item.reason)).toEqual(expect.arrayContaining([
+      "GitHub truncated the merge-base commit tree; the path inventory is incomplete.",
+      "GitHub truncated the source commit tree; the path inventory is incomplete.",
+    ]));
+    expect(first.incomplete.filter((item) => item.kind === "snapshot_incomplete")).toHaveLength(2);
+    expect(classified(first, "tree_path_old").reason).toBe("The old tree was truncated before this path could be established.");
+    expect(classified(first, "tree_path_new").reason).toBe("The new tree was truncated before this path could be established.");
+    expect(delta.ackEquivalences.get(classified(first, "tree_snapshot_old").id)?.targetId).not.toBe(classified(second, "tree_snapshot_new").id);
+  });
+
+  test("writer-produced capture ceilings carry while variable byte counts do not participate", async () => {
+    const ceilingClient = (patch: string): GithubClient => {
+      const client = fixtureClient();
+      client.getTree = async (_repo, treeSha) => ({ sha: treeSha, truncated: false, tree: [] });
+      const file = { filename: "omitted.txt", status: "added", additions: 0, deletions: 0, changes: 0 } as const;
+      client.compare = async () => ({ merge_base_commit: { sha: MERGE }, files: Array.from({ length: 300 }, () => file) });
+      client.compareDiff = async () => patch;
+      return client;
+    };
+    const first = await captureInventory("reason-capture-ceilings-1", ceilingClient("xx"), 0);
+    const second = await captureInventory("reason-capture-ceilings-2", ceilingClient("xxxxx"), 0);
+    const classified = (inventory: typeof first, kind: CaptureReasonClass) => inventory.incomplete.find((item) => captureReasonClasses(item.reason)?.includes(kind))!;
+    const delta = revisionCodeDelta(first, second);
+    for (const kind of ["compare_file_ceiling", "pinned_diff_over_budget"] as const) {
+      const source = classified(first, kind);
+      const target = classified(second, kind);
+      expect(source).toBeDefined();
+      expect(delta.ackEquivalences.get(source.id)?.targetId).toBe(target.id);
+    }
+    expect(classified(first, "compare_file_ceiling").reason).toBe("GitHub compare returned its 300-file ceiling; tree facts are complete, but omitted rename and patch metadata may exist.");
+    expect(classified(first, "pinned_diff_over_budget").reason).toBe("The pinned unified compare diff is 2 logical bytes, over the 0-byte capture budget.");
+    expect(classified(second, "pinned_diff_over_budget").reason).toBe("The pinned unified compare diff is 5 logical bytes, over the 0-byte capture budget.");
+  });
+
   test("a missing aggregate patch does not hide reviewability when text reconstruction succeeds", async () => {
     const client = fixtureClient();
     const getTree = client.getTree!;
@@ -540,7 +662,10 @@ describe("stage captures", () => {
     const inventory = getStageCapture(result.captureId, ws)!;
     const edit = inventory.files.find((file) => file.path === "a.txt")!;
     expect(inventory.changes.filter((change) => change.file_id === edit.id)).toEqual([]);
-    expect(inventory.incomplete.filter((item) => item.path === "a.txt" && item.kind === "lines_unavailable")).toHaveLength(2);
+    const unavailable = inventory.incomplete.filter((item) => item.path === "a.txt" && item.kind === "lines_unavailable");
+    expect(unavailable).toHaveLength(2);
+    expect(unavailable.every((item) => item.reason === "GitHub compare reports 1 additions and 1 deletions, but the canonical patch and retained textual sides could not represent those line changes. Text reconstruction exceeds the 12000-line alignment limit.")).toBe(true);
+    expect(unavailable.every((item) => captureReasonClasses(item.reason)?.includes("compare_lines_alignment_limit"))).toBe(true);
   });
 
   test("a truncated tree remains readable but explicitly incomplete", async () => {

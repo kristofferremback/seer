@@ -149,8 +149,10 @@ for one week is a real thing to want.
 without changing their bytes. It projects an agent to name and model only. Member ids,
 key ids, credential and installation ids, email, Projects, reads, carry provenance,
 progress, unread filters, acknowledgements, judgments, refresh state, GitHub actions,
-private canonical links, all forms, and every mutation stay absent. Bundle evidence in an
-account is inert text. Only copied attachment ids are readable.
+private canonical links, all forms, and every mutation stay absent. Schema v22 does not
+copy active acknowledgements, acknowledgement boundaries or carry rows, verdicts, or
+verdict-item snapshots into a capability inventory. Bundle evidence in an account is inert
+text. Only copied attachment ids are readable.
 
 Every `/s/` response carries `Referrer-Policy: no-referrer` and
 `X-Robots-Tag: noindex, nofollow`. Document capability responses, soft misses, and method

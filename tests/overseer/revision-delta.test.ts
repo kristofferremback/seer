@@ -11,7 +11,7 @@
 // unique exact match on both sides.
 
 import { describe, expect, test } from "bun:test";
-import { accountDelta, resolvePaths, revisionCodeDelta } from "../../src/overseer/revision-delta";
+import { accountDelta, requiredAcknowledgements, resolvePaths, reviewItemIdentities, revisionCodeDelta } from "../../src/overseer/revision-delta";
 import type {
   StageCaptureChangeRow,
   StageCaptureFileRow,
@@ -99,7 +99,11 @@ const OTHER = { old: "of2", new: "nf2", context: "cf2" };
 /** The previous change id every carry assertion names, so the shape of a carry — source
  *  change to target change — is checked rather than merely its count. */
 function carries(result: ReturnType<typeof revisionCodeDelta>): { from: string; to: string }[] {
-  return [...result.equivalences.values()].map((entry) => ({ from: entry.sourceChangeId, to: entry.targetChangeId }));
+  return [...result.readEquivalences.values()].map((entry) => ({ from: entry.sourceChangeId, to: entry.targetChangeId }));
+}
+
+function acknowledgementCarries(result: ReturnType<typeof revisionCodeDelta>) {
+  return [...result.ackEquivalences.values()];
 }
 
 describe("a rebase moves lines and nothing else", () => {
@@ -116,7 +120,7 @@ describe("a rebase moves lines and nothing else", () => {
     expect(delta.counts).toEqual({ unchanged: 1, revised: 0, new: 0, removed: 0 });
     expect(carries(delta)).toEqual([{ from: `chg_${"a".padEnd(64, "0")}`, to: `chg_${"z".padEnd(64, "0")}` }]);
     // The key digest is recorded so a later reader can say what was matched.
-    expect([...delta.equivalences.values()][0]!.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect([...delta.readEquivalences.values()][0]!.digest).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test("changed bytes are revised and carry nothing", () => {
@@ -130,7 +134,7 @@ describe("a rebase moves lines and nothing else", () => {
     });
     const delta = revisionCodeDelta(before, after);
     expect(delta.counts).toEqual({ unchanged: 0, revised: 1, new: 0, removed: 0 });
-    expect(delta.equivalences.size).toBe(0);
+    expect(delta.readEquivalences.size).toBe(0);
   });
 
   test("the same fingerprints in another file are not the same change", () => {
@@ -144,7 +148,7 @@ describe("a rebase moves lines and nothing else", () => {
     });
     const delta = revisionCodeDelta(before, after);
     expect(delta.counts).toEqual({ unchanged: 0, revised: 0, new: 1, removed: 1 });
-    expect(delta.equivalences.size).toBe(0);
+    expect(delta.readEquivalences.size).toBe(0);
   });
 
   test("a duplicate candidate on either side is ambiguous and carries nothing", () => {
@@ -163,7 +167,7 @@ describe("a rebase moves lines and nothing else", () => {
     const delta = revisionCodeDelta(before, after);
     // Exact duplicate evidence is unchanged, but its ambiguity still authorizes no carry.
     expect(delta.counts).toEqual({ unchanged: 2, revised: 0, new: 0, removed: 0 });
-    expect(delta.equivalences.size).toBe(0);
+    expect(delta.readEquivalences.size).toBe(0);
   });
 
   test("a split is one revision and one arrival; a merge is one revision and one departure", () => {
@@ -176,9 +180,9 @@ describe("a rebase moves lines and nothing else", () => {
       changes: [change("stg_b", "a", "stf_1", OTHER), change("stg_b", "b", "stf_1", { old: "of3", new: "nf3", context: "cf3" })],
     });
     expect(revisionCodeDelta(one, two).counts).toEqual({ unchanged: 0, revised: 1, new: 1, removed: 0 });
-    expect(revisionCodeDelta(one, two).equivalences.size).toBe(0);
+    expect(revisionCodeDelta(one, two).readEquivalences.size).toBe(0);
     expect(revisionCodeDelta(two, one).counts).toEqual({ unchanged: 0, revised: 1, new: 0, removed: 1 });
-    expect(revisionCodeDelta(two, one).equivalences.size).toBe(0);
+    expect(revisionCodeDelta(two, one).readEquivalences.size).toBe(0);
   });
 
   test("a deleted file is removed and carries nothing", () => {
@@ -190,7 +194,7 @@ describe("a rebase moves lines and nothing else", () => {
     const delta = revisionCodeDelta(before, after);
     expect(delta.counts).toEqual({ unchanged: 0, revised: 0, new: 0, removed: 1 });
     expect(delta.items[0]).toMatchObject({ status: "removed", path: "src/gone.ts", newId: null });
-    expect(delta.equivalences.size).toBe(0);
+    expect(delta.readEquivalences.size).toBe(0);
   });
 });
 
@@ -257,7 +261,7 @@ describe("a rename is something the capture recorded, or it is nothing", () => {
       changes: [change("stg_c", "y", "stf_3", FP)],
     });
     expect(resolvePaths(before, occupied).resolve("src/new.ts")).toBeNull();
-    expect(revisionCodeDelta(before, occupied).equivalences.size).toBe(0);
+    expect(revisionCodeDelta(before, occupied).readEquivalences.size).toBe(0);
   });
 
   test("two files claiming one previous path resolve to nothing and carry nothing", () => {
@@ -274,7 +278,7 @@ describe("a rename is something the capture recorded, or it is nothing", () => {
     });
     expect(resolvePaths(before, after).resolve("src/old.ts")).toBeNull();
     const delta = revisionCodeDelta(before, after);
-    expect(delta.equivalences.size).toBe(0);
+    expect(delta.readEquivalences.size).toBe(0);
     expect(delta.counts.unchanged).toBe(0);
     expect(delta.counts.removed).toBe(1);
   });
@@ -289,7 +293,7 @@ describe("a rename is something the capture recorded, or it is nothing", () => {
       changes: [change("stg_b", "z", "stf_3", FP)],
     });
     expect(resolvePaths(before, after).resolve("src/taken.ts")).toBeNull();
-    expect(revisionCodeDelta(before, after).equivalences.size).toBe(0);
+    expect(revisionCodeDelta(before, after).readEquivalences.size).toBe(0);
   });
 });
 
@@ -306,8 +310,9 @@ describe("material without line changes still has an identity", () => {
   test("identical object identity at the same placement is unchanged", () => {
     const delta = revisionCodeDelta(binary("stg_a", "n".repeat(40)), binary("stg_b", "n".repeat(40)));
     expect(delta.counts).toEqual({ unchanged: 1, revised: 0, new: 0, removed: 0 });
-    // Non-text material has no handling mutation yet, so nothing carries either way.
-    expect(delta.equivalences.size).toBe(0);
+    // Text reads and non-text acknowledgements have separate carry maps.
+    expect(delta.readEquivalences.size).toBe(0);
+    expect(delta.ackEquivalences.size).toBe(1);
   });
 
   test("a different Git object at the same placement is revised", () => {
@@ -367,7 +372,7 @@ describe("material without line changes still has an identity", () => {
     ).counts).toEqual({ unchanged: 0, revised: 1, new: 0, removed: 0 });
   });
 
-  test("both-tree truncation matches per side, and legacy snapshot rows stay unmatched", () => {
+  test("both-tree truncation matches by its stored production reason even on legacy snapshot rows", () => {
     const sided = (captureId: string) => inventory(captureId, {
       incomplete: [
         material(captureId, `sti_${captureId}_old`, "snapshot_incomplete", null, "old", "GitHub truncated the old commit tree; the path inventory is incomplete."),
@@ -377,16 +382,143 @@ describe("material without line changes still has an identity", () => {
     expect(revisionCodeDelta(sided("stg_a"), sided("stg_b")).counts)
       .toEqual({ unchanged: 2, revised: 0, new: 0, removed: 0 });
 
-    // A capture written before the sides were separated has two rows that key alike. They
-    // remain ambiguous for handling carry, but unchanged delta must not invent movement.
+    // Existing captures stored both rows as snapshot facts. Their exact old/new production
+    // reasons provide distinct internal identities without rewriting either stored reason.
     const legacy = (captureId: string) => inventory(captureId, {
       incomplete: [
         material(captureId, `sti_${captureId}_1`, "snapshot_incomplete", null, "snapshot", "GitHub truncated the old commit tree; the path inventory is incomplete."),
         material(captureId, `sti_${captureId}_2`, "snapshot_incomplete", null, "snapshot", "GitHub truncated the new commit tree; the path inventory is incomplete."),
       ],
     });
-    expect(revisionCodeDelta(legacy("stg_a"), legacy("stg_b")).counts)
-      .toEqual({ unchanged: 2, revised: 0, new: 0, removed: 0 });
+    const delta = revisionCodeDelta(legacy("stg_a"), legacy("stg_b"));
+    expect(delta.counts).toEqual({ unchanged: 2, revised: 0, new: 0, removed: 0 });
+    expect(acknowledgementCarries(delta)).toHaveLength(2);
+  });
+});
+
+describe("acknowledgement identity is exact and separate from movement", () => {
+  test("every material and only a leafless file requires acknowledgement", () => {
+    const capture = inventory("stg_required", {
+      files: [
+        file("stg_required", "stf_text", "src/value.ts"),
+        file("stg_required", "stf_material", "assets/logo.png"),
+        file("stg_required", "stf_leaf", "bin/run.sh", { old_mode: "100644", new_mode: "100755" }),
+      ],
+      changes: [change("stg_required", "text", "stf_text", FP)],
+      incomplete: [
+        material("stg_required", "sti_capture", "snapshot_incomplete", null, "new", "[budget:tree] capped"),
+        material("stg_required", "sti_file", "lines_unavailable", "assets/logo.png", "new", "binary"),
+      ],
+    });
+    expect(requiredAcknowledgements(capture).map((item) => [item.type, item.id])).toEqual([
+      ["material", "sti_capture"], ["material", "sti_file"], ["file", "stf_leaf"],
+    ]);
+    expect(reviewItemIdentities(capture).find((item) => item.type === "change")?.digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("an unchanged binary object and mode-only leaf carry, while changed identity does not", () => {
+    const binary = (captureId: string, object: string) => inventory(captureId, {
+      files: [file(captureId, `stf_${captureId}`, "assets/logo.png", { new_kind: "blob", new_mode: "100644", new_object_id: object })],
+      incomplete: [material(captureId, `sti_${captureId}`, "lines_unavailable", "assets/logo.png", "new", "Binary")],
+    });
+    const same = revisionCodeDelta(binary("a", "a".repeat(40)), binary("b", "a".repeat(40)));
+    expect(acknowledgementCarries(same)).toHaveLength(1);
+    expect(acknowledgementCarries(same)[0]).toMatchObject({ type: "material", sourceId: "sti_a", targetId: "sti_b" });
+    expect(acknowledgementCarries(same)[0]!.sourceDigest).not.toBe(acknowledgementCarries(same)[0]!.equivalenceDigest);
+    expect(acknowledgementCarries(revisionCodeDelta(binary("a", "a".repeat(40)), binary("b", "b".repeat(40))))).toHaveLength(0);
+
+    const leaf = (captureId: string, mode: string) => inventory(captureId, {
+      files: [file(captureId, `stf_${captureId}`, "bin/run.sh", { old_kind: "blob", new_kind: "blob", old_mode: "100644", new_mode: mode, old_object_id: "o".repeat(40), new_object_id: "o".repeat(40) })],
+    });
+    expect(acknowledgementCarries(revisionCodeDelta(leaf("a", "100755"), leaf("b", "100755")))).toHaveLength(1);
+    expect(acknowledgementCarries(revisionCodeDelta(leaf("a", "100755"), leaf("b", "100644")))).toHaveLength(0);
+  });
+
+  test("a proved rename carries with distinct standalone digests; ambiguity does not", () => {
+    const before = inventory("stg_before", {
+      files: [file("stg_before", "stf_old", "old.bin", { new_kind: "blob", new_mode: "100644", new_object_id: "o".repeat(40) })],
+      incomplete: [material("stg_before", "sti_old", "lines_unavailable", "old.bin", "new", "Binary")],
+    });
+    const after = inventory("stg_after", {
+      files: [file("stg_after", "stf_new", "new.bin", { old_path: "old.bin", status: "renamed", new_kind: "blob", new_mode: "100644", new_object_id: "o".repeat(40) })],
+      incomplete: [material("stg_after", "sti_new", "lines_unavailable", "new.bin", "new", "Binary")],
+    });
+    const match = acknowledgementCarries(revisionCodeDelta(before, after))[0]!;
+    expect(match.sourceDigest).not.toBe(match.targetDigest);
+    expect(match.equivalenceDigest).toMatch(/^[0-9a-f]{64}$/);
+
+    const ambiguous = inventory("stg_ambiguous", {
+      files: [
+        file("stg_ambiguous", "stf_a", "a.bin", { old_path: "old.bin", new_kind: "blob", new_mode: "100644", new_object_id: "o".repeat(40) }),
+        file("stg_ambiguous", "stf_b", "b.bin", { old_path: "old.bin", new_kind: "blob", new_mode: "100644", new_object_id: "o".repeat(40) }),
+      ],
+      incomplete: [material("stg_ambiguous", "sti_a", "lines_unavailable", "a.bin", "new", "Binary")],
+    });
+    expect(acknowledgementCarries(revisionCodeDelta(before, ambiguous))).toHaveLength(0);
+  });
+
+  test("legacy capture-level reasons retain stable acknowledgement identities", () => {
+    const reason = (captureId: string, kind: StageIncompleteRow["kind"], text: string) => inventory(captureId, {
+      incomplete: [material(captureId, `sti_${captureId}`, kind, null, "snapshot", text)],
+    });
+    const forms = [
+      ["snapshot_incomplete", "GitHub truncated the old commit tree; the path inventory is incomplete.", "GitHub truncated the old commit tree; the path inventory is incomplete."],
+      ["snapshot_incomplete", "GitHub truncated the new commit tree; the path inventory is incomplete.", "GitHub truncated the new commit tree; the path inventory is incomplete."],
+      ["metadata_incomplete", "GitHub compare returned its 300-file ceiling; tree facts are complete, but omitted rename and patch metadata may exist.", "GitHub compare returned its 300-file ceiling; tree facts are complete, but omitted rename and patch metadata may exist."],
+      ["patch_unavailable", "GitHub did not provide the pinned unified compare diff: timed out", "GitHub did not provide the pinned unified compare diff: connection reset"],
+    ] as const;
+    for (const [kind, before, after] of forms) {
+      const delta = revisionCodeDelta(reason(`a-${kind}`, kind, before), reason(`b-${kind}`, kind, after));
+      expect(delta.counts).toEqual({ unchanged: 1, revised: 0, new: 0, removed: 0 });
+      expect(acknowledgementCarries(delta)).toHaveLength(1);
+    }
+    expect(acknowledgementCarries(revisionCodeDelta(
+      reason("old", "snapshot_incomplete", forms[0][1]),
+      reason("new", "snapshot_incomplete", forms[1][1]),
+    ))).toHaveLength(0);
+  });
+
+  test("machine reason carries without prose; free prose and duplicate evidence never authorize carry", () => {
+    const reason = (captureId: string, text: string) => inventory(captureId, {
+      incomplete: [material(captureId, `sti_${captureId}`, "metadata_incomplete", null, "snapshot", text)],
+    });
+    expect(acknowledgementCarries(revisionCodeDelta(
+      reason("a", "[budget:blob_requests] first wording"),
+      reason("b", "[budget:blob_requests] second wording"),
+    ))).toHaveLength(1);
+    expect(acknowledgementCarries(revisionCodeDelta(
+      reason("a", "[budget:blob_requests] wording"),
+      reason("b", "[budget:logical_bytes] wording"),
+    ))).toHaveLength(0);
+    expect(acknowledgementCarries(revisionCodeDelta(reason("a", "ordinary prose"), reason("b", "ordinary prose")))).toHaveLength(0);
+
+    const duplicate = (captureId: string) => inventory(captureId, {
+      incomplete: [
+        material(captureId, `sti_${captureId}_1`, "snapshot_incomplete", null, "snapshot", "[budget:tree] capped"),
+        material(captureId, `sti_${captureId}_2`, "snapshot_incomplete", null, "snapshot", "[budget:tree] capped"),
+      ],
+    });
+    expect(acknowledgementCarries(revisionCodeDelta(duplicate("a"), duplicate("b")))).toHaveLength(0);
+
+    const one = reason("one", "[budget:tree] capped");
+    const two = duplicate("two");
+    expect(acknowledgementCarries(revisionCodeDelta(one, two))).toHaveLength(0);
+    expect(acknowledgementCarries(revisionCodeDelta(two, one))).toHaveLength(0);
+    expect(acknowledgementCarries(revisionCodeDelta(one, inventory("gone", {})))).toHaveLength(0);
+  });
+
+  test("required acknowledgements do not read or hash canonical change fingerprints", () => {
+    const capture = inventory("stg_no_change_hash", {
+      files: [
+        file("stg_no_change_hash", "stf_text", "src/value.ts"),
+        file("stg_no_change_hash", "stf_leaf", "bin/run.sh", { old_mode: "100644", new_mode: "100755" }),
+      ],
+      changes: [change("stg_no_change_hash", "text", "stf_text", FP)],
+    });
+    for (const field of ["old_fingerprint", "new_fingerprint", "context_fingerprint"] as const) {
+      Object.defineProperty(capture.changes[0]!, field, { get() { throw new Error(`read ${field}`); } });
+    }
+    expect(requiredAcknowledgements(capture).map((item) => item.id)).toEqual(["stf_leaf"]);
   });
 });
 

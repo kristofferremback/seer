@@ -187,6 +187,14 @@ describe("the document and the router are one list", () => {
     expect(schema.oneOf[1]).toMatchObject({ additionalProperties: false, properties: { kind: { enum: ["review_document", "stack_document"] } } });
   });
 
+  test("judgment authors use the shared projected-actor schema rather than strings", () => {
+    const revision = (openApiPaths()["/api/review-lineages/{slug}/revisions/{revision}/judgments"] as any).get;
+    const by = revision.responses["200"].content["application/json"].schema.properties.judgments.items.properties.by;
+    expect(by.oneOf).toHaveLength(3);
+    expect(by.oneOf[0]).toMatchObject({ required: ["kind", "label"], properties: { kind: { enum: ["member"] }, label: { type: "string" } } });
+    expect(by.type).toBeUndefined();
+  });
+
   test("every described path is one Bun actually routes", async () => {
     // The projection rewrites `:slug` to `{slug}`. That rewrite, and nothing else, stands
     // between the two spellings — so this is the one structural thing still worth
@@ -589,6 +597,11 @@ describe("a 200 matches the schema the document declares for it", () => {
     );
   });
 
+  test("judgment APIs", async () => {
+    await check("readReviewRevisionJudgments", () => fetch(`${base}/api/review-lineages/${CONVERSATION_SLUG}/revisions/1/judgments`, { headers: auth() }));
+    await check("readReviewStackJudgments", () => fetch(`${base}/api/review-stacks/${CONVERSATION_STACK}/manifests/1/judgments`, { headers: auth() }));
+  });
+
   test("conversation APIs", async () => {
     await check("replyToReviewThread", () => fetch(`${base}/api/review-threads/${conversationThread}/replies`, {
       method: "POST",
@@ -646,6 +659,8 @@ describe("a 200 matches the schema the document declares for it", () => {
       "createNote",
       "listNotes",
       "replyToReviewThread",
+      "readReviewRevisionJudgments",
+      "readReviewStackJudgments",
       "readReviewConversation",
       "readReviewStackConversation",
       "refreshReviewConversation",

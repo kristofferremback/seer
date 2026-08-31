@@ -30,6 +30,8 @@ import {
   type ReaderDoc,
   type ReaderDrift,
   type ReaderGroup,
+  type ReaderHandling,
+  type ReaderJudgmentBlocker,
   type ReaderMember,
   type ReaderMovement,
   type ReaderPullRequest,
@@ -75,6 +77,11 @@ import {
   type ReviewRevisionRow,
 } from "./revision-db";
 import { readableWorkspaces, softNotFound as softReviewJson } from "./read";
+import {
+  getMyRevisionJudgment,
+  listRevisionJudgments,
+  revisionAcknowledgementState,
+} from "./judgments-db";
 import { softNotFound as softReviewPage } from "./render";
 
 const NUMBER_RE = /^[1-9][0-9]{0,8}$/;
@@ -565,6 +572,7 @@ export async function handlePromotedReviewPage(
   workspaceId: string,
   slug: string,
   pin: { kind: "revision" | "account"; raw: string } | null,
+  judgmentError: string | null = null,
 ): Promise<Response> {
   const user = sessionUser(req);
   const workspace = getWorkspace(workspaceId);
@@ -630,12 +638,47 @@ export async function handlePromotedReviewPage(
       : { kind: "revision", number: revision.revision },
   });
   const readIds = listRevisionReadChangeIds(workspaceId, revision.id, user.id);
+  const acknowledgementState = revisionAcknowledgementState(revision, user.id, resolved.inventory);
+  const mine = getMyRevisionJudgment(workspaceId, revision.id, user.id);
+  const judgments = listRevisionJudgments(workspaceId, revision.id, { viewerId: user.id, memberLabels });
+  const blockedItems = new Set(acknowledgementState.blockers.map((blocker) => blocker.itemId));
+  const judgmentItems: ReaderJudgmentBlocker[] = acknowledgementState.requiredItems.map((item) => {
+    const group = doc.groups.find((candidate) => candidate.members.some((member) => member.id === item.id));
+    const href = group
+      ? `${routes.group(group.id).split("#", 1)[0]}#focus-${item.id}`
+      : pinnedPath;
+    const material = resolved.inventory.incomplete.find((candidate) => candidate.id === item.id);
+    return {
+      itemId: item.id,
+      itemType: item.type as "material" | "file",
+      label: item.path ?? material?.kind.replaceAll("_", " ") ?? item.type,
+      href,
+      blocked: blockedItems.has(item.id),
+    };
+  });
+  const openThreads = (doc.conversation?.local.filter((thread) => thread.state === "open").length ?? 0) +
+    (doc.conversation?.imported.filter((thread) => !thread.resolved && !thread.deleted).length ?? 0);
+  const handling: ReaderHandling = {
+    readIds,
+    requiredAcknowledgementIds: new Set(acknowledgementState.requiredItems.map((item) => item.id)),
+    acknowledgements: acknowledgementState.acknowledgements,
+    acknowledgementAction: (item) => `/${workspaceId}/r/${slug}/rev/${revision.revision}/items/${item.id}/acknowledge`,
+    returnTo: new URL(req.url).pathname + new URL(req.url).search,
+    judgment: {
+      mine,
+      others: judgments.filter((judgment) => judgment.id !== mine?.id),
+      items: judgmentItems,
+      action: mine ? null : `/${workspaceId}/r/${slug}/rev/${revision.revision}/judgment`,
+      error: judgmentError,
+      facts: { unread: resolved.inventory.changes.length - readIds.size, openThreads },
+    },
+  };
   const response = await renderReaderPage(
     req,
     {
       kind: "member",
       nav,
-      handling: { readIds },
+      handling,
       share: { workspace: workspaceId, kind: "review_document", target: account?.id ?? revision.id },
     },
     workspaceId,

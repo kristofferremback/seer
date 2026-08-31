@@ -663,7 +663,7 @@ describe("a moving pull request appends one revision at a time", () => {
 
   test("the source rail is chronological across revisions and accounts", async () => {
     const page = visible(await (await fetch(`${base}/${workspace}/r/mover/rev/3`, { headers: { cookie } })).text());
-    const rail = /<aside class="source-rail"><h2>Source<\/h2><p>(.*?)<\/p>/.exec(page)![1]!;
+    const rail = /<aside class="source-rail"[^>]*>[\s\S]*?<h2>Source<\/h2><p>(.*?)<\/p>/.exec(page)![1]!;
     const order = [...rail.matchAll(/>(rev \d+|v\d+)</g)].map((match) => match[1]!);
     // The account over revision 1 was published before revision 2 existed, so it belongs
     // between them rather than after everything.
@@ -1291,7 +1291,7 @@ describe("the completion transaction is measured rather than assumed", () => {
       lineageId: "rln_scale00000",
       sourceRevisionId: sourceRevision,
       targetRevisionId: targetRevision,
-      equivalences: revisionCodeDelta(beforeInventory, afterInventory).equivalences,
+      equivalences: revisionCodeDelta(beforeInventory, afterInventory).readEquivalences,
       now: Date.now(),
     }))();
     const elapsed = performance.now() - started;

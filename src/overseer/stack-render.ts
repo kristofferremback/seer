@@ -27,6 +27,8 @@ import {
   type ReaderDoc,
   type ReaderEvidence,
   type ReaderGroup,
+  type ReaderHandling,
+  type ReaderJudgmentBlocker,
   type ReaderMember,
   type ReaderPageState,
   type ReaderRoutes,
@@ -38,6 +40,7 @@ import { materializeCanonicalChanges, type MaterializedStageChange } from "../st
 import { softNotFound as softReviewPage } from "./render";
 import { evidenceSeams } from "./revision-read";
 import {
+  getLineage,
   getRevision,
   getWitnessRequestForRevision,
   listRevisionReadChangeIds,
@@ -71,6 +74,11 @@ import { latestImportedConversation } from "./conversation-import";
 import { createConversationReadContext, readCapabilityConversation, readPinnedLineageConversation } from "./conversation-read";
 import { listLocalThreadsForStackAccount, projectLocalThread, workspaceMemberLabels } from "./thread-db";
 import { projectAgent } from "./actor-projection";
+import {
+  getMyStackJudgment,
+  listStackJudgments,
+  stackAcknowledgementState,
+} from "./judgments-db";
 
 const NUMBER_RE = /^[1-9][0-9]{0,8}$/;
 const POSITION_RE = /^[1-9][0-9]?$/;
@@ -563,7 +571,7 @@ function softHtml(req: Request): Response {
  * is the review soft miss. Query: `review` a stack group (or evidence seam), `layer` a
  * member slug, `page` a bounded page, `change` a namespaced change anchor.
  */
-export async function handleStackPage(req: Request, workspaceId: string, slug: string, pin: { version: string; account: boolean } | null): Promise<Response> {
+export async function handleStackPage(req: Request, workspaceId: string, slug: string, pin: { version: string; account: boolean } | null, judgmentError: string | null = null): Promise<Response> {
   const nav = navFor(req, workspaceId);
   const user = sessionUser(req);
   if (!nav || !user) return softReviewPage();
@@ -659,11 +667,78 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
     };
   }
 
+  const acknowledgementState = stackAcknowledgementState(workspaceId, resolved.manifest, user.id, resolved.members);
+  const acknowledgements: ReaderHandling["acknowledgements"] = new Map();
+  for (const member of acknowledgementState.members) {
+    for (const view of member.state.acknowledgements.values()) {
+      acknowledgements.set(prefixId(member.position, view.itemId), { ...view, itemId: prefixId(member.position, view.itemId) });
+    }
+  }
+  const blockedItems = new Set(acknowledgementState.blockers.map((blocker) => `${blocker.revisionId}:${blocker.itemId}`));
+  const judgmentItems: ReaderJudgmentBlocker[] = acknowledgementState.members.flatMap((member) =>
+    member.state.requiredItems.map((item) => {
+      const id = prefixId(member.position, item.id);
+      const group = groups.find((candidate) => candidate.group.members.some((entry) => entry.id === id));
+      const material = member.inventory.incomplete.find((candidate) => candidate.id === item.id);
+      const label = item.path ?? material?.kind.replaceAll("_", " ") ?? item.type;
+      const blocked = blockedItems.has(`${member.revision.id}:${item.id}`);
+      if (group) {
+        return { itemId: id, itemType: item.type as "material" | "file", label, href: `${routes.group(group.group.id).split("#", 1)[0]}#focus-${id}`, blocked };
+      }
+      const seam = evidenceSeams(member.inventory).find((candidate) => candidate.members.some((entry) => entry.id === item.id));
+      const memberPath = `/${workspaceId}/r/${member.revision.slug}/rev/${member.revision.revision}`;
+      const href = seam ? `${memberPath}?${new URLSearchParams({ review: seam.id })}#focus-${item.id}` : memberPath;
+      return { itemId: id, itemType: item.type as "material" | "file", label, href, blocked };
+    }),
+  );
+  const mine = getMyStackJudgment(workspaceId, resolved.manifest.id, user.id);
+  const judgments = listStackJudgments(workspaceId, resolved.manifest.id, { viewerId: user.id, memberLabels });
+  const allChanges = acknowledgementState.members.reduce((sum, member) => sum + member.inventory.changes.length, 0);
+  const allReads = acknowledgementState.members.reduce((sum, member) => {
+    const read = listRevisionReadChangeIds(workspaceId, member.revision.id, user.id);
+    return sum + member.inventory.changes.filter((change) => read.has(change.id)).length;
+  }, 0);
+  const openThreadIds = new Set<string>();
+  for (const thread of doc.conversation?.local ?? []) if (thread.state === "open") openThreadIds.add(`local:${thread.id}`);
+  for (const thread of doc.conversation?.imported ?? []) if (!thread.resolved && !thread.deleted) openThreadIds.add(`github:${thread.id}`);
+  if (!layerMember) {
+    for (const member of acknowledgementState.members) {
+      const lineage = getLineage(workspaceId, member.revision.slug);
+      const snapshot = resolved.manifest.doc.members[member.position - 1];
+      if (!lineage || !snapshot) continue;
+      const pinnedConversation = await readPinnedLineageConversation(workspaceId, {
+        lineage,
+        revisionId: member.revision.id,
+        accountId: snapshot.accountId,
+        headSha: member.revision.doc.source.sourceHeadSha,
+      }, user.id, conversationContext, memberLabels);
+      for (const thread of pinnedConversation.local) if (thread.state === "open") openThreadIds.add(`local:${thread.id}`);
+      for (const thread of pinnedConversation.imported) if (!thread.resolved && !thread.deleted) openThreadIds.add(`github:${thread.id}`);
+    }
+  }
+  const handling: ReaderHandling = {
+    readIds: built.readIds,
+    requiredAcknowledgementIds: new Set(acknowledgementState.members.flatMap((member) => member.state.requiredItems.map((item) => prefixId(member.position, item.id)))),
+    acknowledgements,
+    acknowledgementAction: (item) => {
+      const parts = splitStackId(item.id);
+      return `${stackPath(workspaceId, slug, resolved.manifest.version)}/members/${parts?.position ?? 0}/items/${parts?.bare ?? item.id}/acknowledge`;
+    },
+    returnTo: url.pathname + url.search,
+    judgment: {
+      mine,
+      others: judgments.filter((judgment) => judgment.id !== mine?.id),
+      items: judgmentItems,
+      action: mine ? null : `${stackPath(workspaceId, slug, resolved.manifest.version)}/judgment`,
+      error: judgmentError,
+      facts: { unread: allChanges - allReads, openThreads: openThreadIds.size },
+    },
+  };
   const aside = `${driftLines(resolved)}${memberCards(resolved, resolved.members, whole.readIds)}`;
   const response = await renderReaderPage(req, {
     kind: "member",
     nav,
-    handling: { readIds: built.readIds },
+    handling,
     share: { workspace: workspaceId, kind: "stack_document", target: resolved.account?.id ?? resolved.manifest.id },
   }, workspaceId, doc, routes, built.inventory, `stack ${pinned}`, {
     seamOf: built.seamOf,

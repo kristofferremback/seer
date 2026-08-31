@@ -38,6 +38,7 @@ import {
   type ReviewLineageRow,
 } from "./revision-db";
 import { revisionCodeDelta } from "./revision-delta";
+import { carryRevisionAcknowledgements } from "./acknowledgements-db";
 import { recoverStackRefreshJobs } from "./stack-jobs";
 import {
   enrichWebhookObservation,
@@ -444,7 +445,8 @@ export const completeCaptureJob = db.transaction((input: {
       previousRevisionId: previous.id,
       revisionId: appended.revision.id,
       counts: delta.counts,
-      equivalences: delta.equivalences,
+      readEquivalences: delta.readEquivalences,
+      ackEquivalences: delta.ackEquivalences,
       now,
     });
     carried = carryRevisionReads({
@@ -452,7 +454,15 @@ export const completeCaptureJob = db.transaction((input: {
       lineageId: job.lineage_id,
       sourceRevisionId: previous.id,
       targetRevisionId: appended.revision.id,
-      equivalences: delta.equivalences,
+      equivalences: delta.readEquivalences,
+      now,
+    });
+    carryRevisionAcknowledgements({
+      workspaceId: job.workspace_id,
+      lineageId: job.lineage_id,
+      sourceRevisionId: previous.id,
+      targetRevisionId: appended.revision.id,
+      equivalences: delta.ackEquivalences,
       now,
     });
   }
