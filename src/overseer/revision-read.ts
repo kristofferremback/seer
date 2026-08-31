@@ -609,12 +609,16 @@ export async function handlePromotedReviewPage(
   const readIds = listRevisionReadChangeIds(workspaceId, revision.id, user.id);
   const response = await renderReaderPage(
     req,
-    nav,
+    {
+      kind: "member",
+      nav,
+      handling: { readIds },
+      share: { workspace: workspaceId, kind: "review_document", target: account?.id ?? revision.id },
+    },
     workspaceId,
     doc,
     routes,
     resolved.inventory,
-    readIds,
     `review ${pinnedPath}`,
   );
   if (response.status !== 404) return response;

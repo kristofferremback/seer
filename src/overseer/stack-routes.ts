@@ -48,11 +48,12 @@ import {
 } from "./stack-db";
 import { listStackRefreshJobs, stackRefreshJobView } from "./stack-jobs";
 import { getLineageById, liveMemberSlugsInOrder, normalizeInferredChain, normalizeNativeStack, seedMemberOf, stackDrift } from "./stack-pr";
-import { MAX_STACK_MEMBERS, STACK_TITLE_MAX } from "./stack-types";
+import { MAX_STACK_MEMBERS, MAX_STACK_MEMBER_POSITIONS, STACK_TITLE_MAX } from "./stack-types";
 import { validateStackAccountBody } from "./stack-validate";
 
 const NUMBER_RE = /^[1-9][0-9]{0,8}$/;
 const POSITION_RE = /^[1-9][0-9]?$/;
+const validPosition = (value: string): boolean => POSITION_RE.test(value) && Number(value) <= MAX_STACK_MEMBER_POSITIONS;
 const MAX_KEY_LENGTH = 200;
 
 function stackJson(data: unknown, status = 200): Response {
@@ -564,11 +565,11 @@ export function handleRetryStackWitnessRequest(req: Request, id: string): Respon
 /** `/members/:position/files/:fileId`: manifest → member → its pinned revision → the real
  *  `stf_` id that revision's capture owns. A foreign file id is the same soft miss. */
 export async function handleStackMemberLines(req: Request, slug: string, rawVersion: string, rawPosition: string, fileId: string): Promise<Response> {
-  if (!POSITION_RE.test(rawPosition) || !STF_ID_RE.test(fileId)) return softNotFound();
+  if (!validPosition(rawPosition) || !STF_ID_RE.test(fileId)) return softNotFound();
   const resolved = resolveManifest(req, slug, rawVersion);
   if (!resolved) return softNotFound();
   const member = resolved.manifest.doc.members[Number(rawPosition) - 1];
-  if (!member) return softNotFound();
+  if (!member || member.status === "removed") return softNotFound();
   const workspaceId = resolved.stack.workspace_id;
   const revision = getRevision(workspaceId, member.lineageSlug, member.revision);
   if (!revision || revision.id !== member.revisionId) return softNotFound();

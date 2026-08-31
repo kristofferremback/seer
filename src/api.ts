@@ -3228,8 +3228,17 @@ export const API_ROUTES: readonly ApiRoute[] = [
                         required: ["id", "kind", "target", "label", "createdBy", "createdAt", "expiresAt"],
                         properties: {
                           id: { type: "string" },
-                          kind: { type: "string", enum: ["bundle", "review"] },
+                          kind: { type: "string", enum: ["bundle", "review", "review_document", "stack_document"] },
                           target: { type: "string" },
+                          document: {
+                            type: "object",
+                            required: ["kind", "slug", "pin", "title"],
+                            additionalProperties: false,
+                            properties: {
+                              kind: { type: "string", enum: ["review_revision", "review_account", "stack_manifest", "stack_account"] },
+                              slug: { type: "string" }, pin: { type: "string" }, title: { type: "string" },
+                            },
+                          },
                           label: { type: "string" },
                           createdBy: { type: "string" },
                           createdAt: { type: "string", format: "date-time" },
@@ -3251,26 +3260,48 @@ export const API_ROUTES: readonly ApiRoute[] = [
     POST: {
       doc: {
         operationId: "createShare",
-        summary: "Mint one revocable, read-only link to one bundle or review",
-        description: "The token comes back exactly once, in `url`. It is not recoverable after.",
+        summary: "Mint one revocable, read-only link to one asset or exact review document",
+        description: "The token comes back exactly once. Document kinds accept one immutable revision, account, manifest, or stack-account id and copy its retained inventory at mint. Document bodies reject conversation and other unknown fields; legacy review and bundle bodies keep accepting extension fields.",
         security: "keyOrSession",
         requestBody: {
           required: true,
           content: {
             "application/json": {
               schema: {
-                type: "object",
-                required: ["kind", "target"],
-                properties: {
-                  workspace: { type: "string" },
-                  kind: { type: "string", enum: ["bundle", "review"] },
-                  target: { type: "string", pattern: SLUG_RE.source },
-                  label: { type: "string" },
-                  expiresAt: {
-                    description: "An ISO instant, a day count, or null for never.",
-                    anyOf: [{ type: "string" }, { type: "integer" }, { type: "null" }],
+                oneOf: [
+                  {
+                    title: "Legacy review or bundle share",
+                    type: "object",
+                    required: ["kind", "target"],
+                    additionalProperties: true,
+                    properties: {
+                      workspace: { type: "string" },
+                      kind: { type: "string", enum: ["bundle", "review"] },
+                      target: { type: "string", description: "The review or bundle slug." },
+                      label: { type: "string" },
+                      expiresAt: {
+                        description: "An ISO instant, an epoch in milliseconds, or null for never.",
+                        anyOf: [{ type: "string" }, { type: "integer" }, { type: "null" }],
+                      },
+                    },
                   },
-                },
+                  {
+                    title: "Exact review or stack document capability",
+                    type: "object",
+                    required: ["kind", "target"],
+                    additionalProperties: false,
+                    properties: {
+                      workspace: { type: "string" },
+                      kind: { type: "string", enum: ["review_document", "stack_document"] },
+                      target: { type: "string", description: "An exact rvr_, rac_, rsm_, or rsa_ id." },
+                      label: { type: "string" },
+                      expiresAt: {
+                        description: "An ISO instant, an epoch in milliseconds, or null for never.",
+                        anyOf: [{ type: "string" }, { type: "integer" }, { type: "null" }],
+                      },
+                    },
+                  },
+                ],
               },
             },
           },
@@ -3286,8 +3317,17 @@ export const API_ROUTES: readonly ApiRoute[] = [
                   properties: {
                     id: { type: "string" },
                     workspace: { type: "string" },
-                    kind: { type: "string", enum: ["bundle", "review"] },
+                    kind: { type: "string", enum: ["bundle", "review", "review_document", "stack_document"] },
                     target: { type: "string" },
+                    document: {
+                      type: "object",
+                      required: ["kind", "slug", "pin", "title"],
+                      additionalProperties: false,
+                      properties: {
+                        kind: { type: "string", enum: ["review_revision", "review_account", "stack_manifest", "stack_account"] },
+                        slug: { type: "string" }, pin: { type: "string" }, title: { type: "string" },
+                      },
+                    },
                     label: { type: "string" },
                     expiresAt: { type: ["integer", "null"] },
                     token: { type: "string" },

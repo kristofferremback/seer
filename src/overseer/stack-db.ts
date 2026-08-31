@@ -24,6 +24,7 @@ import type { WitnessRequestState, WitnessWorkflowWord } from "./revision-types"
 import {
   MAX_STACK_GROUPS,
   MAX_STACK_MEMBERS,
+  MAX_STACK_MEMBER_POSITIONS,
   STACK_SCHEMA_VERSION,
   type StackAccountDoc,
   type StackGroup,
@@ -166,7 +167,7 @@ function isManifestDoc(value: unknown): value is StackManifestDoc {
       (source.providerStackId !== null && !Number.isInteger(source.providerStackId)) ||
       (source.providerStackNumber !== null && !Number.isInteger(source.providerStackNumber)) ||
       (source.observedAt !== null && typeof source.observedAt !== "string")) return false;
-  return Array.isArray(value.members) && value.members.length >= 1 && value.members.length <= MAX_STACK_MEMBERS * 4 && value.members.every(isSnapshot) &&
+  return Array.isArray(value.members) && value.members.length >= 1 && value.members.length <= MAX_STACK_MEMBER_POSITIONS && value.members.every(isSnapshot) &&
     value.members.filter((member) => (member as StackMemberSnapshot).status !== "removed").length <= MAX_STACK_MEMBERS &&
     Array.isArray(value.projects) && value.projects.length <= 16 && value.projects.every((project) => typeof project === "string" && SLUG_RE.test(project));
 }
@@ -256,6 +257,12 @@ export function getStackById(id: string): ReviewStackRow | null {
   return db.query<ReviewStackRow, [string]>("SELECT * FROM review_stacks WHERE id = ?").get(id);
 }
 
+export function getStackByIdInWorkspace(workspaceId: string, id: string): ReviewStackRow | null {
+  return db.query<ReviewStackRow, [string, string]>(
+    "SELECT * FROM review_stacks WHERE workspace_id = ? AND id = ?",
+  ).get(workspaceId, id);
+}
+
 export function getStackManifest(workspaceId: string, slug: string, version: number): StackManifestRow | null {
   const row = db.query<Raw<StackManifestRow>, [string, string, number]>(
     "SELECT * FROM review_stack_manifests WHERE workspace_id = ? AND slug = ? AND version = ?",
@@ -281,6 +288,13 @@ export function getStackAccount(workspaceId: string, slug: string, version: numb
   const row = db.query<Raw<StackAccountRow>, [string, string, number]>(
     "SELECT * FROM review_stack_accounts WHERE workspace_id = ? AND slug = ? AND version = ?",
   ).get(workspaceId, slug, version);
+  return row ? parseAccount(row) : null;
+}
+
+export function getStackAccountById(workspaceId: string, accountId: string): StackAccountRow | null {
+  const row = db.query<Raw<StackAccountRow>, [string, string]>(
+    "SELECT * FROM review_stack_accounts WHERE workspace_id = ? AND id = ?",
+  ).get(workspaceId, accountId);
   return row ? parseAccount(row) : null;
 }
 

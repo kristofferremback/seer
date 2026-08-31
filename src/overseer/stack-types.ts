@@ -98,6 +98,8 @@ export interface StackAccountDoc {
 export const STACK_SCHEMA_VERSION = 1;
 export const MIN_STACK_MEMBERS = 2;
 export const MAX_STACK_MEMBERS = 16;
+/** Stable manifest slots include removed history retained by task 7. */
+export const MAX_STACK_MEMBER_POSITIONS = MAX_STACK_MEMBERS * 4;
 export const MAX_STACK_GROUPS = 16;
 export const MAX_STACK_GROUP_REFS = 256;
 export const MAX_STACK_TOTAL_REFS = 256;

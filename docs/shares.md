@@ -3,7 +3,7 @@
 A share is a revocable, read-only link to one asset in a workspace, for someone who is
 not in that workspace.
 
-Seer has two kinds of asset today and will have more. Bundles were public by link, so
+Seer has legacy review and bundle links plus exact immutable promoted-review and stack document capabilities. Bundles were public by link, so
 they needed no share; reviews are workspace-private, so they could not be handed to
 anyone at all. That asymmetry is the thing to fix, and fixing it per-asset would mean
 inventing the same table twice. So the share is generic from the start: it names a kind
@@ -20,8 +20,8 @@ mechanism.
 share
   token         "seer_sh_" + 32 random chars, the secret itself
   workspace_id  the workspace that owns the asset
-  kind          review | bundle
-  target        the asset's slug within that workspace
+  kind          review | bundle | review_document | stack_document
+  target        a legacy slug, or one exact rvr_ / rac_ / rsm_ / rsa_ document id
   label         authored, why this link exists ("for Anna", "the client")
   created_by    user id
   created_at
@@ -42,8 +42,14 @@ out of the asset's canonical URL so the two can be reasoned about separately, an
 gives one place to set `Referrer-Policy: no-referrer` so following a link out of a shared
 page cannot hand the token to a third party.
 
-A share link renders the current version. `GET /s/<token>/v/<n>` pins one, for the same
-reason the private route does.
+A legacy share link renders the current version. `GET /s/<token>/v/<n>` pins one, for
+the same reason the private route does.
+
+A document capability is pinned when minted. `review_document` accepts one exact source
+revision or review account id. `stack_document` accepts one exact manifest or stack
+account id. Minting copies the exact retained file, review-item, and attachment inventory
+into capability-owned rows in the same transaction as the share. Resolution never follows
+a slug, latest pointer, path, Git object id, or blob digest supplied by the holder.
 
 ## What a share is not
 
@@ -52,11 +58,11 @@ publishing, no refresh. Every write path keeps requiring a session or an API key
 share resolver returns a reader identity that fails those checks by construction rather
 than by a forgotten branch.
 
-**It does not show the workspace's own conversation.** A shared review renders without
-annotations. Questions and answers are the workspace talking to itself about a change,
-and a link handed to an outsider should carry the account rather than the discussion.
-This is a default rather than a law; if it turns out people share reviews _to_ discuss
-them, a per-share flag is the obvious next move.
+**It does not show the workspace's own conversation.** Legacy review links permanently
+keep their shipped no-annotation and no-conversation behavior. New document capabilities
+also default to no conversation. Task 8 accepts no `conversation` field, so a client cannot
+mistake an unsupported field for a grant. A later explicit conversation scope must be a
+new snapshotted grant; it cannot widen an existing token.
 
 **It carries the change, not the codebase.** A shared review draws its hunks, the same
 ones the walkthrough drew. It does not draw the file around them: for a member the
@@ -65,16 +71,20 @@ against and lays the hunks back into it, and on a share that route answers the s
 and the page does not offer the control in the first place. The difference is what was
 agreed to. The person who minted the link handed over a review of a change; the whole of
 every file that change touches is a larger thing, and links already in the wild would
-have widened silently on the day the feature shipped. Like the annotations rule above
-this is a default rather than a law, and a per-share flag is the obvious next move if
-outside reviewers turn out to need the context to review at all.
+have widened silently on the day the feature shipped. This no-context behavior is permanent for legacy links.
+
+New document capabilities make a separate, explicit grant: every retained old and new
+side of each copied file id may be read in windows of at most 400 lines and 512 KiB.
+The request supplies only the copied opaque file id, side, and bounds. It cannot supply a
+revision, capture, repository, path, object id, or digest as authority.
 
 **It is not a login.** Following a share never creates a session, never joins the
 workspace, and never widens on a second visit. The holder of a token sees one asset.
 
 ## Failure
 
-A token that is unknown, revoked or expired gets the same page a private review already
+A token that is unknown, malformed, revoked, expired, corrupt, cross-workspace, or outside
+a copied document inventory gets the same page a private review already
 gives a stranger: the soft 404, byte-identical to a slug that never existed. A revoked
 link must not be distinguishable from a wrong one, or revocation becomes a way to confirm
 that something was there.
@@ -106,8 +116,9 @@ deliberately: minting is visible in the workspace's own list, every link is revo
 and the alternative is a capability that only works when a human is watching. A share
 token remains not a credential — it authenticates nothing, including this route.
 
-The settings page grows a list: what is shared, why, when it was made, when it expires,
-and a way to revoke. A share nobody can see is a share nobody revokes.
+The settings page lists what is shared, why, when it was made, when it expires, and a way
+to revoke. Document rows use the projected title and exact pin rather than exposing raw
+stored documents or actor identity. A share nobody can see is a share nobody revokes.
 
 ## Decisions taken, and what would reverse them
 
@@ -121,7 +132,19 @@ whole point, and a token that opens several things cannot be revoked for one of 
 owner forgets, given revocation exists and is visible. Optional, because a client link
 for one week is a real thing to want.
 
-**Annotations hidden.** See above; reversible per share if the need appears.
+**Personal and workflow state omitted.** A document capability adapts immutable V1 rows
+without changing their bytes. It projects an agent to name and model only. Member ids,
+key ids, credential and installation ids, email, Projects, reads, carry provenance,
+progress, unread filters, acknowledgements, judgments, refresh state, GitHub actions,
+private canonical links, all forms, and every mutation stay absent. Bundle evidence in an
+account is inert text. Only copied attachment ids are readable.
+
+Every `/s/` response carries `Referrer-Policy: no-referrer` and
+`X-Robots-Tag: noindex, nofollow`. Document capability responses, soft misses, and method
+refusals also carry `Cache-Control: no-store`. Legacy bundle successes keep their shipped
+`Cache-Control: private, no-cache`; the capability wrapper does not overwrite it. HTML also
+carries the robots meta tag. Rendering a document capability uses retained rows and objects
+with GitHub transports sealed.
 
 ## As built
 
