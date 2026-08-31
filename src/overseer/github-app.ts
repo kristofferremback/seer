@@ -22,8 +22,10 @@ import {
 import {
   createUserGithubClient,
   exactUserGithubClient,
+  exactUserGithubGraphqlReader,
   findUserCredentialFor,
 } from "./github-user";
+import { createGithubGraphqlReader, type GithubGraphqlReader } from "./github-graphql";
 
 // ---- the app JWT ----
 
@@ -778,6 +780,8 @@ export interface ReadRouter {
   /** A client for exactly that actor, or a visible refusal. Never a different actor.
    *  A stored repository id keeps installation scoping valid after a rename. */
   open(workspaceId: string, actor: ReadActor, repo: string, repoId?: number): Promise<GithubClient>;
+  /** Read-only review conversation transport for the same exact stored actor. */
+  openGraphql(workspaceId: string, actor: ReadActor, repo: string, repoId?: number): Promise<GithubGraphqlReader>;
 }
 
 /** The lane a capture job queues on. Two jobs for one actor serialize; jobs for
@@ -826,37 +830,43 @@ function defaultReadRouter(): ReadRouter {
       assertRepo(repo);
       if (actor.kind === "anonymous") return anonymousGithubClient(repo);
       if (actor.kind === "user") return exactUserGithubClient(actor.userId, actor.credentialId);
-      if (!holdingsSource) {
-        throw new Error(
-          "No workspace holdings source is installed, so no workspace can be routed to an installation.",
-        );
-      }
-      const held = await holdingsSource.installationIds(workspaceId);
-      if (!held.includes(actor.installationId)) {
-        throw new GithubRoutingError(
-          `This review reads ${repo} through GitHub App installation ${actor.installationId}, which ` +
-            "this workspace no longer holds. Reconnect that installation in workspace settings, or " +
-            "attach the pull request again through a reader that can reach it.",
-        );
-      }
-      defaultApp ??= createAppApi({ credentials: appCredentials() });
-      const id = repoId ?? defaultApp.repositoryId(repo);
-      const token = await defaultApp.installationToken(
-        actor.installationId,
-        id === undefined ? { repositories: [repo.split("/")[1]!] } : { repositoryIds: [id] },
-      );
+      const token = await exactInstallationToken(workspaceId, actor.installationId, repo, repoId);
       return createFetchGithubClient({ token });
+    },
+
+    async openGraphql(workspaceId, actor, repo, repoId) {
+      assertRepo(repo);
+      if (actor.kind === "anonymous") throw new GithubRoutingError("GitHub conversation import needs an authenticated reader.");
+      if (actor.kind === "user") return exactUserGithubGraphqlReader(actor.userId, actor.credentialId);
+      return createGithubGraphqlReader({ token: await exactInstallationToken(workspaceId, actor.installationId, repo, repoId) });
     },
   };
 }
 
-let injectedReadRouter: ReadRouter | null = null;
+async function exactInstallationToken(workspaceId: string, installationId: number, repo: string, repoId?: number): Promise<string> {
+  if (!holdingsSource) throw new Error("No workspace holdings source is installed, so no workspace can be routed to an installation.");
+  const held = await holdingsSource.installationIds(workspaceId);
+  if (!held.includes(installationId)) {
+    throw new GithubRoutingError(
+      `This review reads ${repo} through GitHub App installation ${installationId}, which this workspace no longer holds. ` +
+      "Reconnect that installation in workspace settings, or attach the pull request again through a reader that can reach it.",
+    );
+  }
+  defaultApp ??= createAppApi({ credentials: appCredentials() });
+  const id = repoId ?? defaultApp.repositoryId(repo);
+  return defaultApp.installationToken(installationId, id === undefined ? { repositories: [repo.split("/")[1]!] } : { repositoryIds: [id] });
+}
 
-/** Test seam. The suite installs an offline router at preload for the same reason it
- *  installs an offline client factory: without one, resolving an actor would route a
- *  repository name against the real App credentials. */
-export function setReadRouter(router: ReadRouter | null): void {
-  injectedReadRouter = router;
+let injectedReadRouter: ReadRouter | null = null;
+type CompatibleReadRouter = Omit<ReadRouter, "openGraphql"> & Partial<Pick<ReadRouter, "openGraphql">>;
+
+/** Test seam. Older task-8 fakes may omit GraphQL; normalize that omission to a loud
+ * refusal rather than weakening the production ReadRouter contract or reaching GitHub. */
+export function setReadRouter(router: CompatibleReadRouter | null): void {
+  injectedReadRouter = router === null ? null : {
+    ...router,
+    openGraphql: router.openGraphql ?? (async () => { throw new GithubRoutingError("The selected GitHub reader does not provide read-only conversation import."); }),
+  };
 }
 
 function readRouter(): ReadRouter {
@@ -883,4 +893,13 @@ export async function openReadSession(
   repoId?: number,
 ): Promise<GithubReadSession> {
   return { actor, client: await readRouter().open(workspaceId, actor, repo, repoId) };
+}
+
+export async function openGraphqlReadSession(
+  workspaceId: string,
+  actor: ReadActor,
+  repo: string,
+  repoId?: number,
+): Promise<{ actor: ReadActor; reader: GithubGraphqlReader }> {
+  return { actor, reader: await readRouter().openGraphql(workspaceId, actor, repo, repoId) };
 }

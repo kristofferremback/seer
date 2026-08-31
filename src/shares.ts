@@ -22,6 +22,7 @@ import { db, getBundle, getVersion, isMember } from "./db";
 import { RAC_ID_RE, RSA_ID_RE, RSM_ID_RE, RVR_ID_RE, hashKey, newShareToken, tinyId, SHARE_TOKEN_RE, SHR_ID_RE, WS_ID_RE } from "./ids";
 import { serveBundleFile, type BundleMeta } from "./serve-bundle";
 import { getReview } from "./overseer/db";
+import { ConversationError } from "./overseer/conversation-types";
 import {
   CapabilityTargetError,
   capabilityAssetPath,
@@ -461,8 +462,13 @@ export async function handleCreateShare(req: Request): Promise<Response> {
   const kind = body.kind;
   const documentKind = kind === "review_document" || kind === "stack_document";
   if (documentKind) {
-    const extra = Object.keys(body).find((field) => !["workspace", "kind", "target", "label", "expiresAt"].includes(field));
+    const extra = Object.keys(body).find((field) => !["workspace", "kind", "target", "label", "expiresAt", "conversation"].includes(field));
     if (extra) errors.push({ field: extra, rule: "field_unknown", message: `${extra} is not a supported share field` });
+    if (body.conversation !== undefined && typeof body.conversation !== "boolean") {
+      errors.push({ field: "conversation", rule: "conversation_malformed", message: "conversation must be true or false" });
+    }
+  } else if ((kind === "review" || kind === "bundle") && body.conversation === true) {
+    errors.push({ field: "conversation", rule: "conversation_not_served", message: "Legacy shares do not serve conversation" });
   }
   const kindOk = typeof kind === "string" && (SHARE_KINDS as readonly string[]).includes(kind);
   if (!kindOk) {
@@ -519,9 +525,15 @@ export async function handleCreateShare(req: Request): Promise<Response> {
   if (errors.length > 0) return unprocessable(errors);
 
   const expiresAt = (expiry as { at: number | null }).at;
-  const created = kind === "review_document" || kind === "stack_document"
-    ? createDocumentCapability({ wsId: gate.ws, kind, target: target as string, label: label as string, userId: gate.userId, expiresAt })
-    : createShare({ wsId: gate.ws, kind: kind as LegacyShareKind, target: target as string, label: label as string, userId: gate.userId, expiresAt });
+  let created;
+  try {
+    created = kind === "review_document" || kind === "stack_document"
+      ? await createDocumentCapability({ wsId: gate.ws, kind, target: target as string, label: label as string, userId: gate.userId, expiresAt, conversation: body.conversation === true })
+      : createShare({ wsId: gate.ws, kind: kind as LegacyShareKind, target: target as string, label: label as string, userId: gate.userId, expiresAt });
+  } catch (error) {
+    if (error instanceof ConversationError) return json({ error: error.message, rule: error.rule }, error.status);
+    throw error;
+  }
   return json({
     id: created.id,
     workspace: gate.ws,
@@ -531,7 +543,7 @@ export async function handleCreateShare(req: Request): Promise<Response> {
     expiresAt,
     token: created.token,
     url: `${config.baseUrl}/s/${created.token}`,
-    ...("projection" in created ? { document: created.projection } : {}),
+    ...("projection" in created ? { document: created.projection, conversation: body.conversation === true } : {}),
   });
 }
 

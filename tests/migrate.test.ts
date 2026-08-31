@@ -100,6 +100,12 @@ test("a populated v19 database preserves every legacy share through v20 and rest
   expect(out).toContain("all assertions passed");
 });
 
+test("a populated v20 capability database gains empty conversation authority and restores", async () => {
+  const { code, out } = await runScenario("v20");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("a database from a newer release is refused rather than walked", async () => {
   const { code, out } = await runScenario("newer");
   expect(code).toBe(0);

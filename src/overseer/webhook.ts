@@ -56,6 +56,7 @@ import { parseUpdatedAt } from "./derive";
 import { openStackRefreshJob, scheduleStackLane } from "./stack-jobs";
 import { recordStackObservation, type ProviderStackFacts } from "./stack-pr";
 import { getStackById, matchStackMembers } from "./stack-db";
+import { recordGithubCommentWebhook, recordGithubReviewWebhook, recordGithubThreadWebhook } from "./conversation-import";
 
 export const WEBHOOK_PATH = "/api/github/webhook";
 
@@ -132,6 +133,23 @@ interface WebhookPayload {
     /** The native stack this pull request is in, when it is in one. Its ABSENCE is the only
      *  unstack signal GitHub sends, so absence is recorded rather than ignored. */
     stack?: unknown;
+  };
+  review?: {
+    id?: number | string; node_id?: string; user?: { login?: string } | null; state?: string;
+    body?: string | null; html_url?: string; commit_id?: string | null; submitted_at?: string | null;
+    dismissed_at?: string | null;
+  };
+  comment?: {
+    id?: number | string; node_id?: string; in_reply_to_id?: number | string | null;
+    user?: { login?: string } | null; body?: string | null; html_url?: string;
+    path?: string; side?: string; line?: number | null; start_line?: number | null;
+    commit_id?: string | null; original_commit_id?: string | null;
+    created_at?: string; updated_at?: string;
+  };
+  thread?: {
+    id?: string; node_id?: string; resolved?: boolean; is_resolved?: boolean;
+    path?: string; diff_side?: string; line?: number | null; start_line?: number | null;
+    html_url?: string; comments?: { id?: number | string }[];
   };
 }
 
@@ -480,12 +498,70 @@ function applyEvent(event: string, payload: WebhookPayload, deliveryId: string):
   return effects;
 }
 
+function decimalId(value: unknown): string | null {
+  if (typeof value === "string" && /^[0-9]+$/.test(value)) return value;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+}
+
+function conversationRelations(installationId: number, payload: WebhookPayload) {
+  const repoId = payload.repository?.id;
+  const prNumber = payload.pull_request?.number;
+  if (!Number.isInteger(repoId) || !Number.isInteger(prNumber)) return [];
+  return matchLineagePrs(repoId!, prNumber!).flatMap((row) => {
+    const relation = getLineagePr(row.workspace_id, row.lineage_id);
+    return relation?.actor_kind === "installation" && relation.installation_id === installationId ? [{ row, relation }] : [];
+  });
+}
+
+function reviewState(value: unknown): "approved" | "changes_requested" | "commented" | "dismissed" | "pending" | null {
+  if (typeof value !== "string") return null;
+  const state = value.toLowerCase();
+  return state === "approved" || state === "changes_requested" || state === "commented" || state === "dismissed" || state === "pending" ? state : null;
+}
+
+function applyReviewConversation(event: string, installationId: number, payload: WebhookPayload, deliveryId: string): Effects {
+  const sourceAt = Date.now();
+  for (const { row } of conversationRelations(installationId, payload)) {
+    if (event === "pull_request_review") {
+      const review = payload.review;
+      const databaseId = decimalId(review?.id); const nodeId = review?.node_id; const state = reviewState(review?.state);
+      if (!review || !databaseId || typeof nodeId !== "string" || !state) continue;
+      recordGithubReviewWebhook({ workspaceId: row.workspace_id, lineageId: row.lineage_id, sourceId: deliveryId, sourceAt, review: {
+        databaseId, nodeId, authorLogin: review.user?.login ?? null, state: payload.action === "dismissed" ? "dismissed" : state,
+        body: review.body ?? "", url: review.html_url ?? null, commitSha: review.commit_id ?? null,
+        submittedAt: review.submitted_at ? Date.parse(review.submitted_at) : null, dismissed: payload.action === "dismissed" || review.dismissed_at != null,
+      } });
+      continue;
+    }
+    if (event === "pull_request_review_comment") {
+      const comment = payload.comment; const databaseId = decimalId(comment?.id); const nodeId = comment?.node_id;
+      if (!comment || !databaseId || typeof nodeId !== "string") continue;
+      const rootId = decimalId(comment.in_reply_to_id) ?? databaseId;
+      const threadId = recordGithubThreadWebhook({ workspaceId: row.workspace_id, lineageId: row.lineage_id, repoId: row.repo_id, prNumber: row.pr_number, sourceId: deliveryId, sourceAt, nodeId: null, firstCommentDatabaseId: rootId, resolved: false, path: comment.path ?? null, side: comment.side === "LEFT" ? "old" : comment.side === "RIGHT" ? "new" : null, startLine: comment.start_line ?? comment.line ?? null, endLine: comment.line ?? null, commitSha: comment.commit_id ?? null, originalCommitSha: comment.original_commit_id ?? null, githubUrl: comment.html_url ?? null });
+      const createdAt = comment.created_at ? Date.parse(comment.created_at) : sourceAt;
+      const updatedAt = comment.updated_at ? Date.parse(comment.updated_at) : sourceAt;
+      recordGithubCommentWebhook({ workspaceId: row.workspace_id, threadId, sourceId: deliveryId, sourceAt, databaseId, nodeId, createdAt: Number.isFinite(createdAt) ? createdAt : sourceAt, updatedAt: Number.isFinite(updatedAt) ? updatedAt : sourceAt, authorLogin: comment.user?.login ?? null, body: payload.action === "deleted" ? null : comment.body ?? "", githubUrl: comment.html_url ?? null, deleted: payload.action === "deleted" });
+      continue;
+    }
+    const thread = payload.thread; const nodeId = thread?.node_id ?? thread?.id;
+    if (!thread || typeof nodeId !== "string") continue;
+    recordGithubThreadWebhook({ workspaceId: row.workspace_id, lineageId: row.lineage_id, repoId: row.repo_id, prNumber: row.pr_number, sourceId: deliveryId, sourceAt, nodeId, firstCommentDatabaseId: decimalId(thread.comments?.[0]?.id), resolved: payload.action === "resolved" || thread.resolved === true || thread.is_resolved === true, path: thread.path ?? null, side: thread.diff_side === "LEFT" ? "old" : thread.diff_side === "RIGHT" ? "new" : null, startLine: thread.start_line ?? thread.line ?? null, endLine: thread.line ?? null, githubUrl: thread.html_url ?? null });
+  }
+  return NOTHING;
+}
+
 function dispatchEvent(event: string, installationId: number, payload: WebhookPayload, deliveryId: string): Effects {
   switch (event) {
     case "pull_request":
       return PR_ACTIONS.has(payload.action ?? "")
         ? applyPullRequest(installationId, payload, deliveryId)
         : NOTHING;
+    case "pull_request_review":
+      return ["submitted", "edited", "dismissed"].includes(payload.action ?? "") ? applyReviewConversation(event, installationId, payload, deliveryId) : NOTHING;
+    case "pull_request_review_comment":
+      return ["created", "edited", "deleted"].includes(payload.action ?? "") ? applyReviewConversation(event, installationId, payload, deliveryId) : NOTHING;
+    case "pull_request_review_thread":
+      return ["resolved", "unresolved"].includes(payload.action ?? "") ? applyReviewConversation(event, installationId, payload, deliveryId) : NOTHING;
     case "installation":
       return applyInstallation(installationId, payload);
     case "installation_repositories":

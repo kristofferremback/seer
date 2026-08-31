@@ -805,7 +805,10 @@ has deliveries in flight.
 
 | event | actions | effect |
 |---|---|---|
-| `pull_request` | opened, closed, reopened, edited, synchronize, converted_to_draft, ready_for_review | conditional upsert **only for pull requests some review names** — see below |
+| `pull_request` | opened, closed, reopened, edited, synchronize, converted_to_draft, ready_for_review, stacked | conditional upsert **only for pull requests some review names**; queue installation-owned capture work |
+| `pull_request_review` | submitted, edited, dismissed | append an immutable review observation for installation-owned promoted lineages |
+| `pull_request_review_comment` | created, edited, deleted | append comment observations or a terminal tombstone |
+| `pull_request_review_thread` | resolved, unresolved | append thread state observations |
 | `installation` | created | record as an **unclaimed** installation, with its `repositories[]` |
 | `installation` | deleted | mark removed; drop that installation's status rows |
 | `installation` | suspend, unsuspend | set / clear `suspended_at` |
@@ -829,6 +832,27 @@ workspace names them, in the same publish transaction.
 is the earliest trustworthy moment Seer learns an installation exists, it carries
 `repositories[]` and `sender`, and recording it unclaimed means the settings page can
 offer a real list rather than take an id from anywhere.
+
+**Conversation ownership.** Review conversation events join through numeric repository id
+and PR number, then re-read the live promoted relation. The relation must name the same
+installation as the delivery. A PAT-owned or anonymous lineage stores nothing from App
+conversation events, even when its workspace also holds that App installation. Handlers
+append rows and make no GitHub call. Missing App subscriptions degrade to the explicit
+conversation refresh route.
+
+The GraphQL conversation transport is read-only and exports no mutation operation. It
+pages review threads and reviews within fixed page, comment, and logical-body limits. One
+import gets a 60-second total deadline across every page while each call keeps its
+20-second timeout. A total deadline returns the retained partial snapshot with
+`complete=false` and `truncated=true`; it does not fail the import or tombstone missing
+identities.
+
+Installation actors reopen the exact installation. PAT actors reopen the exact owner's
+stored credential. Execution reads that actor from the authorized import row, never from
+a newer observation. PAT refresh is explicit and owner-bound. Replaying its idempotency
+key returns the first import without a GitHub call. A fresh key is refused for 60 seconds
+per lineage. Create and attach imports keep their existing trigger behavior. Rendering,
+capability reads, API inventory reads, and witness serialization never refresh GitHub.
 
 **Sweeping `github_deliveries`.** Not on the blob store's interval, as the first draft
 said — that is `store.ts:234`, a module-level `setInterval` in a different layer, and

@@ -784,7 +784,7 @@ same hard limit. The measured cost is about
 620 bytes per rendered diff line, so the line bound and the byte target are not the same
 promise; a line-byte cap stored at capture time is the change that would make them one.
 
-Deferred here on purpose: discussion, judgment, and any GitHub write.
+Judgment and every GitHub write remain deferred. Schema v21 adds local and imported discussion without changing a stored review or stack document.
 
 ### Exact document capabilities
 
@@ -819,11 +819,17 @@ remain available under the token. Document capability responses are `no-store`; 
 `private, no-cache`. Malformed, dead, corrupt, cross-workspace, and out-of-inventory reads
 share one soft miss.
 
-The request schema has no conversation field in v20. Unknown fields are refused, which
-makes the current scope explicit: no conversation. A future conversation grant must add a
-new snapshotted scope and cannot reinterpret an existing capability. Legacy `review`
-shares keep their latest-version behavior and permanent no-context, no-conversation
-contract. Legacy `bundle` shares and live reload keep their routing and token identity.
+Schema v21 adds `conversation_scope` with a default of `none`. Existing capabilities and
+new capabilities minted without `conversation: true` remain byte-equivalent to v20,
+even if stray snapshot rows exist. An explicit `snapshot` grant copies local thread
+sequence bounds and exact imported observation ids in the share transaction. Imported
+threads must place on an exact pinned revision, their comments copy only beneath them,
+and review commits must equal an exact pinned head. Snapshot rows carry the workspace;
+reads recheck workspace, identity, observation, and document containment. Later local
+entries and identities do not enter the grant. A later GitHub deletion tombstone still
+hides a copied body. Legacy `review` shares keep their latest-version behavior and
+permanent no-context, no-conversation contract. Legacy `bundle` shares and live reload
+keep their routing and token identity.
 
 ## Privacy differs from Seer
 
@@ -839,7 +845,11 @@ API key mints an explicit revocable capability.
 
 **The `keep` statement kind.** Cut, see the statement section.
 
-**Rendering comment threads.** Pull request comments and review threads are derived and handed to the skill as context, so discussion informs the briefing. Rendering the threads themselves re-hosts GitHub's conversation UI, which is a project of its own and not this one. If a comment matters to the review, the skill says so in a statement or note and refs the code it is about.
+**Exact review conversation.** Schema v21 stores local `rth_` threads with one immutable anchor and append-only `rte_` message, resolution, and reopening entries. Review and range anchors pin one source revision and retained object digest. Account and group anchors pin the exact account that authored them. Stack anchors pin one stack account and manifest. No anchor stores a renderer hunk index, and no thread moves to a newer revision or account. The 500-thread and 512 KiB counters key the anchor's exact revision, account, or stack account. A successor document therefore starts with its own budget while `review_threads` keeps lineage or stack ownership.
+
+Imported GitHub threads, comments, and reviews use text node and decimal database ids. Comment identity includes its thread, and review identity includes its lineage, so detach and reattach cannot redirect observations to an older lineage. GraphQL and webhook reads append immutable observations. One GraphQL import has a 60-second total deadline while each request keeps its 20-second timeout. Reaching the total deadline stores the partial snapshot as incomplete and truncated, and never tombstones absent rows. A complete untruncated refresh may append tombstones for missing identities; failed and truncated refreshes never do. Comment and thread tombstones are terminal in every projection. Placement validates commit, path, side, retained object, and both line bounds against immutable captures. One read context caches revisions, inventories, and retained-object line counts across all threads in that page, API read, witness claim, or capability projection.
+
+Local writes never call GitHub. Session members create, reply, resolve, and reopen. Private workspace pages name other members by a stable workspace label; capabilities, APIs, and witness packets still project them as `Member`. Workspace API keys reply as their projected agent only. Explicit refresh executes with the actor copied to its authorized import row, not an actor from a later observation. Idempotent refresh replay returns its first import; a fresh key inside the 60-second lineage cooldown is refused. Renders and inventory reads use stored rows and retained objects only. Fresh member witness claims receive every open lineage thread. Stack claims and stack conversation reads receive the exact stack-account threads plus only the pinned revision and account threads, imported placements, and review heads for each live member.
 
 **Attachment formats beyond images.** The `media_type` field is already there; each new format is a renderer decision made when a real review needs it.
 

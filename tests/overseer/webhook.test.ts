@@ -42,6 +42,7 @@ let base = "";
 let wsA = "";
 let wsB = "";
 let keyA = "";
+let ownerA = "";
 
 function attach(wsId: string, installationId: number, login: string): void {
   db.run("DELETE FROM github_installations WHERE installation_id = ?", [installationId]);
@@ -137,6 +138,7 @@ beforeAll(async () => {
   base = `http://localhost:${server.port}`;
 
   const owner = listMembers(legacyWorkspaceId()!)[0]!.id;
+  ownerA = owner;
   wsA = createWorkspace("Hook A", owner);
   keyA = mintApiKey(owner, wsA, "hook").token;
   const stranger = tinyId("usr");
@@ -890,6 +892,40 @@ describe("reconciliation", () => {
 
     expect(statusA(12)!.head_sha).toBe("f".repeat(40));
     setGithubClientFactory(offlineGithubClientFactory());
+  });
+});
+
+describe("stored review conversation events", () => {
+  test("review, comment and thread webhooks append observations without calling GitHub", async () => {
+    const lineageId = tinyId("rln");
+    db.run("INSERT INTO review_lineages VALUES (?, ?, 'hook-conversation', ?, ?, 'topic', 'main', ?, 'Hook conversation', NULL, NULL, ?, ?, ?, ?)", [lineageId, wsA, GOLDEN_REPO, REPO_ID, "1".repeat(40), ownerA, tinyId("key"), Date.now(), Date.now()]);
+    db.run("INSERT INTO review_lineage_prs VALUES (?, ?, 'hook-conversation', ?, ?, 12, 'topic', 'main', 'installation', ?, NULL, NULL, ?, NULL)", [lineageId, wsA, REPO_ID, GOLDEN_REPO, INSTALL_A, Date.now()]);
+    setGithubClientFactory(() => { throw new Error("conversation webhooks must not call GitHub"); });
+    const common = { installation: { id: INSTALL_A }, repository: { id: REPO_ID, full_name: GOLDEN_REPO }, pull_request: { number: 12 } };
+    const created = await deliver("pull_request_review_comment", { ...common, action: "created", comment: { id: 9007199254740001, node_id: "COMMENT_NODE", user: { login: "reviewer" }, body: "First body", html_url: "https://github.test/comment", path: "src/a.ts", side: "RIGHT", line: 2, start_line: 2, created_at: "2026-08-01T10:00:00Z", updated_at: "2026-08-01T10:00:00Z" } }, { delivery: "conversation-comment-create" });
+    expect(created.status).toBe(202);
+    expect(db.query<{ body: string }, []>("SELECT body FROM review_github_comment_observations ORDER BY rowid DESC LIMIT 1").get()?.body).toBe("First body");
+    await deliver("pull_request_review_comment", { ...common, action: "edited", comment: { id: 9007199254740001, node_id: "COMMENT_NODE", user: { login: "reviewer" }, body: "Edited body", html_url: "https://github.test/comment", path: "src/a.ts", side: "RIGHT", line: 2, created_at: "2026-08-01T10:00:00Z", updated_at: "2026-08-01T10:01:00Z" } }, { delivery: "conversation-comment-edit" });
+    await deliver("pull_request_review_comment", { ...common, action: "deleted", comment: { id: 9007199254740001, node_id: "COMMENT_NODE", user: { login: "reviewer" }, body: null, html_url: "https://github.test/comment", path: "src/a.ts", side: "RIGHT", line: 2, created_at: "2026-08-01T10:00:00Z", updated_at: "2026-08-01T10:02:00Z" } }, { delivery: "conversation-comment-delete" });
+    expect(db.query<{ deleted: number; body: string | null }, []>("SELECT deleted, body FROM review_github_comment_observations ORDER BY rowid DESC LIMIT 1").get()).toEqual({ deleted: 1, body: null });
+
+    await deliver("pull_request_review_thread", { ...common, action: "resolved", thread: { node_id: "THREAD_NODE", resolved: true, path: "src/a.ts", diff_side: "RIGHT", line: 2 } }, { delivery: "conversation-thread-resolve" });
+    await deliver("pull_request_review_thread", { ...common, action: "unresolved", thread: { node_id: "THREAD_NODE", resolved: false, path: "src/a.ts", diff_side: "RIGHT", line: 2 } }, { delivery: "conversation-thread-unresolve" });
+    expect(db.query<{ resolved: number }, []>("SELECT resolved FROM review_github_thread_observations WHERE thread_id = (SELECT id FROM review_github_threads WHERE github_node_id = 'THREAD_NODE') ORDER BY source_observed_at DESC, observed_at DESC, rowid DESC LIMIT 1").get()?.resolved).toBe(0);
+
+    await deliver("pull_request_review", { ...common, action: "submitted", review: { id: 8123, node_id: "REVIEW_NODE", user: { login: "reviewer" }, state: "approved", body: "Approved", html_url: "https://github.test/review", commit_id: "a".repeat(40), submitted_at: "2026-08-01T10:00:00Z" } }, { delivery: "conversation-review-submit" });
+    await deliver("pull_request_review", { ...common, action: "dismissed", review: { id: 8123, node_id: "REVIEW_NODE", user: { login: "reviewer" }, state: "dismissed", body: "Approved", html_url: "https://github.test/review", commit_id: "a".repeat(40), submitted_at: "2026-08-01T10:00:00Z", dismissed_at: "2026-08-01T10:03:00Z" } }, { delivery: "conversation-review-dismiss" });
+    expect(db.query<{ state: string; dismissed: number }, []>("SELECT state, dismissed FROM review_github_review_observations ORDER BY rowid DESC LIMIT 1").get()).toEqual({ state: "dismissed", dismissed: 1 });
+    setGithubClientFactory(offlineGithubClientFactory());
+  });
+
+  test("a PAT-owned relation ignores installation conversation events", async () => {
+    const lineageId = tinyId("rln");
+    db.run("INSERT INTO review_lineages VALUES (?, ?, 'hook-pat-conversation', ?, ?, 'topic-pat', 'main', ?, 'PAT hook', NULL, NULL, ?, ?, ?, ?)", [lineageId, wsA, GOLDEN_REPO, REPO_ID, "1".repeat(40), ownerA, tinyId("key"), Date.now(), Date.now()]);
+    db.run("INSERT INTO review_lineage_prs VALUES (?, ?, 'hook-pat-conversation', ?, ?, 13, 'topic-pat', 'main', 'user', NULL, ?, ?, ?, NULL)", [lineageId, wsA, REPO_ID, GOLDEN_REPO, ownerA, tinyId("ghc"), Date.now()]);
+    const before = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM review_github_comments").get()!.n;
+    await deliver("pull_request_review_comment", { action: "created", installation: { id: INSTALL_A }, repository: { id: REPO_ID, full_name: GOLDEN_REPO }, pull_request: { number: 13 }, comment: { id: 9991, node_id: "PAT_COMMENT", body: "private", created_at: "2026-08-01T10:00:00Z", updated_at: "2026-08-01T10:00:00Z" } }, { delivery: "conversation-pat-ignore" });
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM review_github_comments").get()!.n).toBe(before);
   });
 });
 

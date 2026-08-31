@@ -410,7 +410,7 @@ describe("reading evidence before a witness has answered", () => {
     const inventory = getStageCapture(revision.capture_id, workspace)!;
     const seam = evidenceSeams(inventory).find((group) => group.members.some((member) => member.type === "change"))!;
     const change = seam.members.find((member) => member.type === "change")!;
-    const capability = createDocumentCapability({ wsId: workspace, kind: "review_document", target: revision.id, label: "retained context", userId: owner, expiresAt: null });
+    const capability = await createDocumentCapability({ wsId: workspace, kind: "review_document", target: revision.id, label: "retained context", userId: owner, expiresAt: null });
     const page = visible(await (await fetch(`${base}/s/${capability.token}?review=${seam.id}&change=${change.id}`)).text());
     expect(page).toContain("Load file context");
     expect(page).toContain(`/s/${capability.token}/files/`);

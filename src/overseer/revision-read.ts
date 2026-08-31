@@ -41,6 +41,9 @@ import { STAGE_CSS } from "../stage/render-css";
 import { escapeHtml } from "../escape";
 import { agoWords } from "../relative-time";
 import { actorWords } from "./github-app";
+import { latestImportedConversation } from "./conversation-import";
+import { createConversationReadContext, listImportedReviews, listImportedThreads } from "./conversation-read";
+import { getLocalThread, listLocalThreadsForLineage, projectLocalThread, workspaceMemberLabels } from "./thread-db";
 import { latestCaptureJob, retryCaptureJob, scheduleActorQueue, type ReviewCaptureJobRow } from "./revision-jobs";
 import {
   getLineagePr,
@@ -597,6 +600,26 @@ export async function handlePromotedReviewPage(
   const pinnedPath = account
     ? `/${workspaceId}/r/${slug}/v/${account.version}`
     : `/${workspaceId}/r/${slug}/rev/${revision.revision}`;
+  const importedState = latestImportedConversation(workspaceId, lineage.id);
+  const relation = getLineagePr(workspaceId, lineage.id);
+  const memberLabels = workspaceMemberLabels(workspaceId);
+  const conversationContext = createConversationReadContext(workspaceId);
+  const canRefresh = relation !== null && relation.actor_kind !== "anonymous" && (relation.actor_kind !== "user" || relation.user_id === user.id);
+  doc.conversation = {
+    local: listLocalThreadsForLineage(workspaceId, lineage.id).map((thread) => projectLocalThread(thread, user.id, thread.thread.append_version, memberLabels)),
+    imported: await listImportedThreads(workspaceId, lineage, { context: conversationContext }),
+    reviews: listImportedReviews(workspaceId, lineage.id),
+    importState: importedState?.state ?? "never",
+    complete: importedState?.complete === 1,
+    truncated: importedState?.truncated === 1,
+    exactRevisionId: revision.id,
+    exactAccountId: account?.id ?? null,
+    createAction: `${pinnedPath}/threads`,
+    replyAction: (threadId) => `/${workspaceId}/review-threads/${threadId}/replies`,
+    resolutionAction: (threadId) => `/${workspaceId}/review-threads/${threadId}/resolution`,
+    refreshAction: canRefresh ? `/api/review-lineages/${lineage.slug}/conversations/refresh?workspace=${workspaceId}` : null,
+    returnTo: new URL(req.url).pathname + new URL(req.url).search,
+  };
   const routes = routesFor(workspaceId, lineage, revision, pinnedPath, {
     workspaceId,
     slug,

@@ -83,6 +83,7 @@ import {
   handleStackMemberLines,
 } from "./overseer/stack-routes";
 import { handleReadStackRefreshJob, handleRetryStackRefreshJob } from "./overseer/stack-jobs";
+import { handleAgentThreadReply, handleLineageConversations, handleRefreshConversations, handleStackConversations } from "./overseer/thread-routes";
 
 // ---- the shape of an entry ----
 
@@ -949,6 +950,73 @@ const lineagePrSchema = {
   },
 };
 
+const conversationImportResultSchema = {
+  type: "object",
+  required: ["id", "state", "complete", "truncated", "threads", "comments", "reviews", "failure", "startedAt", "completedAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string" }, state: { type: "string", enum: ["running", "completed", "failed"] }, complete: { type: "boolean" }, truncated: { type: "boolean" },
+    threads: { type: "integer", minimum: 0 }, comments: { type: "integer", minimum: 0 }, reviews: { type: "integer", minimum: 0 }, failure: { type: ["string", "null"] }, startedAt: { type: "string", format: "date-time" }, completedAt: { type: ["string", "null"], format: "date-time" },
+  },
+};
+
+const conversationImportSchema = { oneOf: [conversationImportResultSchema, { type: "null" }] };
+
+const conversationActorSchema = {
+  oneOf: [
+    { type: "object", required: ["kind", "label"], additionalProperties: false, properties: { kind: { type: "string", enum: ["member"] }, label: { type: "string" } } },
+    { type: "object", required: ["kind", "label", "model"], additionalProperties: false, properties: { kind: { type: "string", enum: ["agent"] }, label: { type: "string" }, model: { type: "string" } } },
+    { type: "object", required: ["kind", "login"], additionalProperties: false, properties: { kind: { type: "string", enum: ["github"] }, login: { type: "string" } } },
+  ],
+};
+
+const conversationAnchorSchema = {
+  type: "object",
+  required: ["thread_id", "anchor_kind", "lineage_id", "revision_id", "account_id", "stack_id", "stack_manifest_id", "stack_account_id", "group_id", "change_id", "file_id", "side", "start_line", "end_line", "range_kind", "old_object_digest", "new_object_digest", "object_digest"],
+  additionalProperties: false,
+  properties: {
+    thread_id: { type: "string" }, anchor_kind: { type: "string", enum: ["review", "account", "stack", "member_group", "stack_group", "change", "range"] },
+    lineage_id: { type: ["string", "null"] }, revision_id: { type: ["string", "null"] }, account_id: { type: ["string", "null"] }, stack_id: { type: ["string", "null"] }, stack_manifest_id: { type: ["string", "null"] }, stack_account_id: { type: ["string", "null"] }, group_id: { type: ["string", "null"] }, change_id: { type: ["string", "null"] }, file_id: { type: ["string", "null"] },
+    side: { type: ["string", "null"], enum: ["old", "new", null] }, start_line: { type: ["integer", "null"], minimum: 1 }, end_line: { type: ["integer", "null"], minimum: 1 }, range_kind: { type: ["string", "null"], enum: ["changed", "unchanged", null] }, old_object_digest: { type: ["string", "null"] }, new_object_digest: { type: ["string", "null"] }, object_digest: { type: ["string", "null"] },
+  },
+};
+
+const localConversationThreadSchema = {
+  type: "object",
+  required: ["id", "anchor", "state", "entries", "createdAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string" }, anchor: conversationAnchorSchema, state: { type: "string", enum: ["open", "resolved"] }, createdAt: { type: "string", format: "date-time" },
+    entries: { type: "array", items: { type: "object", required: ["id", "seq", "kind", "author", "body", "createdAt"], additionalProperties: false, properties: {
+      id: { type: "string" }, seq: { type: "integer", minimum: 1 }, kind: { type: "string", enum: ["message", "resolved", "reopened"] }, author: conversationActorSchema, body: { type: ["string", "null"] }, createdAt: { type: "string", format: "date-time" },
+    } } },
+  },
+};
+
+const githubConversationThreadSchema = {
+  type: "object",
+  required: ["id", "resolved", "deleted", "outdated", "url", "placement", "comments"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string" }, resolved: { type: "boolean" }, deleted: { type: "boolean" }, outdated: { type: "boolean" }, url: { type: ["string", "null"] },
+    placement: { oneOf: [
+      { type: "object", required: ["kind", "revisionId", "revision", "fileId", "path", "side", "startLine", "endLine", "objectDigest"], additionalProperties: false, properties: { kind: { type: "string", enum: ["code"] }, revisionId: { type: "string" }, revision: { type: "integer", minimum: 1 }, fileId: { type: "string" }, path: { type: "string" }, side: { type: "string", enum: ["old", "new"] }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 }, objectDigest: { type: "string" } } },
+      { type: "object", required: ["kind", "reason"], additionalProperties: false, properties: { kind: { type: "string", enum: ["conversation"] }, reason: { type: "string", enum: ["outdated", "commit_not_retained", "path_not_retained", "side_not_retained", "line_not_retained", "deleted"] } } },
+    ] },
+    comments: { type: "array", items: { type: "object", required: ["id", "author", "body", "deleted", "url", "createdAt", "updatedAt"], additionalProperties: false, properties: { id: { type: "string" }, author: conversationActorSchema, body: { type: ["string", "null"] }, deleted: { type: "boolean" }, url: { type: ["string", "null"] }, createdAt: { type: "string", format: "date-time" }, updatedAt: { type: "string", format: "date-time" } } } },
+  },
+};
+
+const githubConversationReviewSchema = {
+  type: "object", required: ["id", "author", "state", "body", "url", "commitSha", "submittedAt", "dismissed", "deleted"], additionalProperties: false,
+  properties: { id: { type: "string" }, author: conversationActorSchema, state: { type: "string", enum: ["approved", "changes_requested", "commented", "dismissed", "pending"] }, body: { type: ["string", "null"] }, url: { type: ["string", "null"] }, commitSha: { type: ["string", "null"] }, submittedAt: { type: ["string", "null"], format: "date-time" }, dismissed: { type: "boolean" }, deleted: { type: "boolean" } },
+};
+
+const conversationInventorySchema = {
+  type: "object", required: ["local", "imported", "reviews"], additionalProperties: false,
+  properties: { local: { type: "array", items: localConversationThreadSchema }, imported: { type: "array", items: githubConversationThreadSchema }, reviews: { type: "array", items: githubConversationReviewSchema } },
+};
+
 /** Workflow state, not a document. A pending or failed job is visible and retryable and
  *  is never a source revision. */
 const captureJobSchema = {
@@ -977,6 +1045,7 @@ const captureJobSchema = {
     pullRequest: { oneOf: [prObservationSchema, { type: "null" }] },
     createdAt: { type: "string", format: "date-time" },
     updatedAt: { type: "string", format: "date-time" },
+    conversationImport: conversationImportSchema,
   },
 };
 
@@ -1001,13 +1070,13 @@ const captureJobConflict = {
         type: "object",
         required: ["error", "job"],
         additionalProperties: false,
-        properties: { error: { type: "string" }, job: captureJobSchema },
+        properties: { error: { type: "string" }, job: captureJobSchema, conversationImport: conversationImportSchema },
       },
       {
         type: "object",
         required: ["error"],
         additionalProperties: false,
-        properties: { error: { type: "string" } },
+        properties: { error: { type: "string" }, conversationImport: conversationImportSchema },
       },
     ],
   } } },
@@ -1028,6 +1097,7 @@ const reusedSourceSchema = {
     url: { type: ["string", "null"] },
     apiUrl: { type: "string", format: "uri" },
     pullRequest: prObservationSchema,
+    conversationImport: conversationImportSchema,
   },
 };
 
@@ -1052,6 +1122,7 @@ const refreshViewSchema = {
     actor: { type: "string", enum: ["installation", "user", "anonymous"] },
     actorLabel: { type: "string" },
     pullRequest: prObservationSchema,
+    conversationImport: conversationImportSchema,
   },
 };
 
@@ -1148,10 +1219,11 @@ const witnessRequestSchema = {
 /** The claim view: the witness request, plus which attempt this key now holds. */
 const witnessClaimSchema = {
   type: "object",
-  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "updatedAt", "claim", "priorAccount"],
+  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "updatedAt", "claim", "priorAccount", "threads"],
   additionalProperties: false,
   properties: {
     ...witnessRequestSchema.properties,
+    threads: { type: "object" },
     claim: {
       type: "object",
       required: ["retryCount", "claimed", "leaseExpiresAt", "claimedAt"],
@@ -1509,12 +1581,13 @@ const stackWitnessRequestSchema = {
 
 const stackWitnessClaimSchema = {
   type: "object",
-  required: [...stackWitnessRequestSchema.required, "manifestId", "manifestUrl", "claim"],
+  required: [...stackWitnessRequestSchema.required, "manifestId", "manifestUrl", "claim", "threads"],
   additionalProperties: false,
   properties: {
     ...stackWitnessRequestSchema.properties,
     manifestId: { type: "string", pattern: RSM_ID_RE.source },
     manifestUrl: { type: "string", format: "uri" },
+    threads: { type: "object" },
     claim: {
       type: "object", required: ["retryCount", "claimed", "leaseExpiresAt", "claimedAt"], additionalProperties: false,
       properties: { retryCount: { type: "integer", minimum: 0 }, claimed: { type: "boolean" }, leaseExpiresAt: { type: "string", format: "date-time" }, claimedAt: { type: "string", format: "date-time" } },
@@ -3201,6 +3274,63 @@ export const API_ROUTES: readonly ApiRoute[] = [
   // Minting and revoking. The mint answers with the full /s/<token> URL, because the URL
   // is the thing a person wants; the list answers without tokens, because only their
   // hashes survived the mint.
+  route("/api/review-threads/:id/replies", {
+    POST: {
+      doc: {
+        operationId: "replyToReviewThread",
+        summary: "Append an attributed agent reply to an open local thread",
+        description: "API keys may reply only. Thread creation and resolution require a member session. This route never writes to GitHub.",
+        security: "key",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: "^rth_" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["body", "agentName", "agentModel"], properties: { body: { type: "string", maxLength: 4000 }, agentName: { type: "string", maxLength: 80 }, agentModel: { type: "string", maxLength: 80 }, idempotencyKey: { type: "string" } } } } } },
+        responses: { "200": { description: "The exact projected thread.", content: { "application/json": { schema: localConversationThreadSchema } } }, "401": errorResponse, "403": errorResponse, "404": errorResponse, "409": errorResponse, "422": errorResponse },
+      },
+      run: guarded((req) => handleAgentThreadReply(req, req.params.id)),
+    },
+  }),
+
+  route("/api/review-lineages/:slug/conversations", {
+    GET: {
+      doc: {
+        operationId: "readReviewConversation",
+        summary: "Read stored local and imported conversation",
+        description: "Returns safe actor projections from retained rows. Reading never refreshes GitHub.",
+        security: "keyOrSession",
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }, { name: "workspace", in: "query", required: false, schema: { type: "string" }, description: "Required for a session when this slug exists in more than one member workspace." }],
+        responses: { "200": { description: "Stored conversation.", content: { "application/json": { schema: conversationInventorySchema } } }, "401": errorResponse, "404": errorResponse },
+      },
+      run: (req) => handleLineageConversations(req, req.params.slug),
+    },
+  }),
+
+  route("/api/review-stacks/:slug/manifests/:version/conversations", {
+    GET: {
+      doc: {
+        operationId: "readReviewStackConversation",
+        summary: "Read one exact stack manifest's stored conversation",
+        description: "Projects direct stack-account and exact pinned member conversation without refreshing GitHub.",
+        security: "keyOrSession",
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }, { name: "version", in: "path", required: true, schema: { type: "integer" } }],
+        responses: { "200": { description: "Stored exact stack conversation.", content: { "application/json": { schema: conversationInventorySchema } } }, "401": errorResponse, "404": errorResponse },
+      },
+      run: (req) => handleStackConversations(req, req.params.slug, req.params.version),
+    },
+  }),
+
+  route("/api/review-lineages/:slug/conversations/refresh", {
+    POST: {
+      doc: {
+        operationId: "refreshReviewConversation",
+        summary: "Explicitly import GitHub conversation",
+        description: "Reopens the exact actor authorized on the import row. GraphQL keeps a 20-second call timeout and one 60-second total deadline; a deadline stores an incomplete, truncated partial snapshot. Idempotent replay makes no call, and fresh keys have a 60-second lineage cooldown. This does not observe the PR or queue a capture.",
+        security: "keyOrSession",
+        parameters: [{ name: "slug", in: "path", required: true, schema: { type: "string" } }, { name: "workspace", in: "query", required: false, schema: { type: "string" }, description: "Required for a session when this slug exists in more than one member workspace." }],
+        responses: { "200": { description: "Stored import state.", content: { "application/json": { schema: conversationImportResultSchema } } }, "401": errorResponse, "403": errorResponse, "404": errorResponse, "409": errorResponse, "422": errorResponse },
+      },
+      run: guarded((req) => handleRefreshConversations(req, req.params.slug)),
+    },
+  }),
+
   route("/api/shares", {
     GET: {
       doc: {
@@ -3261,7 +3391,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
       doc: {
         operationId: "createShare",
         summary: "Mint one revocable, read-only link to one asset or exact review document",
-        description: "The token comes back exactly once. Document kinds accept one immutable revision, account, manifest, or stack-account id and copy its retained inventory at mint. Document bodies reject conversation and other unknown fields; legacy review and bundle bodies keep accepting extension fields.",
+        description: "The token comes back exactly once. Document kinds accept one immutable revision, account, manifest, or stack-account id and copy its retained inventory at mint. conversation true copies an exact read-only conversation snapshot. Existing capabilities remain conversation scope none.",
         security: "keyOrSession",
         requestBody: {
           required: true,
@@ -3295,6 +3425,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
                       kind: { type: "string", enum: ["review_document", "stack_document"] },
                       target: { type: "string", description: "An exact rvr_, rac_, rsm_, or rsa_ id." },
                       label: { type: "string" },
+                      conversation: { type: "boolean", description: "Copy the exact currently visible conversation into this capability." },
                       expiresAt: {
                         description: "An ISO instant, an epoch in milliseconds, or null for never.",
                         anyOf: [{ type: "string" }, { type: "integer" }, { type: "null" }],
@@ -3319,6 +3450,7 @@ export const API_ROUTES: readonly ApiRoute[] = [
                     workspace: { type: "string" },
                     kind: { type: "string", enum: ["bundle", "review", "review_document", "stack_document"] },
                     target: { type: "string" },
+                    conversation: { type: "boolean", description: "True only when this document capability copied an exact conversation snapshot." },
                     document: {
                       type: "object",
                       required: ["kind", "slug", "pin", "title"],

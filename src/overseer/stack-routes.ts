@@ -50,6 +50,8 @@ import { listStackRefreshJobs, stackRefreshJobView } from "./stack-jobs";
 import { getLineageById, liveMemberSlugsInOrder, normalizeInferredChain, normalizeNativeStack, seedMemberOf, stackDrift } from "./stack-pr";
 import { MAX_STACK_MEMBERS, MAX_STACK_MEMBER_POSITIONS, STACK_TITLE_MAX } from "./stack-types";
 import { validateStackAccountBody } from "./stack-validate";
+import { conversationImportRunning } from "./conversation-import";
+import { stackWitnessConversationContext } from "./conversation-read";
 
 const NUMBER_RE = /^[1-9][0-9]{0,8}$/;
 const POSITION_RE = /^[1-9][0-9]?$/;
@@ -505,16 +507,24 @@ function resolveRequest(req: Request, id: string): { request: StackWitnessReques
   return { request, slug: stack.slug, userId: auth.userId, keyId: auth.keyId };
 }
 
-export function handleClaimStackWitnessRequest(req: Request, id: string): Response {
+export async function handleClaimStackWitnessRequest(req: Request, id: string): Promise<Response> {
   const resolved = resolveRequest(req, id);
   if (resolved instanceof Response) return resolved;
   try {
+    const manifest = getStackManifest(resolved.request.workspace_id, resolved.slug, resolved.request.version);
+    if (!manifest || manifest.id !== resolved.request.manifest_id) return softNotFound();
+    for (const member of manifest.doc.members) {
+      if (member.status !== "removed" && conversationImportRunning(resolved.request.workspace_id, member.lineageId)) {
+        return stackJson({ error: "Conversation refresh is in progress.", rule: "conversation_refresh_in_progress" }, 409);
+      }
+    }
     const result = claimStackWitnessRequest({ workspaceId: resolved.request.workspace_id, requestId: resolved.request.id, userId: resolved.userId, keyId: resolved.keyId });
-    const manifest = db.query<{ id: string }, [string]>("SELECT id FROM review_stack_manifests WHERE id = ?").get(resolved.request.manifest_id);
+    const threads = await stackWitnessConversationContext(resolved.request.workspace_id, manifest);
     return stackJson({
       ...(witnessView(result.request, resolved.slug) as Record<string, unknown>),
-      manifestId: manifest?.id ?? resolved.request.manifest_id,
+      manifestId: manifest.id,
       manifestUrl: `${config.baseUrl}/api/review-stacks/${resolved.slug}/manifests/${resolved.request.version}`,
+      threads,
       claim: {
         retryCount: result.claim.retry_count,
         claimed: result.created,

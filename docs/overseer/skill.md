@@ -558,6 +558,42 @@ one is read as filing a question and is refused for an API key. `refs[]` is opti
 names the same repo the review names. An annotation already answered stays answered:
 the route will not overwrite one.
 
+## Local review conversation
+
+A member witness claim now returns `threads` beside `priorAccount`. Read every open local
+and imported thread before authoring the replacement account. A stack claim includes its
+exact stack-account threads and only each live member's pinned revision, optional account,
+imported placement, and review head. It never substitutes a later lineage document.
+
+The projection includes stored messages and comments, placement or the exact unmappable
+reason where the claim is lineage-wide, standalone review observations, and whether the
+last import was complete or truncated. It never includes a member id, API key id,
+credential id, installation id, or email. A claim returns
+`conversation_refresh_in_progress` while an exact import lease is active. Retry after the
+stored refresh completes or fails. An explicit refresh may return
+`conversation_refresh_cooldown` for a fresh key during the 60 seconds after the lineage's
+last import. Replaying the first key returns that import.
+
+An API-key agent may append one local reply to an existing open thread:
+
+```http
+POST /api/review-threads/<rth_id>/replies
+Idempotency-Key: <stable operation key>
+Content-Type: application/json
+
+{
+  "body": "The retained range is covered by the new guard.",
+  "agentName": "Overseer",
+  "agentModel": "model-name"
+}
+```
+
+Use one stable idempotency key for one intended reply. The key's owner, agent name, model,
+thread id, and body participate in the replay hash. A changed reuse is a 409. API keys
+cannot create a thread, resolve it, or reopen it. Those actions require a workspace member
+session. A local reply never publishes to GitHub. Task 9 has no GitHub mutation transport.
+The legacy annotation answer loop remains available only on legacy review documents.
+
 ## Graded failure modes
 
 **assurance-filed-as-risk.** Filing a reassurance as a risk. "Tokens carry 75 random

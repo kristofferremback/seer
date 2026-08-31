@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 20 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 21 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -83,6 +83,10 @@ import { hashKey, tinyId } from "./ids";
 // v20 rebuilds the closed shares.kind check to admit exact promoted-review and stack
 // document capabilities, then adds their immutable copied file, item, and attachment
 // inventories. Every old share column is copied unchanged in the same transaction.
+//
+// v21 adds exact local review conversations, immutable GitHub conversation observations,
+// bounded refresh workflow leases, and explicit capability conversation snapshots. It is
+// additive. Existing capabilities receive conversation_scope = 'none'.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -560,7 +564,7 @@ export function assertDatabaseVersionSupported(maxVersion: number): void {
 }
 
 export function migrate(): void {
-  assertDatabaseVersionSupported(20);
+  assertDatabaseVersionSupported(21);
   const uv = userVersion();
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -582,6 +586,7 @@ export function migrate(): void {
   if (userVersion() < 18) migrateToV18();
   if (userVersion() < 19) migrateToV19();
   if (userVersion() < 20) migrateToV20();
+  if (userVersion() < 21) migrateToV21();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -1684,6 +1689,293 @@ function migrateToV20(): void {
     db.run("PRAGMA user_version = 20");
   })();
   console.log("[seer] migrated to schema v20 (exact review document capabilities).");
+}
+
+const V21_REVIEW_CONVERSATIONS = `
+  ALTER TABLE share_document_capabilities
+    ADD COLUMN conversation_scope TEXT NOT NULL DEFAULT 'none'
+    CHECK (conversation_scope IN ('none','snapshot'));
+
+  CREATE TABLE review_thread_scopes (
+    workspace_id TEXT NOT NULL,
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('lineage','stack')),
+    document_id TEXT NOT NULL,
+    local_thread_count INTEGER NOT NULL DEFAULT 0 CHECK (local_thread_count >= 0),
+    local_body_bytes INTEGER NOT NULL DEFAULT 0 CHECK (local_body_bytes >= 0),
+    PRIMARY KEY (workspace_id, scope_kind, document_id)
+  );
+
+  CREATE TABLE review_threads (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('lineage','stack')),
+    lineage_id TEXT,
+    stack_id TEXT,
+    created_by_user_id TEXT NOT NULL,
+    append_version INTEGER NOT NULL CHECK (append_version >= 1),
+    created_at INTEGER NOT NULL,
+    CHECK ((scope_kind = 'lineage' AND lineage_id IS NOT NULL AND stack_id IS NULL) OR
+           (scope_kind = 'stack' AND lineage_id IS NULL AND stack_id IS NOT NULL))
+  );
+  CREATE INDEX idx_review_threads_lineage ON review_threads (workspace_id, lineage_id, created_at);
+  CREATE INDEX idx_review_threads_stack ON review_threads (workspace_id, stack_id, created_at);
+
+  CREATE TABLE review_thread_anchors (
+    thread_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    anchor_kind TEXT NOT NULL CHECK (anchor_kind IN ('review','account','stack','member_group','stack_group','change','range')),
+    lineage_id TEXT,
+    revision_id TEXT,
+    account_id TEXT,
+    stack_id TEXT,
+    stack_manifest_id TEXT,
+    stack_account_id TEXT,
+    group_id TEXT,
+    change_id TEXT,
+    file_id TEXT,
+    side TEXT CHECK (side IN ('old','new')),
+    start_line INTEGER CHECK (start_line >= 1),
+    end_line INTEGER CHECK (end_line >= 1),
+    range_kind TEXT CHECK (range_kind IN ('changed','unchanged')),
+    old_object_digest TEXT,
+    new_object_digest TEXT,
+    object_digest TEXT,
+    CHECK (start_line IS NULL OR end_line >= start_line),
+    CHECK (
+      (anchor_kind = 'review' AND revision_id IS NOT NULL AND lineage_id IS NOT NULL AND account_id IS NULL AND stack_account_id IS NULL AND change_id IS NULL AND file_id IS NULL) OR
+      (anchor_kind = 'account' AND revision_id IS NOT NULL AND account_id IS NOT NULL AND lineage_id IS NOT NULL AND group_id IS NULL AND file_id IS NULL) OR
+      (anchor_kind = 'stack' AND stack_id IS NOT NULL AND stack_manifest_id IS NOT NULL AND stack_account_id IS NOT NULL AND lineage_id IS NULL AND group_id IS NULL) OR
+      (anchor_kind = 'member_group' AND revision_id IS NOT NULL AND account_id IS NOT NULL AND lineage_id IS NOT NULL AND group_id IS NOT NULL) OR
+      (anchor_kind = 'stack_group' AND stack_id IS NOT NULL AND stack_manifest_id IS NOT NULL AND stack_account_id IS NOT NULL AND group_id IS NOT NULL) OR
+      (anchor_kind = 'change' AND revision_id IS NOT NULL AND lineage_id IS NOT NULL AND change_id IS NOT NULL AND file_id IS NOT NULL AND (old_object_digest IS NOT NULL OR new_object_digest IS NOT NULL)) OR
+      (anchor_kind = 'range' AND revision_id IS NOT NULL AND lineage_id IS NOT NULL AND file_id IS NOT NULL AND side IS NOT NULL AND start_line IS NOT NULL AND end_line IS NOT NULL AND range_kind IS NOT NULL AND object_digest IS NOT NULL)
+    )
+  );
+  CREATE INDEX idx_review_thread_anchors_revision ON review_thread_anchors (workspace_id, revision_id, anchor_kind);
+  CREATE INDEX idx_review_thread_anchors_account ON review_thread_anchors (workspace_id, account_id, anchor_kind);
+  CREATE INDEX idx_review_thread_anchors_stack_account ON review_thread_anchors (workspace_id, stack_account_id, anchor_kind);
+  CREATE INDEX idx_review_thread_anchors_change ON review_thread_anchors (workspace_id, revision_id, change_id);
+  CREATE INDEX idx_review_thread_anchors_file ON review_thread_anchors (workspace_id, revision_id, file_id, side, start_line);
+
+  CREATE TABLE review_thread_entries (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq >= 1),
+    kind TEXT NOT NULL CHECK (kind IN ('message','resolved','reopened')),
+    author_kind TEXT NOT NULL CHECK (author_kind IN ('member','agent')),
+    user_id TEXT NOT NULL,
+    key_id TEXT,
+    agent_name TEXT,
+    agent_model TEXT,
+    body TEXT,
+    created_at INTEGER NOT NULL,
+    UNIQUE (thread_id, seq),
+    CHECK ((author_kind = 'member' AND key_id IS NULL AND agent_name IS NULL AND agent_model IS NULL) OR
+           (author_kind = 'agent' AND key_id IS NOT NULL AND agent_name IS NOT NULL AND agent_model IS NOT NULL)),
+    CHECK ((kind = 'message' AND body IS NOT NULL) OR
+           (kind IN ('resolved','reopened') AND body IS NULL AND author_kind = 'member'))
+  );
+  CREATE INDEX idx_review_thread_entries_thread ON review_thread_entries (workspace_id, thread_id, seq);
+
+  CREATE TABLE review_thread_idempotency (
+    workspace_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('create','reply','resolve','reopen')),
+    thread_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, idempotency_key)
+  );
+
+  CREATE TABLE review_github_threads (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    repo_id INTEGER NOT NULL,
+    pr_number INTEGER NOT NULL CHECK (pr_number >= 1),
+    github_node_id TEXT,
+    first_comment_database_id TEXT,
+    first_observed_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX idx_review_github_threads_node ON review_github_threads (workspace_id, lineage_id, github_node_id) WHERE github_node_id IS NOT NULL;
+  CREATE UNIQUE INDEX idx_review_github_threads_first_comment ON review_github_threads (workspace_id, lineage_id, first_comment_database_id) WHERE first_comment_database_id IS NOT NULL;
+  CREATE INDEX idx_review_github_threads_lineage ON review_github_threads (workspace_id, lineage_id, first_observed_at);
+
+  CREATE TABLE review_github_thread_observations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('graphql','webhook')),
+    source_id TEXT NOT NULL,
+    source_observed_at INTEGER NOT NULL,
+    path TEXT,
+    side TEXT CHECK (side IN ('old','new')),
+    start_line INTEGER,
+    end_line INTEGER,
+    original_start_line INTEGER,
+    original_end_line INTEGER,
+    commit_sha TEXT,
+    original_commit_sha TEXT,
+    resolved INTEGER NOT NULL CHECK (resolved IN (0,1)),
+    outdated INTEGER NOT NULL CHECK (outdated IN (0,1)),
+    deleted INTEGER NOT NULL CHECK (deleted IN (0,1)),
+    github_url TEXT,
+    digest TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    UNIQUE (thread_id, digest)
+  );
+  CREATE INDEX idx_review_github_thread_observations_latest ON review_github_thread_observations (workspace_id, thread_id, source_observed_at, observed_at);
+
+  CREATE TABLE review_github_comments (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    github_database_id TEXT NOT NULL,
+    github_node_id TEXT NOT NULL,
+    github_created_at INTEGER NOT NULL,
+    first_observed_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, thread_id, github_database_id),
+    UNIQUE (workspace_id, thread_id, github_node_id)
+  );
+  CREATE INDEX idx_review_github_comments_thread ON review_github_comments (workspace_id, thread_id, github_created_at);
+
+  CREATE TABLE review_github_comment_observations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    comment_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('graphql','webhook')),
+    source_id TEXT NOT NULL,
+    source_observed_at INTEGER NOT NULL,
+    author_login TEXT,
+    body TEXT,
+    github_url TEXT,
+    github_updated_at INTEGER NOT NULL,
+    deleted INTEGER NOT NULL CHECK (deleted IN (0,1)),
+    digest TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    CHECK ((deleted = 1 AND body IS NULL) OR (deleted = 0 AND body IS NOT NULL)),
+    UNIQUE (comment_id, digest, deleted)
+  );
+  CREATE INDEX idx_review_github_comment_observations_latest ON review_github_comment_observations (workspace_id, comment_id, github_updated_at, source_observed_at, observed_at);
+
+  CREATE TABLE review_github_reviews (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    github_database_id TEXT NOT NULL,
+    github_node_id TEXT NOT NULL,
+    first_observed_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, lineage_id, github_database_id),
+    UNIQUE (workspace_id, lineage_id, github_node_id)
+  );
+  CREATE INDEX idx_review_github_reviews_lineage ON review_github_reviews (workspace_id, lineage_id, first_observed_at);
+
+  CREATE TABLE review_github_review_observations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('graphql','webhook')),
+    source_id TEXT NOT NULL,
+    source_observed_at INTEGER NOT NULL,
+    author_login TEXT,
+    state TEXT NOT NULL CHECK (state IN ('approved','changes_requested','commented','dismissed','pending')),
+    commit_sha TEXT,
+    body TEXT,
+    github_url TEXT,
+    submitted_at INTEGER,
+    dismissed INTEGER NOT NULL CHECK (dismissed IN (0,1)),
+    deleted INTEGER NOT NULL CHECK (deleted IN (0,1)),
+    digest TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    UNIQUE (review_id, digest)
+  );
+  CREATE INDEX idx_review_github_review_observations_latest ON review_github_review_observations (workspace_id, review_id, source_observed_at, observed_at);
+
+  CREATE TABLE review_conversation_imports (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    observation_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('running','completed','failed')),
+    complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0,1)),
+    truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0,1)),
+    thread_count INTEGER NOT NULL DEFAULT 0 CHECK (thread_count >= 0),
+    comment_count INTEGER NOT NULL DEFAULT 0 CHECK (comment_count >= 0),
+    review_count INTEGER NOT NULL DEFAULT 0 CHECK (review_count >= 0),
+    logical_body_bytes INTEGER NOT NULL DEFAULT 0 CHECK (logical_body_bytes >= 0),
+    failure TEXT,
+    actor_kind TEXT NOT NULL CHECK (actor_kind IN ('installation','user','anonymous')),
+    installation_id INTEGER,
+    user_id TEXT,
+    credential_id TEXT,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    CHECK ((actor_kind = 'installation' AND installation_id IS NOT NULL AND user_id IS NULL AND credential_id IS NULL) OR
+           (actor_kind = 'user' AND installation_id IS NULL AND user_id IS NOT NULL AND credential_id IS NOT NULL) OR
+           (actor_kind = 'anonymous' AND installation_id IS NULL AND user_id IS NULL AND credential_id IS NULL))
+  );
+  CREATE INDEX idx_review_conversation_imports_lineage ON review_conversation_imports (workspace_id, lineage_id, started_at);
+  CREATE INDEX idx_review_conversation_imports_lease ON review_conversation_imports (state, lease_expires_at);
+
+  CREATE TABLE review_conversation_refresh_idempotency (
+    workspace_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    import_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, idempotency_key)
+  );
+
+  CREATE TABLE share_capability_local_threads (
+    share_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    through_seq INTEGER NOT NULL CHECK (through_seq >= 1),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    PRIMARY KEY (share_id, thread_id),
+    UNIQUE (share_id, ordinal)
+  );
+  CREATE TABLE share_capability_github_threads (
+    share_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    thread_observation_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    PRIMARY KEY (share_id, thread_id),
+    UNIQUE (share_id, ordinal)
+  );
+  CREATE TABLE share_capability_github_comments (
+    share_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    comment_id TEXT NOT NULL,
+    comment_observation_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    PRIMARY KEY (share_id, comment_id),
+    UNIQUE (share_id, ordinal)
+  );
+  CREATE TABLE share_capability_github_reviews (
+    share_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    review_id TEXT NOT NULL,
+    review_observation_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    PRIMARY KEY (share_id, review_id),
+    UNIQUE (share_id, ordinal)
+  );
+`;
+
+function migrateToV21(): void {
+  db.transaction(() => {
+    db.exec(V21_REVIEW_CONVERSATIONS);
+    db.run("PRAGMA user_version = 21");
+  })();
+  console.log("[seer] migrated to schema v21 (exact review conversations).");
 }
 
 /**

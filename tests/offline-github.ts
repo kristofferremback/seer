@@ -59,6 +59,12 @@ export function offlineReadRouter(): ReadRouter {
           "Install one with setReadRouter().",
       );
     },
+    async openGraphql(): Promise<never> {
+      throw new Error(
+        "[tests] GitHub is offline in tests: a GraphQL read session was opened with no fake installed. " +
+          "Install one with setReadRouter().",
+      );
+    },
   };
 }
 

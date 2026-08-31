@@ -71,6 +71,14 @@ export const RSW_ID_RE = new RegExp(`^rsw_${TINY}$`);
 // One provider stack-membership reading from an accepted webhook receipt.
 export const RSO_ID_RE = new RegExp(`^rso_${TINY}$`);
 export const RSJ_ID_RE = new RegExp(`^rsj_${TINY}$`);
+// Exact local conversation, imported GitHub identities and immutable observations.
+export const RTH_ID_RE = new RegExp(`^rth_${TINY}$`);
+export const RTE_ID_RE = new RegExp(`^rte_${TINY}$`);
+export const RGT_ID_RE = new RegExp(`^rgt_${TINY}$`);
+export const RGC_ID_RE = new RegExp(`^rgc_${TINY}$`);
+export const RGR_ID_RE = new RegExp(`^rgr_${TINY}$`);
+export const RGO_ID_RE = new RegExp(`^rgo_${TINY}$`);
+export const RCI_ID_RE = new RegExp(`^rci_${TINY}$`);
 export const STAGE_CHANGE_ID_RE = /^chg_[a-f0-9]{64}$/;
 /** A member's change or file inside a stack reader, namespaced by the member's position:
  *  canonical ids are content-derived and two layers can hold identical hunks. */

@@ -90,6 +90,7 @@ import {
 } from "./overseer/revision-read";
 import { latestCaptureJob, recoverCaptureJobs, startCaptureSweep } from "./overseer/revision-jobs";
 import { handleStackPage, handleStackReadMutation } from "./overseer/stack-render";
+import { handleCreateReviewThread, handleCreateStackThread, handleSessionThreadMutation } from "./overseer/thread-routes";
 import { listLineages } from "./overseer/revision-db";
 import { getLineagePr, latestObservation, observationStateWord } from "./overseer/revision-pr";
 import {
@@ -152,6 +153,12 @@ const WS_REVIEW_RE = new RegExp(
 const WS_REVISION_READ_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/rev/([^/]+)/changes/([^/]+)/read/?$`,
 );
+const WS_REVIEW_THREADS_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/(rev|v)/([^/]+)/threads/?$`,
+);
+const WS_THREAD_MUTATION_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/review-threads/([^/]+)/(replies|resolution)/?$`,
+);
 // The failed-capture shell's retry form, on the review's own path so it needs no key.
 const WS_CAPTURE_RETRY_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/capture-jobs/([^/]+)/retry/?$`,
@@ -164,6 +171,9 @@ const WS_STACK_RE = new RegExp(
 );
 const WS_STACK_READ_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)/v/([^/]+)/m/([^/]+)/changes/([^/]+)/read/?$`,
+);
+const WS_STACK_THREADS_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)/v/([^/]+)/account/threads/?$`,
 );
 const WS_STAGE_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/st/([^/]+)(?:/v/([^/]+))?/?$`,
@@ -1240,6 +1250,21 @@ export async function startServer() {
       // not knowable until the token says which kind of asset it opens.
       if (url.pathname.startsWith("/s/")) return handleShareRequest(req);
 
+      const threadMutation = url.pathname.match(WS_THREAD_MUTATION_RE);
+      if (threadMutation) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleSessionThreadMutation(req, threadMutation[1]!, threadMutation[2]!, threadMutation[3] === "replies" ? "reply" : "resolution");
+      }
+      const stackThreads = url.pathname.match(WS_STACK_THREADS_RE);
+      if (stackThreads) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleCreateStackThread(req, stackThreads[1]!, stackThreads[2]!, stackThreads[3]!);
+      }
+      const reviewThreads = url.pathname.match(WS_REVIEW_THREADS_RE);
+      if (reviewThreads) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleCreateReviewThread(req, reviewThreads[1]!, reviewThreads[2]!, reviewThreads[3] === "rev" ? "revision" : "account", reviewThreads[4]!);
+      }
       const stackRead = url.pathname.match(WS_STACK_READ_RE);
       if (stackRead) {
         if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });

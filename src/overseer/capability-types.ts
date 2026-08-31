@@ -16,6 +16,7 @@ export interface CapabilityScopeRow {
   document_kind: CapabilityDocumentKind;
   document_id: string;
   created_at: number;
+  conversation_scope: "none" | "snapshot";
 }
 
 export interface CapabilityFileRow {

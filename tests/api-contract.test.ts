@@ -25,9 +25,12 @@ import addFormats from "ajv-formats";
 
 import { API_ROUTES, openApiPaths } from "../src/api";
 import { openApiSpec } from "../src/agent-discovery";
-import { createWorkspace, legacyWorkspaceId, listMembers, mintApiKey } from "../src/db";
+import { createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../src/db";
 import { startServer } from "../src/server";
 import { storeGoldenReview } from "./overseer/fixtures/stored-review";
+import { tinyId } from "../src/ids";
+import { createLocalThread } from "../src/overseer/thread-db";
+import { digestOf } from "../src/overseer/revision-db";
 
 // ---- schema validation ----
 
@@ -55,6 +58,10 @@ let ws = "";
 let key = "";
 const SLUG = "contract-golden";
 const BUNDLE = "contract-bundle";
+const CONVERSATION_SLUG = "contract-conversation";
+const CONVERSATION_STACK = "contract-conversation-stack";
+let conversationThread = "";
+const conversationRefreshKey = "contract-conversation-refresh";
 
 function auth(extra: Record<string, string> = {}): Record<string, string> {
   return { authorization: `Bearer ${key}`, ...extra };
@@ -78,6 +85,30 @@ beforeAll(async () => {
     headers: auth(),
     body: zipSync({ "index.html": strToU8("<html></html>") }),
   });
+
+  const lineageId = tinyId("rln");
+  const revisionId = tinyId("rvr");
+  const captureId = tinyId("stg");
+  const head = "3".repeat(40);
+  db.run("INSERT INTO review_lineages VALUES (?, ?, ?, 'Acme/Contract', 441, 'feature', 'main', ?, 'Contract conversation', 1, NULL, ?, ?, ?, ?)", [lineageId, ws, CONVERSATION_SLUG, "1".repeat(40), owner, tinyId("key"), Date.now(), Date.now()]);
+  const revisionDoc = { identity: { lineageId, slug: CONVERSATION_SLUG, revision: 1, title: "Contract conversation", createdAt: new Date().toISOString() }, source: { captureId, repo: "Acme/Contract", repoId: 441, branch: "feature", originalBaseRef: "main", originalBaseSha: "1".repeat(40), baseRef: "main", sourceHeadSha: head, baseTipSha: "1".repeat(40), mergeBaseSha: "1".repeat(40) }, builder: null, projects: [] };
+  db.run("INSERT INTO review_revisions VALUES (?, ?, ?, ?, 1, ?, 1, ?, ?, ?)", [revisionId, ws, lineageId, CONVERSATION_SLUG, captureId, JSON.stringify(revisionDoc), digestOf(revisionDoc), Date.now()]);
+  conversationThread = createLocalThread({ workspaceId: ws, scopeKind: "lineage", scopeId: lineageId, anchor: { workspace_id: ws, anchor_kind: "review", lineage_id: lineageId, revision_id: revisionId, account_id: null, stack_id: null, stack_manifest_id: null, stack_account_id: null, group_id: null, change_id: null, file_id: null, side: null, start_line: null, end_line: null, range_kind: null, old_object_digest: null, new_object_digest: null, object_digest: null }, body: "Contract thread", author: { kind: "member", userId: owner }, idempotencyKey: "contract-thread-create" }).thread.id;
+
+  const observationId = tinyId("pob");
+  db.run("INSERT INTO review_lineage_prs VALUES (?, ?, ?, 441, 'Acme/Contract', 7, 'feature', 'main', 'installation', 9441, NULL, NULL, ?, NULL)", [lineageId, ws, CONVERSATION_SLUG, Date.now()]);
+  db.run("INSERT INTO review_pr_observations VALUES (?, ?, ?, 441, 'Acme/Contract', 7, 'Contract conversation', 'open', 0, 0, 'main', ?, 'feature', ?, ?, ?, ?, 'installation', 9441, NULL, NULL, 'contract-observation')", [observationId, ws, lineageId, "1".repeat(40), head, "1".repeat(40), Date.now(), Date.now()]);
+  const importId = tinyId("rci");
+  const started = Date.now() - 120_000;
+  db.run("INSERT INTO review_conversation_imports (id, workspace_id, lineage_id, observation_id, state, complete, actor_kind, installation_id, started_at, completed_at) VALUES (?, ?, ?, ?, 'completed', 1, 'installation', 9441, ?, ?)", [importId, ws, lineageId, observationId, started, started + 1]);
+  const refreshHash = digestOf({ operation: "conversation_refresh", lineageId, observationId, actor: { kind: "installation", installationId: 9441 } });
+  db.run("INSERT INTO review_conversation_refresh_idempotency VALUES (?, ?, ?, ?, ?, ?)", [ws, conversationRefreshKey, refreshHash, lineageId, importId, started]);
+
+  const stackId = tinyId("rsk");
+  const manifestId = tinyId("rsm");
+  db.run("INSERT INTO review_stacks VALUES (?, ?, ?, 'Contract stack', 'Acme/Contract', 441, 'main', 'inferred', NULL, NULL, 'anonymous', NULL, NULL, NULL, 1, ?, ?, ?, ?)", [stackId, ws, CONVERSATION_STACK, owner, tinyId("key"), Date.now(), Date.now()]);
+  const manifestDoc = { identity: { stackId, slug: CONVERSATION_STACK, title: "Contract stack", version: 1, predecessorVersion: 0, reason: "created", createdAt: new Date().toISOString() }, repository: { repo: "Acme/Contract", repoId: 441, baseRef: "main" }, source: { kind: "inferred", providerStackId: null, providerStackNumber: null, observedAt: null }, members: [{ lineageId, lineageSlug: CONVERSATION_SLUG, prNumber: 7, title: "Contract conversation", revisionId, revision: 1, accountId: null, accountVersion: null, baseRef: "main", headRef: "feature", headSha: head, status: "live", removedReason: null }], projects: [] };
+  db.run("INSERT INTO review_stack_manifests VALUES (?, ?, ?, ?, 1, 0, 'created', 1, ?, ?, ?)", [manifestId, stackId, ws, CONVERSATION_STACK, JSON.stringify(manifestDoc), digestOf(manifestDoc), Date.now()]);
 });
 afterAll(() => server.stop(true));
 
@@ -124,6 +155,7 @@ describe("the document and the router are one list", () => {
     );
     expect(shouldGuard.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
       "DELETE /api/shares/:id",
+      "POST /api/review-lineages/:slug/conversations/refresh",
       "POST /api/reviews/:slug/annotations",
       "POST /api/reviews/:slug/refresh",
       "POST /api/shares",
@@ -557,6 +589,21 @@ describe("a 200 matches the schema the document declares for it", () => {
     );
   });
 
+  test("conversation APIs", async () => {
+    await check("replyToReviewThread", () => fetch(`${base}/api/review-threads/${conversationThread}/replies`, {
+      method: "POST",
+      headers: auth({ "content-type": "application/json", "idempotency-key": "contract-agent-reply" }),
+      body: JSON.stringify({ body: "Contract agent reply", agentName: "Contract agent", agentModel: "test" }),
+    }));
+    await check("readReviewConversation", () => fetch(`${base}/api/review-lineages/${CONVERSATION_SLUG}/conversations?workspace=${ws}`, { headers: auth() }));
+    await check("readReviewStackConversation", () => fetch(`${base}/api/review-stacks/${CONVERSATION_STACK}/manifests/1/conversations?workspace=${ws}`, { headers: auth() }));
+    await check("refreshReviewConversation", () => fetch(`${base}/api/review-lineages/${CONVERSATION_SLUG}/conversations/refresh?workspace=${ws}`, {
+      method: "POST",
+      headers: auth({ "content-type": "application/json", "idempotency-key": conversationRefreshKey }),
+      body: JSON.stringify({ idempotencyKey: conversationRefreshKey }),
+    }));
+  });
+
   test("createShare, listShares and revokeShare", async () => {
     let minted = "";
     await check("createShare", async () => {
@@ -598,6 +645,10 @@ describe("a 200 matches the schema the document declares for it", () => {
       "updateTask",
       "createNote",
       "listNotes",
+      "replyToReviewThread",
+      "readReviewConversation",
+      "readReviewStackConversation",
+      "refreshReviewConversation",
     ]);
     const ids = Object.values((openApiSpec() as any).paths as Record<string, Record<string, any>>)
       .flatMap((ops) => Object.values(ops))

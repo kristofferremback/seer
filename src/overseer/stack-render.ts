@@ -67,6 +67,9 @@ import { getLineageById, stackDrift } from "./stack-pr";
 import { stackPages, type StackPageUnit, type StackUnit } from "./stack-read";
 import { MAX_STACK_MEMBER_POSITIONS, STACK_PAGE_HTML_MAX_BYTES, type StackMemberSnapshot } from "./stack-types";
 import type { StackCapability } from "./capability-types";
+import { latestImportedConversation } from "./conversation-import";
+import { createConversationReadContext, readCapabilityConversation, readPinnedLineageConversation } from "./conversation-read";
+import { listLocalThreadsForStackAccount, projectLocalThread, workspaceMemberLabels } from "./thread-db";
 import { projectAgent } from "./actor-projection";
 
 const NUMBER_RE = /^[1-9][0-9]{0,8}$/;
@@ -567,6 +570,8 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
   const resolved = resolveStackRead(workspaceId, slug, pin);
   if (!resolved) return softReviewPage();
   const url = new URL(req.url);
+  const memberLabels = workspaceMemberLabels(workspaceId);
+  const conversationContext = createConversationReadContext(workspaceId);
   const layer = url.searchParams.get("layer");
   const layerMember = layer === null ? null : resolved.members.find((member) => member.lineage.slug === layer) ?? null;
   if (layer !== null && !layerMember) return softReviewPage();
@@ -581,6 +586,40 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
     .filter((entry) => resolved.account !== null || entry.group.members.length > 0);
   const doc = readerDoc(resolved, groups.map((entry) => entry.group));
   const pinned = resolved.account ? `${stackPath(workspaceId, slug, resolved.manifest.version)}/account` : stackPath(workspaceId, slug, resolved.manifest.version);
+  if (layerMember) {
+    const importedState = latestImportedConversation(workspaceId, layerMember.lineage.id);
+    const pinnedConversation = await readPinnedLineageConversation(workspaceId, {
+      lineage: layerMember.lineage,
+      revisionId: layerMember.revision.id,
+      accountId: layerMember.account?.id ?? null,
+      headSha: layerMember.revision.doc.source.sourceHeadSha,
+    }, user.id, conversationContext, memberLabels);
+    doc.conversation = {
+      local: pinnedConversation.local,
+      imported: pinnedConversation.imported,
+      reviews: pinnedConversation.reviews,
+      importState: importedState?.state ?? "never", complete: importedState?.complete === 1, truncated: importedState?.truncated === 1,
+      exactRevisionId: layerMember.revision.id, exactAccountId: null,
+      createAction: `/${workspaceId}/r/${layerMember.lineage.slug}/rev/${layerMember.revision.revision}/threads`,
+      replyAction: (threadId) => `/${workspaceId}/review-threads/${threadId}/replies`,
+      resolutionAction: (threadId) => `/${workspaceId}/review-threads/${threadId}/resolution`,
+      refreshAction: null, returnTo: url.pathname + url.search,
+      overviewAnchor: { anchorKind: "review" },
+      changeIdOf: (id) => splitStackId(id)?.bare ?? id,
+      fileIdOf: (id) => splitStackId(id)?.bare ?? id,
+    };
+  } else if (resolved.account) {
+    doc.conversation = {
+      local: listLocalThreadsForStackAccount(workspaceId, resolved.account.id).map((thread) => projectLocalThread(thread, user.id, thread.thread.append_version, memberLabels)),
+      imported: [], reviews: [], importState: "never", complete: true, truncated: false,
+      exactRevisionId: "", exactAccountId: null,
+      createAction: `${pinned}/threads`,
+      replyAction: (threadId) => `/${workspaceId}/review-threads/${threadId}/replies`,
+      resolutionAction: (threadId) => `/${workspaceId}/review-threads/${threadId}/resolution`,
+      refreshAction: null, returnTo: url.pathname + url.search,
+      overviewAnchor: { anchorKind: "stack", stackAccountId: resolved.account.id },
+    };
+  }
   const routes = routesFor(resolved, pinned, layer);
   const scope: ReaderScope = {
     current: layer,
@@ -759,6 +798,11 @@ export async function renderStackCapability(req: Request, capability: StackCapab
     pin: capability.account ? `v${capability.manifest.version} account` : `v${capability.manifest.version}`,
     latest: false,
   };
+  if (capability.scope.conversation_scope === "snapshot") {
+    const conversation = await readCapabilityConversation(capability);
+    if (!conversation) return softHtml(req);
+    doc.conversation = { ...conversation, importState: "never", complete: true, truncated: false, exactRevisionId: layerMember?.revision.id ?? top.revision.id, exactAccountId: layerMember?.account?.id ?? null, createAction: null, replyAction: null, resolutionAction: null, refreshAction: null, returnTo: basePath };
+  }
   const routes = capabilityStackRoutes(resolved, basePath, layer);
   const scope: ReaderScope = {
     current: layer,
