@@ -7,10 +7,8 @@
 // Exits 0 on success, 1 on the first failed assertion (message on stderr).
 import "./app-env";
 import { createHmac } from "node:crypto";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { zipSync, strToU8 } from "fflate";
+import { createTestDataDir } from "./test-data-dir";
 
 process.env.API_TOKEN = "test-token";
 delete process.env.AUTH_DISABLED;
@@ -23,7 +21,7 @@ process.env.PORT = "0";
 // Small cap so the oversize-upload test stays cheap. Bun's maxRequestBodySize is
 // set to this + 1024, so a ~1.5 KB body reaches the handler and gets a 413.
 process.env.MAX_UPLOAD_BYTES = "1024";
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-auth-"));
+process.env.DATA_DIR = createTestDataDir("seer-tests-auth-");
 
 const { sessionCookie, sessionEmail, sessionUser } = await import("../src/auth");
 const { config } = await import("../src/config");

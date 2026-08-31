@@ -20,9 +20,7 @@
 // Exits 0 on success, 1 on the first failed assertion (message on stderr).
 import "../app-env";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createTestDataDir } from "../test-data-dir";
 // Type-only, so it is erased: nothing here may import an app module before the env
 // above is set.
 import type { AppApi } from "../../src/overseer/github-app";
@@ -38,7 +36,7 @@ process.env.SEER_ENCRYPTION_ACTIVE_KEY = "test";
 process.env.ALLOWED_EMAILS = "a@example.com";
 process.env.BASE_URL = "http://localhost:3000";
 process.env.PORT = "0";
-process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "seer-tests-ghi-privacy-"));
+process.env.DATA_DIR = createTestDataDir("seer-tests-ghi-privacy-");
 
 // A GitHub App this process owns, with a keypair generated here: nothing in this script
 // is signed with a credential that exists anywhere else, and config.ts reads these at
