@@ -105,6 +105,10 @@ import {
   startGithubProjectionSweep,
 } from "./overseer/github-projection-worker";
 import {
+  recoverLegacySuccessions,
+  startLegacySuccessionSweep,
+} from "./overseer/legacy-successor-jobs";
+import {
   handleRevisionAcknowledgement,
   handleRevisionJudgment,
   handleStackAcknowledgement,
@@ -163,7 +167,7 @@ const WS_IMG_RE = new RegExp(`^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/i/`
 // Workspace-scoped review path: /<ws_id>/r/<slug>[/v/N | /a/<att_id>]. This is the
 // URL publish hands back; the bare /r/<slug> routes resolve the same review across
 // every workspace the reader can reach.
-const WS_REVIEW_RE = new RegExp(
+export const WS_REVIEW_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)(?:/(v|a|rev)/([^/]+))?/?$`,
 );
 // A promoted review's read mark. Its own pattern, and revision-scoped rather than
@@ -210,7 +214,7 @@ const WS_CAPTURE_RETRY_RE = new RegExp(
 // A stack of promoted reviews: /<ws_id>/r-stacks/<slug>[/v/<n>[/account]], and the read
 // mark on one member's change through the manifest. Its own segment, so it never competes
 // with /r/<slug>.
-const WS_STACK_RE = new RegExp(
+export const WS_STACK_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)(?:/v/([^/]+)(?:/(account))?)?/?$`,
 );
 const WS_STACK_READ_RE = new RegExp(
@@ -251,14 +255,14 @@ const WS_ANNOTATIONS_RE = new RegExp(
 // The workspace's own pages: /<ws_id> (its front door), /<ws_id>/bundles,
 // /<ws_id>/reviews, /<ws_id>/projects, /<ws_id>/settings. Members only; anyone else
 // meets the same soft-404 an unknown workspace gives.
-const WS_PAGE_RE = new RegExp(
+export const WS_PAGE_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})(?:/(bundles|reviews|projects|settings))?/?$`,
 );
 
 // One project's page: /<ws_id>/p/<slug>. Members only, the same posture as the
 // workspace pages: a stranger cannot tell a project that is not theirs from one that
 // does not exist.
-const WS_PROJECT_RE = new RegExp(
+export const WS_PROJECT_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/p/([^/]+)/?$`,
 );
 
@@ -833,11 +837,13 @@ export async function startServer() {
   // be halfway through it.
   recoverCaptureJobs();
   recoverGithubProjectionJobs();
+  recoverLegacySuccessions();
   // And again, on a timer. A lane this process left because another container held the
   // lease has nothing else that would look at it: without the sweep, "another process may
   // recover an abandoned claim" would only be true at boot.
   startCaptureSweep();
   startGithubProjectionSweep();
+  startLegacySuccessionSweep();
 
   // Only the sockets a share opened, so revocation can find them. Membership-gated
   // sockets are not in here: nothing revokes a membership mid-connection today, and a

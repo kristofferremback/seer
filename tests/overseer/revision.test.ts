@@ -313,7 +313,10 @@ describe("publishing a source revision", () => {
     // Promoted cannot take a slug a legacy review owns.
     const ontoLegacy = await createLineage({ captureId: wideCapture.id, slug: "legacy-evidence", title: "Onto a legacy review" });
     expect(ontoLegacy.status).toBe(409);
-    expect((await ontoLegacy.json() as any).error).toContain("already names a review in this workspace");
+    expect(await ontoLegacy.json() as any).toMatchObject({
+      error: expect.stringContaining("already names a review in this workspace"),
+      rule: "review_slug_taken",
+    });
     expect(getLineage(workspace, "legacy-evidence")).toBeNull();
 
     // And a FIRST legacy publish cannot take a slug a lineage owns. The transaction is
@@ -422,6 +425,7 @@ describe("reading evidence before a witness has answered", () => {
     const revisionView = await (await fetch(`${base}/api/review-lineages/promoted-source/revisions/1`, { headers: apiHeaders() })).json() as any;
     validateResponse("readReviewRevision", revisionView);
     const requestId = revisionView.witness.id;
+    expect(revisionView.witness.claimUrl).toBe(`${config.baseUrl}/api/review-witness-requests/${requestId}/claim`);
 
     setGithubClientFactory(() => { throw new Error("GitHub must not be called while rendering evidence"); });
     const failed = await fetch(`${base}/api/review-witness-requests/${requestId}/fail`, {
@@ -431,6 +435,7 @@ describe("reading evidence before a witness has answered", () => {
     const failedBody = await failed.json() as any;
     validateResponse("failWitnessRequest", failedBody);
     expect(failedBody.state).toBe("failed");
+    expect(failedBody.claimUrl).toBeNull();
     let page = visible(await (await fetch(`${base}/${workspace}/r/promoted-source/rev/1`, { headers: sessionHeaders() })).text());
     expect(page).toContain("Witness failed");
     expect(page).toContain("The witness ran out of context.");
@@ -442,6 +447,7 @@ describe("reading evidence before a witness has answered", () => {
     expect(retriedBody.state).toBe("retrying");
     expect(retriedBody.retryCount).toBe(1);
     expect(retriedBody.failure).toBeNull();
+    expect(retriedBody.claimUrl).toBe(`${config.baseUrl}/api/review-witness-requests/${requestId}/claim`);
     page = visible(await (await fetch(`${base}/${workspace}/r/promoted-source/rev/1`, { headers: sessionHeaders() })).text());
     expect(page).toContain("Witness retrying");
 

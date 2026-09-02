@@ -724,7 +724,11 @@ export const SUPERSEDED_MESSAGE =
   "A later source revision was published while this witness request was open, so it has been superseded.";
 
 export class RevisionWriteError extends Error {
-  constructor(readonly status: 404 | 409 | 422, message: string) {
+  constructor(
+    readonly status: 404 | 409 | 422,
+    message: string,
+    readonly rule?: string,
+  ) {
     super(message);
     this.name = "RevisionWriteError";
   }
@@ -802,13 +806,13 @@ export const publishFirstRevision = db.transaction((input: PublishRevisionInput)
   }
 
   if (lineageOwnsSlug(workspaceId, slug)) {
-    throw new RevisionWriteError(409, `Review slug "${slug}" already names another promoted review`);
+    throw new RevisionWriteError(409, `Review slug "${slug}" already names another promoted review`, "review_slug_taken");
   }
   if (stackOwnsSlug(workspaceId, slug)) {
-    throw new RevisionWriteError(409, `Review slug "${slug}" already names a review stack`);
+    throw new RevisionWriteError(409, `Review slug "${slug}" already names a review stack`, "review_slug_taken");
   }
   if (input.legacyOwnsSlug(slug)) {
-    throw new RevisionWriteError(409, `Review slug "${slug}" already names a review in this workspace`);
+    throw new RevisionWriteError(409, `Review slug "${slug}" already names a review in this workspace`, "review_slug_taken");
   }
   for (const project of input.projects) {
     if (!getProject(workspaceId, project)) throw new RevisionWriteError(422, `No project "${project}" in this workspace`);

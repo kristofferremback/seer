@@ -47,6 +47,7 @@ import {
 } from "./delta";
 import type { PrStatusWord } from "./installations";
 import { freshnessOf, observedAtOf, resolveFor, statusesOf } from "./read";
+import { legacySuccessorLink } from "./legacy-successor";
 import {
   KIND_LABEL,
   hunkAnchorId,
@@ -3503,6 +3504,9 @@ export interface RenderInput {
    *  member gets the way back to the workspace's reviews, a share holder was handed
    *  one page and the page does not advertise the rest. */
   indexHref?: string | null;
+  /** A permanent immutable successor, shown without redirecting this legacy artifact.
+   *  Shared legacy pages omit it so an old capability never widens. */
+  successor?: { state: "pending" | "running" | "failed" | "completed"; url: string | null; statusUrl: string; failure: string | null } | null;
 }
 
 /** The revision menu: every published version, what moved in it, and the two
@@ -3782,6 +3786,13 @@ export function renderReviewPage(input: RenderInput): string {
         `aria-label="Ask GitHub for the current state of these pull requests">refresh</button></span>`
       : "") +
     `${baseMark}</p>` +
+    (input.successor
+      ? `<p class="meta successor"><span>Immutable successor</span><span>` +
+        (input.successor.state === "completed" && input.successor.url
+          ? `<a href="${escapeHtml(input.successor.url)}">open</a>`
+          : escapeHtml(input.successor.state)) +
+        `</span>` + (input.successor.failure ? `<span>${escapeHtml(input.successor.failure)}</span>` : "") + `</p>`
+      : "") +
     revisionMenu(input, ctx.basePath) +
     `</header>\n` +
     sharePanel(input.canShare === true) +
@@ -4154,6 +4165,7 @@ function reviewPage(args: {
       listUserWorkspaces(reader.id).some((w) => w.id === ws)
         ? `/${ws}/reviews`
         : null,
+    successor: shared ? null : legacySuccessorLink(ws, slug, false),
   });
   // Nothing here reaches GitHub. Looking at a review used to check it; that automatic
   // check is deleted, not merely unused, so there is no path from a render to the

@@ -1,5 +1,5 @@
-// The witness skill document, served. Public and unauthenticated, the same shape as
-// Seer's own /skill.md: an agent fetches it before it publishes anything.
+// The witness skill document, served. Public and unauthenticated. A fresh agent fetches
+// it after receiving one exact member or stack witness claim.
 //
 // The bytes are the committed doc, docs/overseer/skill.md, read at request time rather
 // than inlined into TypeScript. The document is prose the reader also reads in the repo,
@@ -56,7 +56,7 @@ export function overseerAgentText(): Promise<string | null> {
  *  its own substituted at serve time. */
 const CANONICAL_BASE = "https://seer.build";
 
-/** What the witness is told: what to write, and how. Fetched at review time.
+/** What the witness is told: claim one immutable request, then publish its account.
  *
  *  Host-substituted like the agent document, because this one now names the origin to
  *  publish to. It did not, and a witness reading it had to infer the host from wherever
@@ -66,9 +66,8 @@ export async function handleOverseerSkill(): Promise<Response> {
   return serveDoc(DOC_PATH, "skill document");
 }
 
-/** What a person installs so their agent can dispatch a witness at all. Two audiences,
- *  two documents: this one is read once by whoever sets it up, that one is read on every
- *  review by the agent doing it. */
+/** What a person installs so their agent can ingest exact pushed pull requests and
+ *  dispatch one leased witness. Two audiences, two documents. */
 export async function handleOverseerAgentSkill(): Promise<Response> {
   return serveDoc(AGENT_DOC_PATH, "agent skill document");
 }

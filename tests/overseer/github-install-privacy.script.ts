@@ -820,6 +820,11 @@ let attachTokenA: string;
         } as never),
   );
 
+  // Task 12 keeps this credential-routing proof in explicit legacy republish mode.
+  const { createReviewVersion } = await import("../../src/overseer/db");
+  const { goldenStoredDoc } = await import("./fixtures/stored-review");
+  createReviewVersion(wsA, "cred-route", goldenStoredDoc());
+
   const publish = (key: string) =>
     fetch(`${base}/api/reviews`, {
       method: "POST",

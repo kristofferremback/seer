@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 23 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 24 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -96,6 +96,10 @@ import { hashKey, tinyId } from "./ids";
 // v23 adds explicit personal GitHub projection. Preferences bind one member and lineage
 // to one exact personal credential. Viewed ownership, retry jobs, explicit submissions,
 // and local-to-GitHub mappings are workflow and audit rows beside immutable Seer facts.
+//
+// v24 makes immutable review lineages the default Overseer path. It adds the permanent,
+// resumable conversion workflow for existing legacy ReviewDoc rows. No legacy review,
+// stage, immutable document, share, read, annotation, or Project row is rewritten.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -573,7 +577,7 @@ export function assertDatabaseVersionSupported(maxVersion: number): void {
 }
 
 export function migrate(): void {
-  assertDatabaseVersionSupported(23);
+  assertDatabaseVersionSupported(24);
   const uv = userVersion();
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -598,6 +602,7 @@ export function migrate(): void {
   if (userVersion() < 21) migrateToV21();
   if (userVersion() < 22) migrateToV22();
   if (userVersion() < 23) migrateToV23();
+  if (userVersion() < 24) migrateToV24();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -2416,6 +2421,77 @@ function migrateToV23(): void {
     db.run("PRAGMA user_version = 23");
   })();
   console.log("[seer] migrated to schema v23 (personal GitHub projection).");
+}
+
+// v24: permanent, explicit succession from a legacy ReviewDoc.
+//
+// The source ReviewDoc remains where it is. These tables hold only workflow state and
+// exact target identities. `projects_json` is workflow input rather than domain state: a
+// crashed worker must be able to resume Project attachment without reconstructing the
+// caller's request from mutable joins.
+const V24_LEGACY_SUCCESSION = `
+  CREATE TABLE IF NOT EXISTS review_legacy_successions (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    legacy_slug TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('single','stack')),
+    target_slug TEXT NOT NULL,
+    projects_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending','running','failed','completed')),
+    created_by_user_id TEXT NOT NULL,
+    created_by_key_id TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    failure TEXT,
+    result_lineage_id TEXT,
+    result_stack_id TEXT,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, legacy_slug),
+    CHECK (
+      (kind = 'single' AND result_stack_id IS NULL) OR
+      (kind = 'stack')
+    )
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_legacy_successions_queue
+    ON review_legacy_successions (state, lease_expires_at, updated_at);
+
+  CREATE TABLE IF NOT EXISTS review_legacy_succession_members (
+    succession_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 1),
+    workspace_id TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL CHECK (pr_number >= 1),
+    lineage_slug TEXT NOT NULL,
+    lineage_id TEXT,
+    capture_job_id TEXT,
+    revision_id TEXT,
+    account_id TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (succession_id, position),
+    UNIQUE (succession_id, pr_number),
+    UNIQUE (succession_id, lineage_slug)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_legacy_succession_members_lineage
+    ON review_legacy_succession_members (workspace_id, lineage_id);
+
+  CREATE TABLE IF NOT EXISTS review_legacy_succession_idempotency (
+    workspace_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    succession_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, idempotency_key)
+  );
+`;
+
+function migrateToV24(): void {
+  db.transaction(() => {
+    db.exec(V24_LEGACY_SUCCESSION);
+    db.run("PRAGMA user_version = 24");
+  })();
+  console.log("[seer] migrated to schema v24 (legacy review succession).");
 }
 
 /**

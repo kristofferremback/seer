@@ -23,6 +23,7 @@ import {
 } from "./db";
 import { lookupPrStatus, statusOf, type PrStatusWord } from "./installations";
 import { prKey, type Freshness, type Review } from "./types";
+import { legacySuccessorLink } from "./legacy-successor";
 
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -218,6 +219,7 @@ export function handleReadReview(req: Request, slug: string, version: string | n
     isLatest: asked === review.latest_version,
     url: `${config.baseUrl}/${ws}/r/${slug}`,
     versionUrl: `${config.baseUrl}/${ws}/r/${slug}/v/${asked}`,
+    successor: legacySuccessorLink(ws, slug),
     document,
   });
 }

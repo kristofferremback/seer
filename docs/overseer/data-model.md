@@ -1,6 +1,6 @@
 # Overseer data model
 
-Overseer is a tool for a human to run a review. A hosted skill, running on the user's own inference, reads the pull requests and prepares the briefing: what changed, what matters, where to look closely. Overseer stores that briefing and renders it. Neither of them is the reviewer. The reader is, and every entity below exists to put the reader in a position to judge.
+Overseer is a tool for a human to run a review. New work starts from exact pushed pull requests, becomes immutable source revisions or stack manifests, and receives a fresh witness account later. The hosted skill runs on the user's own inference. Overseer invokes no model. Legacy ReviewDoc rows keep their original one-shot document and renderer permanently; the first sections below document that stored format before the promoted model that now owns default creation.
 
 The name splits the roles. Overseer is the tool through which the reader oversees, and it sits over Seer, whose deployment it shares. The sub-agent that authors a review is the witness: it testifies to what it observed, and the reader judges. This project was called Witness until the better name arrived; the old name survives as the agent's, where it was always most accurate.
 
@@ -29,7 +29,7 @@ The skill authors and Overseer may not invent:
 
 This split is the single most load-bearing decision in the model. In the prototype the agent authored line numbers by hand and drifted three separate times: a ref labelled `L38-49` rendered 38 to 47, two hunks in one file overlapped, and a hunk claimed a base range that its own PR had already rewritten. None of those are possible once the numbers come from the diff instead of from a language model.
 
-## Entities
+## Legacy ReviewDoc entities
 
 ### Review
 
@@ -313,19 +313,19 @@ A monolithic pull request that exhausts its budget is not an error, and the writ
 - every bundle evidence resolves to a bundle in the same workspace
 - on republish, an id reused from the prior version must name an entity of the same type
 
-## Endpoints
+## Legacy ReviewDoc endpoints
 
 ```
-POST  /api/reviews                  publish a review document, returns the resolved review
-                                    plus any warnings, or 422
-GET   /api/reviews/:slug            the resolved document, for the renderer
-POST  /api/reviews/:slug/refresh    re-derive against GitHub, update freshness
-GET   /r/:slug                      the rendered page, current version
-GET   /r/:slug/v/:n                 a prior version, marked as such
+POST  /api/reviews                  republish an existing legacy slug only
+GET   /api/reviews/:slug            the resolved legacy document
+POST  /api/reviews/:slug/refresh    re-derive legacy freshness
+GET   /r/:slug                      the legacy page, current version
+GET   /r/:slug/v/:n                 a prior legacy version
 POST  /api/reviews/:slug/annotations
+POST  /api/reviews/:slug/successor  choose one permanent immutable successor
 ```
 
-A review is authored in one shot. The skill reads the pull requests, forms its view, and publishes a whole document with its attachments; it does not build one up over many calls. Annotations are the only thing written afterward.
+A legacy review is authored in one shot. Schema v24 retires first publication through this route: a slug absent from `reviews` receives rule `legacy_creation_retired` before GitHub or blob storage is opened. An existing row keeps the complete writer and may append versions. Annotations remain legacy state and a successor never copies them.
 
 One shot does not mean one pass. Publishing to an existing slug creates the next version, exactly as uploading a bundle does in Seer, and prior versions stay readable at `/r/:slug/v/:n`. This is how reviewing happens in passes: the branch moves, the skill publishes again, and the reader comes back to the same link. On a second pass the skill is given the prior version and the open annotations, which is published record, not private context, and it keeps the ids of statements, notes, design modules, coverage paths and groups whose claims survive. The renderer derives the delta between any two versions from those ids and the text, so a returning reader sees what is new, what was revised, and what was answered, as marks on the rows rather than as a changelog to read. Derived, never authored: the skill does not get to say what changed about its own account.
 
@@ -341,12 +341,12 @@ The same machinery covers derived text. A pull request description that changed 
 
 How the delta renders is part of the design, not a renderer whim. Revised prose stays clean under a short yellow italic `edited` control. Opening it swaps a word-level redline into the same place: prior words precede their replacements and current words carry the insertion mark. Every changed field inside an entity shares one explicit `edited` control in that entity's expanded body; opening the row itself never reveals a diff. Density never switches the page to a second diff grammar. New and removed rows use their coloured inline state text as the indication, while their titles and content remain neutral even when opened. Removed rows remain near the next surviving section from their base ordering rather than collecting at the end. Author intent, the witness summary and code design are not exempt: authored text diffs wherever it appears. The page states which base version its marks are measured against, and row-level marks exist only as the sum of their spans, so a mark can never claim a change the text does not show.
 
-Viewing is the refresh trigger. Opening `/r/:slug` compares the stored head SHAs against GitHub, rate limited to once a minute per review, and kicks an asynchronous re-derivation when a head has moved. The page renders the stored document immediately and updates its freshness marks when the refresh lands, over the same live channel Seer already uses for bundles. `POST /api/reviews/:slug/refresh` stays for explicit calls, but nothing depends on remembering to make one: a review someone is looking at cannot silently claim `current` while the branch moves underneath it, because looking at it is what checks.
+Rendering a legacy review reads stored rows only and never calls GitHub. Webhooks maintain observed status, and the member's explicit `POST /api/reviews/:slug/refresh` control repairs a missed delivery. An absent observation reads `unknown`, never `current`. The latest page may receive stored status updates over its live channel; pinned legacy versions do not.
 
 ## The promoted review: evidence before an account
 
-A review published from a pull request is authored in one shot, and everything above is
-about that. A **promoted** review is the other order: a completed stage capture becomes a
+A legacy ReviewDoc is authored in one shot, and everything above is about that. A
+**promoted** review is now the default order: a completed stage capture becomes a
 readable review the moment it exists, and a witness publishes an account over it later, or
 fails, or is retried. The reason is a product one. A reader who has just pushed a branch
 should be able to open it, page through the code, and mark what they have handled, without
@@ -357,11 +357,12 @@ Three rows carry it, all workspace-scoped and slugged exactly as a legacy review
 
 - `review_lineages` is the identity: repository, branch, the original base ref and merge
   base the lineage started from, its title, and pointers to the latest revision and the
-  latest account version. A slug is unique across `reviews` and `review_lineages`
-  together. SQLite cannot spell that, so both write paths enforce it — the promoted
-  publish refuses a slug a legacy review owns, and a FIRST legacy publish refuses one a
-  lineage owns. An existing legacy review is untouched by the rule and keeps appending
-  versions: it owned its slug first, and `/r/<slug>` has to keep meaning what it meant.
+  latest account version. A slug is unique across `reviews`, `review_lineages`, and
+  `review_stacks` together. SQLite cannot spell that cross-table constraint, so every
+  storage boundary enforces it inside its write transaction. Promoted creation refuses a
+  slug owned by a legacy review or stack. Direct first legacy publication refuses a
+  lineage or stack. The public legacy route no longer creates first rows. An existing
+  legacy review keeps appending versions.
 - `review_revisions` is the evidence: one immutable V1 document per source revision, over
   one completed capture. It stores identity, exact source facts, nullable builder facts,
   and Project slugs — and no witness object of any kind, because it is published before
@@ -680,9 +681,9 @@ revision, where the member's own page reads it too.
 
 Five rows carry it, all in v19 and all workspace-scoped.
 
-- `review_stacks` is the identity: slug (unique across reviews, lineages and stacks
-  together, enforced by every write path), title, repository, the stack base ref, the
-  provenance (`native` with GitHub's stack id and number, or `inferred`), the exact read
+- `review_stacks` is the identity: slug unique across legacy reviews, promoted lineages,
+  and stacks in the workspace, title, repository, the stack base ref, the provenance
+  (`native` with GitHub's stack id and number, or `inferred`), the exact read
   actor stored at creation, and the latest manifest version.
 - `review_stack_members` is the live membership webhooks and reconciliation join by
   `(repo_id, pr_number)`. A lineage is in at most one live stack, held by a partial unique
@@ -979,6 +980,100 @@ entries and identities do not enter the grant. A later GitHub deletion tombstone
 hides a copied body. Legacy `review` shares keep their latest-version behavior and
 permanent no-context, no-conversation contract. Legacy `bundle` shares and live reload
 keep their routing and token identity.
+
+### Default creation, hosted witnesses, and legacy succession
+
+Schema v24 changes no stored document. New Overseer work enters through
+`POST /api/pull-request-review-lineages`, `POST /api/review-lineages`, or
+`POST /api/review-stacks`. The pull request path requires a same-repository PR. A fork,
+missing remote head, repository mismatch, or broken stack is explicit and never rerouted
+to another source or legacy writer. One live PR belongs to one lineage. Native and
+inferred stack inputs normalize to one ordered manifest shape; a caller chooses the source
+explicitly and no path silently falls back to the other.
+
+Route ownership is permanent:
+
+- `/r/<slug>` and `/r/<slug>/v/<n>` are legacy only.
+- `/<workspace>/r/<slug>/rev/<n>` is promoted only and never falls back.
+- `/<workspace>/r/<slug>` and `/v/<n>` resolve a stored legacy collision first, then a
+  promoted lineage.
+- `/<workspace>/r-stacks/<slug>` and `/v/<n>` resolve only stack rows.
+- `/<workspace>/st/<slug>` and `/v/<n>` resolve only StageDoc V1 rows.
+
+ReviewDoc, promoted lineage, and stack slugs share one flat workspace namespace despite
+separate `/r/` and `/r-stacks/` routes. Every route preflights collisions before external
+work, and every storage transaction rechecks them after that work. Stage slugs remain
+separate. No writer renames a slug or adds a suffix.
+
+Each exact revision and account response carries its member witness view. Each exact stack
+manifest and account response carries its stack witness view. A pending or retrying view
+includes the exact `claimUrl`; failed, published, and superseded views carry null. This is
+the normal hosted handoff.
+
+`GET /api/witness-requests` is bounded recovery and diagnostic inventory for the key's
+workspace. It returns pending, retrying, and failed member and stack requests oldest first,
+with exact revision or manifest URLs. Failed rows have a retry URL and no claim URL. The
+list caps each kind at 500 and reports the omitted count. `?state=all` includes published
+and superseded history. Inventory never acquires or renews a claim. Exact member and stack
+claim routes keep the `(request id, retry count)` lease, so two agents cannot own one
+attempt.
+
+`review_legacy_successions` records one permanent successor choice for each legacy slug.
+It holds kind, target, creator, state, failure, result ids, and a renewable 120-second
+lease. `review_legacy_succession_members` records exact ordered PRs and persists lineage,
+capture job, revision, and account ids after each step. The workflow's Project input is
+stored as JSON on the succession so a process can resume it without consulting mutable
+joins. `review_legacy_succession_idempotency` binds each client key to the normalized
+request hash.
+
+Before writing the permanent succession, the transaction verifies both owners for every
+member: the retained PR may have no other lineage owner, and an existing requested lineage
+slug must own that exact repository and PR. Member and target slugs also pass the same flat
+namespace checks as direct writers.
+
+A single successor completes when its exact PR owns the requested lineage shell. Capture
+and witness state continue on that lineage. A stack successor observes every stored PR
+through the creator's routed actor, creates or adopts only the requested owning lineage,
+and waits for an account on each exact revision. A legacy pointer array may be authored
+in any order, so succession follows stored parent links and creates one inferred manifest
+in bottom-to-top chain order. A process death resumes from member rows. An existing owner
+under another slug fails with its canonical URL. An unrelated legacy set returns
+`unsupported_source` and writes no workflow row.
+
+A target stack can still lose its slug after the permanent row is chosen and while member
+witnesses run. If that leaves a failed workflow with no result, only the exact creator API
+key may amend it. Projects, kind, retained PRs, order, and every resolved member slug stay
+fixed; only the unresolved target and unresolved member slugs may change. The same owner
+and flat-namespace checks run again before the row returns to pending. Retry also requires
+the exact creator key.
+
+Legacy pages and API reads show the successor once chosen but never redirect. Result and
+page URLs remain null until the exact lineage or stack exists. Pending and failed legacy
+pages render inline state and failure text without a dead link. Succession status GET uses
+the same session-or-key readable workspace set as other review reads. Legacy ReviewDoc
+bytes, annotations, shares, attachments, context, reads, and conversation remain on the
+legacy artifact. No row is copied to the successor. Capability pages omit the link so an
+old grant does not widen.
+
+Stage remains an explicit compatibility workflow. `/stage/agent.md`, `/stage/skill.md`,
+Stage capture APIs, StageDoc V1 publication, `/st/` readers, Project joins, and member reads
+are unchanged. A capture may still back both one StageDoc V1 and one promoted revision.
+Stage publication never creates a lineage, account, stack, judgment, or GitHub projection.
+
+The v24 deploy contract is snapshot before migration and restore before an old image.
+`src/db-snapshot.ts` reads only `DATA_DIR`, service owner markers, and explicit arguments.
+Backup runs SQLite `quick_check`, serializes one WAL-consistent read transaction, writes
+mode-0600 temp files, fsyncs, and atomically renames the snapshot and SHA-256 manifest.
+Verify checks hash, length, `quick_check`, and `user_version`, then removes inspection
+sidecars.
+
+Normal `bun run start` writes a cross-container heartbeat on the shared volume. Restore
+requires `--confirm-service-stopped` and refuses every fresh heartbeat despite that flag.
+The explicit `SEER_MAINTENANCE_RESTORE` startup branch imports no application database,
+restores before binding, and serves only `/healthz`. Prepared and completed restore state
+makes a restart resume or verify the same operation without a second quarantine. A v23
+binary refuses `user_version = 24`. The exact wait, maintenance, local blob, and S3 limits
+are in `docs/operations/migrations.md`.
 
 ## Privacy differs from Seer
 

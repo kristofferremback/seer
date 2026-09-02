@@ -60,8 +60,8 @@ describe("overseer skill doc", () => {
 
   test("carries the three settled opening clauses", () => {
     expect(doc).toContain("fresh sub-agent");
-    expect(doc).toContain("only through the published record");
-    expect(doc).toContain("annotation answers");
+    expect(doc).toContain("retained builder facts");
+    expect(doc).toContain("one complete account over one immutable revision");
   });
 
   test("states the hunk id format and a worked example that hunkId() reproduces", () => {
@@ -141,14 +141,40 @@ describe("overseer skill doc", () => {
     expect(doc).toContain("summary-buries-result");
   });
 
-  test("covers the publish contract", () => {
-    expect(doc).toContain("{ slug, title, authorIntent, summary");
-    expect(doc).toContain("{ repo, number, gist, detail, detailRef, parent }");
-    expect(doc).not.toContain("{ id, repo, number");
-    expect(doc).toContain("POST /api/reviews");
-    expect(doc).toContain("multipart/form-data");
-    expect(doc).toContain("document");
-    expect(doc).toContain("422");
+  test("defaults to exact immutable account publication", () => {
+    const legacy = doc.indexOf("# Legacy ReviewDoc republish appendix");
+    const primary = doc.slice(0, legacy);
+    expect(legacy).toBeGreaterThan(0);
+    expect(primary).toContain("exact `claimUrl` from a revision or stack manifest witness");
+    expect(primary).not.toContain("/api/witness-requests");
+    expect(primary).toContain("/api/review-lineages/<slug>/revisions/<revision>/accounts");
+    expect(primary).toContain("/api/review-stacks/<slug>/manifests/<manifest>/account");
+    expect(primary).toContain("The capture is the evidence");
+    expect(primary).toContain("Do not ask GitHub for a moving branch");
+    expect(primary).toContain("Do not publish a partial account");
+    expect(primary).toContain("`groups[].explanation`");
+    expect(primary).toContain("`focus[].body`");
+    expect(primary).toContain("`groups[].body`");
+    for (const legacyOnlyInstruction of [
+      "`authorIntent` paraphrases",
+      "Publish that judgment in `codeDesign`",
+      "`usage.design.prose`",
+      "`usage.prose.perPr`",
+    ]) {
+      expect(primary).not.toContain(legacyOnlyInstruction);
+    }
+  });
+
+  test("keeps the complete old contract only as an explicit legacy republish appendix", () => {
+    const legacy = doc.slice(doc.indexOf("# Legacy ReviewDoc republish appendix"));
+    expect(legacy).toContain("existing slug is a legacy ReviewDoc");
+    expect(legacy).toContain("legacy_creation_retired");
+    expect(legacy).toContain("{ slug, title, authorIntent, summary");
+    expect(legacy).toContain("{ repo, number, gist, detail, detailRef, parent }");
+    expect(legacy).not.toContain("{ id, repo, number");
+    expect(legacy).toContain("POST /api/reviews");
+    expect(legacy).toContain("multipart/form-data");
+    expect(legacy).toContain("422");
   });
 
   test("served bytes carry no em dash", () => {
@@ -171,6 +197,14 @@ describe("the agent skill document", () => {
     expect(text).toContain("You do not write the review. A fresh sub-agent does.");
     // It points the witness at the other document rather than repeating it.
     expect(text).toContain("/overseer/skill.md");
+    expect(text).toContain("Require an exact remote pull request");
+    expect(text).toContain("git rev-parse @{upstream}");
+    expect(text).toContain("Private forks are deferred");
+    expect(text).toContain("/api/pull-request-review-lineages");
+    expect(text).toContain("/api/witness-requests");
+    expect(text).toContain("bounded recovery inventory");
+    expect(text).toContain("witness.claimUrl");
+    expect(text).toContain("Never post the same change to `/api/reviews` as a fallback");
   });
 
   test("the dispatch brief names this deployment, not the canonical one", async () => {

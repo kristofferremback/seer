@@ -109,7 +109,9 @@ function projectsField(body: Record<string, unknown>): string[] {
 }
 
 function failure(err: unknown): Response {
-  if (err instanceof StackWriteError) return stackJson({ error: err.message }, err.status);
+  if (err instanceof StackWriteError) {
+    return stackJson({ error: err.message, ...(err.rule ? { rule: err.rule } : {}) }, err.status);
+  }
   if (err instanceof GithubAppRefusal) return stackJson({ error: err.message }, 422);
   if (err instanceof GithubError) return stackJson({ error: err.message }, err.status === 404 ? 422 : 502);
   if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE") {
@@ -130,15 +132,19 @@ function manifestUrl(stack: ReviewStackRow, version: number): string {
 }
 
 function witnessView(request: StackWitnessRequestRow, slug: string): unknown {
+  const state = stackWorkflowWord(request);
   return {
     id: request.id,
     workspace: request.workspace_id,
     slug,
     version: request.version,
-    state: stackWorkflowWord(request),
+    state,
     retryCount: request.retry_count,
     failure: request.failure,
     accountId: request.account_id,
+    claimUrl: state === "pending" || state === "retrying"
+      ? `${config.baseUrl}/api/review-stack-witness-requests/${request.id}/claim`
+      : null,
     updatedAt: new Date(request.updated_at).toISOString(),
   };
 }
@@ -332,9 +338,9 @@ export async function handleCreateStack(req: Request): Promise<Response> {
       const stack = getStack(auth.workspaceId, slug);
       if (stack) return stackJson(stackView(req, stack), 200);
     }
-    if (stackOwnsSlug(auth.workspaceId, slug)) return stackJson({ error: `Stack slug "${slug}" already names another stack` }, 409);
-    if (lineageOwnsSlug(auth.workspaceId, slug)) return stackJson({ error: `Stack slug "${slug}" already names a promoted review` }, 409);
-    if (getReview(auth.workspaceId, slug)) return stackJson({ error: `Stack slug "${slug}" already names a review in this workspace` }, 409);
+    if (stackOwnsSlug(auth.workspaceId, slug)) return stackJson({ error: `Stack slug "${slug}" already names another stack`, rule: "review_slug_taken" }, 409);
+    if (lineageOwnsSlug(auth.workspaceId, slug)) return stackJson({ error: `Stack slug "${slug}" already names a promoted review`, rule: "review_slug_taken" }, 409);
+    if (getReview(auth.workspaceId, slug)) return stackJson({ error: `Stack slug "${slug}" already names a review in this workspace`, rule: "review_slug_taken" }, 409);
     for (const project of projects) {
       if (!getProject(auth.workspaceId, project)) return stackJson({ error: `No project "${project}" in this workspace` }, 422);
     }

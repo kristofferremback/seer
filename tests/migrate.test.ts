@@ -118,6 +118,12 @@ test("a populated v22 review database gains personal projection workflows, then 
   expect(out).toContain("all assertions passed");
 });
 
+test("a populated v23 database gains empty legacy succession workflows, then restores", async () => {
+  const { code, out } = await runScenario("v23");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("a database from a newer release is refused rather than walked", async () => {
   const { code, out } = await runScenario("newer");
   expect(code).toBe(0);

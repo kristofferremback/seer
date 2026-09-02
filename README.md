@@ -147,7 +147,16 @@ A bundle serves its own `index.html` as-is, so a shared link previews with whate
 
 ## Migration
 
-On first boot Seer migrates an existing single-user deployment losslessly, driven by SQLite's `PRAGMA user_version`:
+On first boot Seer migrates an existing single-user deployment losslessly, driven by SQLite's `PRAGMA user_version`. Schema v24 is additive and makes immutable review lineages the default Overseer path. Before deploying a newer schema, create and verify a WAL-consistent snapshot:
+
+```sh
+bun run db:backup -- /data/backups/pre-v24.sqlite
+bun run db:verify -- /data/backups/pre-v24.sqlite
+```
+
+An older image refuses a newer `user_version`. Roll forward by default. Restore requires zero application replicas, a stale shared-volume service heartbeat, and the explicit `SEER_MAINTENANCE_RESTORE=<snapshot>` startup mode before the old image starts. The committed `bun run start` command does not change. The exact sequence and local blob and S3 limits are in [`docs/operations/migrations.md`](./docs/operations/migrations.md).
+
+The original bootstrap contract remains:
 
 - The root user's email is the first entry of `ALLOWED_EMAILS` (or `dev@localhost` when `AUTH_DISABLED=true`); with neither set and auth enabled, startup fails loudly.
 - A root user, a root workspace (named after the email's local part, `public` visibility), and a membership are created.
@@ -159,10 +168,12 @@ A deployment already at schema v1 boots straight through — the migration is a 
 
 ## For agents
 
-Seer hosts its own usage doc, written for an AI agent that holds a base URL and an API token and wants to publish a bundle:
+Seer hosts its own public agent router. It points bundle work at `/bundles/skill.md`, exact pushed pull request review at `/overseer/agent.md`, Stage V1 compatibility work at `/stage/agent.md`, and Project work at `/projects/skill.md`.
 
-- `GET /skill.md` — a public, no-auth Markdown guide covering how to build the zip, upload it with `curl`, read the response (`url` = latest, `versionUrl` = pinned), iterate, and list bundles. The `curl` examples are interpolated with the deployment's `BASE_URL`, so they are copy-pasteable as-is.
-- `GET /llms.txt` — the same document, at the path agents conventionally probe for.
+The Overseer default creates or adopts one immutable lineage per same-repository pull request, polls the pinned capture, reads the exact revision or stack witness `claimUrl`, and dispatches a fresh witness through that claim. `/api/witness-requests` is recovery inventory, not the normal handoff. It never falls back to legacy `POST /api/reviews` or Stage publication. Existing ReviewDoc slugs keep an explicit legacy republish and successor workflow.
+
+- `GET /skill.md` is the public no-auth router, with this deployment's `BASE_URL` interpolated.
+- `GET /llms.txt` serves the same router at the conventional discovery path.
 
 The landing page advertises the doc via `<link rel="alternate" type="text/markdown" href="/skill.md">` and a colophon link. Point an agent at `$BASE_URL/skill.md` (or `/llms.txt`) and it has everything it needs. A public workspace's bundle URLs are viewable by anyone, so an agent can hand the returned URL out — or fetch it back itself to verify the rendered page. A private workspace's URLs are members-only. The inventory (`GET /api/bundles`) always stays behind the key.
 
@@ -178,7 +189,7 @@ An agent that arrives at `/` without having been told any of the above can find 
 | `GET /openapi.json` | The credential-bearing API, as OpenAPI 3.1. Its `paths` are projected from `src/api.ts`, the same list `Bun.serve` is handed its route table from, so the document cannot name a route the server does not answer. |
 | `GET /auth.md` | How an agent gets a credential, in the [auth.md](https://github.com/workos/auth.md) shape. |
 | `GET /.well-known/api-catalog` | RFC 9727 linkset pointing at the spec, the docs and `/healthz`. |
-| `GET /.well-known/agent-skills/index.json` | The four skill documents, each with a SHA-256 of the bytes this deployment actually serves. |
+| `GET /.well-known/agent-skills/index.json` | Every hosted skill document, each with a SHA-256 of the bytes this deployment actually serves. |
 | `Link:` on `/` | The same targets as response headers, for a client that reads headers and not bodies. |
 | WebMCP on `/` | Two `navigator.modelContext` tools, for an agent driving a browser. |
 
@@ -201,6 +212,7 @@ All configuration is via environment variables. Bun loads `.env` automatically. 
 | `BASE_URL` | `http://localhost:$PORT` | Public base URL of the deployment. Used to build OAuth redirects and the URLs returned from uploads. Cookies are `Secure` when this is `https`. A trailing slash is stripped. |
 | `PORT` | `3000` | Port to listen on. |
 | `DATA_DIR` | `./data` | Directory for the SQLite database and the extraction cache (and, without S3, the uploaded blobs). Point this at a mounted volume in production. |
+| `SEER_MAINTENANCE_RESTORE` | (unset) | Emergency only. When present, `bun run start` verifies and restores this snapshot, then serves only `/healthz`. Restore still refuses a fresh normal-server heartbeat. Follow the operations runbook. |
 | `S3_BUCKET` | (optional) | When set, bundle zips and images are stored in this S3 bucket instead of on disk; the only durable local state left is the SQLite database. On the first boot with a bucket configured, existing local blobs are copied into it (idempotent, marker-gated; local files are left in place). |
 | `S3_REGION` | (required with `S3_BUCKET`) | Bucket region, e.g. `eu-north-1`. `AWS_REGION` is accepted as an alias. Alternatively set `S3_ENDPOINT` for S3-compatible stores (R2, MinIO, ...). |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | (required with `S3_BUCKET`) | Credentials for an IAM user scoped to the bucket (`GetObject`, `PutObject`, `DeleteObject`, `ListBucket`). `AWS_*` names are accepted as aliases. |
@@ -212,7 +224,7 @@ All configuration is via environment variables. Bun loads `.env` automatically. 
 
 Seer keeps its metadata in a local SQLite database, so it must run as a **single instance** with a persistent volume. Do not scale it horizontally. With `S3_BUCKET` set, blobs (zips and images) live in S3 and the volume only has to hold the database and the disposable extraction cache.
 
-Build and deploy settings (start command, healthcheck, single replica, restart policy) are committed in [`railway.toml`](./railway.toml), so Railway picks them up automatically. Two things still have to be done in the dashboard because they can't live in the repo: attaching the volume and setting the variables.
+Build and deploy settings (start command, healthcheck, single replica, restart policy) are committed in [`railway.toml`](./railway.toml), so Railway picks them up automatically. The schema snapshot, private proof, roll-forward, and restore sequence is in [`docs/operations/migrations.md`](./docs/operations/migrations.md). Two things still have to be done in the dashboard because they can't live in the repo: attaching the volume and setting the variables.
 
 1. Create a new service pointed at this repository. Railway reads `railway.toml`, detects Bun, and runs `bun run start`.
 2. Attach a **volume** and mount it at `/data`, then set `DATA_DIR=/data` so the database, zips, and cache live on the volume and survive redeploys.

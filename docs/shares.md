@@ -59,7 +59,8 @@ share resolver returns a reader identity that fails those checks by construction
 than by a forgotten branch.
 
 **Conversation is a separate exact grant.** Legacy review links permanently keep their
-shipped no-annotation and no-conversation behavior. Document capabilities default to
+shipped no-annotation and no-conversation behavior. They also omit a later immutable
+successor link; an existing capability never widens to a different artifact. Document capabilities default to
 `conversation_scope = none`. Existing task-8 capabilities keep that default and never
 consult snapshot rows, including malformed or stray rows inserted later.
 

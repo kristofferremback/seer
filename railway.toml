@@ -1,5 +1,7 @@
 # Railway deployment config. https://docs.railway.com/reference/config-as-code
 # Railpack detects Bun from bun.lock and installs deps automatically.
+# Database snapshot, private rollout, and restore sequence:
+# docs/operations/migrations.md
 #
 # One-time dashboard setup (cannot be expressed here):
 #   1. Attach a Volume to this service, mount path "/data".
@@ -11,7 +13,7 @@
 [deploy]
 startCommand = "bun run start"
 healthcheckPath = "/healthz"
-healthcheckTimeout = 30
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
 numReplicas = 1

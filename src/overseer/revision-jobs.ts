@@ -698,7 +698,11 @@ export async function runCaptureJob(job: ReviewCaptureJobRow): Promise<void> {
       throw new CaptureJobError(409, "This capture job's lease was taken over while it ran, so its result was discarded.");
     }
     const completed = completeCaptureJob({ jobId: job.id, leaseToken, captureId: result.captureId });
-    // Publication committed before a lane can open a personal network client.
+    // Publication committed before either dependent workflow starts. Dynamic import
+    // avoids making the legacy worker and capture worker a module cycle; a lost wake is
+    // recovered by the succession sweep.
+    const { wakeLegacySuccessions } = await import("./legacy-successor-jobs");
+    wakeLegacySuccessions(job.lineage_id);
     for (const credentialId of completed.viewedCredentials) scheduleGithubProjectionCredential(credentialId);
   } catch (err) {
     // Bounded, actionable, and the lane is released either way. A capture that failed is
@@ -708,6 +712,8 @@ export async function runCaptureJob(job: ReviewCaptureJobRow): Promise<void> {
       : `The pinned capture failed: ${message(err)}`;
     try {
       failCaptureJob(job.id, leaseToken, text);
+      const { wakeLegacySuccessions } = await import("./legacy-successor-jobs");
+      wakeLegacySuccessions(job.lineage_id);
     } catch (failure) {
       console.error(`[seer] capture job ${job.id} could not record its failure:`, failure);
     }

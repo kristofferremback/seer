@@ -882,8 +882,8 @@ test("the landing page says the deployment reads pull requests, and where to sta
   // The front door is what it points at, not a second copy of the instructions.
   expect(html).toContain(`${config.baseUrl}/skill.md`);
   expect(html).not.toContain("POST /api/reviews");
-  // The two claims that make it different from a diff, in the reader's language.
-  expect(html).toContain("instead of the diff");
+  // The two claims that distinguish the immutable default.
+  expect(html).toContain("immutable source revision");
   expect(html).toContain("did not write the change");
 });
 

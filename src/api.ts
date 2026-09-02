@@ -28,7 +28,7 @@ import {
 } from "./db";
 import { json, originOk } from "./http";
 import { IMG_NAME_RE, processImage, sniffOk, type ProcessedImage } from "./images";
-import { POB_ID_RE, RAC_ID_RE, RCJ_ID_RE, RJD_ID_RE, RLN_ID_RE, RSA_ID_RE, RSJ_ID_RE, RSK_ID_RE, RSM_ID_RE, RSO_ID_RE, RSW_ID_RE, RVR_ID_RE, SJD_ID_RE, SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE, WTR_ID_RE } from "./ids";
+import { LSC_ID_RE, POB_ID_RE, RAC_ID_RE, RCJ_ID_RE, RJD_ID_RE, RLN_ID_RE, RSA_ID_RE, RSJ_ID_RE, RSK_ID_RE, RSM_ID_RE, RSO_ID_RE, RSW_ID_RE, RVR_ID_RE, SJD_ID_RE, SLUG_RE, STA_ID_RE, STF_ID_RE, STG_ID_RE, WTR_ID_RE } from "./ids";
 import { requireApiKey } from "./auth";
 import { inspectZip, readZipEntry, saveImage, saveZip } from "./store";
 import { handleCreateShare, handleListShares, handleRevokeShare } from "./shares";
@@ -86,6 +86,12 @@ import { handleReadStackRefreshJob, handleRetryStackRefreshJob } from "./oversee
 import { handleAgentThreadReply, handleLineageConversations, handleRefreshConversations, handleStackConversations } from "./overseer/thread-routes";
 import { handleRevisionJudgments, handleStackJudgments } from "./overseer/judgment-routes";
 import { handleGithubProjection } from "./overseer/github-projection-routes";
+import { handleListWitnessRequests } from "./overseer/witness-inventory";
+import {
+  handleCreateLegacySuccessor,
+  handleReadLegacySuccession,
+  handleRetryLegacySuccession,
+} from "./overseer/legacy-successor";
 
 // ---- the shape of an entry ----
 
@@ -1065,7 +1071,8 @@ const captureJobConflict = {
     "is in `error` and the job travels with it in `job` — including `retryUrl`, which queues a " +
     "fresh attempt against the same stored actor and pinned refs. Every other conflict (this " +
     "review already reviews another pull request, this pull request is already reviewed by " +
-    "another review, this Idempotency-Key was used for a different body) carries `error` alone.",
+    "another review, this Idempotency-Key was used for a different body) carries `error` alone. " +
+    "A flat review-slug collision carries `error` and rule `review_slug_taken`.",
   content: { "application/json": { schema: {
     oneOf: [
       {
@@ -1079,6 +1086,15 @@ const captureJobConflict = {
         required: ["error"],
         additionalProperties: false,
         properties: { error: { type: "string" }, conversationImport: conversationImportSchema },
+      },
+      {
+        type: "object",
+        required: ["error", "rule"],
+        additionalProperties: false,
+        properties: {
+          error: { type: "string" },
+          rule: { type: "string", enum: ["review_slug_taken"] },
+        },
       },
     ],
   } } },
@@ -1196,7 +1212,7 @@ const revisionDriftSchema = {
 
 const witnessRequestSchema = {
   type: "object",
-  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "updatedAt"],
+  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "claimUrl", "updatedAt"],
   additionalProperties: false,
   properties: {
     id: { type: "string", pattern: WTR_ID_RE.source },
@@ -1214,6 +1230,7 @@ const witnessRequestSchema = {
     retryCount: { type: "integer", minimum: 0 },
     failure: { type: ["string", "null"] },
     accountId: { type: ["string", "null"], pattern: RAC_ID_RE.source },
+    claimUrl: { type: ["string", "null"], description: "The exact claim route while this request is pending or retrying." },
     updatedAt: { type: "string", format: "date-time" },
   },
 };
@@ -1221,7 +1238,7 @@ const witnessRequestSchema = {
 /** The claim view: the witness request, plus which attempt this key now holds. */
 const witnessClaimSchema = {
   type: "object",
-  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "updatedAt", "claim", "priorAccount", "threads"],
+  required: ["id", "workspace", "slug", "revision", "state", "retryCount", "failure", "accountId", "claimUrl", "updatedAt", "claim", "priorAccount", "threads"],
   additionalProperties: false,
   properties: {
     ...witnessRequestSchema.properties,
@@ -1727,14 +1744,16 @@ const stackAccountDocSchema = {
 
 const stackWitnessRequestSchema = {
   type: "object",
-  required: ["id", "workspace", "slug", "version", "state", "retryCount", "failure", "accountId", "updatedAt"],
+  required: ["id", "workspace", "slug", "version", "state", "retryCount", "failure", "accountId", "claimUrl", "updatedAt"],
   additionalProperties: false,
   properties: {
     id: { type: "string", pattern: RSW_ID_RE.source }, workspace: { type: "string" }, slug: { type: "string", pattern: SLUG_RE.source },
     version: { type: "integer", minimum: 1, description: "The manifest this request waits to become the account of." },
     state: { type: "string", enum: ["pending", "failed", "retrying", "published", "superseded"], description: "`superseded` is derived: a later manifest was published while this request was open." },
     retryCount: { type: "integer", minimum: 0 }, failure: { type: ["string", "null"] },
-    accountId: { type: ["string", "null"], pattern: RSA_ID_RE.source }, updatedAt: { type: "string", format: "date-time" },
+    accountId: { type: ["string", "null"], pattern: RSA_ID_RE.source },
+    claimUrl: { type: ["string", "null"], description: "The exact claim route while this request is pending or retrying." },
+    updatedAt: { type: "string", format: "date-time" },
   },
 };
 
@@ -1750,6 +1769,182 @@ const stackWitnessClaimSchema = {
     claim: {
       type: "object", required: ["retryCount", "claimed", "leaseExpiresAt", "claimedAt"], additionalProperties: false,
       properties: { retryCount: { type: "integer", minimum: 0 }, claimed: { type: "boolean" }, leaseExpiresAt: { type: "string", format: "date-time" }, claimedAt: { type: "string", format: "date-time" } },
+    },
+  },
+};
+
+const witnessInventoryStateSchema = {
+  type: "string",
+  enum: ["pending", "retrying", "failed", "published", "superseded"],
+};
+
+const witnessInventorySchema = {
+  type: "object",
+  required: ["member", "stack", "truncated"],
+  additionalProperties: false,
+  properties: {
+    member: {
+      type: "array",
+      maxItems: 500,
+      items: {
+        type: "object",
+        required: ["kind", "id", "slug", "revision", "state", "retryCount", "revisionUrl", "claimUrl", "retryUrl", "priorAccountAvailable", "updatedAt"],
+        additionalProperties: false,
+        properties: {
+          kind: { type: "string", enum: ["member"] },
+          id: { type: "string", pattern: WTR_ID_RE.source },
+          slug: { type: "string", pattern: SLUG_RE.source },
+          revision: { type: "integer", minimum: 1 },
+          state: witnessInventoryStateSchema,
+          retryCount: { type: "integer", minimum: 0 },
+          revisionUrl: { type: "string", format: "uri" },
+          claimUrl: { type: ["string", "null"] },
+          retryUrl: { type: ["string", "null"] },
+          priorAccountAvailable: { type: "boolean" },
+          updatedAt: { type: "string", format: "date-time" },
+        },
+      },
+    },
+    stack: {
+      type: "array",
+      maxItems: 500,
+      items: {
+        type: "object",
+        required: ["kind", "id", "slug", "manifest", "state", "retryCount", "manifestUrl", "claimUrl", "retryUrl", "updatedAt"],
+        additionalProperties: false,
+        properties: {
+          kind: { type: "string", enum: ["stack"] },
+          id: { type: "string", pattern: RSW_ID_RE.source },
+          slug: { type: "string", pattern: SLUG_RE.source },
+          manifest: { type: "integer", minimum: 1 },
+          state: witnessInventoryStateSchema,
+          retryCount: { type: "integer", minimum: 0 },
+          manifestUrl: { type: "string", format: "uri" },
+          claimUrl: { type: ["string", "null"] },
+          retryUrl: { type: ["string", "null"] },
+          updatedAt: { type: "string", format: "date-time" },
+        },
+      },
+    },
+    truncated: {
+      type: "object",
+      required: ["member", "stack"],
+      additionalProperties: false,
+      properties: {
+        member: { type: "integer", minimum: 0 },
+        stack: { type: "integer", minimum: 0 },
+      },
+    },
+  },
+};
+
+const legacySuccessionMemberSchema = {
+  type: "object",
+  required: ["position", "repo", "pullRequest", "lineageSlug", "state", "lineageUrl", "captureJobUrl", "captureFailure", "revisionUrl", "witness", "accountUrl"],
+  additionalProperties: false,
+  properties: {
+    position: { type: "integer", minimum: 1 },
+    repo: { type: "string" },
+    pullRequest: { type: "integer", minimum: 1 },
+    lineageSlug: { type: "string", pattern: SLUG_RE.source },
+    state: { type: "string", enum: ["lineage_pending", "capture_pending", "capturing", "capture_failed", "witness_pending", "witness_failed", "witness_retrying", "ready"] },
+    lineageUrl: { type: ["string", "null"] },
+    captureJobUrl: { type: ["string", "null"] },
+    captureFailure: { type: ["string", "null"] },
+    revisionUrl: { type: ["string", "null"] },
+    witness: { type: ["string", "null"], enum: ["pending", "retrying", "failed", "published", "superseded", null] },
+    accountUrl: { type: ["string", "null"] },
+  },
+};
+
+const legacySuccessionSchema = {
+  type: "object",
+  required: ["id", "workspace", "legacySlug", "kind", "targetSlug", "state", "attempts", "failure", "legacyUrl", "statusUrl", "retryUrl", "result", "projects", "members", "createdAt", "updatedAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: LSC_ID_RE.source },
+    workspace: { type: "string" },
+    legacySlug: { type: "string", pattern: SLUG_RE.source },
+    kind: { type: "string", enum: ["single", "stack"] },
+    targetSlug: { type: "string", pattern: SLUG_RE.source },
+    state: { type: "string", enum: ["pending", "running", "failed", "completed"] },
+    attempts: { type: "integer", minimum: 0, description: "Worker runs that retained progress, failed, or completed. Waiting-only sweeps do not increment it." },
+    failure: { type: ["string", "null"] },
+    legacyUrl: { type: "string", format: "uri" },
+    statusUrl: { type: "string", format: "uri" },
+    retryUrl: { type: ["string", "null"] },
+    result: {
+      type: "object",
+      required: ["url", "pinnedUrl", "lineageId", "stackId"],
+      additionalProperties: false,
+      properties: {
+        url: { type: ["string", "null"], format: "uri", description: "Null until the exact successor lineage or stack exists." },
+        pinnedUrl: { type: ["string", "null"] },
+        lineageId: { type: ["string", "null"] },
+        stackId: { type: ["string", "null"] },
+      },
+    },
+    projects: { type: "array", maxItems: 16, items: { type: "string", pattern: SLUG_RE.source } },
+    members: { type: "array", minItems: 1, maxItems: 16, items: legacySuccessionMemberSchema },
+    createdAt: { type: "string", format: "date-time" },
+    updatedAt: { type: "string", format: "date-time" },
+  },
+};
+
+const legacySuccessorLinkSchema = {
+  oneOf: [
+    { type: "null" },
+    {
+      type: "object",
+      required: ["state", "url", "statusUrl", "failure"],
+      additionalProperties: false,
+      properties: {
+        state: { type: "string", enum: ["pending", "running", "failed", "completed"] },
+        url: { type: ["string", "null"], format: "uri", description: "Null until the exact successor exists." },
+        statusUrl: { type: "string", format: "uri" },
+        failure: { type: ["string", "null"] },
+      },
+    },
+  ],
+};
+
+const legacyReviewReadSchema = {
+  type: "object",
+  required: ["document", "version", "latestVersion", "successor"],
+  properties: {
+    document: { type: "object" },
+    version: { type: "integer" },
+    latestVersion: { type: "integer" },
+    successor: legacySuccessorLinkSchema,
+  },
+  additionalProperties: true,
+};
+
+const legacyRetirementResponse = {
+  description: "A flat-namespace collision, or the immutable creation routes for a retired new legacy slug.",
+  content: {
+    "application/json": {
+      schema: {
+        anyOf: [
+          {
+            type: "object",
+            required: ["error", "rule"],
+            properties: { error: { type: "string" }, rule: { type: "string" } },
+          },
+          {
+            type: "object",
+            required: ["error", "rule", "pullRequestCreateUrl", "captureCreateUrl", "stackCreateUrl"],
+            additionalProperties: false,
+            properties: {
+              error: { type: "string" },
+              rule: { type: "string", enum: ["legacy_creation_retired"] },
+              pullRequestCreateUrl: { type: "string", format: "uri" },
+              captureCreateUrl: { type: "string", format: "uri" },
+              stackCreateUrl: { type: "string", format: "uri" },
+            },
+          },
+        ],
+      },
     },
   },
 };
@@ -2889,6 +3084,29 @@ export const API_ROUTES: readonly ApiRoute[] = [
     },
   }),
 
+  route("/api/witness-requests", {
+    GET: {
+      doc: {
+        operationId: "listWitnessRequests",
+        summary: "Recover exact hosted witness work",
+        description:
+          "Bounded diagnostic inventory when a caller lost the revision or stack response that normally " +
+          "carries the exact claim URL. Lists pending, retrying, and failed member and stack requests in " +
+          "the key's workspace, oldest first and capped at 500 per kind. `?state=all` includes published " +
+          "and superseded history. Inventory never claims or renews work; claim routes still arbitrate the " +
+          "exact request and retry-count attempt.",
+        security: "key",
+        parameters: [{ name: "state", in: "query", required: false, schema: { type: "string", enum: ["all"] } }],
+        responses: {
+          "200": { description: "The bounded exact work inventory.", content: { "application/json": { schema: witnessInventorySchema } } },
+          "400": errorResponse,
+          "401": errorResponse,
+        },
+      },
+      run: (req) => handleListWitnessRequests(req),
+    },
+  }),
+
   route("/api/review-witness-requests/:id/claim", {
     POST: {
       doc: {
@@ -2967,7 +3185,8 @@ export const API_ROUTES: readonly ApiRoute[] = [
           "must review a live same-repository pull request and have a completed revision; a fork, fan, " +
           "cycle, break, duplicate, cross-repository member, or more than 16 is a 422 naming the member. " +
           "Manifest 1 is published in one transaction with the stack; a witness request is opened only " +
-          "once every member already carries an account on its pinned revision. `Idempotency-Key` replays.",
+          "once every member already carries an account on its pinned revision. ReviewDoc, lineage, and " +
+          "stack slugs share one flat workspace namespace despite their separate routes. `Idempotency-Key` replays.",
         security: "key",
         parameters: [idempotencyKeyParam],
         requestBody: {
@@ -3213,14 +3432,13 @@ export const API_ROUTES: readonly ApiRoute[] = [
     POST: {
       doc: {
         operationId: "publishReview",
-        summary: "Publish a review of one or more pull requests",
+        summary: "Republish an existing legacy review",
         description:
-          "The payload names pull requests and supplies judgment; Overseer derives every " +
-          "fact — files, hunks, line numbers, SHAs — from GitHub itself and refuses a claim " +
-          "that does not stand on them. Send JSON, or multipart/form-data with a `document` " +
-          "part plus one part per attachment. Republishing the same slug keeps the URL and " +
-          "shows what moved. The document format is long and is specified in full at " +
-          `${config.baseUrl}/overseer/skill.md — author against that, not against this summary.`,
+          "New ReviewDoc creation is retired. If this workspace already holds the slug in the legacy " +
+          "reviews table, the complete shipped JSON or multipart republish contract remains available " +
+          "and appends its next immutable legacy version. A new slug returns rule `legacy_creation_retired` " +
+          "before any GitHub or blob-store call and points to the immutable lineage and stack APIs. " +
+          `The explicit legacy appendix is at ${config.baseUrl}/overseer/skill.md.`,
         security: "key",
         requestBody: {
           required: true,
@@ -3277,12 +3495,123 @@ export const API_ROUTES: readonly ApiRoute[] = [
           },
           "400": errorResponse,
           "401": errorResponse,
+          "409": legacyRetirementResponse,
           "413": errorResponse,
           "422": errorResponse,
           "502": errorResponse,
         },
       },
       run: (req) => handlePublishReview(req),
+    },
+  }),
+
+  route("/api/reviews/:slug/successor", {
+    POST: {
+      doc: {
+        operationId: "createLegacyReviewSuccessor",
+        summary: "Choose one permanent immutable successor for a legacy review",
+        description:
+          "Re-reads the latest stored ReviewDoc and requires the authored kind and exact bottom-to-top " +
+          "parent chain to match. A single creates or adopts one lineage. A valid stack creates or adopts one " +
+          "lineage per pull request and publishes a stack only after every exact member revision has an " +
+          "account. An unrelated set returns `unsupported_source` and writes nothing. If a slug race leaves " +
+          "a failed workflow with no result, only its exact creator key may amend unresolved target or member " +
+          "slugs; retained PRs, Projects, and resolved slugs stay fixed. The legacy review, versions, " +
+          "annotations, reads, shares, attachments, and routes remain where they are.",
+        security: "key",
+        parameters: [slugParam, idempotencyKeyParam],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: {
+            oneOf: [
+              {
+                title: "Single legacy review",
+                type: "object",
+                required: ["kind", "lineageSlug"],
+                additionalProperties: false,
+                properties: {
+                  kind: { type: "string", enum: ["single"] },
+                  lineageSlug: { type: "string", pattern: SLUG_RE.source },
+                  projects: { type: "array", maxItems: 16, items: { type: "string", pattern: SLUG_RE.source } },
+                },
+              },
+              {
+                title: "Legacy stack",
+                type: "object",
+                required: ["kind", "stackSlug", "members"],
+                additionalProperties: false,
+                properties: {
+                  kind: { type: "string", enum: ["stack"] },
+                  stackSlug: { type: "string", pattern: SLUG_RE.source },
+                  members: {
+                    type: "array",
+                    minItems: 2,
+                    maxItems: 16,
+                    items: { type: "object", required: ["pr", "lineageSlug"], additionalProperties: false, properties: { pr: { type: "integer", minimum: 1 }, lineageSlug: { type: "string", pattern: SLUG_RE.source } } },
+                    description: "Every stored legacy pull request in bottom-to-top order derived from its parent links."
+                  },
+                  projects: { type: "array", maxItems: 16, items: { type: "string", pattern: SLUG_RE.source } },
+                },
+              },
+              {
+                title: "Unrelated legacy set",
+                type: "object",
+                required: ["kind"],
+                additionalProperties: false,
+                properties: { kind: { type: "string", enum: ["set"] } },
+              },
+            ],
+          } } },
+        },
+        responses: {
+          "200": { description: "An exact replay of a completed succession.", content: { "application/json": { schema: legacySuccessionSchema } } },
+          "202": { description: "The durable succession and its current exact progress.", content: { "application/json": { schema: legacySuccessionSchema } } },
+          "400": errorResponse,
+          "401": errorResponse,
+          "403": errorResponse,
+          "404": reviewNotFound,
+          "409": {
+            description: "A refusal body, or the exact failed workflow on an identical replay.",
+            content: { "application/json": { schema: { oneOf: [legacySuccessionSchema, { type: "object", required: ["error", "rule"], properties: { error: { type: "string" }, rule: { type: "string" } } }] } } },
+          },
+          "422": errorResponse,
+          "502": errorResponse,
+        },
+      },
+      run: (req) => handleCreateLegacySuccessor(req, req.params.slug),
+    },
+  }),
+
+  route("/api/review-legacy-successions/:id", {
+    GET: {
+      doc: {
+        operationId: "readLegacyReviewSuccession",
+        summary: "Read one legacy successor workflow",
+        security: "keyOrSession",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: LSC_ID_RE.source } }],
+        responses: {
+          "200": { description: "Current durable progress and exact result URLs.", content: { "application/json": { schema: legacySuccessionSchema } } },
+          "404": reviewNotFound,
+        },
+      },
+      run: (req) => handleReadLegacySuccession(req, req.params.id),
+    },
+  }),
+
+  route("/api/review-legacy-successions/:id/retry", {
+    POST: {
+      doc: {
+        operationId: "retryLegacyReviewSuccession",
+        summary: "Retry a legacy successor through its creator",
+        description: "Only the exact API key that created the succession may retry it. Failed child captures are explicitly requeued through their stored actors; no personal credential is selected from the workspace.",
+        security: "key",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: LSC_ID_RE.source } }],
+        responses: {
+          "202": { description: "The requeued succession.", content: { "application/json": { schema: legacySuccessionSchema } } },
+          "401": errorResponse, "403": errorResponse, "404": reviewNotFound, "409": errorResponse,
+        },
+      },
+      run: (req) => handleRetryLegacySuccession(req, req.params.id),
     },
   }),
 
@@ -3298,19 +3627,10 @@ export const API_ROUTES: readonly ApiRoute[] = [
         responses: {
           "200": {
             description:
-              "The stored document, plus the annotations and freshness that move on their own.",
+              "The stored document, annotations, freshness, and permanent immutable successor state.",
             content: {
               "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["document", "version", "latestVersion"],
-                  properties: {
-                    document: { type: "object" },
-                    version: { type: "integer" },
-                    latestVersion: { type: "integer" },
-                  },
-                  additionalProperties: true,
-                },
+                schema: legacyReviewReadSchema,
               },
             },
           },
@@ -3333,19 +3653,10 @@ export const API_ROUTES: readonly ApiRoute[] = [
         ],
         responses: {
           "200": {
-            description: "That version.",
+            description: "That version and the legacy review's permanent immutable successor state.",
             content: {
               "application/json": {
-                schema: {
-                  type: "object",
-                  required: ["document", "version", "latestVersion"],
-                  properties: {
-                    document: { type: "object" },
-                    version: { type: "integer" },
-                    latestVersion: { type: "integer" },
-                  },
-                  additionalProperties: true,
-                },
+                schema: legacyReviewReadSchema,
               },
             },
           },
