@@ -19,6 +19,7 @@ import { SLUG_RE } from "../ids";
 import { render as renderMarkdown } from "../overseer/markdown";
 import type { ProjectedGithubReview, ProjectedGithubThread, ProjectedLocalThread } from "../overseer/conversation-types";
 import type { ProjectedActor } from "../overseer/actor-projection";
+import type { AcknowledgementView, JudgmentView } from "../overseer/judgments-db";
 import { codeHtml, langOfPath, stats } from "../overseer/render-diff";
 import type { Hunk, HunkLine } from "../overseer/types";
 import { appBar, softNotFoundPage, type NavContext } from "../pages";
@@ -245,11 +246,35 @@ export interface ReaderScope {
   hidden: Record<string, string>;
 }
 
+export interface ReaderJudgmentBlocker {
+  itemId: string;
+  itemType: "material" | "file";
+  label: string;
+  href: string;
+  blocked: boolean;
+}
+
+export interface ReaderHandling {
+  readIds: Set<string>;
+  requiredAcknowledgementIds: Set<string>;
+  acknowledgements: Map<string, AcknowledgementView>;
+  acknowledgementAction?: (item: ReaderMember) => string;
+  returnTo: string;
+  judgment: {
+    mine: JudgmentView | null;
+    others: JudgmentView[];
+    items: ReaderJudgmentBlocker[];
+    action: string | null;
+    error: string | null;
+    facts: { unread: number; openThreads: number };
+  } | null;
+}
+
 export type ReaderAccess =
   | {
       kind: "member";
       nav: NavContext;
-      handling: { readIds: Set<string> };
+      handling: ReaderHandling;
       share?: { workspace: string; kind: "review_document" | "stack_document"; target: string };
     }
   | { kind: "capability"; nav: null; handling: null; basePath: string };
@@ -284,6 +309,7 @@ interface GroupSummary {
   group: ReaderGroup;
   index: number;
   changeIds: string[];
+  acknowledgementIds: string[];
   read: number;
 }
 
@@ -404,6 +430,13 @@ function readForm(routes: ReaderRoutes, groupId: string, changeId: string, read:
   return `<form class="read-form ${placement}" method="post" action="${esc(routes.read(changeId))}"><input data-read-input type="hidden" name="read" value="${read ? "false" : "true"}">${back === null ? "" : `<input type="hidden" name="return" value="${esc(back)}">`}<span data-read-failure role="status" aria-live="polite"></span><button data-read-button type="submit">${read ? "Mark unread" : "Mark read"}</button></form>`;
 }
 
+function acknowledgementForm(member: ReaderMember, handling: ReaderHandling | null): string {
+  if (!handling?.acknowledgementAction || member.type === "change") return "";
+  const held = handling.acknowledgements.get(member.id);
+  const carried = held?.provenance.kind === "carried" ? ` · from rev ${held.provenance.sourceRevision}` : "";
+  return `<div data-acknowledgement-host="${esc(member.id)}"><form class="acknowledgement-form" method="post" action="${esc(handling.acknowledgementAction(member))}" data-acknowledgement-item="${esc(member.id)}"><input type="hidden" name="acknowledged" value="${held ? "false" : "true"}"><input type="hidden" name="return" value="${esc(handling.returnTo)}"><span class="acknowledgement-state">${held ? `Acknowledged${carried}` : "Needs acknowledgement"}</span><span role="status" aria-live="polite"></span><button type="submit">${held ? "Undo" : "Acknowledge"}</button></form></div>`;
+}
+
 function contextControl(routes: ReaderRoutes, view: ChangeView): string {
   const { file, item } = view;
   const useNew = file.new_availability === "retained" && file.new_kind === "blob" && item.hunk.newLines > 0;
@@ -461,12 +494,19 @@ function fileFacts(file: StageCaptureFileRow): string {
 function summarizeGroups(groups: ReaderGroup[], readIds: Set<string>): GroupSummary[] {
   return groups.map((group, index) => {
     const changeIds = group.members.filter((member) => member.type === "change").map((member) => member.id);
-    return { group, index, changeIds, read: changeIds.filter((id) => readIds.has(id)).length };
+    const acknowledgementIds = group.members.filter((member) => member.type !== "change").map((member) => member.id);
+    return { group, index, changeIds, acknowledgementIds, read: changeIds.filter((id) => readIds.has(id)).length };
   });
 }
 
 function summaryOf(view: GroupView): GroupSummary {
-  return { group: view.group, index: view.index, changeIds: view.changes.map((change) => change.item.change.id), read: view.read };
+  return {
+    group: view.group,
+    index: view.index,
+    changeIds: view.changes.map((change) => change.item.change.id),
+    acknowledgementIds: [...view.materials.map((entry) => entry.member.id), ...view.leafFiles.map((entry) => entry.member.id)],
+    read: view.read,
+  };
 }
 
 function buildGroupViews(
@@ -628,9 +668,9 @@ function focusTreeHtml(
   return folders + files;
 }
 
-function extraMaterialHtml(view: GroupView, focus = false): string {
-  const materials = view.materials.map(({ member, material }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary><span>${esc(material.path ?? material.kind.replaceAll("_", " "))}</span><span>${esc(`${material.side} · ${material.kind.replaceAll("_", " ")}`)}</span></summary><div>${member.description === null ? "" : `<p>${esc(member.description)}</p>`}<p>${esc(material.reason)}</p></div></details>`).join("");
-  const files = view.leafFiles.map(({ member, file }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary><span>${esc(file.old_path ? `${file.old_path} → ${file.path}` : file.path)}</span><span>${esc(file.status)}</span></summary><div>${member.description === null ? "" : `<p>${esc(member.description)}</p>`}${fileFacts(file)}</div></details>`).join("");
+function extraMaterialHtml(view: GroupView, focus = false, handling: ReaderHandling | null = null): string {
+  const materials = view.materials.map(({ member, material }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary><span>${esc(material.path ?? material.kind.replaceAll("_", " "))}</span><span>${esc(`${material.side} · ${material.kind.replaceAll("_", " ")}`)}</span></summary><div>${member.description === null ? "" : `<p>${esc(member.description)}</p>`}<p>${esc(material.reason)}</p>${acknowledgementForm(member, handling)}</div></details>`).join("");
+  const files = view.leafFiles.map(({ member, file }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary><span>${esc(file.old_path ? `${file.old_path} → ${file.path}` : file.path)}</span><span>${esc(file.status)}</span></summary><div>${member.description === null ? "" : `<p>${esc(member.description)}</p>`}${fileFacts(file)}${acknowledgementForm(member, handling)}</div></details>`).join("");
   if (!materials && !files) return "";
   return `<div class="group-materials">${materials}${files}</div>`;
 }
@@ -665,15 +705,19 @@ function groupConversation(doc: ReaderDoc, groupId: string): string {
   return threads.length || create ? `<div class="group-conversation">${threads.map((thread) => localThreadHtml(thread, conversation)).join("")}${create}</div>` : "";
 }
 
-function groupCard(view: GroupView, readIds: Set<string>, routes: ReaderRoutes, doc: ReaderDoc): string {
+function groupCard(view: GroupView, readIds: Set<string>, routes: ReaderRoutes, doc: ReaderDoc, handling: ReaderHandling | null): string {
   const tree = stageTree(view.treeFiles);
   const total = view.changes.length;
+  const acknowledgementIds = [...view.materials.map((entry) => entry.member.id), ...view.leafFiles.map((entry) => entry.member.id)]
+    .filter((id) => handling?.requiredAcknowledgementIds.has(id));
+  const handled = view.read + acknowledgementIds.filter((id) => handling?.acknowledgements.has(id)).length;
+  const handlingTotal = total + acknowledgementIds.length;
   const reviewLabel = total === 0 ? "Review material" : `Review ${total} change${total === 1 ? "" : "s"}`;
   const points = view.changes.slice(0, 3);
-  return `<section class="review-group-card" id="group-${esc(view.group.id)}" data-group="${esc(view.group.id)}"${categoryAttr(view.group)}${seamAttr(view.group)} data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}"><header class="group-head"><div class="group-sequence"><i aria-hidden="true"></i><span>${esc(groupSequence(view))}</span></div><h2>${esc(view.group.title)}</h2>${dimensions(view.group, undefined, "in-group")}</header>${view.group.explanation === null ? "" : accountCopy(view.group.explanation, "group-copy")}${groupConversation(doc, view.group.id)}${view.group.attention ? `<p class="group-attention">${esc(view.group.attention)}</p>` : ""}${points.length === 0 ? "" : `<ol class="group-points">${points.map((change) => {
+  return `<section class="review-group-card" id="group-${esc(view.group.id)}" data-group="${esc(view.group.id)}"${categoryAttr(view.group)}${seamAttr(view.group)} data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}" data-acknowledgement-ids="${acknowledgementIds.join(",")}"><header class="group-head"><div class="group-sequence"><i aria-hidden="true"></i><span>${esc(groupSequence(view))}</span></div><h2>${esc(view.group.title)}</h2>${dimensions(view.group, undefined, "in-group")}</header>${view.group.explanation === null ? "" : accountCopy(view.group.explanation, "group-copy")}${groupConversation(doc, view.group.id)}${view.group.attention ? `<p class="group-attention">${esc(view.group.attention)}</p>` : ""}${points.length === 0 ? "" : `<ol class="group-points">${points.map((change) => {
     const line = change.item.hunk.newLines > 0 ? change.item.hunk.newStart : change.item.hunk.oldStart;
     return `<li><span>${String(change.ordinal).padStart(2, "0")}</span><code>${esc(change.file.path)}:L${line}</code>${change.member.description === null ? "" : `<p>${esc(exactExcerpt(change.member.description, 160).text)}</p>`}</li>`;
-  }).join("")}${view.changes.length > points.length ? `<li class="remaining"><span>+</span><code></code><p>${view.changes.length - points.length} more in review</p></li>` : ""}</ol>`}${view.group.examples.length === 0 ? "" : `<ul class="group-examples">${view.group.examples.map((example) => `<li><code>${esc(example.code)}</code><span>${esc(example.text)}</span></li>`).join("")}</ul>`}<div class="group-preview"><div class="group-preview-files">${overviewTreeHtml(tree, view, readIds, routes)}</div>${extraMaterialHtml(view)}<footer>${routes.read ? `<span data-group-progress>${view.read} / ${total} read</span>` : ""}<a class="review-group-action" data-focus-link data-review="${esc(view.group.id)}" href="${routes.group(view.group.id)}">${reviewLabel}<span aria-hidden="true">→</span></a></footer></div></section>`;
+  }).join("")}${view.changes.length > points.length ? `<li class="remaining"><span>+</span><code></code><p>${view.changes.length - points.length} more in review</p></li>` : ""}</ol>`}${view.group.examples.length === 0 ? "" : `<ul class="group-examples">${view.group.examples.map((example) => `<li><code>${esc(example.code)}</code><span>${esc(example.text)}</span></li>`).join("")}</ul>`}<div class="group-preview"><div class="group-preview-files">${overviewTreeHtml(tree, view, readIds, routes)}</div>${extraMaterialHtml(view, false, handling)}<footer>${routes.read ? `<span data-group-progress>${handled} / ${handlingTotal} handled</span>` : ""}<a class="review-group-action" data-focus-link data-review="${esc(view.group.id)}" href="${routes.group(view.group.id)}">${reviewLabel}<span aria-hidden="true">→</span></a></footer></div></section>`;
 }
 
 function categorySummary(views: GroupView[]): string {
@@ -911,11 +955,56 @@ function changeConversation(doc: ReaderDoc, change: ChangeView, homes: ReturnTyp
   return `<div class="ledger-conversation">${local.map((thread) => localThreadHtml(thread, conversation)).join("")}${imported.map(githubThreadHtml).join("")}${newThreadForm(conversation, anchor)}${range}</div>`;
 }
 
+function verdictWords(verdict: JudgmentView["verdict"]): string {
+  return verdict === "approved" ? "Approved" : "Changes requested";
+}
+
+function judgmentRow(view: JudgmentView): string {
+  const comment = view.comment === "" ? "" : `<div class="judgment-comment markdown">${markdown(view.comment)}</div>`;
+  return `<article class="judgment-row" data-verdict="${esc(view.verdict)}"><p><span>${esc(actorName(view.by))}</span><span>${esc(verdictWords(view.verdict))}</span><time datetime="${esc(view.judgedAt)}">${esc(agoWords(Date.now() - Date.parse(view.judgedAt)))}</time></p>${comment}</article>`;
+}
+
+function judgmentSection(handling: ReaderHandling | null, doc: ReaderDoc): string {
+  const state = handling?.judgment;
+  if (!state) return "";
+  const scopeState = driftLine(doc.drift) || (doc.latest ? "" : `<p class="judgment-facts">Earlier ${esc(doc.standing.toLowerCase())}</p>`);
+  const blocked = state.items.filter((item) => item.blocked).length;
+  const blockers = state.items.length === 0 ? "" : `<ul class="judgment-blockers"${blocked === 0 ? " hidden" : ""}>${state.items.map((item) => `<li data-judgment-blocker="${esc(item.itemId)}"${item.blocked ? "" : " hidden"}><a href="${esc(item.href)}">${esc(item.label)}</a></li>`).join("")}</ul>`;
+  const facts = `<p class="judgment-facts">${state.facts.unread} unread · ${state.facts.openThreads} open thread${state.facts.openThreads === 1 ? "" : "s"}</p>`;
+  const error = state.error ? `<p class="judgment-error" role="alert">${esc(state.error)}</p>` : "";
+  const disabled = blocked === 0 ? "" : " disabled";
+  const form = state.mine || !state.action ? "" : `<form class="judgment-form" method="post" action="${esc(state.action)}"><input type="hidden" name="return" value="${esc(handling.returnTo)}"><label>Comment<textarea name="comment" maxlength="1200"></textarea></label><span role="status" aria-live="polite"></span><div><button type="submit" name="verdict" value="approved"${disabled}>Approve this version</button><button type="submit" name="verdict" value="changes_requested"${disabled}>Request changes</button></div></form>`;
+  const history = [
+    ...(state.mine ? [judgmentRow(state.mine)] : []),
+    ...state.others.map(judgmentRow),
+  ].join("");
+  return `<section class="judgment" aria-label="Judgment"><h2>Judgment</h2>${scopeState}${blockers}${facts}${error}${form}${history}</section>`;
+}
+
+function handledProgress(
+  changeIds: string[],
+  acknowledgementIds: string[],
+  read: number,
+  handling: ReaderHandling,
+): { handled: number; total: number } {
+  const required = acknowledgementIds.filter((id) => handling.requiredAcknowledgementIds.has(id));
+  return {
+    handled: read + required.filter((id) => handling.acknowledgements.has(id)).length,
+    total: changeIds.length + required.length,
+  };
+}
+
 /** The pin is said once, in the header; the rail carries only the progress. */
-function groupNavigation(views: GroupView[], totalRead: number, total: number, handling: boolean): string {
-  const progress = total === 0 ? 100 : Math.round(totalRead / total * 100);
-  const head = handling ? `<div class="review-nav-head"><strong data-progress>${totalRead} / ${total} read</strong><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div>` : "";
-  return `${head}<nav class="group-links" aria-label="Walkthrough groups">${views.map((view) => `<a href="#group-${esc(view.group.id)}"${categoryAttr(view.group)}><i aria-hidden="true"></i><span><small>${esc(groupSequence(view))}</small><strong>${esc(view.group.title)}</strong></span>${handling ? `<em data-group-nav-progress data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}">${view.read}/${view.changes.length}</em>` : ""}</a>`).join("")}</nav>`;
+function groupNavigation(views: GroupView[], handled: number, total: number, handling: ReaderHandling | null): string {
+  const progress = total === 0 ? 100 : Math.round(handled / total * 100);
+  const head = handling ? `<div class="review-nav-head"><strong data-progress>${handled} / ${total} handled</strong><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div>` : "";
+  return `${head}<nav class="group-links" aria-label="Walkthrough groups">${views.map((view) => {
+    const changeIds = view.changes.map((change) => change.item.change.id);
+    const acknowledgementIds = [...view.materials.map((entry) => entry.member.id), ...view.leafFiles.map((entry) => entry.member.id)]
+      .filter((id) => handling?.requiredAcknowledgementIds.has(id));
+    const state = handling ? handledProgress(changeIds, acknowledgementIds, view.read, handling) : null;
+    return `<a href="#group-${esc(view.group.id)}"${categoryAttr(view.group)}><i aria-hidden="true"></i><span><small>${esc(groupSequence(view))}</small><strong>${esc(view.group.title)}</strong></span>${state ? `<em data-group-nav-progress data-change-ids="${changeIds.join(",")}" data-acknowledgement-ids="${acknowledgementIds.join(",")}">${state.handled}/${state.total}</em>` : ""}</a>`;
+  }).join("")}</nav>`;
 }
 
 function hunkReview(view: GroupView, change: ChangeView, readIds: Set<string>, routes: ReaderRoutes): string {
@@ -1011,6 +1100,7 @@ function focusDialog(
   activeChange: string | null,
   options: RenderReaderOptions = {},
   allChanges: StageCaptureChangeRow[] = [],
+  handling: ReaderHandling | null = null,
 ): string {
   const scopeAttrs = ` data-layer="${esc(options.scope?.current ?? "")}" data-page="${options.page ? options.page.number : ""}"`;
   if (!selected) return `<dialog class="focus-dialog" data-focus-dialog${scopeAttrs} aria-label="Group review"></dialog>`;
@@ -1043,7 +1133,11 @@ function focusDialog(
     close();
     return sections.join("");
   };
-  const groupLinks = views.map((view) => `<a class="focus-group-link${view.group.id === selected.group.id ? " is-active" : ""}" data-focus-group-link data-review="${esc(view.group.id)}"${categoryAttr(view.group)} href="${routes.group(view.group.id)}"><i aria-hidden="true"></i><span><small>${esc(groupSequence(view))}</small><strong>${esc(view.group.title)}</strong></span>${routes.read ? `<em data-group-nav-progress data-change-ids="${view.changeIds.join(",")}">${view.read}/${view.changeIds.length}</em>` : ""}</a>`).join("");
+  const groupLinks = views.map((view) => {
+    const acknowledgementIds = view.acknowledgementIds.filter((id) => handling?.requiredAcknowledgementIds.has(id));
+    const state = handling ? handledProgress(view.changeIds, acknowledgementIds, view.read, handling) : null;
+    return `<a class="focus-group-link${view.group.id === selected.group.id ? " is-active" : ""}" data-focus-group-link data-review="${esc(view.group.id)}"${categoryAttr(view.group)} href="${routes.group(view.group.id)}"><i aria-hidden="true"></i><span><small>${esc(groupSequence(view))}</small><strong>${esc(view.group.title)}</strong></span>${routes.read && state ? `<em data-group-nav-progress data-change-ids="${view.changeIds.join(",")}" data-acknowledgement-ids="${acknowledgementIds.join(",")}">${state.handled}/${state.total}</em>` : ""}</a>`;
+  }).join("");
   const headTitle = selected.group.category === null
     ? `${doc.title} · ${String(selected.index + 1).padStart(2, "0")}`
     : `${doc.title} · ${groupSequence(selected)}`;
@@ -1061,12 +1155,12 @@ function focusDialog(
     const leafFiles = selected.leafFiles.filter((entry) => rankOf(entry.member) === rank);
     const fileEntries = streamFiles({ ...selected, changes }, options.seamOf)
       .map(({ file, changes: fileChanges }) => ({ id: file.id, html: fileReview(selected, file, fileChanges, readIds, routes) }));
-    const materialHtml = extraMaterialHtml({ ...selected, changes, materials, leafFiles }, true);
+    const materialHtml = extraMaterialHtml({ ...selected, changes, materials, leafFiles }, true, handling);
     return materialHtml === ""
       ? fileEntries
       : [...fileEntries, { id: materials[0]?.member.id ?? leafFiles[0]!.member.id, html: materialHtml }];
   });
-  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}"${scopeAttrs} data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="${esc(options.brandPath ?? "/bundles")}">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong>${subtitle}</div><div class="focus-head-actions"><span${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span>${doc.pullRequest ? pullRequestLink(doc.pullRequest) : ""}${pageControls(options.page, "header")}<button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream${seams ? " data-seams" : ""}><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}${scopeControl(options.scope)}</div>${diffStat(selected.added, selected.removed)}</header>${layered(streamEntries)}</main><aside class="focus-right" aria-label="Review details"><header>${routes.read ? `<button type="button" data-filter-unread aria-pressed="false">Unread</button>` : ""}<button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${ledgerHead}${focusPullRequest(doc.pullRequest)}${focusLedger(selected, readIds, routes, doc, allChanges)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
+  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}"${scopeAttrs} data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="${esc(options.brandPath ?? "/bundles")}">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong>${subtitle}</div><div class="focus-head-actions"><span${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span>${doc.pullRequest ? pullRequestLink(doc.pullRequest) : ""}${pageControls(options.page, "header")}<button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream${seams ? " data-seams" : ""}><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}${scopeControl(options.scope)}</div>${diffStat(selected.added, selected.removed)}</header>${layered(streamEntries)}</main><aside class="focus-right" aria-label="Review details"><header>${routes.read ? `<button type="button" data-filter-unread aria-pressed="false">Unread</button>` : ""}<button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${ledgerHead}${focusPullRequest(doc.pullRequest)}<div data-judgment-host="focus">${judgmentSection(handling, doc)}</div>${focusLedger(selected, readIds, routes, doc, allChanges)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
 }
 
 function shareControl(access: ReaderAccess): string {
@@ -1123,8 +1217,9 @@ export async function renderReaderPage(
   options: RenderReaderOptions = {},
 ): Promise<Response> {
   const url = new URL(req.url);
-  const readIds = access.handling?.readIds ?? new Set<string>();
-  const handling = access.kind === "member";
+  const handling = access.handling;
+  const readIds = handling?.readIds ?? new Set<string>();
+  const hasHandling = handling !== null;
   const reviewId = url.searchParams.get("review");
   const requestedChange = url.searchParams.get("change");
   const selectedIndex = reviewId === null ? -1 : doc.groups.findIndex((group) => group.id === reviewId);
@@ -1148,6 +1243,18 @@ export async function renderReaderPage(
   const materialized = new Map(changes.map((item) => [item.change.id, item]));
   const allChangeIds = inventory.changes.map((change) => change.id);
   const readCount = allChangeIds.filter((id) => readIds.has(id)).length;
+  const inventoryItemIds = new Set([...inventory.incomplete.map((item) => item.id), ...inventory.files.map((file) => file.id)]);
+  const acknowledgementIds = handling
+    ? options.scope && options.scope.current !== null
+      ? [...handling.requiredAcknowledgementIds].filter((id) => inventoryItemIds.has(id))
+      : [...handling.requiredAcknowledgementIds]
+    : [];
+  const acknowledgedIds = handling ? [...handling.acknowledgements.keys()] : [];
+  const handledCount = readCount + acknowledgementIds.filter((id) => handling?.acknowledgements.has(id)).length;
+  const handlingTotal = allChangeIds.length + acknowledgementIds.length;
+  const bodyState = hasHandling
+    ? ` data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}" data-stage-acknowledgement-ids="${acknowledgementIds.join(",")}" data-stage-acknowledged-ids="${acknowledgedIds.join(",")}"`
+    : "";
 
   if (selectedGroup) {
     let selected: GroupView;
@@ -1158,8 +1265,7 @@ export async function renderReaderPage(
       return storageFailurePage(access, doc.title, 500);
     }
     const rail = summarizeGroups(doc.groups, readIds).map((summary) => summary.index === selectedIndex ? summaryOf(selected) : summary);
-    const bodyState = handling ? ` data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"` : "";
-    const focusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(selected.group.title)} · ${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}>${focusDialog(selected, rail, readIds, routes, doc, requestedChange, options, inventory.changes)}<script>${STAGE_CLIENT}</script></body></html>`;
+    const focusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(selected.group.title)} · ${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}>${focusDialog(selected, rail, readIds, routes, doc, requestedChange, options, inventory.changes, handling)}<script>${STAGE_CLIENT}</script></body></html>`;
     return html(focusPage);
   }
 
@@ -1170,17 +1276,16 @@ export async function renderReaderPage(
     console.error(`[seer] ${label} walkthrough is inconsistent:`, err);
     return storageFailurePage(access, doc.title, 500);
   }
-  const groupCards = views.map((view) => groupCard(view, readIds, routes, doc)).join("");
+  const groupCards = views.map((view) => groupCard(view, readIds, routes, doc, handling)).join("");
   const historyLinks = routes.history()
     .map((entry) => `<a href="${entry.href}"${entry.current ? ` aria-current="page"` : ""}>${esc(entry.label)}</a>`)
     .join(" · ");
-  const progress = allChangeIds.length === 0 ? 100 : Math.round(readCount / allChangeIds.length * 100);
+  const progress = handlingTotal === 0 ? 100 : Math.round(handledCount / handlingTotal * 100);
   const accounts = `${doc.builder ? accountCard("Builder", doc.builder) : ""}${doc.witness ? accountCard("Witness", doc.witness) : ""}`;
-  const bodyState = handling ? ` data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"` : "";
   const shell = access.kind === "member" ? appBar(access.nav) : `<a class="focus-brand" href="${esc(access.basePath)}">Seer</a>`;
-  const terminalState = handling ? `<div><h2 data-unread-summary>${readCount === allChangeIds.length ? "Read" : `${allChangeIds.length - readCount} unread`}</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div>` : "";
-  const mobileState = handling ? `<span data-progress>${readCount} / ${allChangeIds.length} read</span>` : "";
-  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}><div data-stage-background><div class="stage-shell">${shell}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${options.aside ?? ""}${focusSection(doc, views, routes)}${evidenceSection(doc)}${discussionSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, readCount, allChangeIds.length, handling)}</aside><main class="walkthrough">${groupCards}<footer class="terminal">${terminalState}<p>${inventory.files.length} file${inventory.files.length === 1 ? "" : "s"}</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section>${shareControl(access)}</aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button>${mobileState}</nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, [], readIds, routes, doc, null, options, inventory.changes)}<script>${STAGE_CLIENT}${access.kind === "member" && access.share ? DOCUMENT_SHARE_CLIENT : ""}</script></body></html>`;
+  const terminalState = hasHandling ? `<div><h2 data-progress>${handledCount} / ${handlingTotal} handled</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div>` : "";
+  const mobileState = hasHandling ? `<span data-progress>${handledCount} / ${handlingTotal} handled</span>` : `<span></span>`;
+  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}><div data-stage-background><div class="stage-shell">${shell}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${options.aside ?? ""}${focusSection(doc, views, routes)}${evidenceSection(doc)}${discussionSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, handledCount, handlingTotal, handling)}</aside><main class="walkthrough">${groupCards}<footer class="terminal">${terminalState}<p>${inventory.files.length} file${inventory.files.length === 1 ? "" : "s"}</p></footer></main><aside class="source-rail" data-page-details data-open="false"><div class="mobile-detail-head"><button type="button" data-page-details-close>Close</button></div><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section>${shareControl(access)}<div data-judgment-host="overview">${judgmentSection(handling, doc)}</div></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button>${mobileState}<button type="button" data-page-details-open>Details</button></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close panel"></button></div>${focusDialog(null, [], readIds, routes, doc, null, options, inventory.changes, handling)}<script>${STAGE_CLIENT}${access.kind === "member" && access.share ? DOCUMENT_SHARE_CLIENT : ""}</script></body></html>`;
   return html(page);
 }
 
@@ -1280,7 +1385,17 @@ export async function handleStagePage(
 
   return renderReaderPage(
     req,
-    { kind: "member", nav, handling: { readIds: listStageReadChangeIds(workspaceId, version.id, user.id) } },
+    {
+      kind: "member",
+      nav,
+      handling: {
+        readIds: listStageReadChangeIds(workspaceId, version.id, user.id),
+        requiredAcknowledgementIds: new Set(),
+        acknowledgements: new Map(),
+        returnTo: new URL(req.url).pathname + new URL(req.url).search,
+        judgment: null,
+      },
+    },
     workspaceId,
     doc,
     stageRoutes(workspaceId, slug, versionNumber, stage.latest_version),

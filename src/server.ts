@@ -40,7 +40,7 @@ import {
   sessionUser,
   type SessionUser,
 } from "./auth";
-import { IMG_ID_RE, INV_ID_RE, SLUG_RE, WS_ID_RE } from "./ids";
+import { IMG_ID_RE, INV_ID_RE, SLUG_RE, STF_ID_RE, STI_ID_RE, WS_ID_RE } from "./ids";
 import {
   getShare,
   handleShareRequest,
@@ -91,6 +91,12 @@ import {
 import { latestCaptureJob, recoverCaptureJobs, startCaptureSweep } from "./overseer/revision-jobs";
 import { handleStackPage, handleStackReadMutation } from "./overseer/stack-render";
 import { handleCreateReviewThread, handleCreateStackThread, handleSessionThreadMutation } from "./overseer/thread-routes";
+import {
+  handleRevisionAcknowledgement,
+  handleRevisionJudgment,
+  handleStackAcknowledgement,
+  handleStackJudgment,
+} from "./overseer/judgment-routes";
 import { listLineages } from "./overseer/revision-db";
 import { getLineagePr, latestObservation, observationStateWord } from "./overseer/revision-pr";
 import {
@@ -153,6 +159,16 @@ const WS_REVIEW_RE = new RegExp(
 const WS_REVISION_READ_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/rev/([^/]+)/changes/([^/]+)/read/?$`,
 );
+const ACK_ITEM_SOURCE = `(?:${STI_ID_RE.source.replace(/^\^|\$$/g, "")}|${STF_ID_RE.source.replace(/^\^|\$$/g, "")})`;
+const WS_REVISION_ACK_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/rev/([^/]+)/items/(${ACK_ITEM_SOURCE})/acknowledge/?$`,
+);
+const WS_REVISION_ACK_MALFORMED_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/rev/([^/]+)/items/([^/]+)/acknowledge/?$`,
+);
+const WS_REVISION_JUDGMENT_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/rev/([^/]+)/judgment/?$`,
+);
 const WS_REVIEW_THREADS_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/(rev|v)/([^/]+)/threads/?$`,
 );
@@ -171,6 +187,15 @@ const WS_STACK_RE = new RegExp(
 );
 const WS_STACK_READ_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)/v/([^/]+)/m/([^/]+)/changes/([^/]+)/read/?$`,
+);
+const WS_STACK_ACK_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)/v/([^/]+)/members/([^/]+)/items/(${ACK_ITEM_SOURCE})/acknowledge/?$`,
+);
+const WS_STACK_ACK_MALFORMED_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)/v/([^/]+)/members/([^/]+)/items/([^/]+)/acknowledge/?$`,
+);
+const WS_STACK_JUDGMENT_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)/v/([^/]+)/judgment/?$`,
 );
 const WS_STACK_THREADS_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r-stacks/([^/]+)/v/([^/]+)/account/threads/?$`,
@@ -1265,6 +1290,16 @@ export async function startServer() {
         if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
         return handleCreateReviewThread(req, reviewThreads[1]!, reviewThreads[2]!, reviewThreads[3] === "rev" ? "revision" : "account", reviewThreads[4]!);
       }
+      const stackAck = url.pathname.match(WS_STACK_ACK_RE) ?? url.pathname.match(WS_STACK_ACK_MALFORMED_RE);
+      if (stackAck) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleStackAcknowledgement(req, stackAck[1]!, stackAck[2]!, stackAck[3]!, stackAck[4]!, stackAck[5]!);
+      }
+      const stackJudgment = url.pathname.match(WS_STACK_JUDGMENT_RE);
+      if (stackJudgment) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleStackJudgment(req, stackJudgment[1]!, stackJudgment[2]!, stackJudgment[3]!);
+      }
       const stackRead = url.pathname.match(WS_STACK_READ_RE);
       if (stackRead) {
         if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
@@ -1308,6 +1343,16 @@ export async function startServer() {
       const wsContext = url.pathname.match(WS_REVIEW_CONTEXT_RE);
       if (wsContext) return handleReviewContext(req, wsContext[2]!, wsContext[1]!);
 
+      const revisionAck = url.pathname.match(WS_REVISION_ACK_RE) ?? url.pathname.match(WS_REVISION_ACK_MALFORMED_RE);
+      if (revisionAck) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleRevisionAcknowledgement(req, revisionAck[1]!, revisionAck[2]!, revisionAck[3]!, revisionAck[4]!);
+      }
+      const revisionJudgment = url.pathname.match(WS_REVISION_JUDGMENT_RE);
+      if (revisionJudgment) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleRevisionJudgment(req, revisionJudgment[1]!, revisionJudgment[2]!, revisionJudgment[3]!);
+      }
       const revisionRead = url.pathname.match(WS_REVISION_READ_RE);
       if (revisionRead) {
         if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });

@@ -956,10 +956,10 @@ export interface RevisionMovement {
  * What one revision changed about the one before it. Reads rows; never GitHub.
  *
  * The code counts are the stored movement the completion transaction wrote. A revision
- * published before that row existed has it written the first time anything asks — the two
+ * published before that row existed has it written the first time anything asks. A v18
+ * through v21 row with counts but no v22 item marker is backfilled the same way. The two
  * captures are immutable and the engine deterministic, so computing it late says exactly
- * what completion would have said — and every read after that is one row rather than two
- * inventories and a delta over them.
+ * what completion would have said. Every later read uses the stored facts.
  */
 export function revisionMovement(
   workspaceId: string,
@@ -970,22 +970,26 @@ export function revisionMovement(
   const previous = previousRevision(workspaceId, lineage.id, revision.revision);
   if (!previous) return null;
   let stored = getRevisionMovement(workspaceId, revision.id);
-  if (!stored) {
+  if (!stored || stored.items_computed_at === null) {
     const before = getStageCapture(previous.capture_id, workspaceId);
     const after = currentInventory ?? getStageCapture(revision.capture_id, workspaceId);
-    if (!before || !after) return null;
-    const delta = revisionCodeDelta(before, after);
-    db.transaction(() => storeRevisionMovement({
-      workspaceId,
-      lineageId: lineage.id,
-      previousRevisionId: previous.id,
-      revisionId: revision.id,
-      counts: delta.counts,
-      equivalences: delta.equivalences,
-      now: Date.now(),
-    }))();
-    stored = getRevisionMovement(workspaceId, revision.id);
-    if (!stored) throw new Error(`Revision ${revision.id} movement was not stored`);
+    if (before && after) {
+      const delta = revisionCodeDelta(before, after);
+      db.transaction(() => storeRevisionMovement({
+        workspaceId,
+        lineageId: lineage.id,
+        previousRevisionId: previous.id,
+        revisionId: revision.id,
+        counts: delta.counts,
+        readEquivalences: delta.readEquivalences,
+        ackEquivalences: delta.ackEquivalences,
+        now: Date.now(),
+      }))();
+      stored = getRevisionMovement(workspaceId, revision.id);
+      if (!stored || stored.items_computed_at === null) throw new Error(`Revision ${revision.id} movement items were not stored`);
+    } else if (!stored) {
+      return null;
+    }
   }
   const current = latestAccountForRevision(workspaceId, revision.id);
   const prior = latestAccountBeforeRevision(workspaceId, lineage.id, revision.revision);

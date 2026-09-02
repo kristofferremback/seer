@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 21 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 22 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -87,6 +87,11 @@ import { hashKey, tinyId } from "./ids";
 // v21 adds exact local review conversations, immutable GitHub conversation observations,
 // bounded refresh workflow leases, and explicit capability conversation snapshots. It is
 // additive. Existing capabilities receive conversation_scope = 'none'.
+//
+// v22 adds per-member acknowledgement state and immutable local judgments over exact
+// revisions and stack manifests. Active acknowledgement rows remain separate from their
+// append-only carry provenance, explicit target boundaries, and judgment snapshots. A
+// nullable marker backfills material/file equivalences on movement rows written by v21.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -564,7 +569,7 @@ export function assertDatabaseVersionSupported(maxVersion: number): void {
 }
 
 export function migrate(): void {
-  assertDatabaseVersionSupported(21);
+  assertDatabaseVersionSupported(22);
   const uv = userVersion();
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -587,6 +592,7 @@ export function migrate(): void {
   if (userVersion() < 19) migrateToV19();
   if (userVersion() < 20) migrateToV20();
   if (userVersion() < 21) migrateToV21();
+  if (userVersion() < 22) migrateToV22();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -1976,6 +1982,163 @@ function migrateToV21(): void {
     db.run("PRAGMA user_version = 21");
   })();
   console.log("[seer] migrated to schema v21 (exact review conversations).");
+}
+
+// v22: personal acknowledgement state and immutable local judgment.
+//
+// Acknowledgements answer whether one member handled one exact non-text review item.
+// Their carry rows answer why a carried acknowledgement once arrived and are never
+// removed. Boundaries preserve a member's explicit choice against older carry. Judgments
+// answer a third question: what that member decided about one exact revision or manifest.
+// They copy every required acknowledgement into append-only item rows in the same
+// transaction as the verdict. A nullable marker on v18 movement rows records whether this
+// release has stored the material/file equivalences as well as the earlier text facts.
+const V22_REVIEW_JUDGMENTS = `
+  CREATE TABLE IF NOT EXISTS review_revision_acknowledgements (
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    item_type TEXT NOT NULL CHECK (item_type IN ('material','file')),
+    identity_digest TEXT NOT NULL,
+    provenance_kind TEXT NOT NULL CHECK (provenance_kind IN ('explicit','carried')),
+    source_revision_id TEXT,
+    source_item_id TEXT,
+    equivalence_digest TEXT,
+    acknowledged_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, revision_id, user_id, item_id),
+    CHECK (
+      (provenance_kind = 'explicit' AND source_revision_id IS NULL AND source_item_id IS NULL AND equivalence_digest IS NULL) OR
+      (provenance_kind = 'carried' AND source_revision_id IS NOT NULL AND source_item_id IS NOT NULL AND equivalence_digest IS NOT NULL)
+    )
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_ack_member
+    ON review_revision_acknowledgements (workspace_id, revision_id, user_id);
+
+  CREATE TABLE IF NOT EXISTS review_revision_acknowledgement_carries (
+    target_revision_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    target_item_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    source_revision_id TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    source_identity_digest TEXT NOT NULL,
+    target_identity_digest TEXT NOT NULL,
+    equivalence_digest TEXT NOT NULL,
+    carried_at INTEGER NOT NULL,
+    PRIMARY KEY (target_revision_id, user_id, target_item_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_ack_carries_source
+    ON review_revision_acknowledgement_carries (source_revision_id, user_id, source_item_id);
+
+  -- An explicit acknowledgement or reversal on a target is a member's boundary. An
+  -- older revision may never carry through it later. Active state remains separate.
+  CREATE TABLE IF NOT EXISTS review_revision_acknowledgement_boundaries (
+    revision_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (revision_id, user_id, item_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_ack_boundaries_workspace
+    ON review_revision_acknowledgement_boundaries (workspace_id, revision_id, user_id);
+
+  CREATE TABLE IF NOT EXISTS review_revision_item_equivalences (
+    target_revision_id TEXT NOT NULL,
+    target_item_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    source_revision_id TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    item_type TEXT NOT NULL CHECK (item_type IN ('material','file')),
+    source_identity_digest TEXT NOT NULL,
+    target_identity_digest TEXT NOT NULL,
+    equivalence_digest TEXT NOT NULL,
+    PRIMARY KEY (target_revision_id, target_item_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_item_equiv_source
+    ON review_revision_item_equivalences (source_revision_id, source_item_id);
+
+  CREATE TABLE IF NOT EXISTS review_revision_judgments (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    verdict TEXT NOT NULL CHECK (verdict IN ('approved','changes_requested')),
+    comment TEXT NOT NULL,
+    acknowledgement_digest TEXT NOT NULL,
+    required_count INTEGER NOT NULL CHECK (required_count >= 0),
+    judged_at INTEGER NOT NULL,
+    UNIQUE (revision_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_judgments_scope
+    ON review_revision_judgments (workspace_id, revision_id, judged_at);
+
+  CREATE TABLE IF NOT EXISTS review_revision_judgment_items (
+    judgment_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    item_type TEXT NOT NULL CHECK (item_type IN ('material','file')),
+    identity_digest TEXT NOT NULL,
+    provenance_kind TEXT NOT NULL CHECK (provenance_kind IN ('explicit','carried')),
+    source_revision_id TEXT,
+    source_item_id TEXT,
+    equivalence_digest TEXT,
+    acknowledged_at INTEGER NOT NULL,
+    PRIMARY KEY (judgment_id, item_id),
+    CHECK (
+      (provenance_kind = 'explicit' AND source_revision_id IS NULL AND source_item_id IS NULL AND equivalence_digest IS NULL) OR
+      (provenance_kind = 'carried' AND source_revision_id IS NOT NULL AND source_item_id IS NOT NULL AND equivalence_digest IS NOT NULL)
+    )
+  );
+
+  CREATE TABLE IF NOT EXISTS review_stack_judgments (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    stack_id TEXT NOT NULL,
+    manifest_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    verdict TEXT NOT NULL CHECK (verdict IN ('approved','changes_requested')),
+    comment TEXT NOT NULL,
+    acknowledgement_digest TEXT NOT NULL,
+    required_count INTEGER NOT NULL CHECK (required_count >= 0),
+    judged_at INTEGER NOT NULL,
+    UNIQUE (manifest_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_stack_judgments_scope
+    ON review_stack_judgments (workspace_id, manifest_id, judged_at);
+
+  CREATE TABLE IF NOT EXISTS review_stack_judgment_items (
+    judgment_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    item_type TEXT NOT NULL CHECK (item_type IN ('material','file')),
+    identity_digest TEXT NOT NULL,
+    provenance_kind TEXT NOT NULL CHECK (provenance_kind IN ('explicit','carried')),
+    source_revision_id TEXT,
+    source_item_id TEXT,
+    equivalence_digest TEXT,
+    acknowledged_at INTEGER NOT NULL,
+    PRIMARY KEY (judgment_id, revision_id, item_id),
+    CHECK (
+      (provenance_kind = 'explicit' AND source_revision_id IS NULL AND source_item_id IS NULL AND equivalence_digest IS NULL) OR
+      (provenance_kind = 'carried' AND source_revision_id IS NOT NULL AND source_item_id IS NOT NULL AND equivalence_digest IS NOT NULL)
+    )
+  );
+`;
+
+function migrateToV22(): void {
+  db.transaction(() => {
+    if (!hasColumn("review_revision_movements", "items_computed_at")) {
+      db.run("ALTER TABLE review_revision_movements ADD COLUMN items_computed_at INTEGER");
+    }
+    db.exec(V22_REVIEW_JUDGMENTS);
+    db.run("PRAGMA user_version = 22");
+  })();
+  console.log("[seer] migrated to schema v22 (review acknowledgements and judgments).");
 }
 
 /**

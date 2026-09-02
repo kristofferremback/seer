@@ -106,6 +106,12 @@ test("a populated v20 capability database gains empty conversation authority and
   expect(out).toContain("all assertions passed");
 });
 
+test("a populated v21 review database gains judgment authority and the movement marker, then restores", async () => {
+  const { code, out } = await runScenario("v21");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("a database from a newer release is refused rather than walked", async () => {
   const { code, out } = await runScenario("newer");
   expect(code).toBe(0);

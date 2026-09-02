@@ -290,11 +290,11 @@ describe("paging and reads", () => {
     expect(document.body.dataset.stageReadIds).toBe(B);
     expect(dialog.querySelector(`.hunk-review[data-change="${B}"]`).dataset.read).toBe("true");
     expect(dialog.querySelector(`[data-ledger-change="${B}"]`).dataset.read).toBe("true");
-    expect(document.querySelector("[data-progress]").textContent).toBe("1 / 3 read");
-    expect(document.querySelector("[data-group-progress]").textContent).toBe("1 / 3 read");
+    expect(document.querySelector("[data-progress]").textContent).toBe("1 / 3 handled");
+    expect(document.querySelector("[data-group-progress]").textContent).toBe("1 / 3 handled");
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await settle();
     expect(document.body.dataset.stageReadIds).toBe("");
-    expect(document.querySelector("[data-progress]").textContent).toBe("0 / 3 read");
+    expect(document.querySelector("[data-progress]").textContent).toBe("0 / 3 handled");
   });
 });

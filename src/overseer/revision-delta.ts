@@ -2,7 +2,7 @@
 //
 // One deterministic boundary over two `StageCaptureInventory` values and, separately, two
 // account documents. It reads rows and nothing else: no blob is fetched, no GitHub call is
-// made, and no display prose decides anything. Handed the same two captures twice it
+// made, and no free-form display prose decides anything. Handed the same two captures twice it
 // returns the same answer, which is the only reason a carried read is allowed to exist.
 //
 // The rule underneath every key here is ONE UNIQUE EXACT MATCH. A key that occurs once in
@@ -19,12 +19,37 @@
 import { createHash } from "node:crypto";
 import type { StageCaptureFileRow, StageCaptureInventory } from "../stage/db";
 import type { AccountDoc } from "./revision-types";
+import { captureReasonIdentity } from "../stage/capture-reasons";
 import { digestOf } from "./revision-db";
 
 // ---- results ----
 
 export type DeltaStatus = "unchanged" | "revised" | "new" | "removed";
 export type DeltaItemType = "change" | "material" | "file";
+export type ReviewItemType = DeltaItemType;
+
+/** One review item's identity inside its immutable capture. `digest` is standalone: it
+ * uses the path this capture knew, never a future rename target. */
+export interface ReviewItemIdentity {
+  type: ReviewItemType;
+  id: string;
+  fileId: string | null;
+  path: string | null;
+  placement: readonly unknown[];
+  evidence: readonly unknown[] | null;
+  digest: string;
+}
+
+/** One unique exact match between two captures. The equivalence digest is computed in
+ * the target path space; each standalone digest remains truthful to its own capture. */
+export interface ExactItemEquivalence {
+  type: Exclude<ReviewItemType, "change">;
+  sourceId: string;
+  targetId: string;
+  sourceDigest: string;
+  targetDigest: string;
+  equivalenceDigest: string;
+}
 
 /**
  * One item's fate, named by ids and paths the authorized retained document already
@@ -62,8 +87,10 @@ export interface TextEquivalence {
 export interface RevisionCodeDelta {
   counts: DeltaCounts;
   items: DeltaItem[];
-  /** Keyed by the PREVIOUS change id, which is what a stored read names. */
-  equivalences: Map<string, TextEquivalence>;
+  /** Keyed by the previous change id, which is what a stored read names. */
+  readEquivalences: Map<string, TextEquivalence>;
+  /** Keyed by the previous material or leaf-file id. */
+  ackEquivalences: Map<string, ExactItemEquivalence>;
 }
 
 /**
@@ -152,11 +179,11 @@ export function resolvePaths(
 
 // ---- keys ----
 
-/** The bracketed machine code a capture prefixes a budget refusal with, and nothing else.
- *  Display prose after it is deliberately dropped: a sentence that gains a word must not
- *  turn a stable limitation into permanent movement, and prose must never authorize carry. */
+/** One internal production class or writer-prefixed machine code, and nothing else.
+ * Variable counts, limits, and fetch messages never participate. The shared classifier is
+ * also used by the writer, so changing its prose cannot silently disable carry. */
 function machineReason(reason: string): string {
-  return /^\[[a-z0-9_:.-]+\]/.exec(reason)?.[0] ?? "";
+  return captureReasonIdentity(reason) || /^\[[a-z0-9_:.-]+\]/.exec(reason)?.[0] || "";
 }
 
 interface Placed {
@@ -164,6 +191,9 @@ interface Placed {
   id: string;
   path: string | null;
   fileStatus: string | null;
+  identityDigest: string;
+  /** Null evidence may still classify by placement, but can never authorize carry. */
+  carryable: boolean;
   /** The exact equivalence key. A unique match on BOTH sides is `unchanged`. */
   key: string;
   /** The coarser placement. The same placement with a different key is `revised`. */
@@ -186,6 +216,84 @@ function sideOf(
     : { kind: file.new_kind, mode: file.new_mode, objectId: file.new_object_id };
 }
 
+function identityOf(
+  type: ReviewItemType,
+  id: string,
+  fileId: string | null,
+  path: string | null,
+  placement: readonly unknown[],
+  evidence: readonly unknown[] | null,
+): ReviewItemIdentity {
+  return { type, id, fileId, path, placement, evidence, digest: digestOf({ type, placement, evidence }) };
+}
+
+function acknowledgementItemIdentities(inventory: StageCaptureInventory): ReviewItemIdentity[] {
+  const fileByPath = new Map<string, StageCaptureFileRow>();
+  for (const file of inventory.files) if (!fileByPath.has(file.path)) fileByPath.set(file.path, file);
+  // Only file ownership is needed from canonical changes. Their fingerprints are never
+  // read or hashed while deciding which separate material/file items require handling.
+  const changedFiles = new Set(inventory.changes.map((change) => change.file_id));
+  const materialPaths = new Set(inventory.incomplete.map((item) => item.path).filter((path): path is string => path !== null));
+  const out: ReviewItemIdentity[] = [];
+
+  for (const item of inventory.incomplete) {
+    const file = item.path === null ? undefined : fileByPath.get(item.path);
+    const side = sideOf(file, item.side);
+    const reason = machineReason(item.reason);
+    const evidence = side.objectId !== null
+      ? [side.kind, side.mode, side.objectId] as const
+      : reason === "" ? null : [reason] as const;
+    out.push(identityOf(
+      "material",
+      item.id,
+      file?.id ?? null,
+      item.path,
+      [item.kind, item.path, item.side],
+      evidence,
+    ));
+  }
+  for (const file of inventory.files) {
+    if (changedFiles.has(file.id) || materialPaths.has(file.path)) continue;
+    const sides = [
+      file.old_kind, file.old_mode, file.old_object_id,
+      file.new_kind, file.new_mode, file.new_object_id,
+    ] as const;
+    out.push(identityOf(
+      "file",
+      file.id,
+      file.id,
+      file.path,
+      [file.path, file.status],
+      sides.every((value) => value === null) ? null : sides,
+    ));
+  }
+  return out;
+}
+
+/** Every item the retained reader presents, with a standalone identity from this capture
+ * alone. Display prose and line position are intentionally absent. */
+export function reviewItemIdentities(inventory: StageCaptureInventory): ReviewItemIdentity[] {
+  const fileById = new Map(inventory.files.map((file) => [file.id, file]));
+  const changes = inventory.changes.map((change) => {
+    const file = fileById.get(change.file_id);
+    return identityOf(
+      "change",
+      change.id,
+      file?.id ?? null,
+      file?.path ?? null,
+      [file?.path ?? null],
+      [change.old_fingerprint, change.new_fingerprint, change.context_fingerprint],
+    );
+  });
+  return [...changes, ...acknowledgementItemIdentities(inventory)];
+}
+
+/** Missing material and otherwise leafless files need acknowledgement. Canonical text
+ * changes keep their separate read state and are not hashed on this path. */
+export function requiredAcknowledgements(inventory: StageCaptureInventory): ReviewItemIdentity[] {
+  return acknowledgementItemIdentities(inventory);
+}
+
 /**
  * Every reviewable item of one capture, keyed and placed in the shared path space.
  *
@@ -198,6 +306,7 @@ function describe(
   resolve: (path: string) => string | null,
 ): Placed[] {
   const fileById = new Map(inventory.files.map((file) => [file.id, file]));
+  const identityById = new Map(reviewItemIdentities(inventory).map((item) => [item.id, item]));
   const fileByPath = new Map<string, StageCaptureFileRow>();
   for (const file of inventory.files) if (!fileByPath.has(file.path)) fileByPath.set(file.path, file);
   const changedFiles = new Set(inventory.changes.map((change) => change.file_id));
@@ -213,7 +322,16 @@ function describe(
     id: string,
     path: string | null,
     fileStatus: string | null,
-  ): Placed => ({ type, id, path, fileStatus, key: keyOf(["unplaced", id]), placement: keyOf(["unplaced", id]) });
+  ): Placed => ({
+    type,
+    id,
+    path,
+    fileStatus,
+    identityDigest: identityById.get(id)?.digest ?? digestOf({ type, id }),
+    carryable: false,
+    key: keyOf(["unplaced", id]),
+    placement: keyOf(["unplaced", id]),
+  });
 
   for (const change of inventory.changes) {
     const file = fileById.get(change.file_id);
@@ -227,6 +345,8 @@ function describe(
       id: change.id,
       path: resolved,
       fileStatus: file.status,
+      identityDigest: identityById.get(change.id)!.digest,
+      carryable: true,
       key: keyOf(["text", resolved, change.old_fingerprint, change.new_fingerprint, change.context_fingerprint]),
       placement: keyOf(["text", resolved]),
     });
@@ -245,11 +365,14 @@ function describe(
     const tail = identity.objectId !== null
       ? [identity.kind ?? "", identity.mode ?? "", identity.objectId]
       : [machineReason(item.reason)];
+    const standalone = identityById.get(item.id)!;
     placed.push({
       type: "material",
       id: item.id,
       path: resolved,
       fileStatus: null,
+      identityDigest: standalone.digest,
+      carryable: standalone.evidence !== null,
       key: keyOf(["nontext", "material", item.kind, resolved, item.side, ...tail]),
       placement: keyOf(["nontext", "material", item.kind, resolved, item.side]),
     });
@@ -262,11 +385,14 @@ function describe(
       placed.push(unplaceable("file", file.id, file.path, file.status));
       continue;
     }
+    const standalone = identityById.get(file.id)!;
     placed.push({
       type: "file",
       id: file.id,
       path: resolved,
       fileStatus: file.status,
+      identityDigest: standalone.digest,
+      carryable: standalone.evidence !== null,
       key: keyOf(["nontext", "file", resolved, file.status,
         file.old_kind, file.old_mode, file.old_object_id,
         file.new_kind, file.new_mode, file.new_object_id]),
@@ -304,7 +430,8 @@ export function revisionCodeDelta(
   for (const item of before) if (beforeKeys.get(item.key) === 1) beforeByKey.set(item.key, item);
 
   const items: DeltaItem[] = [];
-  const equivalences = new Map<string, TextEquivalence>();
+  const readEquivalences = new Map<string, TextEquivalence>();
+  const ackEquivalences = new Map<string, ExactItemEquivalence>();
   const pairedBefore = new Set<string>();
   const leftoverAfter: Placed[] = [];
 
@@ -316,11 +443,21 @@ export function revisionCodeDelta(
     }
     pairedBefore.add(twin.id);
     items.push({ type: item.type, status: "unchanged", oldId: twin.id, newId: item.id, path: item.path, fileStatus: item.fileStatus });
+    const equivalenceDigest = createHash("sha256").update(item.key).digest("hex");
     if (item.type === "change") {
-      equivalences.set(twin.id, {
+      readEquivalences.set(twin.id, {
         sourceChangeId: twin.id,
         targetChangeId: item.id,
-        digest: createHash("sha256").update(item.key).digest("hex"),
+        digest: equivalenceDigest,
+      });
+    } else if (twin.carryable && item.carryable) {
+      ackEquivalences.set(twin.id, {
+        type: item.type,
+        sourceId: twin.id,
+        targetId: item.id,
+        sourceDigest: twin.identityDigest,
+        targetDigest: item.identityDigest,
+        equivalenceDigest,
       });
     }
   }
@@ -370,7 +507,7 @@ export function revisionCodeDelta(
 
   const counts: DeltaCounts = { unchanged: 0, revised: 0, new: 0, removed: 0 };
   for (const item of items) counts[item.status] += 1;
-  return { counts, items, equivalences };
+  return { counts, items, readEquivalences, ackEquivalences };
 }
 
 // ---- the account ----

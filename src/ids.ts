@@ -50,6 +50,7 @@ export const TSK_ID_RE = new RegExp(`^tsk_${TINY}$`);
 export const STG_ID_RE = new RegExp(`^stg_${TINY}$`);
 export const STA_ID_RE = new RegExp(`^sta_${TINY}$`);
 export const STF_ID_RE = new RegExp(`^stf_${TINY}$`);
+export const STI_ID_RE = new RegExp(`^sti_${TINY}$`);
 // A promoted review: the lineage, one source revision of it, one account published over
 // a revision, and the witness request that is waiting to become that account.
 export const RLN_ID_RE = new RegExp(`^rln_${TINY}$`);
@@ -79,6 +80,9 @@ export const RGC_ID_RE = new RegExp(`^rgc_${TINY}$`);
 export const RGR_ID_RE = new RegExp(`^rgr_${TINY}$`);
 export const RGO_ID_RE = new RegExp(`^rgo_${TINY}$`);
 export const RCI_ID_RE = new RegExp(`^rci_${TINY}$`);
+// One member's immutable judgment over an exact revision or stack manifest.
+export const RJD_ID_RE = new RegExp(`^rjd_${TINY}$`);
+export const SJD_ID_RE = new RegExp(`^sjd_${TINY}$`);
 export const STAGE_CHANGE_ID_RE = /^chg_[a-f0-9]{64}$/;
 /** A member's change or file inside a stack reader, namespaced by the member's position:
  *  canonical ids are content-derived and two layers can hold identical hunks. */

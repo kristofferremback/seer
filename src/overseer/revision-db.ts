@@ -550,6 +550,8 @@ export interface RevisionMovementRow {
   new: number;
   removed: number;
   computed_at: number;
+  /** Null on movement rows written before v22 until material/file equivalences are stored. */
+  items_computed_at: number | null;
 }
 
 export function getRevisionMovement(workspaceId: string, revisionId: string): RevisionMovementRow | null {
@@ -559,9 +561,10 @@ export function getRevisionMovement(workspaceId: string, revisionId: string): Re
 }
 
 /**
- * Store the counts and every exact text equivalence between one revision and the one
- * before it. INSERT OR IGNORE throughout: two writers computing the same immutable answer
- * land one row, and the first is as right as the second.
+ * Store the counts and every exact text and acknowledgement equivalence between one
+ * revision and the one before it. INSERT OR IGNORE throughout: two writers computing the
+ * same immutable answer land one row, and the first is as right as the second. The v22
+ * item marker is written last so a partial attempt remains retryable.
  *
  * Not a transaction of its own. The completion transaction writes this beside the revision
  * it describes; a page filling it in for a revision published before it was stored wraps
@@ -573,7 +576,15 @@ export function storeRevisionMovement(input: {
   previousRevisionId: string;
   revisionId: string;
   counts: { unchanged: number; revised: number; new: number; removed: number };
-  equivalences: ReadonlyMap<string, { targetChangeId: string; digest: string }>;
+  readEquivalences: ReadonlyMap<string, { targetChangeId: string; digest: string }>;
+  ackEquivalences: ReadonlyMap<string, {
+    type: "material" | "file";
+    sourceId: string;
+    targetId: string;
+    sourceDigest: string;
+    targetDigest: string;
+    equivalenceDigest: string;
+  }>;
   now: number;
 }): void {
   db.run(
@@ -586,9 +597,22 @@ export function storeRevisionMovement(input: {
     "INSERT OR IGNORE INTO review_revision_equivalences (target_revision_id, target_change_id, workspace_id, lineage_id, source_revision_id, source_change_id, key_digest) " +
       "VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
-  for (const [sourceChangeId, match] of input.equivalences) {
+  for (const [sourceChangeId, match] of input.readEquivalences) {
     insert.run(input.revisionId, match.targetChangeId, input.workspaceId, input.lineageId, input.previousRevisionId, sourceChangeId, match.digest);
   }
+  const insertItem = db.prepare(
+    "INSERT OR IGNORE INTO review_revision_item_equivalences (target_revision_id, target_item_id, workspace_id, lineage_id, source_revision_id, source_item_id, item_type, source_identity_digest, target_identity_digest, equivalence_digest) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  for (const match of input.ackEquivalences.values()) {
+    insertItem.run(input.revisionId, match.targetId, input.workspaceId, input.lineageId,
+      input.previousRevisionId, match.sourceId, match.type, match.sourceDigest,
+      match.targetDigest, match.equivalenceDigest);
+  }
+  db.run(
+    "UPDATE review_revision_movements SET items_computed_at = COALESCE(items_computed_at, ?) WHERE workspace_id = ? AND revision_id = ?",
+    [input.now, input.workspaceId, input.revisionId],
+  );
 }
 
 interface StoredEquivalenceRow {

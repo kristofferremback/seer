@@ -46,7 +46,7 @@ function fixture(onMobile = false): void {
     <span data-progress></span><i data-progress-fill></i><span data-unread-summary></span>
     <span data-group-nav-progress data-change-ids="${A},${B}"></span>
     <details data-tree-node data-files="1" data-change-ids="${A},${B}"><summary><span data-tree-summary><span>1 file</span><span class="tree-read"><i></i>0/2</span></span></summary></details>
-    <aside data-review-nav data-open="false"><nav class="group-links"><a href="#group-first">First group</a></nav></aside><button data-review-nav-open>v1</button><button data-page-scrim hidden></button>
+    <aside data-review-nav data-open="false"><nav class="group-links"><a href="#group-first">First group</a></nav></aside><button data-review-nav-open>v1</button><aside data-page-details data-open="false"><button data-page-details-close>Close</button></aside><button data-page-details-open>Details</button><button data-page-scrim hidden></button>
     </div>
     <dialog data-focus-dialog data-review="first" data-active-change="${A}">${dialogContent()}</dialog>`;
   const dialog = document.querySelector("dialog");
@@ -108,11 +108,49 @@ describe("stage reader client", () => {
     expect(hunks[0].dataset.collapsed).toBe("true");
     expect(hunks[1].dataset.collapsed).toBe("false");
     expect(hunks[0].dataset.read).toBe("true");
-    expect(document.querySelector("[data-progress]").textContent).toBe("1 / 3 read");
-    expect(document.querySelector("[data-group-progress]").textContent).toBe("1 / 2 read");
+    expect(document.querySelector("[data-progress]").textContent).toBe("1 / 3 handled");
+    expect(document.querySelector("[data-group-progress]").textContent).toBe("1 / 2 handled");
     expect(document.querySelector("[data-file-progress]").textContent).toBe("1 / 2 read");
     expect(document.querySelector("[data-tree-summary] .tree-read").textContent).toBe("1/2");
     expect(document.querySelector(`[data-ledger-change="${A}"]`).dataset.read).toBe("true");
+  });
+
+  test("acknowledgement patches handling and reversal in place", async () => {
+    const item = `sti_${"d".repeat(10)}`;
+    document.body.dataset.stageAcknowledgementIds = item;
+    document.body.dataset.stageAcknowledgedIds = "";
+    const group = document.querySelector('[data-group="first"]');
+    group.dataset.acknowledgementIds = item;
+    group.insertAdjacentHTML("beforeend", `<details open><summary>Material</summary><form class="acknowledgement-form" action="/ack" data-acknowledgement-item="${item}"><input name="acknowledged" value="true"><span class="acknowledgement-state">Needs acknowledgement</span><span role="status"></span><button type="submit">Acknowledge</button></form></details>`);
+    document.querySelector("[data-stage-background]").insertAdjacentHTML("beforeend", `<section class="judgment"><ul class="judgment-blockers"><li data-judgment-blocker="${item}"><a href="#">Material</a></li></ul><form class="judgment-form"><button type="submit" disabled>Approve</button></form></section>`);
+    (globalThis as any).fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+      const acknowledged = (init?.body as FormData).get("acknowledged") === "true";
+      return new Response(JSON.stringify({ itemId: item, acknowledged, acknowledgement: acknowledged ? { provenance: { kind: "explicit" } } : null }), { status: 200 });
+    };
+    const disclosure = group.querySelector("details");
+    const href = location.href;
+    run();
+    expect(document.querySelector("[data-progress]").textContent).toBe("0 / 4 handled");
+    const form = group.querySelector(".acknowledgement-form");
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await Bun.sleep(0);
+    expect(disclosure.open).toBe(true);
+    expect(group.querySelector("details")).toBe(disclosure);
+    expect(location.href).toBe(href);
+    expect(form.elements.namedItem("acknowledged").value).toBe("false");
+    expect(form.querySelector("button").textContent).toBe("Undo");
+    expect(document.querySelector("[data-progress]").textContent).toBe("1 / 4 handled");
+    expect(document.querySelector(".judgment-blockers").hidden).toBe(true);
+    expect(document.querySelector(".judgment-form button").disabled).toBe(false);
+
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await Bun.sleep(0);
+    expect(disclosure.open).toBe(true);
+    expect(form.elements.namedItem("acknowledged").value).toBe("true");
+    expect(form.querySelector("button").textContent).toBe("Acknowledge");
+    expect(document.querySelector("[data-progress]").textContent).toBe("0 / 4 handled");
+    expect(document.querySelector("[data-judgment-blocker]").hidden).toBe(false);
+    expect(document.querySelector(".judgment-form button").disabled).toBe(true);
   });
 
   test("group focus lives in the URL and Escape returns to the overview", async () => {
@@ -220,6 +258,15 @@ describe("stage reader client", () => {
     expect(frame.dataset.layout).toBe("unified");
     for (const callback of resizeCallbacks) callback([{ contentRect: { width: 1400 } }]);
     expect(frame.dataset.layout).toBe("split");
+  });
+
+  test("phone Details uses one history state and the overview rail", async () => {
+    fixture(true);run();click("[data-page-details-open]");
+    expect(document.querySelector("[data-page-details]").dataset.open).toBe("true");
+    expect(new URL(location.href).searchParams.get("panel")).toBe("details");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));await Bun.sleep(0);
+    expect(document.querySelector("[data-page-details]").dataset.open).toBe("false");
+    expect(new URL(location.href).searchParams.get("panel")).toBeNull();
   });
 
   test("review drawer uses history state and remains contained by its rail", async () => {

@@ -22,10 +22,13 @@ calling GitHub again.
   `patch_unavailable`, and `metadata_incomplete` describe review limitations without saying
   the pinned source is incomplete. A truncated tree produces one snapshot item per affected
   tree, never a silent successful capture. Both keep the shipped capture-level side
-  `snapshot`. When two captures carry the same duplicate exact snapshot facts, delta marks
-  the evidence unchanged but creates no handling equivalence from the ambiguous pair.
-  Capture-wide material such as the 300-file compare ceiling and an over-budget compare diff
-  also records side `snapshot`.
+  `snapshot`. Their stored reason sentences remain unchanged. A shared typed reason module
+  writes the merge-base/source forms and maps existing old/new forms to the same distinct
+  side identities. A unique truncation can carry across captures; duplicate evidence stays
+  ambiguous. Capture-wide material such as the 300-file compare ceiling and an over-budget
+  compare diff also records side `snapshot`. Pinned-diff fetch failure and over-budget
+  responses retain separate identities while ignoring their variable message, byte count,
+  and limit. Other capture-level prose does not authorize carry.
 - `stage_blobs` maps `(workspace_id, sha256)` to the byte count of an object stored at
   `stage-blobs/<workspace>/<sha256>`. The hash is computed by Seer, not accepted from the
   caller. The canonical compare patch uses the same store and its digest is recorded on
@@ -165,8 +168,12 @@ produce no mapping and therefore no equivalence for the items involved.
 A text item's key is `text`, the rename-resolved path, and the old, new and context
 fingerprints. A non-text item's key is the resolved path, side, object kind, mode and Git
 object id where one is known; where none is, one machine reason code such as
-`[budget:blob_requests]` participates and display prose never does. A file that carries
-neither a change nor material of its own keys on both side identities and its status.
+`[budget:blob_requests]` or one typed production reason identity participates. Production
+classes cover both tree-path sides, both tree snapshots, insufficient retained text,
+compare line loss with a separate alignment-ceiling class, both pinned-diff failure
+classes, and the 300-file ceiling. Counts, limits, and fetch messages do not participate.
+A file that carries neither a change nor material of its own keys on both side identities
+and its status.
 `unchanged` requires the full key to occur exactly once on each side; anything else is
 ambiguous and produces no equivalence rather than an arbitrary pairing. What is left is
 paired by placement in canonical inventory order to say `revised`, which decides a count
