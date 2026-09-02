@@ -124,7 +124,7 @@ test("should expose explicit GitHub controls on desktop, phone, stack layer and 
     await phone.navigate(`${base}/${phoneFixture.workspaceId}/r-stacks/${phoneFixture.stackSlug}/v/1`);
     expect(await phone.evaluate<number>("document.querySelectorAll('.github-projection').length")).toBe(0);
     await phone.navigate(layerUrl);
-    expect(await phone.evaluate<string[]>("[...document.querySelectorAll('.mobile-bar>*')].map(node=>node.textContent.trim())")).toEqual(["v1", "0 / 1 handled", "Details"]);
+    expect(await phone.evaluate<string[]>("[...document.querySelectorAll('.mobile-bar>*')].map(node=>node.textContent.trim())")).toEqual(["Review", "0 / 1 handled", "Details"]);
     await phone.touch('.mobile-bar [data-page-details-open]');
     await phone.waitFor("document.querySelector('[data-page-details]')?.dataset.open==='true'");
     expect(await phone.evaluate<string>("document.querySelector('[data-page-details] .github-projection h2')?.textContent")).toBe("GitHub");

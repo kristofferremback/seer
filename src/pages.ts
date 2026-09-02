@@ -148,7 +148,7 @@ function styles(): string {
     --ink: 30 10% 12%;
     --ink-soft: 30 9% 26%;
     --line: 35 14% 84%;
-    --muted: 30 8% 45%;
+    --muted: 30 8% 39%;
     --night: 356 26% 9%;
     /* Oxblood — Seer's accent, in place of Threa's gold. */
     --accent: 356 55% 27%;
@@ -1134,7 +1134,7 @@ export function planCss(): string {
   --ink: 30 10% 12%;
   --ink-soft: 30 9% 26%;
   --line: 35 14% 84%;
-  --muted: 30 8% 45%;
+  --muted: 30 8% 39%;
   --accent: 356 55% 27%;
   --accent-soft: 356 40% 42%;
   --font-display: "Cabinet Grotesk", "Switzer", system-ui, -apple-system, sans-serif;
@@ -1455,7 +1455,7 @@ export function skillRouter(): string {
   const base = config.baseUrl;
   return `---
 name: seer
-description: "Publish to Seer: HTML bundles, staged walkthroughs, and Overseer reviews of GitHub pull requests. Takes one argument naming what you want to do."
+description: "Publish to Seer: HTML bundles, staged walkthroughs, and immutable Overseer reviews of exact GitHub pull requests. Takes one argument naming what you want to do."
 ---
 
 # Seer
@@ -1472,7 +1472,7 @@ for everything below. A human mints it at \`${base}/settings/<workspace>\`.
 | you were asked to | fetch |
 |---|---|
 | publish a page, dashboard, report or small app | \`${base}/bundles/skill.md\` |
-| review a pull request, or a stack of them | \`${base}/overseer/agent.md\` |
+| review a pushed same-repository pull request, or an exact stack | \`${base}/overseer/agent.md\` |
 | publish a pinned staged walkthrough | \`${base}/stage/agent.md\` |
 | group work into a project, keep it, or resume one | \`${base}/projects/skill.md\` |
 
@@ -1489,11 +1489,11 @@ curl -s ${base}/projects/skill.md
 
 ## One thing worth knowing before you route
 
-A pull request review is written by a **fresh sub-agent**, never by you. If you wrote the
-change, or watched it get built, you will describe what it was meant to do rather than
-what the diff says. \`${base}/overseer/agent.md\` is the document that tells you how to
-dispatch one correctly; \`${base}/overseer/skill.md\` is what that sub-agent reads, and
-you do not need it yourself.
+A pull request account is written by a **fresh sub-agent**, never by you. The default path
+requires a pushed same-repository pull request, creates one immutable lineage per pull
+request, and claims one exact witness request. It never falls back to legacy ReviewDoc or
+Stage publication. \`${base}/overseer/agent.md\` tells you how to dispatch it;
+\`${base}/overseer/skill.md\` is what that sub-agent reads.
 `;
 }
 
@@ -1924,14 +1924,13 @@ Back comes \`/<workspace>/b/your-slug/\`, versioned and live.
 
 ## Overseer
 
-The same deployment reads pull requests. Point it at one, or at a stack of them, and it
-publishes a page you read instead of the diff: what changed, what it costs, what to look
-at closely, every claim one tap from the lines it stands on.
+The same deployment retains exact pushed pull requests and same-repository stacks. It
+publishes an immutable source revision first, then a fresh witness account over that exact
+revision or manifest.
 
-It derives the facts itself, so the file list, the hunks, every line number and every
-commit come from GitHub rather than from an agent's memory. The judgment comes from a
-sub-agent that did not write the change, because one that did describes what it meant to
-do rather than what the diff says. Reviews are private to their workspace.
+The file list, source ids, and code come from the retained capture rather than an agent's
+memory or a later branch read. The judgment comes from a sub-agent that did not write the
+change. Reviews are private to their workspace.
 
 ## Where to go next
 
@@ -1939,7 +1938,7 @@ do rather than what the diff says. Reviews are private to their workspace.
 |---|---|
 | what this deployment does, and which document you need | \`${base}/skill.md\` |
 | to publish a page, dashboard, report or small app | \`${base}/bundles/skill.md\` |
-| to review a pull request, or a stack of them | \`${base}/overseer/agent.md\` |
+| to review a pushed pull request, or an exact stack | \`${base}/overseer/agent.md\` |
 | a credential | \`${base}/auth.md\` |
 | the API, described | \`${base}/openapi.json\` |
 | every skill this site publishes | \`${base}/.well-known/agent-skills/index.json\` |
@@ -2060,16 +2059,13 @@ ${head(
   <div class="shell spine">
     <h2 class="h-section">Overseer</h2>
     <div class="prose">
-      <p class="lede">The same deployment reads pull requests. Point it at one, or at a
-      stack of them, and it publishes a page you read instead of the diff: what changed,
-      what it costs, what to look at closely, every claim one tap from the lines it
-      stands on.</p>
-      <p>It derives the facts itself, so the file list, the hunks, every line number and
-      every commit come from GitHub rather than from an agent's memory. The judgment
-      comes from a sub-agent that did not write the change, because one that did
-      describes what it meant to do rather than what the diff says. Reviews are private
-      to their workspace, and a review of the same pull requests published twice keeps
-      its link and shows you what moved between the passes.</p>
+      <p class="lede">The same deployment retains exact pushed pull requests and
+      same-repository stacks. It publishes an immutable source revision first, then a
+      fresh witness account over that exact revision or manifest.</p>
+      <p>The file list, source ids, and code come from the retained capture rather than
+      an agent's memory or a later branch read. The judgment comes from a sub-agent that
+      did not write the change. A later push appends a revision and never rewrites a
+      pinned page. Reviews are private to their workspace.</p>
     </div>
     <div class="specimen-grid">
       <div class="specimen">
@@ -2392,6 +2388,7 @@ ${appScript()}
 export interface LedgerReview {
   slug: string;
   title: string;
+  route: "r" | "r-stacks";
   /** What the Latest column prints: `v3` for a legacy review, and for a promoted one the
    *  account version, the standing revision, or where its first capture has got to —
    *  the same words the Project page uses for the same review. */
@@ -2443,7 +2440,7 @@ export function reviewsPage(nav: NavContext, groups: ReviewLedgerGroup[]): strin
   const og = { "og:title": title, "og:type": "website", robots: "noindex" };
 
   const row = (g: ReviewLedgerGroup, r: LedgerReview) => {
-    const url = `/${g.wsId}/r/${encodeURIComponent(r.slug)}/`;
+    const url = `/${g.wsId}/${r.route}/${encodeURIComponent(r.slug)}/`;
     // `owner/repo#12` and `repo#12` are both in the haystack, so the filter answers the
     // question however the reader spells it.
     const haystack = [

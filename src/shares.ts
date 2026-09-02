@@ -17,6 +17,7 @@
 // something was there.
 
 import { config } from "./config";
+import { escapeHtml } from "./escape";
 import { requireApiKey, sessionUser } from "./auth";
 import { db, getBundle, getVersion, isMember } from "./db";
 import { RAC_ID_RE, RSA_ID_RE, RSM_ID_RE, RVR_ID_RE, hashKey, newShareToken, tinyId, SHARE_TOKEN_RE, SHR_ID_RE, WS_ID_RE } from "./ids";
@@ -446,13 +447,25 @@ function targetExists(wsId: string, kind: LegacyShareKind, target: string): bool
 /** POST /api/shares: mint one, and hand back the URL rather than the bare token,
  *  because the URL is the thing a person actually wants. */
 export async function handleCreateShare(req: Request): Promise<Response> {
+  const formRequest = req.headers.get("content-type")?.toLowerCase().startsWith("application/x-www-form-urlencoded") === true;
   let body: Record<string, unknown>;
+  let returnTo: string | null = null;
   try {
-    const parsed: unknown = await req.json();
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
-    body = parsed as Record<string, unknown>;
+    if (formRequest) {
+      const form = await req.formData();
+      body = Object.fromEntries(["workspace", "kind", "target", "label"].flatMap((name) => {
+        const value = form.get(name);
+        return typeof value === "string" ? [[name, value]] : [];
+      }));
+      const rawReturn = form.get("return");
+      returnTo = typeof rawReturn === "string" ? rawReturn : null;
+    } else {
+      const parsed: unknown = await req.json();
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+      body = parsed as Record<string, unknown>;
+    }
   } catch {
-    return json({ error: "Body must be a JSON object: { workspace, kind, target, label?, expiresAt? }" }, 400);
+    return json({ error: formRequest ? "Share form is malformed." : "Body must be a JSON object: { workspace, kind, target, label?, expiresAt? }" }, 400);
   }
 
   const gate = callerWorkspace(req, body.workspace);
@@ -534,6 +547,26 @@ export async function handleCreateShare(req: Request): Promise<Response> {
     if (error instanceof ConversationError) return json({ error: error.message, rule: error.rule }, error.status);
     throw error;
   }
+  const shareUrl = `${config.baseUrl}/s/${created.token}`;
+  if (formRequest) {
+    const configuredOrigin = new URL(config.baseUrl).origin;
+    let back = `/${gate.ws}/reviews`;
+    if (returnTo) {
+      try {
+        const candidate = new URL(returnTo, config.baseUrl);
+        if (candidate.origin === configuredOrigin && candidate.pathname.startsWith(`/${gate.ws}/`)) {
+          back = candidate.pathname + candidate.search;
+        }
+      } catch {
+        // The link already exists. A malformed optional return cannot turn success into
+        // a partial-failure response; the workspace review ledger remains the safe back.
+      }
+    }
+    return new Response(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Link created · Seer</title></head><body><main><h1>Link created</h1><p><a href="${escapeHtml(shareUrl)}">${escapeHtml(shareUrl)}</a></p><p><a href="${escapeHtml(back)}">Back to review</a></p></main></body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" } },
+    );
+  }
   return json({
     id: created.id,
     workspace: gate.ws,
@@ -542,7 +575,7 @@ export async function handleCreateShare(req: Request): Promise<Response> {
     label,
     expiresAt,
     token: created.token,
-    url: `${config.baseUrl}/s/${created.token}`,
+    url: shareUrl,
     ...("projection" in created ? { document: created.projection, conversation: body.conversation === true } : {}),
   });
 }

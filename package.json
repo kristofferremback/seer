@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "bun --hot index.ts",
     "start": "bun index.ts",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "db:backup": "bun src/db-snapshot.ts backup",
+    "db:verify": "bun src/db-snapshot.ts verify",
+    "db:restore": "bun src/db-snapshot.ts restore"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.11.1",

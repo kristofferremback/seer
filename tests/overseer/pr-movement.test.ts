@@ -580,10 +580,10 @@ describe("a moving pull request appends one revision at a time", () => {
     expect(page).toContain(HEAD2);
     expect(page).not.toContain(HEAD3);
     // And a newer revision is one short link rather than a banner.
-    expect(page).toContain("Revision 3 available");
+    expect(page).toContain("rev 3 available");
     expect(page).toContain(`/${workspace}/r/mover/rev/3`);
     // One short underlined link below the source facts, and nothing louder than that.
-    expect(page).toMatch(/<p class="stage-drift"><a href="[^"]*\/rev\/3">Revision 3 available<\/a><\/p>/);
+    expect(page).toMatch(/<p class="stage-drift"><a href="[^"]*\/rev\/3">rev 3 available<\/a><\/p>/);
     expect(page).not.toContain("New source");
   });
 
@@ -684,8 +684,8 @@ describe("a moving pull request appends one revision at a time", () => {
     expect(page).not.toContain("<details class=\"account\"");
     // The pin is said in the header and nowhere else; the footer carries the file count,
     // pluralized; the account delta stays an API fact.
-    expect(page).toContain("Version 1 · revision 1");
-    expect(page.split("Version 1 · revision 1")).toHaveLength(2);
+    expect(page).toContain("v1 · rev 1");
+    expect(page.split("v1 · rev 1")).toHaveLength(2);
     expect(page).toContain("<p>2 files</p>");
     expect(page).not.toContain("account 1 revised");
     // An evidence seam is navigation, not a title: it names its directory and count and
@@ -835,8 +835,8 @@ describe("a member can recover from a capture that failed, from the page", () =>
     // The failed page: the failure, the source at the completed page's width, and a plain
     // form — no JavaScript, no OpenAPI document — for the member who may spend it.
     const failed = visible(await (await fetch(`${base}/${workspace}/r/mover-recover`, { headers: { cookie } })).text());
-    expect(failed).toContain("Capture failed");
-    expect(failed).toContain("tree unavailable");
+    expect(failed).toContain('<h2 class="capture-state" data-capture-state="failed">Capture failed</h2>');
+    expect(failed).toContain('<p class="capture-failure">GitHub refused the merge-base commit tree: tree unavailable</p>');
     expect(failed).toContain(`main → feature/mover ${HEAD1.slice(0, 12)}`);
     expect(failed).not.toContain(HEAD1.slice(0, 13));
     expect(failed).toContain("via the GitHub App installation");
@@ -853,7 +853,7 @@ describe("a member can recover from a capture that failed, from the page", () =>
     expect(getCaptureJob(workspace, job.id)!.state).toBe("failed");
 
     // Retried from the page, with the fixture repaired but its worker held: the shell now
-    // says capturing, refreshes itself, and says how to reload.
+    // says capturing and leaves reload under the reader's control.
     currentClient = githubFixture(pull({ number: 19 }));
     const gate = holdOpenAt(openCount + 1);
     const retried = await fetch(`${base}/${workspace}/r/mover-recover/capture-jobs/${job.id}/retry`, {
@@ -863,7 +863,7 @@ describe("a member can recover from a capture that failed, from the page", () =>
     expect(retried.headers.get("location")).toBe(`/${workspace}/r/mover-recover`);
     const capturing = visible(await (await fetch(`${base}/${workspace}/r/mover-recover`, { headers: { cookie } })).text());
     expect(capturing).toContain("Capturing");
-    expect(capturing).toContain(`<meta http-equiv="refresh" content="30">`);
+    expect(capturing).not.toContain("http-equiv");
     expect(capturing).toContain(`<a href="/${workspace}/r/mover-recover">Reload to check</a>`);
     expect(capturing).not.toContain("Retry capture");
     gate.release();

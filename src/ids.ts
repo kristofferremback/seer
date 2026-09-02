@@ -83,6 +83,8 @@ export const RCI_ID_RE = new RegExp(`^rci_${TINY}$`);
 // One member's immutable judgment over an exact revision or stack manifest.
 export const RJD_ID_RE = new RegExp(`^rjd_${TINY}$`);
 export const SJD_ID_RE = new RegExp(`^sjd_${TINY}$`);
+// One permanent conversion of a legacy ReviewDoc into immutable review lineage work.
+export const LSC_ID_RE = new RegExp(`^lsc_${TINY}$`);
 // One durable personal GitHub projection job or explicit submission.
 export const GVP_ID_RE = new RegExp(`^gvp_${TINY}$`);
 export const GHS_ID_RE = new RegExp(`^ghs_${TINY}$`);

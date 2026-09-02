@@ -442,7 +442,13 @@ describe("one exact revision judgment", () => {
     expect(html).not.toContain("0 / 0 read");
     expect(html).toContain("data-page-details-open");
     expect(html).toContain("data-judgment-host=\"overview\"");
-    expect(html).toContain("button type=\"submit\" name=\"verdict\" value=\"approved\" disabled");
+    expect(html).toContain("3 acknowledgements required");
+    expect(html).toContain('aria-describedby="judgment-acknowledgements" disabled');
+    expect(html).toContain("assets/logo.png · new · lines unavailable");
+    expect(html).toContain("bin/run.sh · mode changed");
+    expect(html).toContain("capture · snapshot · metadata incomplete");
+    expect(html.match(/data-acknowledgement-summary=/g)).toHaveLength(3);
+    expect(html.match(/<details class="material-fact" open/g)).toBeNull();
   });
 
   test("comments are normalized constrained markdown, optional, and bounded", () => {
@@ -569,7 +575,7 @@ describe("member forms and safe history", () => {
 
     const successor = createRevision({ lineageId: fixture.lineageId, slug: fixture.slug, revision: 2, materialOnly: true });
     const stale = visible(await (await fetch(`${base}${focus}`, { headers: { cookie } })).text());
-    expect(stale).toContain("Revision 2 available");
+    expect(stale).toContain("rev 2 available");
     expect(stale).toContain("Approve this version");
 
     const judgment = await fetch(`${base}/${workspace}/r/${fixture.slug}/rev/1/judgment`, {
@@ -723,7 +729,7 @@ describe("member forms and safe history", () => {
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM review_github_reviews").get()!.n).toBe(githubReviewsBefore);
     createManifest([{ fixture: bottom, account: bottomAccount }, { fixture: top, account: topAccount }], { stackId: stack.stackId, slug: stack.slug, version: 2 });
     const old = visible(await (await fetch(`${base}${focus}`, { headers: { cookie } })).text());
-    expect(old).toContain("Earlier manifest 1");
+    expect(old).toContain("Earlier v1 · account");
     expect(old).toContain("Stack-local only.");
   });
 
@@ -830,7 +836,7 @@ describe("member forms and safe history", () => {
     const phone = await ChromePage.launch({ width: 390, height: 844, dark: true, touch: true, profileRoot: profiles, name: "judgment-phone" });
     try {
       await phone.navigate(phoneBase);
-      expect(await phone.evaluate<string[]>("[...document.querySelectorAll('.mobile-bar>*')].map(node=>node.textContent.trim())")).toEqual(["v1", "0 / 3 handled", "Details"]);
+      expect(await phone.evaluate<string[]>("[...document.querySelectorAll('.mobile-bar>*')].map(node=>node.textContent.trim())")).toEqual(["Review", "0 / 3 handled", "Details"]);
       await phone.touch('.mobile-bar [data-page-details-open]');
       await phone.waitFor("document.querySelector('[data-page-details]')?.dataset.open==='true'");
       expect(await phone.evaluate<string>("document.querySelector('[data-page-details] .judgment h2')?.textContent")).toBe("Judgment");
@@ -883,6 +889,16 @@ describe("member forms and safe history", () => {
       await noJs.waitFor("document.querySelector('.judgment-row[data-verdict=changes_requested]') && !document.querySelector('.judgment-form')");
       await noJs.evaluate("document.querySelector('.focus-right').scrollIntoView({block:'start'})");
       await noJs.screenshot(join(evidence, "judgment-phone-390-nojs.png"));
+
+      await noJs.navigate(noJsUrl);
+      await noJs.click(".document-share summary");
+      await noJs.setValue('.document-share input[name="label"]', "No-JavaScript link");
+      await noJs.clickAndWaitForLoad(".document-share button[type=submit]");
+      expect(await noJs.evaluate<string>("document.querySelector('h1')?.textContent.trim()")).toBe("Link created");
+      expect(await noJs.evaluate<string>("document.querySelector('main p a')?.getAttribute('href')")).toMatch(/^http:\/\/localhost:0\/s\/seer_sh_/);
+      expect(await noJs.evaluate<string>("document.querySelectorAll('main p a')[1]?.getAttribute('href')")).toBe(
+        `/${workspace}/r/${noJsFixture.slug}/v/1?review=all-material`,
+      );
     } finally {
       await noJs.close();
     }

@@ -8,7 +8,7 @@
 import { test, expect, beforeAll, afterAll, describe } from "bun:test";
 
 import { startServer } from "../../src/server";
-import { legacyWorkspaceId } from "../../src/db";
+import { db, legacyWorkspaceId } from "../../src/db";
 import { createReviewVersion, type ReviewDoc } from "../../src/overseer/db";
 import {
   reviewStatusTally,
@@ -18,6 +18,8 @@ import {
 } from "../../src/overseer/installations";
 import { setGithubClientFactory, type GithubClientFactory } from "../../src/overseer/github-app";
 import { offlineGithubClient, offlineGithubClientFactory } from "../offline-github";
+import { digestOf } from "../../src/overseer/revision-db";
+import { tinyId } from "../../src/ids";
 
 let server: Awaited<ReturnType<typeof startServer>>;
 let base: string;
@@ -131,6 +133,29 @@ beforeAll(async () => {
   createReviewVersion(wsId, "never-checked", doc("The unchecked review", unseen));
   setReviewPrs(wsId, "never-checked", unseen.map((p) => ({ ...p, repoId: REPO_ID })));
 
+  const stackId = tinyId("rsk");
+  const manifestId = tinyId("rsm");
+  const owner = db.query<{ user_id: string }, [string]>("SELECT user_id FROM memberships WHERE workspace_id = ? ORDER BY created_at LIMIT 1").get(wsId)!.user_id;
+  const now = Date.now();
+  db.run(
+    "INSERT INTO review_stacks VALUES (?, ?, 'retained-stack', 'The retained stack', ?, ?, 'main', 'inferred', NULL, NULL, 'anonymous', NULL, NULL, NULL, 1, ?, ?, ?, ?)",
+    [stackId, wsId, REPO, REPO_ID, owner, tinyId("key"), now, now],
+  );
+  const manifest = {
+    identity: { stackId, slug: "retained-stack", title: "The retained stack", version: 1, predecessorVersion: 0, reason: "created", createdAt: new Date(now).toISOString() },
+    repository: { repo: REPO, repoId: REPO_ID, baseRef: "main" },
+    source: { kind: "inferred", providerStackId: null, providerStackNumber: null, observedAt: null },
+    members: [
+      { lineageId: tinyId("rln"), lineageSlug: "stack-open", prNumber: 71, title: "Open member", revisionId: tinyId("rvr"), revision: 1, accountId: null, accountVersion: null, baseRef: "main", headRef: "open", headSha: "7".repeat(40), status: "live", removedReason: null },
+      { lineageId: tinyId("rln"), lineageSlug: "stack-merged", prNumber: 72, title: "Merged member", revisionId: tinyId("rvr"), revision: 1, accountId: null, accountVersion: null, baseRef: "main", headRef: "merged", headSha: "8".repeat(40), status: "merged", removedReason: null },
+    ],
+    projects: [],
+  };
+  db.run(
+    "INSERT INTO review_stack_manifests VALUES (?, ?, ?, 'retained-stack', 1, 0, 'created', 1, ?, ?, ?)",
+    [manifestId, stackId, wsId, JSON.stringify(manifest), digestOf(manifest), now],
+  );
+
   // Someone else's workspace, with a review that must not surface on this reader's page.
   createReviewVersion(WS_OTHER, "not-yours", doc("Somebody else's review", [{ repo: REPO, number: 99 }]));
   setReviewPrs(WS_OTHER, "not-yours", [{ repo: REPO, number: 99, repoId: REPO_ID }]);
@@ -143,8 +168,8 @@ afterAll(() => {
 });
 
 /** The text of one review's row, tags stripped and whitespace collapsed. */
-function rowText(html: string, slug: string): string {
-  const start = html.indexOf(`/${wsId}/r/${slug}/`);
+function rowText(html: string, slug: string, route = "r"): string {
+  const start = html.indexOf(`/${wsId}/${route}/${slug}/`);
   expect(start).toBeGreaterThan(-1);
   const end = html.indexOf("</tr>", start);
   return html
@@ -189,6 +214,19 @@ describe("the reviews index", () => {
       total: 6,
     });
 
+    expect(githubCalls).toBe(0);
+  });
+
+  test("should link a retained stack with its title, pin, members, and no GitHub read", async () => {
+    const html = await index();
+    const row = rowText(html, "retained-stack", "r-stacks");
+    expect(row).toContain("The retained stack");
+    expect(row).toContain("v1");
+    expect(row).toContain("1 merged");
+    expect(row).toContain("1 open");
+    expect(html).toContain(`href="/${wsId}/r-stacks/retained-stack/"`);
+    const scoped = await (await fetch(`${base}/${wsId}/reviews`)).text();
+    expect(scoped).toContain(`href="/${wsId}/r-stacks/retained-stack/"`);
     expect(githubCalls).toBe(0);
   });
 

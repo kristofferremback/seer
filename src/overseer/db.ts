@@ -109,8 +109,9 @@ export function lineageOwnsSlug(wsId: string, slug: string): boolean {
     .get(wsId, slug);
 }
 
-/** Whether a review stack owns this workspace slug. Kept beside lineageOwnsSlug so legacy
- * and promoted writers can enforce the shared namespace without importing stack writers. */
+/** Whether a review stack owns this workspace slug. Kept beside lineageOwnsSlug so
+ * legacy and promoted writers can enforce the flat namespace without importing stack
+ * writers. */
 export function stackOwnsSlug(wsId: string, slug: string): boolean {
   return !!db
     .query<{ one: number }, [string, string]>(
@@ -179,9 +180,11 @@ export const createReviewVersion = db.transaction(
     const existing = getReview(wsId, slug);
     // The other direction of the same rule promoted writers enforce: a FIRST publish
     // cannot take a name a lineage or stack holds. A review that already exists is
-    // untouched by this: it owned the slug first, and
-    // appending a version to it changes nothing about who the slug names.
-    if (!existing && (lineageOwnsSlug(wsId, slug) || stackOwnsSlug(wsId, slug))) throw new ReviewSlugTaken(slug);
+    // untouched by this: it owned the slug first, and appending a version changes
+    // nothing about who owns it.
+    if (!existing && (lineageOwnsSlug(wsId, slug) || stackOwnsSlug(wsId, slug))) {
+      throw new ReviewSlugTaken(slug);
+    }
     const version = (existing?.latest_version ?? 0) + 1;
     let id: string;
     if (existing) {

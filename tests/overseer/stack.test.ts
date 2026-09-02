@@ -26,11 +26,12 @@ import { GithubError, type GithubClient, type GithubPull, type GithubPullStack, 
 import { offlineGithubClientFactory, offlineReadRouter } from "../offline-github";
 import { settleCaptureJobs, stopCaptureSweep } from "../../src/overseer/revision-jobs";
 import { getLineage, getRevision, listRevisionReadChangeIds, setRevisionChangeRead } from "../../src/overseer/revision-db";
+import { ingestPullRequest, PrIngestError } from "../../src/overseer/revision-pr";
 import { WEBHOOK_PATH, webhookSignature } from "../../src/overseer/webhook";
 import { getStageCapture } from "../../src/stage/db";
 import { getStack, getStackManifest, StackWriteError } from "../../src/overseer/stack-db";
 import { normalizeInferredChain, normalizeNativeStack, recordStackObservation } from "../../src/overseer/stack-pr";
-import { ingestPullRequest, PrIngestError } from "../../src/overseer/revision-pr";
+
 import { stackPages, type StackUnit } from "../../src/overseer/stack-read";
 import { CAPTURE_LEASE_MS } from "../../src/overseer/revision-jobs";
 import { recoverStackRefreshJobs, settleStackRefreshJobs } from "../../src/overseer/stack-jobs";
@@ -601,7 +602,7 @@ describe("a stack over four members", () => {
     const again = await createStack({ slug: "stack-dup", members: ["pr-11", "pr-12"] }, "stack-dup-create");
     expect(again.status).toBe(422);
     expect((await again.json() as any).error).toContain("already a member of stack \"stack-a\"");
-    // And every other slug owner refuses the name.
+    // Every other review model refuses the same workspace slug.
     expect((await createStack({ slug: "pr-11", members: ["pr-21", "pr-22"] }, "stack-slugclash")).status).toBe(409);
     createReviewVersion(workspace, "legacy-stack-owner", goldenStoredDoc());
     expect((await createStack({ slug: "legacy-stack-owner", members: ["pr-21", "pr-22"] }, "stack-legacy-slugclash")).status).toBe(409);
@@ -632,8 +633,7 @@ describe("a stack over four members", () => {
     expect(prFirst.status).toBe(409);
     expect((await prFirst.json() as any).error).toContain("review stack");
 
-    // Call the transaction directly too. This is the recheck after any preflight and
-    // provider read, where a stack created during that gap must still win the slug.
+    // The transaction recheck catches a stack created after preflight and provider read.
     expect(() => ingestPullRequest({
       workspaceId: workspace,
       userId: owner,
@@ -659,7 +659,7 @@ describe("a stack over four members", () => {
     throwingGithub();
     const page = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a`, { headers: { cookie } })).text());
     expect(page).toContain("The whole chain");
-    expect(page).toContain("Manifest 1");
+    expect(page).toContain("v1");
     for (const number of [11, 12, 13, 14]) expect(page).toContain(`#${number} Layer #${number}`);
     expect(page).toContain("witness pending");
     expect(page).toContain("awaiting member accounts #11, #12, #13, #14");
@@ -700,6 +700,9 @@ describe("a stack over four members", () => {
     const manifestView = await (await fetch(`${base}/api/review-stacks/stack-a/manifests/2`, { headers: { cookie } })).json() as any;
     validateResponse("readReviewStackManifest", manifestView);
     expect(manifestView.progress).toEqual({ read: 0, total: 8 });
+    expect(manifestView.witness.claimUrl).toBe(
+      `${config.baseUrl}/api/review-stack-witness-requests/${manifestView.witness.id}/claim`,
+    );
   });
 
   test("the partition is checked exactly: omission, duplication, wrong pins, wrong group, out of order", async () => {
@@ -833,7 +836,7 @@ describe("movement, refresh and immutability", () => {
     expect(view.manifest.drift.refreshRequired).toBe(true);
     throwingGithub();
     const page = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a`, { headers: { cookie } })).text());
-    expect(page).toContain("#12 revision 2 available");
+    expect(page).toContain("#12 rev 2 available");
     expect(page).toContain("refresh required");
   });
 
@@ -866,7 +869,7 @@ describe("movement, refresh and immutability", () => {
     expect((await fetch(`${base}/${workspace}/r-stacks/stack-a/v/3/account`, { headers: { cookie } })).status).toBe(404);
     const third = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a/v/3`, { headers: { cookie } })).text());
     expect(third).toContain("awaiting member accounts #12");
-    expect(third).toContain("Manifest 3");
+    expect(third).toContain("v3");
     expect(before.requests).toEqual(rows().requests.slice(0, 1));
     expect((rows().requests[0] as any).state).toBe("published");
   });
@@ -1446,6 +1449,7 @@ describe("paging", () => {
     }
     expect(overflowLinks.map((link) => link.id)).toEqual(links.map((link) => link.id));
     expect(new Set(overflowLinks.map((link) => link.href))).toEqual(new Set(links.map((link) => link.href)));
+
     db.run("UPDATE stage_capture_files SET path = 'src/structure-only.ts' WHERE id = ?", [leafId]);
     db.run("UPDATE stage_capture_incomplete SET path = 'src/big.ts' WHERE id = ?", [materialId]);
   });
@@ -1459,6 +1463,7 @@ describe("rendering and lines", () => {
     const page = await (await fetch(`${base}/${workspace}/r-stacks/stack-a/v/2/account?review=shared-line`, { headers: { cookie } })).text();
     expect([...page.matchAll(/data-seam="(l[0-9]+)"/g)].map((match) => match[1])).toEqual(["l1", "l2", "l3", "l4"]);
     expect(page).toContain("<main class=\"focus-stream\" data-focus-stream data-seams>");
+    expect(page).toMatch(/class="stack-seam"[^>]*>[\s\S]*?aria-label="Open PR #11: Layer #11">open<\/a>/);
     expect(page).toContain("4 layers");
     expect(visible(page)).toContain("Whole stack · 4 layers");
     expect(page).toContain('<select class="scope-select" name="layer" data-scope');
@@ -1475,7 +1480,7 @@ describe("rendering and lines", () => {
     expect(changeIdsOf(layer)).toHaveLength(2);
     const overview = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a/v/2/account`, { headers: { cookie } })).text());
     expect(overview).toContain("v2 account");
-    expect(overview).toContain("Manifest 2 · account");
+    expect(overview).toContain("v2 · account");
     // A stale group on a resolved stack lands on the stack, not on a miss.
     const stale = await fetch(`${base}/${workspace}/r-stacks/stack-a/v/2?review=gone`, { headers: { cookie }, redirect: "manual" });
     expect(stale.status).toBe(303);

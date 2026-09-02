@@ -427,15 +427,15 @@ function projectionOf(target: ExactDocument): CapabilityDocumentProjection {
     return {
       kind: target.documentKind,
       slug: target.revision.slug,
-      pin: target.account ? `v ${target.account.version}` : `rev ${target.revision.revision}`,
-      title: target.account ? target.account.slug : target.revision.doc.identity.title,
+      pin: target.account ? `v${target.account.version}` : `rev ${target.revision.revision}`,
+      title: target.revision.doc.identity.title,
     };
   }
   return {
     kind: target.documentKind,
     slug: target.manifest.slug,
-    pin: target.account ? `v ${target.manifest.version} account` : `v ${target.manifest.version}`,
-    title: target.account ? target.account.slug : target.manifest.doc.identity.title,
+    pin: target.account ? `v${target.manifest.version} account` : `v${target.manifest.version}`,
+    title: target.manifest.doc.identity.title,
   };
 }
 
@@ -535,8 +535,8 @@ interface ShareDocumentProjection {
   assetPath: string;
 }
 
-/** A listing label and owning-member redirect need only the immutable row named by the
- * capability. They deliberately do not resolve its inventory or consult a latest pointer. */
+/** A listing label and owning-member redirect need only the capability's immutable
+ * document rows. They deliberately do not resolve inventory or consult a latest pointer. */
 function projectedDocumentRow(share: ShareRow): ShareDocumentProjection | null {
   if (share.kind !== "review_document" && share.kind !== "stack_document") return null;
   const scope = getCapabilityScope(share.id);
@@ -552,21 +552,23 @@ function projectedDocumentRow(share: ShareRow): ShareDocumentProjection | null {
   }
   if (scope.document_kind === "review_account") {
     const row = getAccountById(share.workspace_id, scope.document_id);
-    return row ? {
-      document: { kind: scope.document_kind, slug: row.slug, pin: `v ${row.version}`, title: row.slug },
+    const revision = row ? getRevisionById(share.workspace_id, row.revision_id) : null;
+    return row && revision && revision.slug === row.slug && revision.lineage_id === row.lineage_id && revision.revision === row.revision ? {
+      document: { kind: scope.document_kind, slug: row.slug, pin: `v${row.version}`, title: revision.doc.identity.title },
       assetPath: `/${share.workspace_id}/r/${row.slug}/v/${row.version}`,
     } : null;
   }
   if (scope.document_kind === "stack_manifest") {
     const row = getStackManifestById(share.workspace_id, scope.document_id);
     return row ? {
-      document: { kind: scope.document_kind, slug: row.slug, pin: `v ${row.version}`, title: row.doc.identity.title },
+      document: { kind: scope.document_kind, slug: row.slug, pin: `v${row.version}`, title: row.doc.identity.title },
       assetPath: `/${share.workspace_id}/r-stacks/${row.slug}/v/${row.version}`,
     } : null;
   }
   const row = getStackAccountById(share.workspace_id, scope.document_id);
-  return row ? {
-    document: { kind: scope.document_kind, slug: row.slug, pin: `v ${row.version} account`, title: row.slug },
+  const manifest = row ? getStackManifestById(share.workspace_id, row.manifest_id) : null;
+  return row && manifest && manifest.slug === row.slug && manifest.stack_id === row.stack_id && manifest.version === row.version ? {
+    document: { kind: scope.document_kind, slug: row.slug, pin: `v${row.version} account`, title: manifest.doc.identity.title },
     assetPath: `/${share.workspace_id}/r-stacks/${row.slug}/v/${row.version}/account`,
   } : null;
 }

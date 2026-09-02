@@ -53,13 +53,25 @@ export function stageTree(files: StageCaptureFileRow[]): StageTreeNode {
     }
     node.files.push(file);
   }
-  const freeze = (node: MutableTree): StageTreeNode => ({
-    name: node.name,
-    path: node.path,
-    folders: [...node.folders.values()].sort((a, b) => codePointOrder(a.name, b.name)).map(freeze),
-    files: [...node.files].sort((a, b) => codePointOrder(a.path, b.path)),
-  });
-  return freeze(root);
+  const freeze = (node: MutableTree, rootNode = false): StageTreeNode => {
+    const frozen: StageTreeNode = {
+      name: node.name,
+      path: node.path,
+      folders: [...node.folders.values()].sort((a, b) => codePointOrder(a.name, b.name)).map((folder) => freeze(folder)),
+      files: [...node.files].sort((a, b) => codePointOrder(a.path, b.path)),
+    };
+    if (!rootNode && frozen.files.length === 0 && frozen.folders.length === 1) {
+      const child = frozen.folders[0]!;
+      return {
+        name: `${frozen.name}/${child.name}`,
+        path: child.path,
+        folders: child.folders,
+        files: child.files,
+      };
+    }
+    return frozen;
+  };
+  return freeze(root, true);
 }
 
 export function changesByFile(inventory: StageCaptureInventory): Map<string, string[]> {

@@ -369,6 +369,7 @@ export class PrIngestError extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 409 | 422 | 502,
     message: string,
+    readonly rule?: string,
   ) {
     super(message);
     this.name = "PrIngestError";
@@ -513,13 +514,13 @@ export const ingestPullRequest = db.transaction((input: PrIngestInput): PrIngest
   let lineage: ReviewLineageRow | null;
   if (input.operation === "create") {
     if (lineageOwnsSlug(workspaceId, input.slug)) {
-      throw new PrIngestError(409, `Review slug "${input.slug}" already names another promoted review`);
+      throw new PrIngestError(409, `Review slug "${input.slug}" already names another promoted review`, "review_slug_taken");
     }
     if (stackOwnsSlug(workspaceId, input.slug)) {
-      throw new PrIngestError(409, `Review slug "${input.slug}" already names a review stack`);
+      throw new PrIngestError(409, `Review slug "${input.slug}" already names a review stack`, "review_slug_taken");
     }
     if (input.legacyOwnsSlug(input.slug)) {
-      throw new PrIngestError(409, `Review slug "${input.slug}" already names a review in this workspace`);
+      throw new PrIngestError(409, `Review slug "${input.slug}" already names a review in this workspace`, "review_slug_taken");
     }
     for (const project of input.projects) {
       if (!getProject(workspaceId, project)) throw new PrIngestError(422, `No project "${project}" in this workspace`);
@@ -1171,7 +1172,9 @@ function titleField(body: Record<string, unknown>, fallback: string): string {
 }
 
 function ingestFailure(err: unknown): Response {
-  if (err instanceof PrIngestError) return prJson({ error: err.message }, err.status);
+  if (err instanceof PrIngestError) {
+    return prJson({ error: err.message, ...(err.rule ? { rule: err.rule } : {}) }, err.status);
+  }
   if (err instanceof GithubAppRefusal) return prJson({ error: err.message }, 422);
   // Before the general arm, and deliberately not a `status === 0` rule: the same call
   // path throws a bare GithubError for a malformed compare response, which is the host's
@@ -1223,7 +1226,7 @@ function importForObservation(workspaceId: string, observationId: string): Conve
   return db.query<ConversationImportRow, [string, string]>("SELECT * FROM review_conversation_imports WHERE workspace_id = ? AND observation_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1").get(workspaceId, observationId);
 }
 
-async function importObservedConversation(workspaceId: string, lineage: ReviewLineageRow, observation: ReviewPrObservationRow, actor: ReadActor): Promise<ConversationImportRow | null> {
+export async function importObservedConversation(workspaceId: string, lineage: ReviewLineageRow, observation: ReviewPrObservationRow, actor: ReadActor): Promise<ConversationImportRow | null> {
   try {
     const started = startConversationImport({ workspaceId, lineageId: lineage.id, observationId: observation.id, actor });
     return await runConversationImport(workspaceId, lineage, observation, started);
@@ -1289,13 +1292,13 @@ export async function handleCreatePullRequestLineage(req: Request): Promise<Resp
       // and the caller can fix it without one. Rechecked inside the transaction, because
       // this answer is already stale by the time GitHub replies.
       if (lineageOwnsSlug(auth.workspaceId, slug)) {
-        return prJson({ error: `Review slug "${slug}" already names another promoted review` }, 409);
+        return prJson({ error: `Review slug "${slug}" already names another promoted review`, rule: "review_slug_taken" }, 409);
       }
       if (getReview(auth.workspaceId, slug)) {
-        return prJson({ error: `Review slug "${slug}" already names a review in this workspace` }, 409);
+        return prJson({ error: `Review slug "${slug}" already names a review in this workspace`, rule: "review_slug_taken" }, 409);
       }
       if (stackOwnsSlug(auth.workspaceId, slug)) {
-        return prJson({ error: `Review slug "${slug}" already names a review stack` }, 409);
+        return prJson({ error: `Review slug "${slug}" already names a review stack`, rule: "review_slug_taken" }, 409);
       }
       for (const project of projects) {
         if (!getProject(auth.workspaceId, project)) {

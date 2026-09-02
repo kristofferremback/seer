@@ -94,6 +94,10 @@ function esc(value: unknown): string {
   return escapeHtml(String(value ?? ""));
 }
 
+function layerWords(count: number): string {
+  return `${count} layer${count === 1 ? "" : "s"}`;
+}
+
 // ---- namespacing ----
 
 export function prefixId(position: number, id: string): string {
@@ -380,10 +384,10 @@ function driftLines(resolved: ResolvedStackRead): string {
   const drift = stackDrift(workspaceId, stack, manifest);
   const lines: string[] = [];
   if (drift.latestManifestVersion !== null) {
-    lines.push(`<p class="stage-drift"><a href="${esc(stackPath(workspaceId, stack.slug, drift.latestManifestVersion))}">Manifest ${drift.latestManifestVersion} available</a></p>`);
+    lines.push(`<p class="stage-drift"><a href="${esc(stackPath(workspaceId, stack.slug, drift.latestManifestVersion))}">v${drift.latestManifestVersion} available</a></p>`);
   }
   for (const entry of drift.newerRevisions) {
-    lines.push(`<p class="stage-drift"><a href="${esc(`/${workspaceId}/r/${entry.lineageSlug}/rev/${entry.revision}`)}">#${manifest.doc.members[entry.position - 1]!.prNumber} revision ${entry.revision} available</a></p>`);
+    lines.push(`<p class="stage-drift"><a href="${esc(`/${workspaceId}/r/${entry.lineageSlug}/rev/${entry.revision}`)}">#${manifest.doc.members[entry.position - 1]!.prNumber} rev ${entry.revision} available</a></p>`);
   }
   for (const entry of drift.newerAccounts) {
     lines.push(`<p class="stage-drift" data-drift="account">${esc(`#${manifest.doc.members[entry.position - 1]!.prNumber} account v${entry.accountVersion} published`)}</p>`);
@@ -429,7 +433,7 @@ function readerDoc(resolved: ResolvedStackRead, groups: ReaderGroup[]): ReaderDo
     workflow,
     drift: null,
     movement: null,
-    standing: account ? `Manifest ${manifest.version} · account` : `Manifest ${manifest.version}`,
+    standing: account ? `v${manifest.version} · account` : `v${manifest.version}`,
     pin: account ? `v${manifest.version} account` : `v${manifest.version}`,
     latest: manifest.version === (getStack(resolved.workspaceId, stack.slug)?.latest_manifest_version ?? manifest.version),
   };
@@ -651,7 +655,7 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
   const routes = routesFor(resolved, pinned, layer);
   const scope: ReaderScope = {
     current: layer,
-    subtitle: layerMember ? `Layer ${layerMember.position}/${resolved.members.length} · PR #${layerMember.snapshot.prNumber}` : `Whole stack · ${resolved.members.length} layers`,
+    subtitle: layerMember ? `Layer ${layerMember.position}/${resolved.members.length} · PR #${layerMember.snapshot.prNumber}` : `Whole stack · ${layerWords(resolved.members.length)}`,
     options: resolved.members.map((member) => ({ value: member.lineage.slug, label: `PR #${member.snapshot.prNumber} · ${member.snapshot.title}` })),
     action: pinned,
     hidden: url.searchParams.has("review") ? { review: url.searchParams.get("review")! } : {},
@@ -700,7 +704,11 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
       const id = prefixId(member.position, item.id);
       const group = groups.find((candidate) => candidate.group.members.some((entry) => entry.id === id));
       const material = member.inventory.incomplete.find((candidate) => candidate.id === item.id);
-      const label = item.path ?? material?.kind.replaceAll("_", " ") ?? item.type;
+      const memberLabel = `#${resolved.manifest.doc.members[member.position - 1]?.prNumber ?? member.position}`;
+      const itemLabel = material
+        ? `${material.path ?? "capture"} · ${material.side} · ${material.kind.replaceAll("_", " ")}`
+        : `${item.path ?? item.type} · ${member.inventory.files.find((candidate) => candidate.id === item.id)?.status.replaceAll("_", " ") ?? item.type}`;
+      const label = `${memberLabel} · ${itemLabel}`;
       const blocked = blockedItems.has(`${member.revision.id}:${item.id}`);
       if (group) {
         return { itemId: id, itemType: item.type as "material" | "file", label, href: `${routes.group(group.group.id).split("#", 1)[0]}#focus-${id}`, blocked };
@@ -896,7 +904,7 @@ export async function renderStackCapability(req: Request, capability: StackCapab
     workflow: null,
     drift: null,
     movement: null,
-    standing: capability.account ? `Manifest ${capability.manifest.version} · account` : `Manifest ${capability.manifest.version}`,
+    standing: capability.account ? `v${capability.manifest.version} · account` : `v${capability.manifest.version}`,
     pin: capability.account ? `v${capability.manifest.version} account` : `v${capability.manifest.version}`,
     latest: false,
   };
@@ -908,7 +916,7 @@ export async function renderStackCapability(req: Request, capability: StackCapab
   const routes = capabilityStackRoutes(resolved, basePath, layer);
   const scope: ReaderScope = {
     current: layer,
-    subtitle: layerMember ? `Layer ${layerMember.position}/${members.length} · PR #${layerMember.snapshot.prNumber}` : `Whole stack · ${members.length} layers`,
+    subtitle: layerMember ? `Layer ${layerMember.position}/${members.length} · PR #${layerMember.snapshot.prNumber}` : `Whole stack · ${layerWords(members.length)}`,
     options: members.map((member) => ({ value: member.lineage.slug, label: `PR #${member.snapshot.prNumber} · ${member.snapshot.title}` })),
     action: basePath,
     hidden: url.searchParams.has("review") ? { review: url.searchParams.get("review")! } : {},
@@ -962,11 +970,22 @@ export async function renderStackCapability(req: Request, capability: StackCapab
       brandPath: basePath,
     },
   );
-  if (response.status !== 200 || !page) return response;
+  if (response.status !== 200) return response;
+  if (!page) {
+    if (!url.searchParams.has("fallback-page")) return response;
+    const back = new URL(url);
+    back.searchParams.delete("fallback-page");
+    return new Response(null, { status: 303, headers: { location: back.pathname + back.search, "cache-control": "no-store" } });
+  }
   const text = await response.text();
   const bytes = Buffer.byteLength(text);
   if (bytes > STACK_PAGE_HTML_MAX_BYTES && pageGroup) {
     return overLimitPage(resolved, url, pageEntries, pageGroup, filter, built, bytes, basePath);
+  }
+  if (url.searchParams.has("fallback-page")) {
+    const back = new URL(url);
+    back.searchParams.delete("fallback-page");
+    return new Response(null, { status: 303, headers: { location: back.pathname + back.search, "cache-control": "no-store" } });
   }
   const headers = new Headers(response.headers);
   headers.set("x-seer-page-bytes", String(bytes));

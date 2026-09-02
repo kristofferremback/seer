@@ -134,6 +134,44 @@ describe("the document and the router are one list", () => {
     expect(responses["404"]).toBeDefined();
   });
 
+  test("legacy succession reads use session-or-key privacy and nullable result URLs", () => {
+    const operation = (openApiPaths()["/api/review-legacy-successions/{id}"] as any).get;
+    expect(operation.security).toEqual([{ apiKey: [] }, { session: [] }]);
+    expect(operation.responses["401"]).toBeUndefined();
+    const result = operation.responses["200"].content["application/json"].schema.properties.result;
+    expect(result.properties.url.type).toEqual(["string", "null"]);
+  });
+
+  test("the shared error body documents a human error and stable machine rule", () => {
+    const properties = (openApiSpec() as any).components.responses.Error.content["application/json"].schema.properties;
+    expect(properties.error).toMatchObject({ type: "string", description: expect.stringContaining("person") });
+    expect(properties.rule).toMatchObject({ type: "string", description: expect.stringContaining("machine-readable") });
+  });
+
+  test("legacy cutover responses document successor state and immutable creation routes", () => {
+    const paths = openApiPaths() as any;
+    const read = paths["/api/reviews/{slug}"].get.responses["200"].content["application/json"].schema;
+    const pinnedRead = paths["/api/reviews/{slug}/v/{n}"].get.responses["200"].content["application/json"].schema;
+    expect(read.required).toContain("successor");
+    expect(pinnedRead).toEqual(read);
+    expect(read.properties.successor.oneOf).toHaveLength(2);
+
+    const retired = paths["/api/reviews"].post.responses["409"].content["application/json"].schema;
+    const immutable = retired.anyOf.find((branch: any) => branch.required?.includes("pullRequestCreateUrl"));
+    expect(immutable.required).toEqual([
+      "error", "rule", "pullRequestCreateUrl", "captureCreateUrl", "stackCreateUrl",
+    ]);
+
+    const failedReplay = paths["/api/reviews/{slug}/successor"].post.responses["409"]
+      .content["application/json"].schema;
+    expect(failedReplay.oneOf.some((branch: any) => branch.properties?.state)).toBe(true);
+
+    const pullRequestConflict = paths["/api/pull-request-review-lineages"].post.responses["409"]
+      .content["application/json"].schema;
+    const validate = validator().compile(pullRequestConflict);
+    expect(validate({ error: "Review slug is taken.", rule: "review_slug_taken" })).toBe(true);
+  });
+
   test("no two operations share an operationId", () => {
     const ids = API_ROUTES.flatMap((r) =>
       Object.values(r.methods)
@@ -245,10 +283,12 @@ describe("a required field is one the handler requires", () => {
     return body;
   }
 
-  test("POST /api/reviews refuses a body missing `slug` or `prs`, naming it", async () => {
+  test("POST /api/reviews requires slug and prs for a seeded legacy republish", async () => {
     const branch = requiredFields(operation("/api/reviews", "post"))[0]!;
     expect(branch.required).toEqual(["slug", "prs"]);
-    const sample = { slug: "contract-probe", prs: ["acme/seer#1"] };
+    // beforeAll seeded this exact legacy row, so omitting prs reaches the republish
+    // validator rather than the new-slug retirement response.
+    const sample = { slug: SLUG, prs: [{ repo: "Acme/Contract", number: 1 }] };
 
     for (const omit of branch.required) {
       const res = await fetch(`${base}/api/reviews`, {
@@ -469,6 +509,9 @@ describe("a 200 matches the schema the document declares for it", () => {
     retryStackRefreshJob: "a failed refresh job only exists behind a stack membership delivery; driven in tests/overseer/stack.test.ts",
     attachProjectReviewStack: "needs a created stack; driven in tests/overseer/stack.test.ts",
     detachProjectReviewStack: "needs a created stack; driven in tests/overseer/stack.test.ts",
+    createLegacyReviewSuccessor: "needs a stored legacy source and GitHub actor; driven in tests/overseer/legacy-successor.test.ts",
+    readLegacyReviewSuccession: "needs a durable succession; driven in tests/overseer/legacy-successor.test.ts",
+    retryLegacyReviewSuccession: "needs a failed creator-owned succession; driven in tests/overseer/legacy-successor.test.ts",
   };
 
   let ajv: Ajv2020;
@@ -518,6 +561,10 @@ describe("a 200 matches the schema the document declares for it", () => {
 
   test("listImages", async () => {
     await check("listImages", () => fetch(`${base}/api/images`, { headers: auth() }));
+  });
+
+  test("listWitnessRequests", async () => {
+    await check("listWitnessRequests", () => fetch(`${base}/api/witness-requests`, { headers: auth() }));
   });
 
   test("readReview and readReviewVersion", async () => {
@@ -642,6 +689,7 @@ describe("a 200 matches the schema the document declares for it", () => {
       "publishBundle",
       "publishBundleViaPost",
       "listImages",
+      "listWitnessRequests",
       "readReview",
       "readReviewVersion",
       "createShare",

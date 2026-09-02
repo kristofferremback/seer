@@ -366,7 +366,7 @@ function readerDrift(
   if (drift.newerRevision !== null) {
     return {
       kind: "revision",
-      label: `Revision ${drift.newerRevision} available`,
+      label: `rev ${drift.newerRevision} available`,
       href: `/${workspaceId}/r/${lineage.slug}/rev/${drift.newerRevision}`,
     };
   }
@@ -414,8 +414,8 @@ function readerDoc(
         return { word, detail: request?.failure ?? null };
       })();
   const standing = account
-    ? `Version ${account.version} · revision ${revision.revision}`
-    : `Revision ${revision.revision}`;
+    ? `v${account.version} · rev ${revision.revision}`
+    : `rev ${revision.revision}`;
   const pin = account ? `v${account.version}` : `rev ${revision.revision}`;
   const latest = account
     ? account.version === lineage.latest_account_version
@@ -508,7 +508,7 @@ function shortSha(value: string): string {
  * Nothing here needs JavaScript, there is no `/rev/` URL to link to yet, and the actor is
  * named by what kind of reader it is rather than by any credential id. A reader is not
  * left stuck on it either: a failed capture offers its retry to the member who may spend
- * the credential, and a capture still in flight refreshes itself and says how to reload.
+ * the credential, and a capture still in flight says how to reload without moving focus.
  */
 function pendingCapturePage(
   nav: NavContext,
@@ -542,7 +542,7 @@ function pendingCapturePage(
     : "";
   const facts = [
     `<p><strong>Source</strong> ${pinned}${relation ? ` · via ${esc(actorWords(readActorOf(relation)))}` : ""}</p>`,
-    job && job.state === "failed" && job.failure ? `<p><strong>Failure</strong> ${esc(job.failure)}</p>` : "",
+    job && job.state === "failed" && job.failure ? `<p class="capture-failure">${esc(job.failure)}</p>` : "",
     mayRetry
       ? `<form class="capture-retry" method="post" action="${esc(`${path}/capture-jobs/${job!.id}/retry`)}"><button type="submit">Retry capture</button></form>`
       : "",
@@ -551,14 +551,14 @@ function pendingCapturePage(
   const body =
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">` +
-    `<meta name="robots" content="noindex,nofollow">${inFlight ? `<meta http-equiv="refresh" content="30">` : ""}<script>${STAGE_THEME_BOOTSTRAP}</script>` +
+    `<meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script>` +
     `<title>${esc(lineage.title)} · Seer</title><style>${STAGE_CSS}</style></head>` +
     `<body><div data-stage-background><div class="stage-shell">${appBar(nav)}</div>` +
     `<div class="stage-grid stage-overview"><header class="stage-header">` +
     `<p class="stage-context">${esc(lineage.repo)} · ${esc(lineage.branch)}${prLink === "" ? "" : ` · ${prLink}`}</p>` +
     `<h1>${esc(lineage.title)}</h1>` +
-    `<div class="stage-source"><span>${esc(word)}</span>${standing === "" ? "" : `<span class="source-observation">${standing}</span>`}</div>` +
-    `</header><section class="pending-facts" aria-label="Capture">${facts}</section></div></div></body></html>`;
+    `<div class="stage-source"><h2 class="capture-state" data-capture-state="${esc(job?.state ?? "pending")}">${esc(word)}</h2>${standing === "" ? "" : `<span class="source-observation">${standing}</span>`}</div>` +
+    `</header><section class="pending-facts" data-capture-state="${esc(job?.state ?? "pending")}" aria-label="Capture">${facts}</section></div></div></body></html>`;
   return new Response(body, {
     status: 200,
     headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" },
@@ -670,7 +670,9 @@ export async function handlePromotedReviewPage(
     return {
       itemId: item.id,
       itemType: item.type as "material" | "file",
-      label: item.path ?? material?.kind.replaceAll("_", " ") ?? item.type,
+      label: material
+        ? `${material.path ?? "capture"} · ${material.side} · ${material.kind.replaceAll("_", " ")}`
+        : `${item.path ?? item.type} · ${resolved.inventory.files.find((candidate) => candidate.id === item.id)?.status.replaceAll("_", " ") ?? item.type}`,
       href,
       blocked: blockedItems.has(item.id),
     };

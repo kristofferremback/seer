@@ -50,6 +50,7 @@ import {
 import type { RevisionBuilder } from "./revision-types";
 import { validateAccountPublish, validateLineageCreate } from "./revision-validate";
 import { db } from "../db";
+import { wakeLegacySuccessions } from "./legacy-successor-jobs";
 
 const NUMBER_RE = /^[1-9][0-9]{0,8}$/;
 
@@ -60,15 +61,19 @@ function reviewJson(data: unknown, status = 200): Response {
 }
 
 function witnessView(request: WitnessRequestRow, slug: string): unknown {
+  const state = workflowWord(request);
   return {
     id: request.id,
     workspace: request.workspace_id,
     slug,
     revision: request.revision,
-    state: workflowWord(request),
+    state,
     retryCount: request.retry_count,
     failure: request.failure,
     accountId: request.account_id,
+    claimUrl: state === "pending" || state === "retrying"
+      ? `${config.baseUrl}/api/review-witness-requests/${request.id}/claim`
+      : null,
     updatedAt: new Date(request.updated_at).toISOString(),
   };
 }
@@ -296,7 +301,9 @@ export async function handleCreateReviewLineage(req: Request): Promise<Response>
     });
     return reviewJson(revisionView(result.lineage, result.revision, result.request));
   } catch (err) {
-    if (err instanceof RevisionWriteError) return reviewJson({ error: err.message }, err.status);
+    if (err instanceof RevisionWriteError) {
+      return reviewJson({ error: err.message, ...(err.rule ? { rule: err.rule } : {}) }, err.status);
+    }
     if (err && typeof err === "object" && "code" in err && err.code === "SQLITE_CONSTRAINT_UNIQUE") {
       return reviewJson({ error: "Review publication conflicted with an existing review or capture." }, 409);
     }
@@ -429,6 +436,10 @@ export async function handlePublishReviewAccount(
       focus: checked.value.focus,
       evidence: checked.value.evidence,
     });
+    // The account transaction committed before this wake. A lost process signal is
+    // covered by the periodic succession sweep, so the immutable account never depends
+    // on workflow notification succeeding.
+    wakeLegacySuccessions(lineage.id);
     return reviewJson(accountView(getLineage(auth.workspaceId, slug)!, result.account, result.request));
   } catch (err) {
     if (err instanceof RevisionWriteError) return reviewJson({ error: err.message }, err.status);

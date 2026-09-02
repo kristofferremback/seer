@@ -164,7 +164,15 @@ function noAttachments(): PublishPayload {
   return payload;
 }
 
+const seededLegacy = new Set<string>();
+
 function publish(slug: string, key = keySeen): Promise<Response> {
+  const workspace = key === keySeen ? wsSeen : wsBlind;
+  const identity = `${workspace}/${slug}`;
+  if (!seededLegacy.has(identity)) {
+    storeGoldenReview(workspace, slug);
+    seededLegacy.add(identity);
+  }
   return fetch(`${base}/api/reviews`, {
     method: "POST",
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },

@@ -172,7 +172,7 @@ export interface ReaderDoc {
   drift?: ReaderDrift | null;
   /** Absent for a stage, and null on the first revision of a lineage. */
   movement?: ReaderMovement | null;
-  /** "Version 3" or "Revision 1", as the nav head and the terminal say it. */
+  /** `v3` or `rev 1`, as the header and source rail say it. */
   standing: string;
   /** The same thing short enough for the focus header: "v3", "rev 1". */
   pin: string;
@@ -387,21 +387,33 @@ function accountCard(role: "Builder" | "Witness", account: ReaderAccount): strin
   return `<section class="account">${accountHeading(role, account.agent.name, account.agent.model)}<div class="account-body markdown">${markdown(account.body)}</div>${context ? `<details class="account-context"><summary>Context</summary><div class="markdown">${markdown(context)}</div></details>` : ""}</section>`;
 }
 
-function lineHtml(line: HunkLine, side: "unified" | "old" | "new", path: string): string {
+function lineHtml(
+  line: HunkLine,
+  side: "unified" | "old" | "new",
+  path: string,
+  roving: Set<"old" | "new">,
+): string {
   const language = langOfPath(path);
   const oldNumber = line.kind === "add" ? "" : String(line.oldNo ?? "");
   const newNumber = line.kind === "del" ? "" : String(line.newNo ?? "");
   const mark = line.kind === "add" ? "+" : line.kind === "del" ? "−" : " ";
   const old = side === "new" ? "" : oldNumber;
   const newer = side === "old" ? "" : newNumber;
-  const number = (value: string, selectedSide: "old" | "new") => value === "" ? `<span class="line-${selectedSide}"></span>` : `<button type="button" class="line-${selectedSide}" data-line-select data-line-side="${selectedSide}" data-line-number="${value}" aria-label="Select ${selectedSide} line ${value}">${value}</button>`;
+  const number = (value: string, selectedSide: "old" | "new") => {
+    if (value === "") return `<span class="line-${selectedSide}"></span>`;
+    const tabIndex = roving.has(selectedSide) ? -1 : 0;
+    roving.add(selectedSide);
+    return `<button type="button" class="line-${selectedSide}" data-line-select data-line-side="${selectedSide}" data-line-number="${value}" tabindex="${tabIndex}" aria-pressed="false" aria-label="Select ${selectedSide} line ${value}">${value}</button>`;
+  };
   return `<div class="diff-line ${line.kind}">${number(old, "old")}${number(newer, "new")}<span class="line-mark">${mark}</span><span class="line-code">${codeHtml(line.content, language, line.wordRanges)}</span></div>`;
 }
 
 function diffHtml(hunk: Hunk): string {
   const range = `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`;
-  const unified = hunk.lines.map((line) => lineHtml(line, "unified", hunk.path)).join("");
-  const split = splitDiffRows(hunk).map((row) => `<div class="split-row"><div class="split-cell">${row.old ? lineHtml(row.old, "old", hunk.path) : ""}</div><div class="split-cell new">${row.newer ? lineHtml(row.newer, "new", hunk.path) : ""}</div></div>`).join("");
+  const unifiedRoving = new Set<"old" | "new">();
+  const splitRoving = new Set<"old" | "new">();
+  const unified = hunk.lines.map((line) => lineHtml(line, "unified", hunk.path, unifiedRoving)).join("");
+  const split = splitDiffRows(hunk).map((row) => `<div class="split-row"><div class="split-cell">${row.old ? lineHtml(row.old, "old", hunk.path, splitRoving) : ""}</div><div class="split-cell new">${row.newer ? lineHtml(row.newer, "new", hunk.path, splitRoving) : ""}</div></div>`).join("");
   return `<div class="diff-frame" data-diff-frame data-layout="unified"><div class="diff"><div class="hunk-range">${esc(range)}</div><div class="unified">${unified}</div><div class="split"><div class="split-head"><span>Old</span><span>New</span></div>${split}</div></div></div>`;
 }
 
@@ -422,7 +434,7 @@ function dimensions(group: ReaderGroup, readLabel?: string, place = ""): string 
     : "";
   const read = readLabel === undefined
     ? ""
-    : `<span class="dimension read-dimension" data-read-state><span class="read-mark" aria-hidden="true">✓</span><span>${esc(readLabel)}</span></span>`;
+    : `<span class="dimension read-dimension" data-read-state><span class="read-mark" data-read-mark aria-hidden="true">${readLabel === "Read" ? "✓" : "○"}</span><span>${esc(readLabel)}</span></span>`;
   if (!signals && !read) return "";
   return `<span class="dimensions ${place}">${signals}${read}</span>`;
 }
@@ -433,11 +445,24 @@ function readForm(routes: ReaderRoutes, groupId: string, changeId: string, read:
   return `<form class="read-form ${placement}" method="post" action="${esc(routes.read(changeId))}"><input data-read-input type="hidden" name="read" value="${read ? "false" : "true"}">${back === null ? "" : `<input type="hidden" name="return" value="${esc(back)}">`}<span data-read-failure role="status" aria-live="polite"></span><button data-read-button type="submit">${read ? "Mark unread" : "Mark read"}</button></form>`;
 }
 
+function acknowledgementWords(member: ReaderMember, handling: ReaderHandling | null): string | null {
+  if (!handling || member.type === "change" || !handling.requiredAcknowledgementIds.has(member.id)) return null;
+  const held = handling.acknowledgements.get(member.id);
+  const carried = held?.provenance.kind === "carried" ? ` · from rev ${held.provenance.sourceRevision}` : "";
+  return held ? `Acknowledged${carried}` : "Needs acknowledgement";
+}
+
+function acknowledgementSummary(member: ReaderMember, handling: ReaderHandling | null): string {
+  const words = acknowledgementWords(member, handling);
+  return words === null ? "" : ` · <span data-acknowledgement-summary="${esc(member.id)}">${esc(words)}</span>`;
+}
+
 function acknowledgementForm(member: ReaderMember, handling: ReaderHandling | null): string {
   if (!handling?.acknowledgementAction || member.type === "change") return "";
   const held = handling.acknowledgements.get(member.id);
-  const carried = held?.provenance.kind === "carried" ? ` · from rev ${held.provenance.sourceRevision}` : "";
-  return `<div data-acknowledgement-host="${esc(member.id)}"><form class="acknowledgement-form" method="post" action="${esc(handling.acknowledgementAction(member))}" data-acknowledgement-item="${esc(member.id)}"><input type="hidden" name="acknowledged" value="${held ? "false" : "true"}"><input type="hidden" name="return" value="${esc(handling.returnTo)}"><span class="acknowledgement-state">${held ? `Acknowledged${carried}` : "Needs acknowledgement"}</span><span role="status" aria-live="polite"></span><button type="submit">${held ? "Undo" : "Acknowledge"}</button></form></div>`;
+  const words = acknowledgementWords(member, handling);
+  if (words === null) return "";
+  return `<div data-acknowledgement-host="${esc(member.id)}"><form class="acknowledgement-form" method="post" action="${esc(handling.acknowledgementAction(member))}" data-acknowledgement-item="${esc(member.id)}"><input type="hidden" name="acknowledged" value="${held ? "false" : "true"}"><input type="hidden" name="return" value="${esc(handling.returnTo)}"><span class="acknowledgement-state">${esc(words)}</span><span role="status" aria-live="polite"></span><button type="submit">${held ? "Undo" : "Acknowledge"}</button></form></div>`;
 }
 
 function contextControl(routes: ReaderRoutes, view: ChangeView): string {
@@ -611,6 +636,10 @@ function treeSummary(ids: string[], files: number, added: number, removed: numbe
   return `<span class="tree-summary" data-tree-summary><span>${files} file${files === 1 ? "" : "s"}</span>${diffStat(added, removed)}${handling ? `<span class="tree-read${read === ids.length && ids.length > 0 ? " is-read" : ""}"><i aria-hidden="true"></i>${read}/${ids.length}</span>` : ""}</span>`;
 }
 
+function disclosureCue(): string {
+  return `<span class="disclosure-cue" aria-hidden="true">›</span>`;
+}
+
 /** `3 layers` beside a path several members touched. Nothing at all on one layer. */
 function layersHtml(view: GroupView, file: StageCaptureFileRow): string {
   const layers = view.layersOf.get(file.id) ?? 1;
@@ -626,7 +655,7 @@ function overviewTreeHtml(
   const folders = node.folders.map((folder) => {
     const ids = treeChangeIds(folder, view.fileChanges);
     const counts = stageTreeStats(folder, view.fileChanges, readIds, view.changeStats);
-    return `<details class="tree-folder"${view.files.length <= 8 ? " open" : ""} data-tree-node data-files="${counts.files}" data-added="${counts.added}" data-removed="${counts.removed}" data-change-ids="${ids.join(",")}"><summary><span class="tree-arrow" aria-hidden="true">›</span><span class="tree-label">${esc(folder.name)}</span>${treeSummary(ids, counts.files, counts.added, counts.removed, readIds, !!routes.read)}</summary><div class="tree-children">${overviewTreeHtml(folder, view, readIds, routes)}</div></details>`;
+    return `<details class="tree-folder"${view.files.length <= 8 ? " open" : ""} data-tree-node data-tree-path="${esc(folder.path)}" data-files="${counts.files}" data-added="${counts.added}" data-removed="${counts.removed}" data-change-ids="${ids.join(",")}"><summary>${disclosureCue()}<span class="tree-label">${esc(folder.name)}</span>${treeSummary(ids, counts.files, counts.added, counts.removed, readIds, !!routes.read)}</summary><div class="tree-children">${overviewTreeHtml(folder, view, readIds, routes)}</div></details>`;
   }).join("");
   const files = node.files.map((file) => {
     const ids = view.fileChanges.get(file.id) ?? [];
@@ -650,7 +679,7 @@ function focusTreeHtml(
   const folders = node.folders.map((folder) => {
     const ids = treeChangeIds(folder, view.fileChanges);
     const counts = stageTreeStats(folder, view.fileChanges, readIds, view.changeStats);
-    return `<details class="tree-folder" open data-tree-node data-files="${counts.files}" data-added="${counts.added}" data-removed="${counts.removed}" data-change-ids="${ids.join(",")}"><summary><span class="tree-arrow" aria-hidden="true">›</span><span class="tree-label">${esc(folder.name)}</span>${treeSummary(ids, counts.files, counts.added, counts.removed, readIds, !!routes.read)}</summary><div class="tree-children">${focusTreeHtml(folder, view, readIds, routes)}</div></details>`;
+    return `<details class="tree-folder" open data-tree-node data-tree-path="${esc(folder.path)}" data-files="${counts.files}" data-added="${counts.added}" data-removed="${counts.removed}" data-change-ids="${ids.join(",")}"><summary>${disclosureCue()}<span class="tree-label">${esc(folder.name)}</span>${treeSummary(ids, counts.files, counts.added, counts.removed, readIds, !!routes.read)}</summary><div class="tree-children">${focusTreeHtml(folder, view, readIds, routes)}</div></details>`;
   }).join("");
   const byId = new Map(view.changes.map((change) => [change.item.change.id, change]));
   const files = node.files.map((file) => {
@@ -672,8 +701,8 @@ function focusTreeHtml(
 }
 
 function extraMaterialHtml(view: GroupView, focus = false, handling: ReaderHandling | null = null): string {
-  const materials = view.materials.map(({ member, material }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary><span>${esc(material.path ?? material.kind.replaceAll("_", " "))}</span><span>${esc(`${material.side} · ${material.kind.replaceAll("_", " ")}`)}</span></summary><div>${member.description === null ? "" : `<p>${esc(member.description)}</p>`}<p>${esc(material.reason)}</p>${acknowledgementForm(member, handling)}</div></details>`).join("");
-  const files = view.leafFiles.map(({ member, file }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary><span>${esc(file.old_path ? `${file.old_path} → ${file.path}` : file.path)}</span><span>${esc(file.status)}</span></summary><div>${member.description === null ? "" : `<p>${esc(member.description)}</p>`}${fileFacts(file)}${acknowledgementForm(member, handling)}</div></details>`).join("");
+  const materials = view.materials.map(({ member, material }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary>${disclosureCue()}<span>${esc(material.path ?? material.kind.replaceAll("_", " "))}</span><span class="material-state">${esc(`${material.side} · ${material.kind.replaceAll("_", " ")}`)}${acknowledgementSummary(member, handling)}</span></summary><div>${member.description === null ? "" : `<p>${esc(member.description)}</p>`}<p>${esc(material.reason)}</p>${acknowledgementForm(member, handling)}</div></details>`).join("");
+  const files = view.leafFiles.map(({ member, file }) => `<details class="material-fact"${focus ? " open" : ""} id="${esc(focus ? `focus-${member.id}` : member.id)}"><summary>${disclosureCue()}<span>${esc(file.old_path ? `${file.old_path} → ${file.path}` : file.path)}</span><span class="material-state">${esc(file.status.replaceAll("_", " "))}${acknowledgementSummary(member, handling)}</span></summary><div>${member.description === null ? "" : `<p>${esc(member.description)}</p>`}${fileFacts(file)}${acknowledgementForm(member, handling)}</div></details>`).join("");
   if (!materials && !files) return "";
   return `<div class="group-materials">${materials}${files}</div>`;
 }
@@ -854,7 +883,7 @@ function focusSection(doc: ReaderDoc, views: GroupView[], routes: ReaderRoutes):
       const groupUrl = routes.group(place.groupId).split("#", 1)[0]!;
       return `<a href="${groupUrl}#${esc(place.anchor)}"><code>${text}</code></a>`;
     }).join("");
-    return `<details class="focus-item" id="focus-item-${esc(item.id)}"><summary><h3>${esc(item.title)}</h3><span>${item.kind === "risk" ? "risk" : "decision"}</span></summary><div class="focus-item-body"><div class="markdown">${markdown(item.body)}</div><p class="focus-anchors">${anchors}</p></div></details>`;
+    return `<details class="focus-item" id="focus-item-${esc(item.id)}"><summary>${disclosureCue()}<h3>${esc(item.title)}</h3><span>${item.kind === "risk" ? "risk" : "decision"}</span></summary><div class="focus-item-body"><div class="markdown">${markdown(item.body)}</div><p class="focus-anchors">${anchors}</p></div></details>`;
   }).join("");
   return `<section class="focus-items" aria-label="Decisions and risks">${items}</section>`;
 }
@@ -940,10 +969,10 @@ function githubThreadHtml(thread: ProjectedGithubThread): string {
   return `<article class="review-thread imported" id="${esc(thread.id)}" data-thread-state="${thread.resolved ? "resolved" : "open"}"><p class="thread-place">${esc(place)}</p>${thread.deleted ? `<p>Deleted on GitHub</p>` : comments}</article>`;
 }
 
-function newThreadForm(conversation: ReaderConversation, anchor: Record<string, string>, label = "New thread"): string {
+function newThreadForm(conversation: ReaderConversation, anchor: Record<string, string>): string {
   if (!conversation.createAction) return "";
   const hidden = Object.entries(anchor).map(([name, value]) => `<input type="hidden" name="${esc(name)}" value="${esc(value)}">`).join("");
-  return `<form class="thread-new" method="post" action="${esc(conversation.createAction)}">${hiddenIdempotency()}${hidden}<input type="hidden" name="return" value="${esc(conversation.returnTo)}"><label>${esc(label)}<textarea name="body" maxlength="4000" required></textarea></label><span role="status" aria-live="polite"></span><button type="submit">Add</button></form>`;
+  return `<details class="thread-composer"><summary>${disclosureCue()}<span>New thread</span></summary><form class="thread-new" method="post" action="${esc(conversation.createAction)}">${hiddenIdempotency()}${hidden}<input type="hidden" name="return" value="${esc(conversation.returnTo)}"><label>Message<textarea name="body" maxlength="4000" required></textarea></label><span role="status" aria-live="polite"></span><button type="submit">Add</button></form></details>`;
 }
 
 function discussionSection(doc: ReaderDoc): string {
@@ -1024,16 +1053,19 @@ function judgmentSection(handling: ReaderHandling | null, doc: ReaderDoc): strin
   if (!state) return "";
   const scopeState = driftLine(doc.drift) || (doc.latest ? "" : `<p class="judgment-facts">Earlier ${esc(doc.standing.toLowerCase())}</p>`);
   const blocked = state.items.filter((item) => item.blocked).length;
-  const blockers = state.items.length === 0 ? "" : `<ul class="judgment-blockers"${blocked === 0 ? " hidden" : ""}>${state.items.map((item) => `<li data-judgment-blocker="${esc(item.itemId)}"${item.blocked ? "" : " hidden"}><a href="${esc(item.href)}">${esc(item.label)}</a></li>`).join("")}</ul>`;
+  const requirementId = "judgment-acknowledgements";
+  const requirement = state.items.length === 0 ? "" : `<p class="judgment-required" id="${requirementId}" data-judgment-required aria-live="polite"${blocked === 0 ? " hidden" : ""}>${blocked} acknowledgement${blocked === 1 ? "" : "s"} required</p>`;
+  const blockers = state.items.length === 0 ? "" : `<ul class="judgment-blockers" aria-label="Acknowledgements required"${blocked === 0 ? " hidden" : ""}>${state.items.map((item) => `<li data-judgment-blocker="${esc(item.itemId)}"${item.blocked ? "" : " hidden"}><a href="${esc(item.href)}">${esc(item.label)}</a></li>`).join("")}</ul>`;
   const facts = `<p class="judgment-facts">${state.facts.unread} unread · ${state.facts.openThreads} open thread${state.facts.openThreads === 1 ? "" : "s"}</p>`;
   const error = state.error ? `<p class="judgment-error" role="alert">${esc(state.error)}</p>` : "";
   const disabled = blocked === 0 ? "" : " disabled";
-  const form = state.mine || !state.action ? "" : `<form class="judgment-form" method="post" action="${esc(state.action)}"><input type="hidden" name="return" value="${esc(handling.returnTo)}"><label>Comment<textarea name="comment" maxlength="1200"></textarea></label><span role="status" aria-live="polite"></span><div><button type="submit" name="verdict" value="approved"${disabled}>Approve this version</button><button type="submit" name="verdict" value="changes_requested"${disabled}>Request changes</button></div></form>`;
+  const describedBy = state.items.length === 0 ? "" : ` aria-describedby="${requirementId}"`;
+  const form = state.mine || !state.action ? "" : `<form class="judgment-form" method="post" action="${esc(state.action)}"><input type="hidden" name="return" value="${esc(handling.returnTo)}"><label>Comment<textarea name="comment" maxlength="1200"></textarea></label><span role="status" aria-live="polite"></span><div><button type="submit" name="verdict" value="approved"${describedBy}${disabled}>Approve this version</button><button type="submit" name="verdict" value="changes_requested"${describedBy}${disabled}>Request changes</button></div></form>`;
   const history = [
     ...(state.mine ? [judgmentRow(state.mine)] : []),
     ...state.others.map(judgmentRow),
   ].join("");
-  return `<section class="judgment" aria-label="Judgment"><h2>Judgment</h2>${scopeState}${blockers}${facts}${error}${form}${history}</section>`;
+  return `<section class="judgment" aria-label="Judgment"><h2>Judgment</h2>${scopeState}${requirement}${blockers}${facts}${error}${form}${history}</section>`;
 }
 
 function githubProjectionSection(handling: ReaderHandling | null): string {
@@ -1119,19 +1151,20 @@ function fileReview(
   const removed = changes.reduce((sum, change) => sum + change.diff.removed, 0);
   const read = changes.filter((change) => readIds.has(change.item.change.id)).length;
   const anchor = `review-file-${view.group.id}-${file.id}`;
-  return `<details class="file-review" id="${esc(anchor)}" open><summary class="file-review-head"><span class="file-disclosure" aria-hidden="true">⌄</span><span class="file-review-title"><strong>${esc(file.old_path ? `${file.old_path} → ${file.path}` : file.path)}</strong>${routes.read ? `<small><span data-file-progress>${read} / ${changes.length} read</span></small>` : ""}</span>${diffStat(added, removed)}</summary><div class="file-review-body">${changes.map((change, index) => `${index === 0 ? "" : gapControl(routes, changes[index - 1]!, change)}${hunkReview(view, change, readIds, routes)}`).join("")}</div></details>`;
+  return `<details class="file-review" id="${esc(anchor)}" open><summary class="file-review-head"><span class="file-disclosure" aria-hidden="true"><span class="disclosure-cue">›</span></span><span class="file-review-title"><strong>${esc(file.old_path ? `${file.old_path} → ${file.path}` : file.path)}</strong>${routes.read ? `<small><span data-file-progress>${read} / ${changes.length} read</span></small>` : ""}</span>${diffStat(added, removed)}</summary><div class="file-review-body">${changes.map((change, index) => `${index === 0 ? "" : gapControl(routes, changes[index - 1]!, change)}${hunkReview(view, change, readIds, routes)}`).join("")}</div></details>`;
 }
 
 function focusLedger(view: GroupView, readIds: Set<string>, routes: ReaderRoutes, doc: ReaderDoc, allChanges: StageCaptureChangeRow[]): string {
   const groupThreads = groupConversation(doc, view.group.id);
-  if (view.changes.length === 0) return `${groupThreads}<p class="empty-ledger">No code changes in this group.</p>`;
+  if (view.changes.length === 0) return `<p class="empty-ledger">No code changes in this group.</p>${groupThreads}`;
   const homes = conversationPlacementHomes(doc.conversation, allChanges);
-  return groupThreads + view.changes.map((change) => {
+  const cards = view.changes.map((change) => {
     const id = change.item.change.id;
     const read = readIds.has(id);
     const line = change.item.hunk.newLines > 0 ? change.item.hunk.newStart : change.item.hunk.oldStart;
     return `<article class="ledger-card${routes.read && read ? " is-read" : ""}" data-ledger-change="${id}" data-change="${id}"${routes.read ? ` data-read="${read}"` : ""}><button type="button" data-activate-change="${id}"><span>${String(change.ordinal).padStart(2, "0")}</span><code>${esc(change.file.path)}:L${line}</code>${diffStat(change.diff.added, change.diff.removed)}</button><div class="ledger-body">${dimensions(view.group, routes.read ? (read ? "Read" : "Unread") : undefined, "in-ledger")}${change.member.description === null ? "" : `<p>${esc(change.member.description)}</p>`}${readForm(routes, view.group.id, id, read, "ledger-read")}${changeConversation(doc, change, homes)}</div></article>`;
   }).join("");
+  return cards + groupThreads;
 }
 
 export function filesInTreeOrder(node: StageTreeNode): StageCaptureFileRow[] {
@@ -1163,7 +1196,7 @@ function streamFiles(view: GroupView, seamOf?: (id: string) => ReaderSeam | null
 }
 
 function seamBand(seam: ReaderSeam): string {
-  return `<div class="stack-seam" data-seam="${esc(seam.id)}" data-seam-position="${seam.position}"><b>${esc(seam.label)}</b><span>${esc(seam.detail)}</span><a href="${esc(seam.href)}">open</a></div>`;
+  return `<div class="stack-seam" data-seam="${esc(seam.id)}" data-seam-position="${seam.position}"><b>${esc(seam.label)}</b><span>${esc(seam.detail)}</span><a href="${esc(seam.href)}" aria-label="${esc(`Open ${seam.label}: ${seam.detail}`)}">open</a></div>`;
 }
 
 function pageControls(page: ReaderPageState | undefined, placement: "header" | "ledger"): string {
@@ -1190,6 +1223,7 @@ function focusDialog(
   readIds: Set<string>,
   routes: ReaderRoutes,
   doc: ReaderDoc,
+  access: ReaderAccess,
   activeChange: string | null,
   options: RenderReaderOptions = {},
   allChanges: StageCaptureChangeRow[] = [],
@@ -1253,21 +1287,22 @@ function focusDialog(
       ? fileEntries
       : [...fileEntries, { id: materials[0]?.member.id ?? leafFiles[0]!.member.id, html: materialHtml }];
   });
-  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}"${scopeAttrs} data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="${esc(options.brandPath ?? "/bundles")}">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong>${subtitle}</div><div class="focus-head-actions"><span${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span>${doc.pullRequest ? pullRequestLink(doc.pullRequest) : ""}${pageControls(options.page, "header")}<button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream${seams ? " data-seams" : ""}><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}${scopeControl(options.scope)}</div>${diffStat(selected.added, selected.removed)}</header>${layered(streamEntries)}</main><aside class="focus-right" aria-label="Review details"><header>${routes.read ? `<button type="button" data-filter-unread aria-pressed="false">Unread</button>` : ""}<button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${ledgerHead}${focusPullRequest(doc.pullRequest)}${githubProjectionSection(handling)}<div data-judgment-host="focus">${judgmentSection(handling, doc)}</div>${focusLedger(selected, readIds, routes, doc, allChanges)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
+  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}"${scopeAttrs} data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="${esc(options.brandPath ?? "/bundles")}">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong>${subtitle}</div><div class="focus-head-actions"><span${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span>${doc.pullRequest ? pullRequestLink(doc.pullRequest) : ""}${pageControls(options.page, "header")}<button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream${seams ? " data-seams" : ""}><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}${scopeControl(options.scope)}</div>${diffStat(selected.added, selected.removed)}</header>${layered(streamEntries)}</main><aside class="focus-right" aria-label="Review details"><header>${routes.read ? `<button type="button" data-filter-unread aria-pressed="false">Unread</button>` : ""}<button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${ledgerHead}${focusLedger(selected, readIds, routes, doc, allChanges)}${focusPullRequest(doc.pullRequest)}${shareControl(access)}${githubProjectionSection(handling)}<div data-judgment-host="focus">${judgmentSection(handling, doc)}</div></div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
 }
 
 function shareControl(access: ReaderAccess): string {
   if (access.kind !== "member" || !access.share) return "";
-  return `<details class="document-share" data-document-share data-workspace="${esc(access.share.workspace)}" data-kind="${esc(access.share.kind)}" data-target="${esc(access.share.target)}"><summary>Share</summary><form><label>Label <input name="label" maxlength="80"></label><button type="submit">Create link</button><output role="status"></output></form></details>`;
+  return `<details class="document-share" data-document-share data-workspace="${esc(access.share.workspace)}" data-kind="${esc(access.share.kind)}" data-target="${esc(access.share.target)}"><summary>${disclosureCue()}<span>Share</span></summary><form method="post" action="/api/shares"><input type="hidden" name="workspace" value="${esc(access.share.workspace)}"><input type="hidden" name="kind" value="${esc(access.share.kind)}"><input type="hidden" name="target" value="${esc(access.share.target)}"><input type="hidden" name="return" value="${esc(access.handling.returnTo)}"><label>Label <input name="label" maxlength="80"></label><button type="submit">Create link</button><output role="status"></output></form></details>`;
 }
 
 const DOCUMENT_SHARE_CLIENT = `(() => {
-  const root = document.querySelector('[data-document-share]');
-  if (!root) return;
-  const form = root.querySelector('form');
-  const output = root.querySelector('output');
-  form.addEventListener('submit', async (event) => {
+  document.addEventListener('submit', async (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    const root = form.closest('[data-document-share]');
+    if (!root) return;
     event.preventDefault();
+    const output = form.querySelector('output');
     output.textContent = '';
     const response = await fetch('/api/shares', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1358,7 +1393,7 @@ export async function renderReaderPage(
       return storageFailurePage(access, doc.title, 500);
     }
     const rail = summarizeGroups(doc.groups, readIds).map((summary) => summary.index === selectedIndex ? summaryOf(selected) : summary);
-    const focusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(selected.group.title)} · ${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}>${focusDialog(selected, rail, readIds, routes, doc, requestedChange, options, inventory.changes, handling)}<script>${STAGE_CLIENT}</script></body></html>`;
+    const focusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(selected.group.title)} · ${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}>${focusDialog(selected, rail, readIds, routes, doc, access, requestedChange, options, inventory.changes, handling)}<script>${STAGE_CLIENT}${access.kind === "member" && access.share ? DOCUMENT_SHARE_CLIENT : ""}</script></body></html>`;
     return html(focusPage);
   }
 
@@ -1378,7 +1413,7 @@ export async function renderReaderPage(
   const shell = access.kind === "member" ? appBar(access.nav) : `<a class="focus-brand" href="${esc(access.basePath)}">Seer</a>`;
   const terminalState = hasHandling ? `<div><h2 data-progress>${handledCount} / ${handlingTotal} handled</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div>` : "";
   const mobileState = hasHandling ? `<span data-progress>${handledCount} / ${handlingTotal} handled</span>` : `<span></span>`;
-  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}><div data-stage-background><div class="stage-shell">${shell}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${options.aside ?? ""}${focusSection(doc, views, routes)}${evidenceSection(doc)}${discussionSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, handledCount, handlingTotal, handling)}</aside><main class="walkthrough">${groupCards}<footer class="terminal">${terminalState}<p>${inventory.files.length} file${inventory.files.length === 1 ? "" : "s"}</p></footer></main><aside class="source-rail" data-page-details data-open="false"><div class="mobile-detail-head"><button type="button" data-page-details-close>Close</button></div><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section>${shareControl(access)}${githubProjectionSection(handling)}<div data-judgment-host="overview">${judgmentSection(handling, doc)}</div></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button>${mobileState}<button type="button" data-page-details-open>Details</button></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close panel"></button></div>${focusDialog(null, [], readIds, routes, doc, null, options, inventory.changes, handling)}<script>${STAGE_CLIENT}${access.kind === "member" && access.share ? DOCUMENT_SHARE_CLIENT : ""}</script></body></html>`;
+  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}><div data-stage-background><div class="stage-shell">${shell}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${options.aside ?? ""}${focusSection(doc, views, routes)}${evidenceSection(doc)}${discussionSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" aria-label="Review navigation" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, handledCount, handlingTotal, handling)}</aside><main class="walkthrough">${groupCards}<footer class="terminal">${terminalState}<p>${inventory.files.length} file${inventory.files.length === 1 ? "" : "s"}</p></footer></main><aside class="source-rail" aria-label="Review details" data-page-details data-open="false"><div class="mobile-detail-head"><button type="button" data-page-details-close>Close</button></div><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section>${shareControl(access)}${githubProjectionSection(handling)}<div data-judgment-host="overview">${judgmentSection(handling, doc)}</div></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>Review</button>${mobileState}<button type="button" data-page-details-open>Details</button></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close panel"></button></div>${focusDialog(null, [], readIds, routes, doc, access, null, options, inventory.changes, handling)}<script>${STAGE_CLIENT}${access.kind === "member" && access.share ? DOCUMENT_SHARE_CLIENT : ""}</script></body></html>`;
   return html(page);
 }
 
@@ -1471,7 +1506,7 @@ export async function handleStagePage(
     // adapter states the answer instead of relying on a missing field to mean it.
     drift: null,
     movement: null,
-    standing: `Version ${versionNumber}`,
+    standing: `v${versionNumber}`,
     pin: `v${versionNumber}`,
     latest: versionNumber === stage.latest_version,
   };

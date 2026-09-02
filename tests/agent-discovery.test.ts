@@ -58,7 +58,7 @@ describe("the documents an agent discovers", () => {
     const body = await (await fetch(`${base}/robots.txt`)).text();
     // These are not a security boundary — each already refuses a stranger — but a
     // crawler should not have to learn that one request at a time.
-    for (const path of ["/api/", "/settings/", "/invite/", "/s/", "/r/", "/*/r/", "/github/"]) {
+    for (const path of ["/api/", "/settings/", "/invite/", "/s/", "/r/", "/*/r/", "/*/r-stacks/", "/*/st/", "/github/"]) {
       expect(body).toContain(`Disallow: ${path}`);
     }
   });

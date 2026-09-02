@@ -16,11 +16,14 @@ import {
   getLineagePr,
   getLiveLineagePrByNumber,
   latestObservation,
+  observationForRevision,
   type ReviewLineagePrRow,
   type ReviewPrObservationRow,
 } from "./revision-pr";
 import {
+  getAccountById,
   getRevision,
+  getRevisionById,
   latestAccountForRevision,
   type ReviewAccountRow,
   type ReviewLineageRow,
@@ -49,7 +52,7 @@ export interface MemberChainFacts {
 export type StackRefusalRule =
   | "cross-repository" | "fork" | "no-lineage" | "no-pull-request" | "no-revision" | "duplicate"
   | "fan" | "cycle" | "broken-chain" | "ambiguous-native" | "too-many-members" | "too-few-members"
-  | "unresolved-native-member" | "no-native-stack" | "already-stacked";
+  | "unresolved-native-member" | "no-native-stack" | "no-account" | "already-stacked";
 
 /** Every refusal names the member and the rule, so an agent can fix the chain rather than
  *  guess at it. */
@@ -241,6 +244,90 @@ export function normalizeInferredChain(workspaceId: string, lineageSlugs: string
     source: "inferred",
     provider: { stackId: null, stackNumber: null, observedAt: null },
     members: ordered,
+  };
+}
+
+// ---- an exact persisted chain ----
+
+export interface PinnedStackMember {
+  lineageSlug: string;
+  revisionId: string;
+  accountId: string;
+}
+
+/**
+ * Normalize exact revisions and accounts already persisted by a resumable workflow.
+ *
+ * The ordinary inferred path intentionally follows each lineage's latest revision. A
+ * legacy succession cannot do that: it records one exact revision per member, waits for
+ * that revision's account, then must pin those same ids even if another push lands before
+ * the final witness. This function shares the same chain and repository checks while
+ * reading each member through its revision's own immutable observation.
+ */
+export function normalizeInferredPinnedChain(
+  workspaceId: string,
+  pins: PinnedStackMember[],
+): NormalizedStack {
+  if (pins.length < MIN_STACK_MEMBERS) {
+    throw refusal("too-few-members", pins[0]?.lineageSlug ?? "", `a stack needs at least ${MIN_STACK_MEMBERS} members`);
+  }
+  if (pins.length > MAX_STACK_MEMBERS) {
+    throw refusal("too-many-members", pins[MAX_STACK_MEMBERS]!.lineageSlug, `a stack holds at most ${MAX_STACK_MEMBERS} members`);
+  }
+  const seen = new Set<string>();
+  const snapshots: StackMemberSnapshot[] = [];
+  let first: { relation: ReviewLineagePrRow; lineage: ReviewLineageRow } | null = null;
+  for (const pin of pins) {
+    if (seen.has(pin.lineageSlug)) throw refusal("duplicate", pin.lineageSlug, "is named twice");
+    seen.add(pin.lineageSlug);
+    const lineage = db.query<ReviewLineageRow, [string, string]>(
+      "SELECT * FROM review_lineages WHERE workspace_id = ? AND slug = ?",
+    ).get(workspaceId, pin.lineageSlug);
+    if (!lineage) throw refusal("no-lineage", pin.lineageSlug, "is not a promoted review in this workspace");
+    const relation = getLineagePr(workspaceId, lineage.id);
+    if (!relation) throw refusal("no-pull-request", pin.lineageSlug, "reviews no pull request");
+    const revision = getRevisionById(workspaceId, pin.revisionId);
+    if (!revision || revision.lineage_id !== lineage.id) {
+      throw refusal("no-revision", pin.lineageSlug, `does not own exact revision ${pin.revisionId}`);
+    }
+    const observation = observationForRevision(workspaceId, revision.id);
+    if (!observation || observation.lineage_id !== lineage.id) {
+      throw refusal("no-revision", pin.lineageSlug, `has no pull request observation for exact revision ${revision.revision}`);
+    }
+    const account = getAccountById(workspaceId, pin.accountId);
+    if (!account || account.revision_id !== revision.id || account.lineage_id !== lineage.id) {
+      throw refusal("no-account", pin.lineageSlug, `does not own exact account ${pin.accountId} on revision ${revision.revision}`);
+    }
+    if (first === null) first = { relation, lineage };
+    else if (relation.repo_id !== first.relation.repo_id) {
+      throw refusal("cross-repository", pin.lineageSlug, `reviews ${relation.repo}, not ${first.relation.repo}`);
+    }
+    snapshots.push({
+      lineageId: lineage.id,
+      lineageSlug: lineage.slug,
+      prNumber: relation.pr_number,
+      title: lineage.title,
+      revisionId: revision.id,
+      revision: revision.revision,
+      accountId: account.id,
+      accountVersion: account.version,
+      baseRef: observation.base_ref,
+      headRef: observation.head_ref,
+      headSha: observation.head_sha,
+      status: observation.merged ? "merged" : "live",
+      removedReason: null,
+    });
+  }
+  if (!first) throw refusal("too-few-members", "", `a stack needs at least ${MIN_STACK_MEMBERS} members`);
+  const baseRef = snapshots[0]!.baseRef;
+  checkChain(snapshots, baseRef);
+  return {
+    repo: first.relation.repo,
+    repoId: first.relation.repo_id,
+    baseRef,
+    source: "inferred",
+    provider: { stackId: null, stackNumber: null, observedAt: null },
+    members: snapshots,
   };
 }
 

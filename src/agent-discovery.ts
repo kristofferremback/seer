@@ -87,6 +87,8 @@ Disallow: /s/
 Disallow: /settings/
 Disallow: /r/
 Disallow: /*/r/
+Disallow: /*/r-stacks/
+Disallow: /*/st/
 
 # A bundle is someone's half-finished page, published here to be looked at once. It is
 # not a corpus. These are the agents whose stated purpose is collecting one; the ones
@@ -118,6 +120,8 @@ Allow: /overseer/agent.md
 Allow: /stage/skill.md
 Allow: /stage/agent.md
 Allow: /.well-known/
+Disallow: /*/r-stacks/
+Disallow: /*/st/
 Disallow: /
 
 Sitemap: ${base}/sitemap.xml
@@ -185,7 +189,7 @@ export function apiCatalog(): unknown {
           { href: `${base}/skill.md`, type: "text/markdown", title: "What Seer does, and which document to read next" },
           { href: `${base}/bundles/skill.md`, type: "text/markdown", title: "Publishing an HTML bundle" },
           { href: `${base}/projects/skill.md`, type: "text/markdown", title: "Grouping work into projects" },
-          { href: `${base}/overseer/agent.md`, type: "text/markdown", title: "Dispatching a pull request review" },
+          { href: `${base}/overseer/agent.md`, type: "text/markdown", title: "Ingesting an exact pull request and dispatching its witness" },
           { href: `${base}/stage/agent.md`, type: "text/markdown", title: "Dispatching a staged walkthrough" },
           { href: `${base}/stage/skill.md`, type: "text/markdown", title: "Authoring a staged walkthrough" },
         ],
@@ -223,10 +227,10 @@ export function openApiSpec(): unknown {
     info: {
       title: "Seer",
       version: "1.0.0",
-      summary: "Publish HTML bundles and pull request reviews an agent builds and a human reads.",
+      summary: "Publish HTML bundles and immutable pull request reviews an agent builds and a human reads.",
       description:
         "Seer holds two things a person is meant to look at: self-contained HTML bundles an " +
-        "agent built, and Overseer reviews of GitHub pull requests. Every write takes a " +
+        "agent built, and immutable Overseer reviews of exact GitHub pull requests. Every write takes a " +
         "workspace API key, and the key is what decides which workspace the thing lands in — " +
         "no call names a workspace itself. Full prose instructions live at " +
         `${base}/skill.md; how to get a key is at ${base}/auth.md.`,
@@ -244,7 +248,8 @@ export function openApiSpec(): unknown {
               schema: {
                 type: "object",
                 properties: {
-                  error: { type: "string" },
+                  error: { type: "string", description: "A sentence a person can read." },
+                  rule: { type: "string", description: "A stable machine-readable refusal code when the route defines one." },
                   errors: {
                     type: "array",
                     description: "Field-level validation failures, on the publish and share paths.",
@@ -372,8 +377,8 @@ export async function agentSkillsIndex(): Promise<unknown> {
       name: "seer-overseer",
       type: "skill-md",
       description:
-        "Dispatch a blind sub-agent to review one or more GitHub pull requests and publish the " +
-        "result as a page a human reads instead of the diff. Install this one.",
+        "Ingest pushed same-repository pull requests into immutable lineages or a stack, then " +
+        "dispatch one fresh witness through an exact leased request. Install this one.",
       url: `${base}/overseer/agent.md`,
       digest: sha256(overseerAgent),
     });
@@ -393,8 +398,8 @@ export async function agentSkillsIndex(): Promise<unknown> {
       name: "seer-overseer-witness",
       type: "skill-md",
       description:
-        "What the dispatched sub-agent reads: how to author and publish an Overseer review. " +
-        "Read by the witness at review time, not installed by a person.",
+        "What the fresh witness reads: how to claim one exact revision or manifest and publish " +
+        "its immutable member or stack account. Read at review time, not installed.",
       url: `${base}/overseer/skill.md`,
       digest: sha256(overseerSkill),
     });

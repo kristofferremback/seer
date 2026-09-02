@@ -16,7 +16,7 @@ import { IMAGE_TYPES, processImage, sniffOk } from "../images";
 import { saveAttachment } from "../store";
 import { tinyId } from "../ids";
 import { requireApiKey } from "../auth";
-import { createAttachment, createReviewVersion, getReview, getReviewVersion, ReviewSlugTaken, type ReviewDoc } from "./db";
+import { createAttachment, createReviewVersion, getReview, getReviewVersion, lineageOwnsSlug, stackOwnsSlug, ReviewSlugTaken, type ReviewDoc } from "./db";
 import { setReviewPrs, sweepOrphanPrStatus, upsertPrStatus } from "./installations";
 import { attachReview, getProject, type ProjectRow } from "../projects/db";
 import {
@@ -662,16 +662,6 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   const declared = Number(req.headers.get("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > config.maxUploadBytes) return tooBig();
 
-  // Every GitHub call this publish makes is made as the workspace first, through an
-  // installation the workspace has connected, and failing that as the PERSON whose api
-  // key authenticated this request. There is no server-wide token behind either: a
-  // repository neither covers is refused by the client itself.
-  //
-  // auth.userId rather than the workspace is the whole point. A key belongs to one
-  // person, so a publish spends that person's credentials and nobody else's, even though
-  // the review it produces lands in a workspace their colleagues can read.
-  const github = githubClientFor(ws, auth.userId);
-
   let body: PublishBody;
   try {
     body = await readBody(req);
@@ -685,6 +675,38 @@ export async function handlePublishReview(req: Request): Promise<Response> {
   }
   const slug = body.slug;
   const payload = body.payload;
+
+  // Legacy ReviewDoc creation is retired. Existing rows keep their complete writer,
+  // including later versions and attachments, but a new slug stops here before a GitHub
+  // client, ref resolver, image pipeline, blob write, or derivation exists. There is no
+  // flag that reopens creation: the stored legacy row is the compatibility condition.
+  if (!getReview(ws, slug)) {
+    if (lineageOwnsSlug(ws, slug)) {
+      return json({
+        error: `Review slug "${slug}" already names a promoted review.`,
+        rule: "review_slug_taken",
+      }, 409);
+    }
+    if (stackOwnsSlug(ws, slug)) {
+      return json({
+        error: `Review slug "${slug}" already names a review stack.`,
+        rule: "review_slug_taken",
+      }, 409);
+    }
+    return json({
+      error: "New Overseer reviews use immutable review lineages.",
+      rule: "legacy_creation_retired",
+      pullRequestCreateUrl: `${config.baseUrl}/api/pull-request-review-lineages`,
+      captureCreateUrl: `${config.baseUrl}/api/review-lineages`,
+      stackCreateUrl: `${config.baseUrl}/api/review-stacks`,
+    }, 409);
+  }
+
+  // Every GitHub call this LEGACY republish makes is made through an installation the
+  // workspace holds, then the person whose key authenticated this request, then an
+  // explicit public actor. The chosen routed client owns that behavior. No task-12 path
+  // catches its failure and falls back to a different creation API.
+  const github = githubClientFor(ws, auth.userId);
 
   // The optional projects[] the document rides in on. Validated with the cheap rules,
   // before any GitHub call: an unknown slug is refused naming the entry, never

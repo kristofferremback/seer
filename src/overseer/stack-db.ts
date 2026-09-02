@@ -253,6 +253,12 @@ export function getStack(workspaceId: string, slug: string): ReviewStackRow | nu
   ).get(workspaceId, slug);
 }
 
+export function listStacks(workspaceId: string): ReviewStackRow[] {
+  return db.query<ReviewStackRow, [string]>(
+    "SELECT * FROM review_stacks WHERE workspace_id = ? ORDER BY updated_at DESC, slug ASC",
+  ).all(workspaceId);
+}
+
 export function getStackById(id: string): ReviewStackRow | null {
   return db.query<ReviewStackRow, [string]>("SELECT * FROM review_stacks WHERE id = ?").get(id);
 }
@@ -392,7 +398,11 @@ export function stackRequestHash(operation: "create" | "refresh", slug: string |
 // ---- errors ----
 
 export class StackWriteError extends Error {
-  constructor(readonly status: 400 | 403 | 404 | 409 | 422 | 500 | 502, message: string) {
+  constructor(
+    readonly status: 400 | 403 | 404 | 409 | 422 | 500 | 502,
+    message: string,
+    readonly rule?: string,
+  ) {
     super(message);
     this.name = "StackWriteError";
   }
@@ -523,9 +533,9 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
- * The whole of a create, in one transaction: replay, slug ownership against all three
- * tables, the stack, live members, manifest v1, the witness request when every member
- * already carries an account, the Project joins, and the idempotency row.
+ * The whole of a create, in one transaction: replay, slug ownership across all three
+ * review models, the stack, live members, manifest v1, the witness request when every
+ * member already carries an account, the Project joins, and the idempotency row.
  */
 export const createStack = db.transaction((input: CreateStackInput): CreatedStack => {
   const { workspaceId, slug, normalized } = input;
@@ -540,9 +550,9 @@ export const createStack = db.transaction((input: CreateStackInput): CreatedStac
     if (!stack || !manifest) throw new Error(`Idempotency row ${replay.idempotency_key} points at rows that are gone`);
     return { stack, manifest, request: getStackWitnessRequestForManifest(workspaceId, manifest.id), created: false };
   }
-  if (getStack(workspaceId, slug)) throw new StackWriteError(409, `Stack slug "${slug}" already names another stack`);
-  if (lineageOwnsSlug(workspaceId, slug)) throw new StackWriteError(409, `Stack slug "${slug}" already names a promoted review`);
-  if (input.legacyOwnsSlug(slug)) throw new StackWriteError(409, `Stack slug "${slug}" already names a review in this workspace`);
+  if (getStack(workspaceId, slug)) throw new StackWriteError(409, `Stack slug "${slug}" already names another stack`, "review_slug_taken");
+  if (lineageOwnsSlug(workspaceId, slug)) throw new StackWriteError(409, `Stack slug "${slug}" already names a promoted review`, "review_slug_taken");
+  if (input.legacyOwnsSlug(slug)) throw new StackWriteError(409, `Stack slug "${slug}" already names a review in this workspace`, "review_slug_taken");
   for (const project of input.projects) {
     if (!getProject(workspaceId, project)) throw new StackWriteError(422, `No project "${project}" in this workspace`);
   }

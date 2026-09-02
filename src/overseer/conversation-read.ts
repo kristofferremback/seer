@@ -409,6 +409,14 @@ export async function readCapabilityConversation(capability: ResolvedCapability)
     imported.push(projected);
   }
 
+  const wrapperReviews = new Set<string>();
+  for (const pin of pins) {
+    for (const row of db.query<{ github_review_id: string }, [string, string]>(
+      "SELECT github_review_id FROM review_local_github_threads WHERE workspace_id=? AND lineage_id=?",
+    ).all(workspaceId, pin.lineage.id)) {
+      wrapperReviews.add(`${pin.lineage.id}\0${row.github_review_id}`);
+    }
+  }
   const reviews: ProjectedGithubReview[] = [];
   for (const row of db.query<CapabilityReviewRow, [string]>(
     "SELECT workspace_id, review_id, review_observation_id FROM share_capability_github_reviews WHERE share_id = ? ORDER BY ordinal",
@@ -424,9 +432,15 @@ export async function readCapabilityConversation(capability: ResolvedCapability)
     if (!review || !pin || !observation || observation.commit_sha !== pin.headSha) return null;
     const projected = projectReview(workspaceId, review, row.review_observation_id);
     if (!projected) return null;
+    if (wrapperReviews.has(`${review.lineage_id}\0${review.github_node_id}`) &&
+        projected.state === "commented" && (projected.body ?? "").trim() === "") continue;
     reviews.push(projected);
   }
-  return { local, imported, reviews };
+  let merged = { local, imported };
+  for (const pin of pins) {
+    merged = mergeMappedGithubConversation(workspaceId, pin.lineage.id, merged.local, merged.imported);
+  }
+  return { ...merged, reviews };
 }
 
 export interface CapabilityImportedSnapshotPlan {

@@ -8,7 +8,7 @@ import { zipSync, strToU8 } from "fflate";
 import { startServer } from "../../src/server";
 import { config } from "../../src/config";
 import { createVersion, createWorkspace, db, legacyWorkspaceId, listMembers, mintApiKey } from "../../src/db";
-import { getAttachment, getReview, getReviewVersion, listAttachments } from "../../src/overseer/db";
+import { createReviewVersion, getAttachment, getReview, getReviewVersion, listAttachments } from "../../src/overseer/db";
 import { attachmentPath } from "../../src/store";
 import {
   GithubError,
@@ -39,6 +39,7 @@ import {
   goldenDerived,
   goldenPayload,
 } from "./fixtures/golden-review";
+import { goldenStoredDoc } from "./fixtures/stored-review";
 
 // ---- the fake GitHub ----
 
@@ -233,7 +234,25 @@ function noAttachments(): PublishPayload {
   return payload;
 }
 
+const seededLegacy = new Set<string>();
+
+function workspaceForKey(key: string): string {
+  if (key === keyA) return wsA;
+  if (key === keyB) return wsB;
+  if (key === keyNone) return wsNone;
+  throw new Error("unknown test key");
+}
+
+function ensureLegacy(slug: string, key = keyA): void {
+  const workspace = workspaceForKey(key);
+  const identity = `${workspace}/${slug}`;
+  if (seededLegacy.has(identity)) return;
+  createReviewVersion(workspace, slug, goldenStoredDoc());
+  seededLegacy.add(identity);
+}
+
 function publish(slug: string, payload: PublishPayload | string, key = keyA): Promise<Response> {
+  ensureLegacy(slug, key);
   return fetch(`${base}/api/reviews`, {
     method: "POST",
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
@@ -244,8 +263,10 @@ function publish(slug: string, payload: PublishPayload | string, key = keyA): Pr
 function counts(): { versions: number; reviews: number; attachments: number } {
   const one = (sql: string) => db.query<{ n: number }, []>(sql).get()!.n;
   return {
-    versions: one("SELECT COUNT(*) AS n FROM review_versions"),
-    reviews: one("SELECT COUNT(*) AS n FROM reviews"),
+    // Version 1 is the pre-existing legacy artifact task 12 preserves. These counts
+    // measure only writes made through the republish route.
+    versions: one("SELECT COUNT(*) AS n FROM review_versions WHERE version > 1"),
+    reviews: one("SELECT COUNT(*) AS n FROM reviews WHERE latest_version > 1"),
     attachments: one("SELECT COUNT(*) AS n FROM review_attachments"),
   };
 }
@@ -280,21 +301,21 @@ afterAll(() => {
 // ---- the happy path ----
 
 describe("POST /api/reviews", () => {
-  test("the golden review publishes as version 1 and is stored", async () => {
+  test("the golden legacy review republishes as version 2 and is stored", async () => {
     const res = await publish("golden", noAttachments());
     expect(res.status).toBe(200);
     const json = await readJson(res);
-    expect(json.version).toBe(1);
+    expect(json.version).toBe(2);
     expect(json.slug).toBe("golden");
     expect(json.workspace).toBe(wsA);
     expect(json.warnings).toEqual([]);
     expect(json.url).toBe(`${config.baseUrl}/${wsA}/r/golden`);
 
     // The response document is the stored document.
-    const stored = getReviewVersion(wsA, "golden", 1)!;
+    const stored = getReviewVersion(wsA, "golden", 2)!;
     expect(stored.doc).toEqual(json.document);
     expect(stored.doc.slug).toBe("golden");
-    expect(stored.doc.version).toBe(1);
+    expect(stored.doc.version).toBe(2);
     expect(stored.doc.id).toMatch(/^rev_/);
     expect(stored.doc.kind).toBe("stack");
     expect(stored.doc.title).toBe(goldenPayload().title);
@@ -302,7 +323,7 @@ describe("POST /api/reviews", () => {
   });
 
   test("the stored document carries the derived halves the renderer needs", async () => {
-    const doc = getReviewVersion(wsA, "golden", 1)!.doc;
+    const doc = getReviewVersion(wsA, "golden", 2)!.doc;
     // Every hunk of both pull requests, and the groups partition them.
     expect(doc.hunks.map((h) => h.id).sort()).toEqual(
       Object.values(GOLDEN_HUNKS)
@@ -342,7 +363,7 @@ describe("POST /api/reviews", () => {
   });
 
   test("each group's kind is derived from the lines its hunks change", async () => {
-    const doc = getReviewVersion(wsA, "golden", 1)!.doc;
+    const doc = getReviewVersion(wsA, "golden", 2)!.doc;
     // gr_gate holds the adding hunk in src/auth.ts beside the deleting one in
     // src/server.ts, so it is a change; gr_api's three hunks only add.
     expect(doc.groups.map((g) => g.kind)).toEqual(["change", "add"]);
@@ -366,17 +387,17 @@ describe("POST /api/reviews", () => {
     api.fileNotes = notes.filter((n) => n.path !== GOLDEN_HUNKS.serverGate.path);
     const res = await publish("kind-remove", payload);
     expect(res.status).toBe(200);
-    const doc = getReviewVersion(wsA, "kind-remove", 1)!.doc;
+    const doc = getReviewVersion(wsA, "kind-remove", 2)!.doc;
     expect(doc.groups.map((g) => g.kind)).toEqual(["remove", "add"]);
   });
 
-  test("republishing the same slug creates version 2 and keeps the review id", async () => {
+  test("republishing the same slug again creates version 3 and keeps the review id", async () => {
     const res = await publish("golden", noAttachments());
     expect(res.status).toBe(200);
     const json = await readJson(res);
-    expect(json.version).toBe(2);
+    expect(json.version).toBe(3);
     expect(getReviewVersion(wsA, "golden", 1)!.doc.id).toBe(json.document.id);
-    expect(getReviewVersion(wsA, "golden", 2)!.doc.version).toBe(2);
+    expect(getReviewVersion(wsA, "golden", 3)!.doc.version).toBe(3);
     // createdAt survives the republish; updatedAt moves.
     expect(json.document.createdAt).toBe(getReviewVersion(wsA, "golden", 1)!.doc.createdAt);
   });
@@ -399,15 +420,16 @@ describe("POST /api/reviews", () => {
     const said = JSON.stringify(await refused.json());
     expect(said).toContain("projects[0]");
     expect(said).toContain("nope");
-    // Refused whole: no version landed under the slug.
-    expect(getReview(wsA, "grouped-bad")).toBeNull();
+    // Refused whole: the permanent legacy version remains, and no republish landed.
+    expect(getReview(wsA, "grouped-bad")?.latest_version).toBe(1);
+    expect(getReviewVersion(wsA, "grouped-bad", 2)).toBeNull();
   });
 
   test("the same slug in two workspaces is two reviews", async () => {
     const a = await publish("shared-slug", noAttachments(), keyA);
     const b = await publish("shared-slug", noAttachments(), keyB);
-    expect((await readJson(a)).version).toBe(1);
-    expect((await readJson(b)).version).toBe(1);
+    expect((await readJson(a)).version).toBe(2);
+    expect((await readJson(b)).version).toBe(2);
     expect(getReviewVersion(wsA, "shared-slug", 1)!.doc.id).not.toBe(
       getReviewVersion(wsB, "shared-slug", 1)!.doc.id,
     );
@@ -490,7 +512,7 @@ describe("publish refusals", () => {
     ref.sha = "0".repeat(40);
     const res = await publish("untouched-sha", payload);
     expect(res.status).toBe(200);
-    const doc = getReviewVersion(wsA, "untouched-sha", 1)!.doc;
+    const doc = getReviewVersion(wsA, "untouched-sha", 2)!.doc;
     const stored = doc.statements.flatMap((s) => s.refs).find((r) => r.path === "src/session.ts")!;
     expect(stored.origin).toBe("outside");
   });
@@ -710,6 +732,9 @@ function png(): Blob {
 }
 
 function postForm(form: FormData, key = keyA): Promise<Response> {
+  const document = form.get("document");
+  if (typeof document !== "string") throw new Error("test multipart document must be text");
+  ensureLegacy((JSON.parse(document) as { slug: string }).slug, key);
   return fetch(`${base}/api/reviews`, {
     method: "POST",
     headers: { authorization: `Bearer ${key}` },
@@ -724,13 +749,13 @@ describe("attachments", () => {
     );
     expect(res.status).toBe(200);
     const json = await readJson(res);
-    expect(json.version).toBe(1);
+    expect(json.version).toBe(2);
 
     const rows = listAttachments(wsA, "with-image");
     expect(rows.length).toBe(1);
     const row = rows[0]!;
     expect(row.id).toMatch(ATT_ID_RE);
-    expect(row.version).toBe(1);
+    expect(row.version).toBe(2);
     expect(row.alt).toBe(goldenPayload().attachments[0]!.alt);
     expect(row.caption).toBe(goldenPayload().attachments[0]!.caption!);
     expect(row.media_type.startsWith("image/")).toBe(true);
@@ -745,7 +770,7 @@ describe("attachments", () => {
     expect(stored.size).toBe(row.bytes);
 
     // The document names the stored attachment, not the authored handle.
-    const doc = getReviewVersion(wsA, "with-image", 1)!.doc;
+    const doc = getReviewVersion(wsA, "with-image", 2)!.doc;
     const evidence = doc.statements
       .flatMap((s) => s.evidence)
       .find((e) => e.type === "attachment")!;
@@ -831,7 +856,7 @@ describe("a workspace that holds no installation", () => {
     expect(body.error).toContain(GOLDEN_REPO);
     expect(body.error).toContain("does not hold");
     // Nothing was written for the refused publish.
-    expect(getReviewVersion(wsNone, "no-installation", 1)).toBeNull();
+    expect(getReviewVersion(wsNone, "no-installation", 2)).toBeNull();
 
     // Bundles never touched GitHub and still do not, which is why this refuses per
     // publish rather than at boot.
@@ -884,8 +909,8 @@ describe("a workspace that holds no installation", () => {
     // GitHub — only the workspace's holdings differ.
     const res = await publish("no-installation", noAttachments(), keyA);
     expect(res.status).toBe(200);
-    expect((await readJson(res)).version).toBe(1);
-    expect(getReviewVersion(wsA, "no-installation", 1)).not.toBeNull();
+    expect((await readJson(res)).version).toBe(2);
+    expect(getReviewVersion(wsA, "no-installation", 2)).not.toBeNull();
   });
 
   test("a ref into a repository the workspace does not hold is refused, not resolved", async () => {
@@ -903,13 +928,13 @@ describe("a workspace that holds no installation", () => {
     }
     expect(refused.status).toBe(422);
     expect((await readJson(refused)).error).toContain("does not hold");
-    expect(getReviewVersion(wsA, "unheld-ref", 1)).toBeNull();
+    expect(getReviewVersion(wsA, "unheld-ref", 2)).toBeNull();
 
     // And with the same workspace holding it, the same ref resolves and the review lands.
     const ok = await publish("unheld-ref", payload, keyA);
     expect(ok.status).toBe(200);
     expect(detail.repo).toBe(GOLDEN_REPO);
-    expect(getReviewVersion(wsA, "unheld-ref", 1)).not.toBeNull();
+    expect(getReviewVersion(wsA, "unheld-ref", 2)).not.toBeNull();
   });
 
   test("a suspended installation and a spent rate limit are 422s, not 502s", async () => {
@@ -957,14 +982,14 @@ describe("a workspace that holds no installation", () => {
       }
       expect(res.status).toBe(422);
       expect((await readJson(res)).error).toContain(expected);
-      expect(getReviewVersion(wsA, "app-refusal", 1)).toBeNull();
+      expect(getReviewVersion(wsA, "app-refusal", 2)).toBeNull();
     }
 
     // The success beside the refusals: the same document, the same workspace, with
     // GitHub answering normally.
     const ok = await publish("app-refusal", noAttachments(), keyA);
     expect(ok.status).toBe(200);
-    expect(getReviewVersion(wsA, "app-refusal", 1)).not.toBeNull();
+    expect(getReviewVersion(wsA, "app-refusal", 2)).not.toBeNull();
   });
 });
 
@@ -1009,7 +1034,7 @@ describe("the publish response and the stored document", () => {
     payload.groups[1]!.significance = 4 + REINDEX_EPSILON / 2;
     const res = await publish("crowded", payload);
     expect(res.status).toBe(200);
-    const doc = getReviewVersion(wsA, "crowded", 1)!.doc;
+    const doc = getReviewVersion(wsA, "crowded", 2)!.doc;
     expect(doc.groups.map((g) => ({ id: g.id, significance: g.significance }))).toEqual([
       { id: payload.groups[0]!.id, significance: 1 },
       { id: payload.groups[1]!.id, significance: 2 },
@@ -1022,12 +1047,12 @@ describe("the publish response and the stored document", () => {
     payload.groups[1]!.significance = 9;
     const res = await publish("spread", payload);
     expect(res.status).toBe(200);
-    const doc = getReviewVersion(wsA, "spread", 1)!.doc;
+    const doc = getReviewVersion(wsA, "spread", 2)!.doc;
     expect(doc.groups.map((g) => g.significance)).toEqual([3, 9]);
   });
 
   test("the stored document records each attachment's authored handle", async () => {
-    const doc = getReviewVersion(wsA, "handles", 1)!.doc;
+    const doc = getReviewVersion(wsA, "handles", 2)!.doc;
     expect(doc.attachments.length).toBe(1);
     const a = doc.attachments[0]!;
     expect(a.authoredId).toBe("att_gate");
