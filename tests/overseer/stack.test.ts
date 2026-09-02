@@ -659,7 +659,7 @@ describe("a stack over four members", () => {
     throwingGithub();
     const page = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a`, { headers: { cookie } })).text());
     expect(page).toContain("The whole chain");
-    expect(page).toContain("Manifest 1");
+    expect(page).toContain("v1");
     for (const number of [11, 12, 13, 14]) expect(page).toContain(`#${number} Layer #${number}`);
     expect(page).toContain("witness pending");
     expect(page).toContain("awaiting member accounts #11, #12, #13, #14");
@@ -836,7 +836,7 @@ describe("movement, refresh and immutability", () => {
     expect(view.manifest.drift.refreshRequired).toBe(true);
     throwingGithub();
     const page = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a`, { headers: { cookie } })).text());
-    expect(page).toContain("#12 revision 2 available");
+    expect(page).toContain("#12 rev 2 available");
     expect(page).toContain("refresh required");
   });
 
@@ -869,7 +869,7 @@ describe("movement, refresh and immutability", () => {
     expect((await fetch(`${base}/${workspace}/r-stacks/stack-a/v/3/account`, { headers: { cookie } })).status).toBe(404);
     const third = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a/v/3`, { headers: { cookie } })).text());
     expect(third).toContain("awaiting member accounts #12");
-    expect(third).toContain("Manifest 3");
+    expect(third).toContain("v3");
     expect(before.requests).toEqual(rows().requests.slice(0, 1));
     expect((rows().requests[0] as any).state).toBe("published");
   });
@@ -1449,6 +1449,7 @@ describe("paging", () => {
     }
     expect(overflowLinks.map((link) => link.id)).toEqual(links.map((link) => link.id));
     expect(new Set(overflowLinks.map((link) => link.href))).toEqual(new Set(links.map((link) => link.href)));
+
     db.run("UPDATE stage_capture_files SET path = 'src/structure-only.ts' WHERE id = ?", [leafId]);
     db.run("UPDATE stage_capture_incomplete SET path = 'src/big.ts' WHERE id = ?", [materialId]);
   });
@@ -1462,6 +1463,7 @@ describe("rendering and lines", () => {
     const page = await (await fetch(`${base}/${workspace}/r-stacks/stack-a/v/2/account?review=shared-line`, { headers: { cookie } })).text();
     expect([...page.matchAll(/data-seam="(l[0-9]+)"/g)].map((match) => match[1])).toEqual(["l1", "l2", "l3", "l4"]);
     expect(page).toContain("<main class=\"focus-stream\" data-focus-stream data-seams>");
+    expect(page).toMatch(/class="stack-seam"[^>]*>[\s\S]*?aria-label="Open PR #11: Layer #11">open<\/a>/);
     expect(page).toContain("4 layers");
     expect(visible(page)).toContain("Whole stack · 4 layers");
     expect(page).toContain('<select class="scope-select" name="layer" data-scope');
@@ -1478,7 +1480,7 @@ describe("rendering and lines", () => {
     expect(changeIdsOf(layer)).toHaveLength(2);
     const overview = visible(await (await fetch(`${base}/${workspace}/r-stacks/stack-a/v/2/account`, { headers: { cookie } })).text());
     expect(overview).toContain("v2 account");
-    expect(overview).toContain("Manifest 2 · account");
+    expect(overview).toContain("v2 · account");
     // A stale group on a resolved stack lands on the stack, not on a miss.
     const stale = await fetch(`${base}/${workspace}/r-stacks/stack-a/v/2?review=gone`, { headers: { cookie }, redirect: "manual" });
     expect(stale.status).toBe(303);

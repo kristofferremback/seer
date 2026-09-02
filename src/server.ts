@@ -115,6 +115,7 @@ import {
   handleStackJudgment,
 } from "./overseer/judgment-routes";
 import { listLineages } from "./overseer/revision-db";
+import { getStackAccountForManifest, getStackManifest, listStacks } from "./overseer/stack-db";
 import { getLineagePr, latestObservation, observationStateWord } from "./overseer/revision-pr";
 import {
   agentSkillsIndex,
@@ -626,6 +627,7 @@ function reviewLedgerGroups(userId: string): ReviewLedgerGroup[] {
           // createReviewVersion moves both in one transaction — but the index is not
           // the place to throw over it, so the slug stands in for the title.
           title: latest?.doc.title ?? r.slug,
+          route: "r",
           latest: `v${r.latest_version}`,
           publishedAt: versions[0]?.created_at ?? r.created_at,
           prs: listReviewPrs(ws.id, r.slug).map((p) => ({ repo: p.repo, number: p.pr_number })),
@@ -641,6 +643,7 @@ function reviewLedgerGroups(userId: string): ReviewLedgerGroup[] {
         return {
           slug: lineage.slug,
           title: lineage.title,
+          route: "r",
           latest: reviewLineageStanding({
             latestRevision: lineage.latest_revision,
             latestAccountVersion: lineage.latest_account_version,
@@ -648,6 +651,26 @@ function reviewLedgerGroups(userId: string): ReviewLedgerGroup[] {
           }),
           publishedAt: lineage.updated_at,
           prs: relation ? [{ repo: relation.repo, number: relation.pr_number }] : [],
+          tally,
+        };
+      }),
+      ...listStacks(ws.id).map((stack): LedgerReview => {
+        const manifest = getStackManifest(ws.id, stack.slug, stack.latest_manifest_version);
+        const tally = { merged: 0, closed: 0, draft: 0, open: 0, unknown: 0, total: manifest?.doc.members.length ?? 0 };
+        for (const member of manifest?.doc.members ?? []) {
+          if (member.status === "merged" || member.removedReason === "merged") tally.merged += 1;
+          else if (member.removedReason === "closed") tally.closed += 1;
+          else if (member.status === "live") tally.open += 1;
+          else tally.unknown += 1;
+        }
+        const account = manifest ? getStackAccountForManifest(ws.id, manifest.id) : null;
+        return {
+          slug: stack.slug,
+          title: stack.title,
+          route: "r-stacks",
+          latest: `v${stack.latest_manifest_version}${account ? " account" : ""}`,
+          publishedAt: stack.updated_at,
+          prs: manifest?.doc.members.map((member) => ({ repo: stack.repo, number: member.prNumber })) ?? [],
           tally,
         };
       }),

@@ -3789,7 +3789,7 @@ export function renderReviewPage(input: RenderInput): string {
     (input.successor
       ? `<p class="meta successor"><span>Immutable successor</span><span>` +
         (input.successor.state === "completed" && input.successor.url
-          ? `<a href="${escapeHtml(input.successor.url)}">open</a>`
+          ? `<a href="${escapeHtml(input.successor.url)}" aria-label="Open immutable successor">open</a>`
           : escapeHtml(input.successor.state)) +
         `</span>` + (input.successor.failure ? `<span>${escapeHtml(input.successor.failure)}</span>` : "") + `</p>`
       : "") +

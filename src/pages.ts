@@ -148,7 +148,7 @@ function styles(): string {
     --ink: 30 10% 12%;
     --ink-soft: 30 9% 26%;
     --line: 35 14% 84%;
-    --muted: 30 8% 45%;
+    --muted: 30 8% 39%;
     --night: 356 26% 9%;
     /* Oxblood — Seer's accent, in place of Threa's gold. */
     --accent: 356 55% 27%;
@@ -1134,7 +1134,7 @@ export function planCss(): string {
   --ink: 30 10% 12%;
   --ink-soft: 30 9% 26%;
   --line: 35 14% 84%;
-  --muted: 30 8% 45%;
+  --muted: 30 8% 39%;
   --accent: 356 55% 27%;
   --accent-soft: 356 40% 42%;
   --font-display: "Cabinet Grotesk", "Switzer", system-ui, -apple-system, sans-serif;
@@ -2388,6 +2388,7 @@ ${appScript()}
 export interface LedgerReview {
   slug: string;
   title: string;
+  route: "r" | "r-stacks";
   /** What the Latest column prints: `v3` for a legacy review, and for a promoted one the
    *  account version, the standing revision, or where its first capture has got to —
    *  the same words the Project page uses for the same review. */
@@ -2439,7 +2440,7 @@ export function reviewsPage(nav: NavContext, groups: ReviewLedgerGroup[]): strin
   const og = { "og:title": title, "og:type": "website", robots: "noindex" };
 
   const row = (g: ReviewLedgerGroup, r: LedgerReview) => {
-    const url = `/${g.wsId}/r/${encodeURIComponent(r.slug)}/`;
+    const url = `/${g.wsId}/${r.route}/${encodeURIComponent(r.slug)}/`;
     // `owner/repo#12` and `repo#12` are both in the haystack, so the filter answers the
     // question however the reader spells it.
     const haystack = [

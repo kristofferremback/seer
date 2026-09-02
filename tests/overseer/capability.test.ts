@@ -18,7 +18,8 @@ import {
 import { getShare, SHARE_KINDS, SERVED_SHARE_KINDS } from "../../src/shares";
 import { appendLocalReply, createLocalThread, projectLocalThread } from "../../src/overseer/thread-db";
 import { recordGithubCommentWebhook, recordGithubReviewWebhook, recordGithubThreadWebhook } from "../../src/overseer/conversation-import";
-import { stackWitnessConversationContext } from "../../src/overseer/conversation-read";
+import { readCapabilityConversation, stackWitnessConversationContext } from "../../src/overseer/conversation-read";
+import { mapSubmittedGithubThread } from "../../src/overseer/github-thread-sync";
 import { getStackManifest } from "../../src/overseer/stack-db";
 import { digestOf } from "../../src/overseer/revision-db";
 
@@ -234,6 +235,8 @@ describe("exact document capabilities", () => {
       expect(response.status).toBe(200);
       const body = await response.json() as any;
       expect(body.document.kind).toBe(documentKind);
+      expect(body.document.title).toBe(kind === "stack_document" ? "Exact stack" : "Exact capability");
+      expect(body.document.pin).toBe(documentKind === "review_revision" ? "rev 1" : documentKind === "review_account" ? "v1" : documentKind === "stack_manifest" ? "v1" : "v1 account");
       expect(body.token).toMatch(/^seer_sh_/);
       expect(db.query<{ token_hash: string }, [string]>("SELECT token_hash FROM shares WHERE id = ?").get(body.id)!.token_hash).toBe(hashKey(body.token));
       expect(resolveDocumentCapability(getShare(body.id)!)?.share.id).toBe(body.id);
@@ -245,6 +248,11 @@ describe("exact document capabilities", () => {
       expect(items.map((row) => row.ordinal)).toEqual(items.map((_, index) => index + 1));
       const attachments = db.query<{ attachment_id: string }, [string]>("SELECT attachment_id FROM share_capability_attachments WHERE share_id = ? ORDER BY ordinal").all(body.id);
       expect(attachments.map((row) => row.attachment_id)).toEqual(documentKind === "review_revision" ? [] : [attachmentId]);
+      if (kind === "stack_document") {
+        const staleFallback = await fetch(`${base}/s/${body.token}?fallback-page=2`, { redirect: "manual" });
+        expect(staleFallback.status).toBe(303);
+        expect(staleFallback.headers.get("location")).toBe(`/s/${body.token}`);
+      }
     }
     const replayOne = await createDocumentCapability({ wsId: workspace, kind: "review_document", target: revisionId, label: "replay", userId: owner, expiresAt: null });
     const replayTwo = await createDocumentCapability({ wsId: workspace, kind: "review_document", target: revisionId, label: "replay", userId: owner, expiresAt: null });
@@ -380,14 +388,14 @@ describe("exact document capabilities", () => {
     expect(revisionPage.status).toBe(200);
     expect(revisionPage.headers.get("cache-control")).toBe("no-store");
     const revisionHtml = visible(await revisionPage.text());
-    expect(revisionHtml).toContain("Revision 1");
+    expect(revisionHtml).toContain("rev 1");
     expect(revisionHtml).not.toContain("Witness account 1");
     expect(revisionHtml).not.toContain("secret-project");
     expect(revisionHtml).toContain("Pinned PR title");
     expect(revisionHtml).toContain("https://github.com/Acme/Capability/pull/42");
     expect(revisionHtml).not.toContain("Newer private title");
     expect(revisionHtml).not.toContain("Acme/Renamed");
-    expect(revisionHtml).not.toContain("Revision 2 available");
+    expect(revisionHtml).not.toContain("rev 2 available");
     expect(revisionHtml).not.toContain(owner);
     expect(revisionHtml).not.toContain("read-form");
     expect(revisionHtml).not.toContain("unread");
@@ -429,6 +437,7 @@ describe("exact document capabilities", () => {
     expect(stackGroup.status).toBe(200);
     const stackHtml = visible(await stackGroup.text());
     expect(stackHtml).toContain("The exact member group.");
+    expect(stackHtml).toContain("Whole stack · 1 layer");
     expect(stackHtml).not.toContain("read-form");
     expect(stackHtml).toContain(`href="/s/${stack.token}?layer=exact-review"`);
     const stackUrls = attributeUrls(stackHtml);
@@ -437,8 +446,31 @@ describe("exact document capabilities", () => {
 
     const memberReview = await (await fetch(`${base}/${workspace}/r/exact-review/v/1`)).text();
     expect(memberReview).toContain(`data-kind="review_document" data-target="${accountId}"`);
+    expect(memberReview).toContain('<form method="post" action="/api/shares">');
     const memberStack = await (await fetch(`${base}/${workspace}/r-stacks/exact-stack/v/1/account`)).text();
     expect(memberStack).toContain(`data-kind="stack_document" data-target="${stackAccountId}"`);
+  });
+
+  test("creates a share through the native no-JavaScript form and returns its one-time link", async () => {
+    const returnTo = `/${workspace}/r/exact-review/v/1?review=exact`;
+    const response = await fetch(`${base}/api/shares`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        workspace,
+        kind: "review_document",
+        target: accountId,
+        label: "No JavaScript",
+        return: returnTo,
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const html = await response.text();
+    expect(html).toContain("Link created");
+    expect(html).toMatch(/href="http:\/\/localhost:0\/s\/seer_sh_[^"]+"/);
+    expect(html).toContain(`href="${returnTo}"`);
   });
 
   test("preserves historical positions above 16 and excludes removed positions", async () => {
@@ -533,11 +565,14 @@ describe("exact document capabilities", () => {
     expect(conversationBody.conversation).toBe(true);
     expect(db.query<{ conversation_scope: string }, [string]>("SELECT conversation_scope FROM share_document_capabilities WHERE share_id = ?").get(conversationBody.id)?.conversation_scope).toBe("snapshot");
 
-    const minted = await (await post({ workspace, kind: "review_document", target: revisionId, label: "listed" })).json() as any;
+    const minted = await (await post({ workspace, kind: "review_document", target: accountId, label: "listed" })).json() as any;
+    const mintedStack = await (await post({ workspace, kind: "stack_document", target: stackAccountId, label: "listed stack" })).json() as any;
     const listing = await (await fetch(`${base}/api/shares?workspace=${workspace}`)).text();
     expect(listing).not.toContain(minted.token);
-    const row = (JSON.parse(listing) as any).shares.find((share: any) => share.id === minted.id);
-    expect(row.document).toEqual(minted.document);
+    expect(listing).not.toContain(mintedStack.token);
+    const rows = (JSON.parse(listing) as any).shares;
+    expect(rows.find((share: any) => share.id === minted.id).document).toEqual({ kind: "review_account", slug: "exact-review", pin: "v1", title: "Exact capability" });
+    expect(rows.find((share: any) => share.id === mintedStack.id).document).toEqual({ kind: "stack_account", slug: "exact-stack", pin: "v1 account", title: "Exact stack" });
   });
 
   test("snapshots exact local conversation and remains read-only", async () => {
@@ -607,6 +642,61 @@ describe("exact document capabilities", () => {
     const laterObservation = db.query<{ id: string }, [string]>("SELECT id FROM review_github_thread_observations WHERE thread_id = ? ORDER BY rowid DESC LIMIT 1").get(laterThread)!.id;
     db.run("UPDATE share_capability_github_threads SET thread_id = ?, thread_observation_id = ? WHERE share_id = ? AND thread_id = ?", [laterThread, laterObservation, capability.id, exactThread]);
     expect((await fetch(`${base}/s/${capability.token}`)).status).toBe(404);
+  });
+
+  test("merges a mapped GitHub thread once and suppresses its empty wrapper review", async () => {
+    const observedAt = Date.now();
+    const local = createLocalThread({
+      workspaceId: workspace,
+      scopeKind: "lineage",
+      scopeId: lineageId,
+      anchor: { workspace_id: workspace, anchor_kind: "review", lineage_id: lineageId, revision_id: revisionId, account_id: null, stack_id: null, stack_manifest_id: null, stack_account_id: null, group_id: null, change_id: null, file_id: null, side: null, start_line: null, end_line: null, range_kind: null, old_object_digest: null, new_object_digest: null, object_digest: null },
+      body: "Mapped capability thread",
+      author: { kind: "member", userId: owner },
+      idempotencyKey: "capability-mapped-local",
+    });
+    const importedThread = recordGithubThreadWebhook({
+      workspaceId: workspace, lineageId, repoId: 990, prNumber: 42,
+      sourceId: "cap-mapped-thread", sourceAt: observedAt,
+      nodeId: "CAP_MAPPED_THREAD", firstCommentDatabaseId: "9301", resolved: false,
+      path: "src/value.ts", side: "new", startLine: 1, endLine: 1,
+      commitSha: sha(3), githubUrl: "https://github.test/comment/9301",
+    });
+    recordGithubCommentWebhook({
+      workspaceId: workspace, threadId: importedThread,
+      sourceId: "cap-mapped-comment", sourceAt: observedAt,
+      databaseId: "9301", nodeId: "CAP_MAPPED_COMMENT", createdAt: observedAt,
+      updatedAt: observedAt, authorLogin: "owner", body: "Mapped capability thread",
+      githubUrl: "https://github.test/comment/9301", deleted: false,
+    });
+    const wrapperReview = recordGithubReviewWebhook({
+      workspaceId: workspace, lineageId, sourceId: "cap-mapped-review", sourceAt: observedAt,
+      review: { databaseId: "9302", nodeId: "CAP_MAPPED_REVIEW", authorLogin: "owner", state: "commented", body: "", url: "https://github.test/review/9302", commitSha: sha(3), submittedAt: observedAt, dismissed: false },
+    });
+    mapSubmittedGithubThread({
+      workspaceId: workspace,
+      lineageId,
+      revisionId,
+      localThreadId: local.thread.id,
+      localMessageId: local.entries[0]!.id,
+      submissionId: tinyId("gsb"),
+      githubReviewId: "CAP_MAPPED_REVIEW",
+      githubThreadId: "CAP_MAPPED_THREAD",
+      githubCommentId: "CAP_MAPPED_COMMENT",
+      commitSha: sha(3),
+    });
+
+    const capability = await createDocumentCapability({
+      wsId: workspace, kind: "review_document", target: revisionId,
+      label: "mapped conversation", userId: owner, expiresAt: null, conversation: true,
+    });
+    const resolved = resolveDocumentCapability(getShare(capability.id)!)!;
+    const conversation = await readCapabilityConversation(resolved);
+    expect(conversation).not.toBeNull();
+    expect(conversation!.imported.map((thread) => thread.id)).not.toContain(importedThread);
+    expect(conversation!.reviews.map((review) => review.id)).not.toContain(wrapperReview);
+    const projected = conversation!.local.find((thread) => thread.id === local.thread.id)!;
+    expect(projected.entries.filter((entry) => entry.body === "Mapped capability thread")).toHaveLength(1);
   });
 
   test("pins stack reads and witness context to the exact stack account and member document", async () => {
@@ -685,6 +775,8 @@ describe("exact document capabilities", () => {
     const page = await (await fetch(`${base}/${workspace}/r/exact-review/v/1?review=exact`)).text();
     expect(page).toContain("thread-new");
     expect(page).toContain("thread-reply");
+    expect(page).toContain('<details class="thread-composer"><summary><span class="disclosure-cue" aria-hidden="true">›</span><span>New thread</span></summary>');
+    expect(page).not.toContain('<details class="thread-composer" open>');
     expect(page).toContain("data-line-select");
     expect(page).toContain(`action="/${workspace}/r/exact-review/v/1/threads"`);
     const created = await fetch(`${base}/${workspace}/r/exact-review/rev/1/threads`, {
@@ -701,6 +793,25 @@ describe("exact document capabilities", () => {
     expect(reply.headers.get("location")).toContain(`#${threadId}`);
     const resolved = await fetch(`${base}/${workspace}/review-threads/${threadId}/resolution`, { method: "POST", body: new URLSearchParams({ state: "resolved", idempotencyKey: "no-js-resolve", return: `/${workspace}/r/exact-review/rev/1?review=exact` }), redirect: "manual" });
     expect(resolved.status).toBe(303);
+  });
+
+  test("should use one disclosure grammar and put change details before document actions", async () => {
+    const overview = visible(await (await fetch(`${base}/${workspace}/r/exact-review/v/1`)).text());
+    const focused = visible(await (await fetch(`${base}/${workspace}/r/exact-review/v/1?review=exact`)).text());
+    for (const className of ["focus-item", "material-fact", "document-share", "tree-folder"]) {
+      expect(overview).toMatch(new RegExp(`class="[^"]*${className}[^"]*"[\\s\\S]*?<summary[^>]*><span class="disclosure-cue"`));
+    }
+    expect(focused).toMatch(/class="file-disclosure"[^>]*><span class="disclosure-cue">›<\/span>/);
+    const ledger = focused.indexOf('class="ledger-card');
+    expect(ledger).toBeGreaterThan(-1);
+    for (const action of ['class="focus-pr-source"', 'class="document-share"', 'class="github-projection"', 'class="judgment"']) {
+      expect(focused.indexOf(action)).toBeGreaterThan(ledger);
+    }
+    expect(focused.match(/data-read-state><span class="read-mark" data-read-mark aria-hidden="true">○<\/span><span>Unread<\/span>/g)).toHaveLength(2);
+    const lineButtons = [...focused.matchAll(/<button[^>]*data-line-select[^>]*>/g)].map((match) => match[0]);
+    expect(lineButtons.length).toBeGreaterThan(4);
+    expect(lineButtons.every((tag) => tag.includes('aria-pressed="false"') && /tabindex="(?:0|-1)"/.test(tag))).toBe(true);
+    expect(lineButtons.filter((tag) => tag.includes('tabindex="0"'))).toHaveLength(4);
   });
 
   test("scope none remains byte-equivalent when snapshot rows are poisoned", async () => {
@@ -775,8 +886,9 @@ describe("exact document capabilities", () => {
       await desktop.navigate(`${base}/${workspace}/r/exact-review/v/1`);
       await mark("member-1440-dark: page loaded");
       expect(await desktop.evaluate<{ width: number; theme: string }>(`({width:innerWidth,theme:document.documentElement.dataset.theme})`)).toEqual({ width: 1440, theme: "dark" });
-      await desktop.setValue(".discussion > form.thread-new textarea", "Chrome created thread");
-      await desktop.activateAndWaitForLoad(".discussion > form.thread-new button[type=submit]");
+      await desktop.evaluate("document.querySelector('.discussion > .thread-composer').open=true");
+      await desktop.setValue(".discussion > .thread-composer > form.thread-new textarea", "Chrome created thread");
+      await desktop.activateAndWaitForLoad(".discussion > .thread-composer > form.thread-new button[type=submit]");
       const createdId = await desktop.evaluate<string>("location.hash.slice(1)");
       expect(createdId).toMatch(/^rth_/);
       expect(threadByBody("Chrome created thread")).toBe(createdId);

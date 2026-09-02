@@ -80,7 +80,7 @@ function reviewDoc(capability: ReviewCapability, basePath: string): ReaderDoc {
     workflow: null,
     drift: null,
     movement: null,
-    standing: account ? `Version ${account.version} · revision ${revision.revision}` : `Revision ${revision.revision}`,
+    standing: account ? `v${account.version} · rev ${revision.revision}` : `rev ${revision.revision}`,
     pin: account ? `v${account.version}` : `rev ${revision.revision}`,
     latest: false,
   };
@@ -88,7 +88,7 @@ function reviewDoc(capability: ReviewCapability, basePath: string): ReaderDoc {
 
 async function root(req: Request, share: ShareRow, token: string): Promise<Response> {
   const allowed = new Set(share.kind === "stack_document"
-    ? ["review", "change", "panel", "tree", "detail", "layer", "page"]
+    ? ["review", "change", "panel", "tree", "detail", "layer", "page", "fallback-page"]
     : ["review", "change", "panel", "tree", "detail"]);
   if ([...new URL(req.url).searchParams.keys()].some((key) => !allowed.has(key))) return softNotFound();
   const resolved = resolveDocumentCapability(share);

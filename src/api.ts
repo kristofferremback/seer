@@ -3917,6 +3917,20 @@ export const API_ROUTES: readonly ApiRoute[] = [
         requestBody: {
           required: true,
           content: {
+            "application/x-www-form-urlencoded": {
+              schema: {
+                type: "object",
+                required: ["workspace", "kind", "target", "return"],
+                additionalProperties: false,
+                properties: {
+                  workspace: { type: "string", pattern: "^ws_" },
+                  kind: { type: "string", enum: ["review_document", "stack_document"] },
+                  target: { type: "string", description: "An exact rvr_, rac_, rsm_, or rsa_ id." },
+                  label: { type: "string" },
+                  return: { type: "string", description: "Same-workspace review path used by the no-JavaScript result page." },
+                },
+              },
+            },
             "application/json": {
               schema: {
                 oneOf: [
@@ -3960,8 +3974,9 @@ export const API_ROUTES: readonly ApiRoute[] = [
         },
         responses: {
           "200": {
-            description: "The share, with its one-time token.",
+            description: "The share, with its one-time token. Form submissions receive a no-store HTML result with the link and a return to the review.",
             content: {
+              "text/html": { schema: { type: "string" } },
               "application/json": {
                 schema: {
                   type: "object",

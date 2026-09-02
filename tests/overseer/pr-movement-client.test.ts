@@ -156,7 +156,7 @@ describe("the newer-source lines are inert", () => {
     // un-hides the label on phone has to undo the desktop clipping too, and the only way
     // into navigation on a phone overview has to be a finger's width.
     const phone = STAGE_CSS.slice(STAGE_CSS.indexOf("@media(max-width:760px)"));
-    expect(phone).toContain(".dimensions.in-header .dimension>span:last-child{position:static;width:auto;height:auto;clip-path:none;overflow:visible;white-space:normal}");
+    expect(phone).toContain(".dimensions.in-header .dimension>span:last-child,.dimensions.in-header .dimension:not(.read-dimension)>span:last-child{position:static;width:auto;height:auto;clip-path:none;overflow:visible;white-space:normal}");
     expect(phone).toContain(".mobile-bar button{min-height:44px;min-width:44px;");
   });
 

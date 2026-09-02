@@ -509,7 +509,7 @@ Retry is one guarded statement: `failed`, or `running` with an expired lease, be
 count reset by anybody who asks, a lane that claimed the job between a read and a write
 keeps its lease, and a completion that landed in between stays completed. The failed
 shell offers the same transition as a plain form to the member who may spend the
-credential; the capturing shell refreshes itself and says how to reload.
+credential; the capturing shell says how to reload and never moves the reader on a timer.
 
 Recovery runs at startup and then on a timer one lease period long. Startup alone was not
 enough: a lane a process left because another container held the lease, or because a caller

@@ -253,6 +253,12 @@ export function getStack(workspaceId: string, slug: string): ReviewStackRow | nu
   ).get(workspaceId, slug);
 }
 
+export function listStacks(workspaceId: string): ReviewStackRow[] {
+  return db.query<ReviewStackRow, [string]>(
+    "SELECT * FROM review_stacks WHERE workspace_id = ? ORDER BY updated_at DESC, slug ASC",
+  ).all(workspaceId);
+}
+
 export function getStackById(id: string): ReviewStackRow | null {
   return db.query<ReviewStackRow, [string]>("SELECT * FROM review_stacks WHERE id = ?").get(id);
 }

@@ -41,6 +41,7 @@ export const STAGE_CLIENT = String.raw`(()=>{
       const rows=[...section.querySelectorAll('[data-judgment-blocker]')];let blocked=0;
       for(const row of rows){const missing=!acknowledgedIds.has(row.dataset.judgmentBlocker);row.hidden=!missing;if(missing)blocked++}
       const list=section.querySelector('.judgment-blockers');if(list)list.hidden=blocked===0;
+      const requirement=section.querySelector('[data-judgment-required]');if(requirement){requirement.hidden=blocked===0;requirement.textContent=blocked+' acknowledgement'+(blocked===1?'':'s')+' required'}
       section.querySelectorAll('.judgment-form button[type=submit]').forEach(button=>button.disabled=blocked>0);
     });
   };
@@ -71,6 +72,7 @@ export const STAGE_CLIENT = String.raw`(()=>{
       node.querySelectorAll('[data-read-input]').forEach(input=>input.value=read?'false':'true');
       node.querySelectorAll('[data-read-button]').forEach(button=>button.textContent=read?'Mark unread':'Mark read');
       node.querySelectorAll('[data-read-state]>span:last-child').forEach(state=>state.textContent=read?'Read':'Unread');
+      node.querySelectorAll('[data-read-mark]').forEach(mark=>mark.textContent=read?'✓':'○');
     });
     document.querySelectorAll('.file-review').forEach(file=>{
       const hunks=[...file.querySelectorAll('.hunk-review[data-change]')];const target=file.querySelector('[data-file-progress]');if(target)target.textContent=hunks.filter(hunk=>readIds.has(hunk.dataset.change)).length+' / '+hunks.length+' read';
@@ -94,6 +96,7 @@ export const STAGE_CLIENT = String.raw`(()=>{
       const input=form.elements.namedItem('acknowledged'),state=form.querySelector('.acknowledgement-state'),button=form.querySelector('button[type=submit]');
       if(input)input.value=acknowledged?'false':'true';if(state)state.textContent=acknowledged?'Acknowledged'+carried:'Needs acknowledgement';if(button){button.textContent=acknowledged?'Undo':'Acknowledge';button.disabled=false}
     });
+    document.querySelectorAll('[data-acknowledgement-summary]').forEach(summary=>{if(summary.dataset.acknowledgementSummary===id)summary.textContent=acknowledged?'Acknowledged'+carried:'Needs acknowledgement'});
     refreshProgress();
   };
 
@@ -112,6 +115,20 @@ export const STAGE_CLIENT = String.raw`(()=>{
     const url=baseUrl();url.searchParams.delete('page');url.searchParams.set('review',review);if(change)url.searchParams.set('change',change);url.hash=change||'review-'+review;return url;
   };
   const findChange=(selector,id)=>[...document.querySelectorAll(selector)].find(node=>(node.dataset.change||node.dataset.ledgerChange||node.dataset.activateChange)===id)||null;
+  const lineButtonsFor=line=>{
+    const side=line.dataset.lineSide,hunk=line.closest('[data-change]'),frame=line.closest('[data-diff-frame]');if(!side||!hunk)return[];
+    const region=frame?.querySelector(frame.dataset.layout==='split'?'.split':'.unified')||hunk;
+    return [...region.querySelectorAll('[data-line-select][data-line-side="'+side+'"]')];
+  };
+  const setLineRoving=line=>{for(const button of lineButtonsFor(line))button.tabIndex=button===line?0:-1};
+  const selectLine=(line,extend=false)=>{
+    const hunk=line.closest('[data-change]'),side=line.dataset.lineSide,number=Number(line.dataset.lineNumber);if(!hunk||!side||!number)return;
+    const same=lineSelection&&lineSelection.change===hunk.dataset.change&&lineSelection.side===side;
+    lineSelection=same&&(extend||touchLine)?{...lineSelection,end:number}:{change:hunk.dataset.change,side,start:number,end:number};touchLine=false;
+    if(lineSelection.end<lineSelection.start)[lineSelection.start,lineSelection.end]=[lineSelection.end,lineSelection.start];
+    document.querySelectorAll('[data-line-select]').forEach(button=>button.setAttribute('aria-pressed',String(button.closest('[data-change]')?.dataset.change===lineSelection.change&&button.dataset.lineSide===lineSelection.side&&Number(button.dataset.lineNumber)>=lineSelection.start&&Number(button.dataset.lineNumber)<=lineSelection.end)));
+    const form=findChange('[data-ledger-change]',lineSelection.change)?.querySelector('.range-thread form');if(form){form.elements.namedItem('side').value=lineSelection.side;form.elements.namedItem('startLine').value=String(lineSelection.start);form.elements.namedItem('endLine').value=String(lineSelection.end)}
+  };
   const scrollInside=(container,node,block='nearest')=>{
     if(!container||!node)return;const outer=container.getBoundingClientRect(),inner=node.getBoundingClientRect();let delta=0;
     if(block==='center')delta=inner.top-outer.top-(outer.height-inner.height)/2;else if(block==='start')delta=inner.top-outer.top;else if(inner.top<outer.top)delta=inner.top-outer.top;else if(inner.bottom>outer.bottom)delta=inner.bottom-outer.bottom;
@@ -280,7 +297,7 @@ export const STAGE_CLIENT = String.raw`(()=>{
     const disclosure=target.closest('[data-toggle-change]');if(disclosure){const hunk=findChange('.hunk-review[data-change]',disclosure.dataset.toggleChange);setCollapsed(hunk,hunk?.dataset.collapsed!=='true');return}
     const filter=target.closest('[data-filter-unread]');if(filter){filter.setAttribute('aria-pressed',String(filter.getAttribute('aria-pressed')!=='true'));applyUnreadFilter();return}
     const context=target.closest('[data-context-trigger]');if(context){event.preventDefault();loadContext(context);return}
-    const line=target.closest('[data-line-select]');if(line){event.preventDefault();if(suppressLineClick&&event.detail>0){suppressLineClick=false;touchLine=false;return}suppressLineClick=false;const hunk=line.closest('[data-change]');const side=line.dataset.lineSide;const number=Number(line.dataset.lineNumber);if(!hunk||!side||!number)return;const same=lineSelection&&lineSelection.change===hunk.dataset.change&&lineSelection.side===side;lineSelection=same&&(event.shiftKey||touchLine)?{...lineSelection,end:number}:{change:hunk.dataset.change,side,start:number,end:number};touchLine=false;if(lineSelection.end<lineSelection.start)[lineSelection.start,lineSelection.end]=[lineSelection.end,lineSelection.start];document.querySelectorAll('[data-line-select]').forEach(button=>button.setAttribute('aria-pressed',String(button.closest('[data-change]')?.dataset.change===lineSelection.change&&button.dataset.lineSide===lineSelection.side&&Number(button.dataset.lineNumber)>=lineSelection.start&&Number(button.dataset.lineNumber)<=lineSelection.end)));const form=findChange('[data-ledger-change]',lineSelection.change)?.querySelector('.range-thread form');if(form){form.elements.namedItem('side').value=lineSelection.side;form.elements.namedItem('startLine').value=String(lineSelection.start);form.elements.namedItem('endLine').value=String(lineSelection.end)}return}
+    const line=target.closest('[data-line-select]');if(line){event.preventDefault();if(suppressLineClick&&event.detail>0){suppressLineClick=false;touchLine=false;return}suppressLineClick=false;setLineRoving(line);selectLine(line,event.shiftKey);return}
   });
 
   document.addEventListener('submit',async event=>{
@@ -301,7 +318,12 @@ export const STAGE_CLIENT = String.raw`(()=>{
   dialog?.addEventListener('pointerout',event=>{const linked=event.target.closest?.('.hunk-review[data-change],[data-ledger-change]');if(!linked)return;const id=linked.dataset.change||linked.dataset.ledgerChange;findChange('.hunk-review[data-change]',id)?.classList.remove('is-linked-hover');findChange('[data-ledger-change]',id)?.classList.remove('is-linked-hover')});
   dialog?.addEventListener('cancel',event=>{event.preventDefault();closeFocus()});
   document.addEventListener('change',event=>{const select=event.target;if(select instanceof HTMLSelectElement&&select.matches('[data-scope]')&&dialog?.open){event.preventDefault();openLayer(select.value||null)}});
-  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&dialog?.open){event.preventDefault();closeFocus();return}if(event.key==='Escape'&&new URL(location.href).searchParams.has('panel')){event.preventDefault();closePagePanel();return}if((event.key==='['||event.key===']')&&dialog?.open&&!(event.target instanceof HTMLInputElement||event.target instanceof HTMLSelectElement||event.target instanceof HTMLTextAreaElement)){event.preventDefault();stepLayer(event.key===']'?1:-1)}});
+  document.addEventListener('keydown',event=>{
+    const line=event.target?.closest?.('[data-line-select]');
+    if(line&&(event.key==='Enter'||event.key===' ')){event.preventDefault();setLineRoving(line);selectLine(line,event.shiftKey);return}
+    if(line&&['ArrowUp','ArrowDown','Home','End'].includes(event.key)){event.preventDefault();const buttons=lineButtonsFor(line),current=buttons.indexOf(line);let next=current;if(event.key==='ArrowUp')next=Math.max(0,current-1);if(event.key==='ArrowDown')next=Math.min(buttons.length-1,current+1);if(event.key==='Home')next=0;if(event.key==='End')next=buttons.length-1;const target=buttons[next];if(target){setLineRoving(target);target.focus()}return}
+    if(event.key==='Escape'&&dialog?.open){event.preventDefault();closeFocus();return}if(event.key==='Escape'&&new URL(location.href).searchParams.has('panel')){event.preventDefault();closePagePanel();return}if((event.key==='['||event.key===']')&&dialog?.open&&!(event.target instanceof HTMLInputElement||event.target instanceof HTMLSelectElement||event.target instanceof HTMLTextAreaElement)){event.preventDefault();stepLayer(event.key===']'?1:-1)}
+  });
   addEventListener('popstate',()=>{if(pendingPanelAction){const action=pendingPanelAction;pendingPanelAction=null;action()}else syncUrl()});
   const initialUrl=new URL(location.href);if(initialUrl.searchParams.has('review')&&!background)history.replaceState({directReview:true},'',initialUrl);else if(initialUrl.searchParams.has('review')&&!history.state?.stageReview&&!history.state?.directReview)history.replaceState({directReview:true},'',initialUrl);
   theme();refreshProgress();syncUrl();

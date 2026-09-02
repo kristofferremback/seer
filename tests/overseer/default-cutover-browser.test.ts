@@ -115,7 +115,7 @@ test("should prove the default reader on desktop, phone, wide stack, and no-Java
   try {
     const url = `${base}/${workspace}/r/${slug}/rev/1`;
     await phone.navigate(url);
-    expect(await phone.evaluate<string[]>("[...document.querySelectorAll('.mobile-bar>*')].map(node=>node.textContent.trim())")).toEqual(["rev 1", "0 / 1 handled", "Details"]);
+    expect(await phone.evaluate<string[]>("[...document.querySelectorAll('.mobile-bar>*')].map(node=>node.textContent.trim())")).toEqual(["Review", "0 / 1 handled", "Details"]);
     await phone.touch("[data-page-details-open]");
     await phone.waitFor("document.querySelector('[data-page-details]')?.dataset.open==='true'");
     expect(await phone.evaluate<string>("new URL(location.href).searchParams.get('panel')")).toBe("details");

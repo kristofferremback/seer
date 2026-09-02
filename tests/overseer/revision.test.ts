@@ -383,7 +383,7 @@ describe("reading evidence before a witness has answered", () => {
     expect(pinned.status).toBe(200);
     const body = visible(await pinned.text());
     expect(body).toContain("A readable review revision");
-    expect(body).toContain("Revision 1");
+    expect(body).toContain("rev 1");
     expect(body).toContain("Witness pending");
     expect(body).toContain("Builder<span> · build-model");
     // No witness prose, no category marks, no signal scales: the revision has no
@@ -694,7 +694,7 @@ describe("publishing an account", () => {
     const evidence = await fetch(`${base}/${workspace}/r/promoted-source/rev/1`, { headers: sessionHeaders(), redirect: "manual" });
     expect(evidence.status).toBe(200);
     const evidenceText = visible(await evidence.text());
-    expect(evidenceText).toContain("Revision 1");
+    expect(evidenceText).toContain("rev 1");
     expect(evidenceText).not.toContain("The witness read every retained leaf.");
     expect(evidenceText).not.toContain("signal-scale");
     // Same code stream underneath: both name the same canonical changes.

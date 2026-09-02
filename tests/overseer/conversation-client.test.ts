@@ -8,11 +8,12 @@ declare const document: any;
 declare const window: any;
 declare const Event: any;
 declare const MouseEvent: any;
+declare const KeyboardEvent: any;
 
 const CHANGE = `chg_${"a".repeat(64)}`;
 
 function fixture(): void {
-  document.body.innerHTML = `<div data-stage-background></div><dialog open data-focus-dialog data-review="group" data-active-change="${CHANGE}"><div data-focus-layout data-left="open" data-right="open"><main data-focus-stream><article class="hunk-review" data-change="${CHANGE}" data-collapsed="false"><header class="hunk-header"><button data-toggle-change="${CHANGE}"></button><code>src/a.ts:L1</code></header><div class="diff-line"><button data-line-select data-line-side="new" data-line-number="1">1</button></div><div class="diff-line add"><button data-line-select data-line-side="new" data-line-number="2">2</button></div><div class="diff-line"><button data-line-select data-line-side="new" data-line-number="3">3</button></div></article></main><aside><article data-ledger-change="${CHANGE}" data-change="${CHANGE}"><details class="range-thread"><form class="thread-new range" action="/threads"><input name="idempotencyKey" value="render-key"><input name="side"><input name="startLine"><input name="endLine"><textarea name="body">Question</textarea><span role="status"></span><button type="submit">Add</button></form></details></article></aside><button data-focus-panel-close hidden></button></div><nav><span data-focus-change-position></span></nav></dialog>`;
+  document.body.innerHTML = `<div data-stage-background></div><dialog open data-focus-dialog data-review="group" data-active-change="${CHANGE}"><div data-focus-layout data-left="open" data-right="open"><main data-focus-stream><article class="hunk-review" data-change="${CHANGE}" data-collapsed="false"><header class="hunk-header"><button data-toggle-change="${CHANGE}"></button><code>src/a.ts:L1</code></header><div class="diff-line"><button data-line-select data-line-side="new" data-line-number="1" tabindex="0" aria-pressed="false">1</button></div><div class="diff-line add"><button data-line-select data-line-side="new" data-line-number="2" tabindex="-1" aria-pressed="false">2</button></div><div class="diff-line"><button data-line-select data-line-side="new" data-line-number="3" tabindex="-1" aria-pressed="false">3</button></div></article></main><aside><article data-ledger-change="${CHANGE}" data-change="${CHANGE}"><details class="range-thread"><form class="thread-new range" action="/threads"><input name="idempotencyKey" value="render-key"><input name="side"><input name="startLine"><input name="endLine"><textarea name="body">Question</textarea><span role="status"></span><button type="submit">Add</button></form></details></article></aside><button data-focus-panel-close hidden></button></div><nav><span data-focus-change-position></span></nav></dialog>`;
   const dialog = document.querySelector("dialog"); dialog.showModal = () => { dialog.open = true; }; dialog.close = () => { dialog.open = false; };
   window.matchMedia = () => ({ matches: false, addEventListener() {} }); (globalThis as any).matchMedia = window.matchMedia;
   class ResizeObserverStub { constructor(_callback: unknown) {} observe() {} } (globalThis as any).ResizeObserver = ResizeObserverStub;
@@ -28,6 +29,22 @@ beforeAll(() => { fixture(); run(); });
 afterAll(() => GlobalRegistrator.unregister());
 
 describe("conversation line selection", () => {
+  test("should keep one line in the tab order and move then select with the keyboard", () => {
+    const lines = [...document.querySelectorAll("[data-line-select]")];
+    expect(lines.map((line) => line.tabIndex)).toEqual([0, -1, -1]);
+    lines[0].focus();
+    lines[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(lines[1]);
+    expect(lines.map((line) => line.tabIndex)).toEqual([-1, 0, -1]);
+    lines[1].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    expect(lines.map((line) => line.getAttribute("aria-pressed"))).toEqual(["false", "true", "false"]);
+    const form = document.querySelector(".range-thread form");
+    expect([form.elements.namedItem("side").value, form.elements.namedItem("startLine").value, form.elements.namedItem("endLine").value]).toEqual(["new", "2", "2"]);
+    lines[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    lines[2].dispatchEvent(new KeyboardEvent("keydown", { key: " ", shiftKey: true, bubbles: true, cancelable: true }));
+    expect(lines.map((line) => line.getAttribute("aria-pressed"))).toEqual(["false", "true", "true"]);
+  });
+
   test("should select one keyboard line and extend with Shift+Enter semantics", () => {
     const lines = [...document.querySelectorAll("[data-line-select]")];
     lines[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));

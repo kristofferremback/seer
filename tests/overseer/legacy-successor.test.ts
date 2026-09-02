@@ -221,7 +221,9 @@ describe("legacy review succession", () => {
     expect(new URL(legacyApi.successor.statusUrl).pathname).toBe(`/api/review-legacy-successions/${completed.id}`);
     const page = await fetch(`${base}/${workspace}/r/legacy-single`);
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain("Immutable successor");
+    const html = await page.text();
+    expect(html).toContain("Immutable successor");
+    expect(html).toContain(`aria-label="Open immutable successor">open</a>`);
   });
 
   test("should build a valid exact stack only after fresh member witnesses publish", async () => {

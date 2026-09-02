@@ -16,6 +16,7 @@ import { getStageCapture, getStageVersion, listStageReadChangeIds } from "../src
 import { openStageBlob } from "../src/store";
 import { materializeCanonicalChanges } from "../src/stage/source";
 import { retainedLineWindow } from "../src/stage/read";
+import { stageTree } from "../src/stage/render-model";
 
 const sha = (n: number) => n.toString(16).padStart(40, "0");
 const BASE = sha(1), HEAD = sha(2), MERGE = sha(3);
@@ -180,6 +181,9 @@ describe("stage reader", () => {
     expect(body).toContain("Witness<span> · review-model");
     expect(body).toContain("Implementation"); expect(body).toContain("Supporting material");
     expect(body).toContain("category-summary"); expect(body).toContain("data-tree-node");
+    expect(body).toContain('<aside class="review-nav" aria-label="Review navigation"');
+    expect(body).toContain('<aside class="source-rail" aria-label="Review details"');
+    expect(body).toContain('<button type="button" data-review-nav-open>Review</button>');
     expect(body.match(/class="review-group-card"/g)?.length).toBe(2);
     expect(body.match(/data-focus-link data-review=/g)?.length).toBeGreaterThanOrEqual(2);
     const renderedBody = body.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<style>[\s\S]*?<\/style>/g, "");
@@ -206,6 +210,9 @@ describe("stage reader", () => {
     expect(withoutScripts).toContain("read-form");
     expect(withoutScripts).toContain("focus-file-tree");
     expect(withoutScripts).toContain("Close group review");
+    expect(withoutScripts).toContain('<span class="read-mark" data-read-mark aria-hidden="true">○</span><span>Unread</span>');
+    expect(withoutScripts).not.toContain('>✓</span><span>Unread</span>');
+    expect(withoutScripts).toContain('<span class="file-disclosure" aria-hidden="true"><span class="disclosure-cue">›</span></span>');
     const focusTargets = [...focused.matchAll(/data-scroll-file="([^"]+)"/g)].map((match) => match[1]!);
     const focusIds = new Set([...focused.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]));
     expect(focusTargets.every((target) => focusIds.has(target))).toBe(true);
@@ -242,6 +249,21 @@ describe("stage reader", () => {
     const corrupt = { ...inventory, changes: inventory.changes.map((change, index) => index === 0 ? { ...change, context_fingerprint: "wrong" } : change) };
     await expect(materializeCanonicalChanges(corrupt, load)).rejects.toThrow("does not reproduce");
     await expect(materializeCanonicalChanges(inventory, async () => null)).rejects.toThrow("missing");
+  });
+
+  test("should fold a single-child directory chain without losing its full path or file", () => {
+    const file = {
+      ...capture.files[0],
+      path: "src/overseer/very/deeply/nested/directory/structure/for/testing/long-path-module-name.ts",
+    };
+    const tree = stageTree([file]);
+    expect(tree.folders).toHaveLength(1);
+    expect(tree.folders[0]).toMatchObject({
+      name: "src/overseer/very/deeply/nested/directory/structure/for/testing",
+      path: "src/overseer/very/deeply/nested/directory/structure/for/testing",
+      files: [{ path: file.path }],
+      folders: [],
+    });
   });
 
   test("bounds retained-line bytes as well as line count", () => {

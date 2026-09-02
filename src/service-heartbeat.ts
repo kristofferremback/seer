@@ -13,13 +13,16 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
 export const SERVICE_HEARTBEAT_INTERVAL_MS = 5_000;
 export const SERVICE_HEARTBEAT_STALE_MS = 30_000;
+export const SERVICE_HEARTBEAT_REAP_MS = 24 * 60 * 60 * 1_000;
 const HEARTBEAT_DIRECTORY = ".seer-service-heartbeats";
+const HEARTBEAT_NAME_RE = /^[0-9]+-[a-f0-9]{16}\.json$/;
 
 export interface ServiceHeartbeat {
   format: 1;
@@ -77,6 +80,32 @@ function parseMarker(path: string): ServiceHeartbeat {
   return row as unknown as ServiceHeartbeat;
 }
 
+/** Remove only markers in Seer's exact namespace after a full day without a beat.
+ * A current or recently stopped replica remains evidence and is never reaped. */
+export function reapStaleServiceHeartbeats(
+  dataDir: string,
+  now: number = Date.now(),
+  reapMs: number = SERVICE_HEARTBEAT_REAP_MS,
+): number {
+  const directory = heartbeatDirectory(dataDir);
+  if (!existsSync(directory)) return 0;
+  let removed = 0;
+  for (const name of readdirSync(directory).sort()) {
+    if (!HEARTBEAT_NAME_RE.test(name)) continue;
+    const path = join(directory, name);
+    let lastBeat: number;
+    try {
+      lastBeat = parseMarker(path).heartbeatAt;
+    } catch {
+      lastBeat = statSync(path).mtimeMs;
+    }
+    if (now - lastBeat <= reapMs) continue;
+    rmSync(path, { force: true });
+    removed += 1;
+  }
+  return removed;
+}
+
 /** Start the marker before importing the application database. A later write failure is
  * fatal by default because allowing the marker to age while the server remains live
  * would turn the restore safety check into a lie. */
@@ -94,6 +123,7 @@ export function startServiceHeartbeat(
   const path = markerPath(dataDir, owner);
   const now = options.now ?? Date.now;
   const startedAt = now();
+  reapStaleServiceHeartbeats(dataDir, startedAt);
   const onError = options.onError ?? ((error: unknown) => {
     console.error("[seer] service heartbeat failed; exiting:", error);
     process.exit(1);
@@ -116,11 +146,15 @@ export function startServiceHeartbeat(
     }
   }, options.intervalMs ?? SERVICE_HEARTBEAT_INTERVAL_MS);
   (timer as unknown as { unref?: () => void }).unref?.();
+  const removeOwnedMarker = () => rmSync(path, { force: true });
+  process.once("exit", removeOwnedMarker);
   return {
     owner,
     path,
     stop() {
       clearInterval(timer);
+      process.off("exit", removeOwnedMarker);
+      removeOwnedMarker();
     },
   };
 }
@@ -136,7 +170,16 @@ export function freshServiceHeartbeats(
   const fresh: ServiceHeartbeat[] = [];
   for (const name of readdirSync(directory).sort()) {
     if (!name.endsWith(".json")) continue;
-    const marker = parseMarker(join(directory, name));
+    const path = join(directory, name);
+    let marker: ServiceHeartbeat;
+    try {
+      marker = parseMarker(path);
+    } catch (error) {
+      // Atomic writers never leave malformed bytes. A recent malformed file therefore
+      // remains a hard stop, while an old one cannot be a live process heartbeat.
+      if (now - statSync(path).mtimeMs <= staleMs) throw error;
+      continue;
+    }
     if (now - marker.heartbeatAt <= staleMs) fresh.push(marker);
   }
   return fresh;

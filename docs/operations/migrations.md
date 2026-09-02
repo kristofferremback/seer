@@ -29,7 +29,11 @@ The confirmation flag does not prove that the service stopped. Every normal `bun
 start` process writes its own owner heartbeat under
 `$DATA_DIR/.seer-service-heartbeats/` every five seconds. Restore refuses if any marker is
 30 seconds old or newer, even when `--confirm-service-stopped` is present. Multiple marker
-files are expected during a normal rolling handoff.
+files are expected during a normal rolling handoff. A graceful stop removes its own
+marker. A later normal start reaps valid or malformed Seer marker names only after a full
+day without a beat. Restore fails closed on a malformed marker written within the last
+30 seconds and ignores an older malformed file, which cannot come from the atomic active
+writer. Operators never need to delete one during rollback.
 
 ## Blob limits
 

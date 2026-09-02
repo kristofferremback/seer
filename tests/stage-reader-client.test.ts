@@ -93,7 +93,35 @@ beforeEach(async () => {
 afterAll(async () => GlobalRegistrator.unregister());
 
 describe("stage reader client", () => {
-  test("the closed mobile panel scrim cannot cover the focused review", () => {
+  test("should keep the stack index in the overview column above phone width", () => {
+    expect(STAGE_CSS).toContain(".stack-lines,.stack-members{grid-column:2}");
+    expect(STAGE_CSS).toContain("@media(max-width:760px)");
+  });
+
+  test("should keep linked hover quieter than the active change in both panes", () => {
+    expect(STAGE_CSS).toContain(".hunk-review.is-active .hunk-header{box-shadow:inset 3px");
+    expect(STAGE_CSS).toContain(".hunk-review.is-linked-hover:not(.is-active) .hunk-header{box-shadow:none");
+    expect(STAGE_CSS).toContain(".ledger-card.is-active{background:");
+    expect(STAGE_CSS).toContain(".ledger-card.is-linked-hover:not(.is-active){background:");
+    expect(STAGE_CSS).not.toContain(".ledger-card.is-active,.ledger-card.is-linked-hover");
+  });
+
+  test("should use AA muted text and readable walkthrough category text in light mode", () => {
+    expect(STAGE_CSS).toContain("--muted:30 8% 39%");
+    expect(STAGE_CSS).toContain(".group-links small,.focus-group-link small{font:11px");
+  });
+
+  test("should keep author form styles from exposing closed native details", () => {
+    expect(STAGE_CSS).toContain("details:not([open])>:not(summary){display:none}");
+  });
+
+  test("should give capture failure text and retry their own visible treatment", () => {
+    expect(STAGE_CSS).toContain(".capture-state[data-capture-state=failed]{color:hsl(var(--accent))}");
+    expect(STAGE_CSS).toContain(".pending-facts .capture-failure{");
+    expect(STAGE_CSS).toContain(".capture-retry button{min-height:40px;border:1px solid hsl(var(--accent));border-radius:3px");
+  });
+
+  test("should keep the closed mobile panel scrim off the focused review", () => {
     expect(STAGE_CSS).toContain("[hidden]{display:none!important}");
     expect(STAGE_CSS).toContain(".focus-layout[data-panel=tree] .focus-scrim");
     expect(STAGE_CSS).toContain(".focus-layout[data-panel=detail] .focus-scrim");
@@ -121,8 +149,8 @@ describe("stage reader client", () => {
     document.body.dataset.stageAcknowledgedIds = "";
     const group = document.querySelector('[data-group="first"]');
     group.dataset.acknowledgementIds = item;
-    group.insertAdjacentHTML("beforeend", `<details open><summary>Material</summary><form class="acknowledgement-form" action="/ack" data-acknowledgement-item="${item}"><input name="acknowledged" value="true"><span class="acknowledgement-state">Needs acknowledgement</span><span role="status"></span><button type="submit">Acknowledge</button></form></details>`);
-    document.querySelector("[data-stage-background]").insertAdjacentHTML("beforeend", `<section class="judgment"><ul class="judgment-blockers"><li data-judgment-blocker="${item}"><a href="#">Material</a></li></ul><form class="judgment-form"><button type="submit" disabled>Approve</button></form></section>`);
+    group.insertAdjacentHTML("beforeend", `<details open><summary>Material · <span data-acknowledgement-summary="${item}">Needs acknowledgement</span></summary><form class="acknowledgement-form" action="/ack" data-acknowledgement-item="${item}"><input name="acknowledged" value="true"><span class="acknowledgement-state">Needs acknowledgement</span><span role="status"></span><button type="submit">Acknowledge</button></form></details>`);
+    document.querySelector("[data-stage-background]").insertAdjacentHTML("beforeend", `<section class="judgment"><p id="judgment-acknowledgements" data-judgment-required>1 acknowledgement required</p><ul class="judgment-blockers"><li data-judgment-blocker="${item}"><a href="#">Material</a></li></ul><form class="judgment-form"><button type="submit" aria-describedby="judgment-acknowledgements" disabled>Approve</button></form></section>`);
     (globalThis as any).fetch = async (_input: string | URL | Request, init?: RequestInit) => {
       const acknowledged = (init?.body as FormData).get("acknowledged") === "true";
       return new Response(JSON.stringify({ itemId: item, acknowledged, acknowledgement: acknowledged ? { provenance: { kind: "explicit" } } : null }), { status: 200 });
@@ -131,6 +159,8 @@ describe("stage reader client", () => {
     const href = location.href;
     run();
     expect(document.querySelector("[data-progress]").textContent).toBe("0 / 4 handled");
+    expect(document.querySelector("[data-judgment-required]").textContent).toBe("1 acknowledgement required");
+    expect(group.querySelector("[data-acknowledgement-summary]").textContent).toBe("Needs acknowledgement");
     const form = group.querySelector(".acknowledgement-form");
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await Bun.sleep(0);
@@ -141,6 +171,8 @@ describe("stage reader client", () => {
     expect(form.querySelector("button").textContent).toBe("Undo");
     expect(document.querySelector("[data-progress]").textContent).toBe("1 / 4 handled");
     expect(document.querySelector(".judgment-blockers").hidden).toBe(true);
+    expect(document.querySelector("[data-judgment-required]").hidden).toBe(true);
+    expect(group.querySelector("[data-acknowledgement-summary]").textContent).toBe("Acknowledged");
     expect(document.querySelector(".judgment-form button").disabled).toBe(false);
 
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -150,6 +182,9 @@ describe("stage reader client", () => {
     expect(form.querySelector("button").textContent).toBe("Acknowledge");
     expect(document.querySelector("[data-progress]").textContent).toBe("0 / 4 handled");
     expect(document.querySelector("[data-judgment-blocker]").hidden).toBe(false);
+    expect(document.querySelector("[data-judgment-required]").hidden).toBe(false);
+    expect(document.querySelector("[data-judgment-required]").textContent).toBe("1 acknowledgement required");
+    expect(group.querySelector("[data-acknowledgement-summary]").textContent).toBe("Needs acknowledgement");
     expect(document.querySelector(".judgment-form button").disabled).toBe(true);
   });
 

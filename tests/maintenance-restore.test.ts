@@ -1,10 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backupDatabase, restoreDatabase } from "../src/db-snapshot";
-import { SERVICE_HEARTBEAT_STALE_MS } from "../src/service-heartbeat";
+import {
+  SERVICE_HEARTBEAT_REAP_MS,
+  SERVICE_HEARTBEAT_STALE_MS,
+  freshServiceHeartbeats,
+  reapStaleServiceHeartbeats,
+  startServiceHeartbeat,
+} from "../src/service-heartbeat";
 
 let roots: string[] = [];
 
@@ -108,6 +114,36 @@ describe("restore maintenance startup", () => {
     const repository = join(import.meta.dir, "..");
     expect(readFileSync(join(repository, "railway.toml"), "utf8")).toContain("healthcheckTimeout = 300");
     expect(readFileSync(join(repository, "docs/operations/migrations.md"), "utf8")).toContain("within 240 seconds");
+  });
+
+  test("should reap only day-old owned markers and fail closed only on recent malformed bytes", () => {
+    const data = root();
+    const directory = join(data, ".seer-service-heartbeats");
+    mkdirSync(directory);
+    const now = Date.now();
+    const marker = (owner: string, heartbeatAt: number) => JSON.stringify({
+      format: 1, mode: "normal", owner, pid: 42, startedAt: heartbeatAt, heartbeatAt,
+    });
+    writeFileSync(join(directory, "42-aaaaaaaaaaaaaaaa.json"), marker("42-aaaaaaaaaaaaaaaa", now - SERVICE_HEARTBEAT_REAP_MS - 1));
+    writeFileSync(join(directory, "43-bbbbbbbbbbbbbbbb.json"), marker("43-bbbbbbbbbbbbbbbb", now));
+    const malformed = join(directory, "44-cccccccccccccccc.json");
+    writeFileSync(malformed, "not json");
+    const old = new Date(now - SERVICE_HEARTBEAT_REAP_MS - 1);
+    utimesSync(malformed, old, old);
+    writeFileSync(join(directory, "somebody-else.txt"), "leave me");
+
+    expect(reapStaleServiceHeartbeats(data, now)).toBe(2);
+    expect(readdirSync(directory).sort()).toEqual(["43-bbbbbbbbbbbbbbbb.json", "somebody-else.txt"]);
+    writeFileSync(malformed, "still not json");
+    expect(() => freshServiceHeartbeats(data, now)).toThrow("unreadable");
+    const stale = new Date(now - SERVICE_HEARTBEAT_STALE_MS - 1);
+    utimesSync(malformed, stale, stale);
+    expect(freshServiceHeartbeats(data, now).map((entry) => entry.owner)).toEqual(["43-bbbbbbbbbbbbbbbb"]);
+
+    const live = startServiceHeartbeat(data, { intervalMs: 60_000, now: () => now });
+    expect(existsSync(live.path)).toBe(true);
+    live.stop();
+    expect(existsSync(live.path)).toBe(false);
   });
 
   test("should refuse restore while the normal bun run start heartbeat is fresh, then allow the stopped stale owner", async () => {

@@ -838,6 +838,7 @@ function reviewGroups(): ReviewLedgerGroup[] {
         {
           slug: "gate-rewrite",
           title: "The gate, rewritten",
+          route: "r",
           latest: "v2",
           publishedAt: NOW,
           prs: [
@@ -857,6 +858,13 @@ describe("reviews found by pull request", () => {
     expect(html).toContain('href="https://github.com/acme/atlas/pull/12"');
     expect(html).toContain(">atlas#12</a>");
     expect(html).toContain(">atlas#13</a>");
+  });
+
+  test("should open a stack row in the retained stack reader", () => {
+    const groups = reviewGroups();
+    groups[0]!.reviews[0]!.route = "r-stacks";
+    const html = reviewsPage(nav({ section: "reviews" }), groups);
+    expect(html).toContain('href="/ws_7g2kq4xbvm/r-stacks/gate-rewrite/"');
   });
 
   test("the filter's haystack answers both spellings of a pull request", () => {
