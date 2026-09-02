@@ -90,6 +90,12 @@ export interface PathResolution {
  * something the capture recorded, and where it recorded two of them onto one path — or a
  * path that is both a rename target and a file of its own — there is no single answer, so
  * there is no answer at all.
+ *
+ * Every capture records renames against the merge base, so a pull request that renamed
+ * `old.ts` to `new.ts` carries that same `old_path → path` pair in every revision. The
+ * pair is the file's identity across captures: a previous file whose pair the current
+ * capture records again is the same file, and only when no such pair exists does the
+ * question fall through to rename targets and plain path identity.
  */
 export function resolvePaths(
   previous: StageCaptureInventory,
@@ -98,12 +104,14 @@ export function resolvePaths(
   const targets = new Map<string, Set<string>>();
   const identity = new Set<string>();
   const occupied = new Set<string>();
+  const pairs = new Set<string>();
   for (const file of current.files) {
     occupied.add(file.path);
     if (file.old_path !== null && file.old_path !== file.path) {
       const held = targets.get(file.old_path) ?? new Set<string>();
       held.add(file.path);
       targets.set(file.old_path, held);
+      pairs.add(keyOf([file.old_path, file.path]));
     } else {
       identity.add(file.path);
     }
@@ -111,7 +119,16 @@ export function resolvePaths(
   const answers = new Map<string, string | null>();
   for (const file of previous.files) {
     if (answers.has(file.path)) continue;
+    const renamed = file.old_path !== null && file.old_path !== file.path ? file.old_path : null;
+    if (renamed !== null && pairs.has(keyOf([renamed, file.path]))) {
+      // The same rename, recorded again: the file continues under the same name.
+      answers.set(file.path, file.path);
+      continue;
+    }
     const candidates = new Set(targets.get(file.path) ?? []);
+    // A file the previous capture already saw renamed from `renamed` may be renamed
+    // again from that same original in the current one; both readings name one file.
+    if (renamed !== null) for (const path of targets.get(renamed) ?? []) candidates.add(path);
     if (identity.has(file.path)) candidates.add(file.path);
     if (candidates.size === 1) {
       answers.set(file.path, [...candidates][0]!);

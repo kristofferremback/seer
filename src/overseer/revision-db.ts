@@ -302,6 +302,19 @@ export function latestAccountForRevision(workspaceId: string, revisionId: string
   return row ? parseAccount(row) : null;
 }
 
+/** The revision immediately after this one in the same lineage, or null on the latest.
+ *  Where a read marked on this revision may still carry to. */
+export function nextRevision(
+  workspaceId: string,
+  lineageId: string,
+  revision: number,
+): ReviewRevisionRow | null {
+  const row = db.query<Raw<ReviewRevisionRow>, [string, string, number]>(
+    "SELECT * FROM review_revisions WHERE workspace_id = ? AND lineage_id = ? AND revision > ? ORDER BY revision ASC LIMIT 1",
+  ).get(workspaceId, lineageId, revision);
+  return row ? parseRevision(row) : null;
+}
+
 /** The revision immediately before this one in the same lineage, or null on the first.
  *  What the retained code delta is measured against. */
 export function previousRevision(
@@ -507,6 +520,115 @@ export function carryRevisionReads(input: {
   return carried;
 }
 
+// ---- stored movement ----
+
+/** What one revision changed about the one before it, written once. Both captures are
+ *  immutable and the engine is deterministic over them, so this is a fact rather than a
+ *  cache: asked again it would say the same thing at the cost of two inventories. */
+export interface RevisionMovementRow {
+  revision_id: string;
+  workspace_id: string;
+  lineage_id: string;
+  previous_revision_id: string;
+  unchanged: number;
+  revised: number;
+  new: number;
+  removed: number;
+  computed_at: number;
+}
+
+export function getRevisionMovement(workspaceId: string, revisionId: string): RevisionMovementRow | null {
+  return db.query<RevisionMovementRow, [string, string]>(
+    "SELECT * FROM review_revision_movements WHERE workspace_id = ? AND revision_id = ?",
+  ).get(workspaceId, revisionId);
+}
+
+/**
+ * Store the counts and every exact text equivalence between one revision and the one
+ * before it. INSERT OR IGNORE throughout: two writers computing the same immutable answer
+ * land one row, and the first is as right as the second.
+ *
+ * Not a transaction of its own. The completion transaction writes this beside the revision
+ * it describes; a page filling it in for a revision published before it was stored wraps
+ * its own.
+ */
+export function storeRevisionMovement(input: {
+  workspaceId: string;
+  lineageId: string;
+  previousRevisionId: string;
+  revisionId: string;
+  counts: { unchanged: number; revised: number; new: number; removed: number };
+  equivalences: ReadonlyMap<string, { targetChangeId: string; digest: string }>;
+  now: number;
+}): void {
+  db.run(
+    "INSERT OR IGNORE INTO review_revision_movements (revision_id, workspace_id, lineage_id, previous_revision_id, unchanged, revised, new, removed, computed_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [input.revisionId, input.workspaceId, input.lineageId, input.previousRevisionId,
+      input.counts.unchanged, input.counts.revised, input.counts.new, input.counts.removed, input.now],
+  );
+  const insert = db.prepare(
+    "INSERT OR IGNORE INTO review_revision_equivalences (target_revision_id, target_change_id, workspace_id, lineage_id, source_revision_id, source_change_id, key_digest) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?)",
+  );
+  for (const [sourceChangeId, match] of input.equivalences) {
+    insert.run(input.revisionId, match.targetChangeId, input.workspaceId, input.lineageId, input.previousRevisionId, sourceChangeId, match.digest);
+  }
+}
+
+interface StoredEquivalenceRow {
+  target_revision_id: string;
+  target_change_id: string;
+  workspace_id: string;
+  lineage_id: string;
+  source_revision_id: string;
+  source_change_id: string;
+  key_digest: string;
+}
+
+/**
+ * Carry one read forward through every stored equivalence it has, as far as it goes.
+ *
+ * The completion-time carry only sees reads that existed when the next revision was
+ * published; a member who keeps reading revision N after N+1 arrived — the ordinary timing,
+ * since webhooks land while people read — would otherwise start N+1 from nothing. Each hop
+ * is carried at most once per member and change. A carry provenance row protects a
+ * carried-then-unmarked target; `review_revision_read_boundaries` protects a target the
+ * member marked directly and later unmarked. Either way, a mark on N cannot overwrite an
+ * explicit state on N+1.
+ *
+ * Not a transaction of its own: it runs inside the read write it belongs to.
+ */
+function carryReadForward(workspaceId: string, revisionId: string, userId: string, changeId: string, now: number): void {
+  let source = { revisionId, changeId };
+  for (let hops = 0; hops < 10_000; hops++) {
+    const match = db.query<StoredEquivalenceRow, [string, string, string]>(
+      "SELECT * FROM review_revision_equivalences WHERE workspace_id = ? AND source_revision_id = ? AND source_change_id = ? " +
+        "ORDER BY target_revision_id ASC LIMIT 1",
+    ).get(workspaceId, source.revisionId, source.changeId);
+    if (!match) return;
+    const boundary = db.query<{ found: number }, [string, string, string, string]>(
+      "SELECT 1 AS found FROM review_revision_read_boundaries WHERE workspace_id = ? AND revision_id = ? AND user_id = ? AND change_id = ?",
+    ).get(workspaceId, match.target_revision_id, userId, match.target_change_id);
+    // A member already marked or unmarked this exact target. Their explicit state wins
+    // over anything an older revision might carry into it later.
+    if (boundary) return;
+    const carried = db.run(
+      "INSERT INTO review_revision_read_carries (target_revision_id, user_id, target_change_id, workspace_id, lineage_id, source_revision_id, source_change_id, key_digest, carried_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(target_revision_id, user_id, target_change_id) DO NOTHING",
+      [match.target_revision_id, userId, match.target_change_id, workspaceId, match.lineage_id,
+        match.source_revision_id, match.source_change_id, match.key_digest, now],
+    ).changes;
+    if (carried === 0) return;
+    db.run(
+      "INSERT INTO review_revision_change_reads (workspace_id, revision_id, user_id, change_id, read_at) VALUES (?, ?, ?, ?, ?) " +
+        "ON CONFLICT(workspace_id, revision_id, user_id, change_id) DO NOTHING",
+      [workspaceId, match.target_revision_id, userId, match.target_change_id, now],
+    );
+    source = { revisionId: match.target_revision_id, changeId: match.target_change_id };
+  }
+}
+
 // ---- read state ----
 
 export function listRevisionReadChangeIds(workspaceId: string, revisionId: string, userId: string): Set<string> {
@@ -515,7 +637,11 @@ export function listRevisionReadChangeIds(workspaceId: string, revisionId: strin
   ).all(workspaceId, revisionId, userId).map((row) => row.change_id));
 }
 
-/** The route verifies that the revision's capture owns the change before this write. */
+/** The route verifies that the revision's capture owns the change before this write. A
+ *  read marked on a revision that already has a successor carries forward in the same
+ *  transaction, through the stored equivalences the successor's completion wrote. Every
+ *  explicit mark or unmark also records a boundary so an older revision cannot later
+ *  overwrite this member's state here. */
 export const setRevisionChangeRead = db.transaction((
   workspaceId: string,
   revisionId: string,
@@ -523,12 +649,18 @@ export const setRevisionChangeRead = db.transaction((
   changeId: string,
   read: boolean,
 ): void => {
+  const now = Date.now();
+  db.run(
+    "INSERT OR IGNORE INTO review_revision_read_boundaries (revision_id, user_id, change_id, workspace_id, created_at) VALUES (?, ?, ?, ?, ?)",
+    [revisionId, userId, changeId, workspaceId, now],
+  );
   if (read) {
     db.run(
       "INSERT INTO review_revision_change_reads (workspace_id, revision_id, user_id, change_id, read_at) VALUES (?, ?, ?, ?, ?) " +
         "ON CONFLICT(workspace_id, revision_id, user_id, change_id) DO UPDATE SET read_at = excluded.read_at",
-      [workspaceId, revisionId, userId, changeId, Date.now()],
+      [workspaceId, revisionId, userId, changeId, now],
     );
+    carryReadForward(workspaceId, revisionId, userId, changeId, now);
     return;
   }
   db.run(

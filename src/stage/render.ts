@@ -120,11 +120,11 @@ export type ReaderDrift =
   | { kind: "source" };
 
 /** What this revision changed about the one before it. Retained counts, so the line is
- *  the same on a phone, on a desktop and with JavaScript off. */
+ *  the same on a phone, on a desktop and with JavaScript off. The account delta stays an
+ *  API fact: "account 1 revised" is not a sentence a reader has. */
 export interface ReaderMovement {
   previousRevision: number;
   code: { unchanged: number; revised: number; new: number; removed: number };
-  account: { unchanged: number; revised: number; new: number; removed: number } | null;
 }
 
 /**
@@ -203,6 +203,15 @@ interface ChangeView {
   ordinal: number;
 }
 
+/** What the focus dialog's group rail needs of every OTHER group: its place, its change
+ *  ids and how many are read. Nothing that needs its bytes materialized. */
+interface GroupSummary {
+  group: ReaderGroup;
+  index: number;
+  changeIds: string[];
+  read: number;
+}
+
 interface GroupView {
   group: ReaderGroup;
   index: number;
@@ -263,10 +272,11 @@ function accountHeading(role: "Builder" | "Witness", name: string, model: string
   return `<h2>${role}<span> · ${esc(identity)}</span></h2>`;
 }
 
+/** The account in full. The summary is the one sentence its author wrote for the reader,
+ *  so nothing cuts it; only the builder's context, which is background, is disclosed. */
 function accountCard(role: "Builder" | "Witness", account: ReaderAccount): string {
-  const excerpt = exactExcerpt(account.body, 120).text;
-  const context = account.context ?? "";
-  return `<details class="account"><summary>${accountHeading(role, account.agent.name, account.agent.model)}<p>${esc(excerpt)}</p></summary><div class="account-full"><div class="markdown">${markdown(account.body)}</div>${context.trim() ? `<h3>Context</h3><div class="markdown">${markdown(context)}</div>` : ""}</div></details>`;
+  const context = (account.context ?? "").trim();
+  return `<section class="account">${accountHeading(role, account.agent.name, account.agent.model)}<div class="account-body markdown">${markdown(account.body)}</div>${context ? `<details class="account-context"><summary>Context</summary><div class="markdown">${markdown(context)}</div></details>` : ""}</section>`;
 }
 
 function lineHtml(line: HunkLine, side: "unified" | "old" | "new", path: string): string {
@@ -310,7 +320,7 @@ function dimensions(group: ReaderGroup, readLabel?: string, place = ""): string 
 
 function readForm(routes: ReaderRoutes, groupId: string, changeId: string, read: boolean, placement = ""): string {
   const back = routes.returnTo(groupId, changeId);
-  return `<form class="read-form ${placement}" method="post" action="${esc(routes.read(changeId))}"><input data-read-input type="hidden" name="read" value="${read ? "false" : "true"}">${back === null ? "" : `<input type="hidden" name="return" value="${esc(back)}">`}<span data-read-failure role="status" aria-live="polite"></span><button data-read-button type="submit">${read ? "Mark unread" : "Mark as read"}</button></form>`;
+  return `<form class="read-form ${placement}" method="post" action="${esc(routes.read(changeId))}"><input data-read-input type="hidden" name="read" value="${read ? "false" : "true"}">${back === null ? "" : `<input type="hidden" name="return" value="${esc(back)}">`}<span data-read-failure role="status" aria-live="polite"></span><button data-read-button type="submit">${read ? "Mark unread" : "Mark read"}</button></form>`;
 }
 
 function contextControl(routes: ReaderRoutes, view: ChangeView): string {
@@ -358,16 +368,31 @@ function fileFacts(file: StageCaptureFileRow): string {
   return `<dl class="fact-list">${values.map(([term, value]) => `<div><dt>${esc(term)}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`;
 }
 
+/** Every group's place, change ids and read count, from the document and the inventory
+ *  alone. What a focus page draws for the groups it did not materialize. */
+function summarizeGroups(groups: ReaderGroup[], readIds: Set<string>): GroupSummary[] {
+  return groups.map((group, index) => {
+    const changeIds = group.members.filter((member) => member.type === "change").map((member) => member.id);
+    return { group, index, changeIds, read: changeIds.filter((id) => readIds.has(id)).length };
+  });
+}
+
+function summaryOf(view: GroupView): GroupSummary {
+  return { group: view.group, index: view.index, changeIds: view.changes.map((change) => change.item.change.id), read: view.read };
+}
+
 function buildGroupViews(
   groups: ReaderGroup[],
   materialized: Map<string, MaterializedStageChange>,
   inventory: StageCaptureInventory,
   readIds: Set<string>,
+  firstIndex = 0,
 ): GroupView[] {
   const fileById = new Map(inventory.files.map((file) => [file.id, file]));
   const materialById = new Map(inventory.incomplete.map((material) => [material.id, material]));
   const canonicalOrder = new Map(inventory.changes.map((change, index) => [change.id, index]));
-  return groups.map((group, index) => {
+  return groups.map((group, offset) => {
+    const index = firstIndex + offset;
     const changes: ChangeView[] = [];
     const materials: GroupView["materials"] = [];
     const leafFiles: GroupView["leafFiles"] = [];
@@ -496,7 +521,7 @@ function extraMaterialHtml(view: GroupView, focus = false): string {
 
 /** The line above the sequence number. An authored group names its category there; a
  *  file seam has only its place in the reading order. */
-function groupSequence(view: GroupView): string {
+function groupSequence(view: { group: ReaderGroup; index: number }): string {
   const sequence = String(view.index + 1).padStart(2, "0");
   return view.group.category === null ? sequence : `${sequence} · ${view.group.category}`;
 }
@@ -505,12 +530,18 @@ function categoryAttr(group: ReaderGroup): string {
   return group.category === null ? "" : ` data-category="${esc(group.category)}"`;
 }
 
+/** An evidence seam: no category, no explanation, nothing a witness said. Its label is
+ *  drawn as navigation rather than as a title. */
+function seamAttr(group: ReaderGroup): string {
+  return group.category === null && group.explanation === null ? " data-seam" : "";
+}
+
 function groupCard(view: GroupView, readIds: Set<string>, routes: ReaderRoutes): string {
   const tree = stageTree(view.files);
   const total = view.changes.length;
   const reviewLabel = total === 0 ? "Review material" : `Review ${total} change${total === 1 ? "" : "s"}`;
   const points = view.changes.slice(0, 3);
-  return `<section class="review-group-card" id="group-${esc(view.group.id)}" data-group="${esc(view.group.id)}"${categoryAttr(view.group)} data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}"><header class="group-head"><div class="group-sequence"><i aria-hidden="true"></i><span>${esc(groupSequence(view))}</span></div><h2>${esc(view.group.title)}</h2>${dimensions(view.group, undefined, "in-group")}</header>${view.group.explanation === null ? "" : accountCopy(view.group.explanation, "group-copy")}${view.group.attention ? `<p class="group-attention">${esc(view.group.attention)}</p>` : ""}${points.length === 0 ? "" : `<ol class="group-points">${points.map((change) => {
+  return `<section class="review-group-card" id="group-${esc(view.group.id)}" data-group="${esc(view.group.id)}"${categoryAttr(view.group)}${seamAttr(view.group)} data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}"><header class="group-head"><div class="group-sequence"><i aria-hidden="true"></i><span>${esc(groupSequence(view))}</span></div><h2>${esc(view.group.title)}</h2>${dimensions(view.group, undefined, "in-group")}</header>${view.group.explanation === null ? "" : accountCopy(view.group.explanation, "group-copy")}${view.group.attention ? `<p class="group-attention">${esc(view.group.attention)}</p>` : ""}${points.length === 0 ? "" : `<ol class="group-points">${points.map((change) => {
     const line = change.item.hunk.newLines > 0 ? change.item.hunk.newStart : change.item.hunk.oldStart;
     return `<li><span>${String(change.ordinal).padStart(2, "0")}</span><code>${esc(change.file.path)}:L${line}</code>${change.member.description === null ? "" : `<p>${esc(exactExcerpt(change.member.description, 160).text)}</p>`}</li>`;
   }).join("")}${view.changes.length > points.length ? `<li class="remaining"><span>+</span><code></code><p>${view.changes.length - points.length} more in review</p></li>` : ""}</ol>`}${view.group.examples.length === 0 ? "" : `<ul class="group-examples">${view.group.examples.map((example) => `<li><code>${esc(example.code)}</code><span>${esc(example.text)}</span></li>`).join("")}</ul>`}<div class="group-preview"><div class="group-preview-files">${overviewTreeHtml(tree, view, readIds, routes)}</div>${extraMaterialHtml(view)}<footer><span data-group-progress>${view.read} / ${total} read</span><a class="review-group-action" data-focus-link data-review="${esc(view.group.id)}" href="${routes.group(view.group.id)}">${reviewLabel}<span aria-hidden="true">→</span></a></footer></div></section>`;
@@ -573,13 +604,6 @@ function movementLine(movement: ReaderMovement | null | undefined): string {
   add(movement.code.revised, "revised");
   add(movement.code.new, "new");
   add(movement.code.removed, "removed");
-  if (movement.account) {
-    const account: string[] = [];
-    if (movement.account.revised > 0) account.push(`${movement.account.revised} revised`);
-    if (movement.account.new > 0) account.push(`${movement.account.new} new`);
-    if (movement.account.removed > 0) account.push(`${movement.account.removed} removed`);
-    if (account.length > 0) parts.push(`account ${account.join(", ")}`);
-  }
   const tail = parts.length === 0 ? "" : ` · ${parts.join(" · ")}`;
   return `<p class="stage-movement">${esc(`Since rev ${movement.previousRevision}${tail}`)}</p>`;
 }
@@ -664,9 +688,10 @@ function evidenceSection(doc: ReaderDoc): string {
   return `<section class="account-evidence" aria-label="Evidence"><h2>Evidence</h2><ul>${doc.evidence.map((item) => `<li><a href="${esc(item.href)}">${esc(item.label)}</a><span>${esc(item.detail)}</span></li>`).join("")}</ul></section>`;
 }
 
-function groupNavigation(views: GroupView[], doc: ReaderDoc, totalRead: number, total: number): string {
+/** The pin is said once, in the header; the rail carries only the progress. */
+function groupNavigation(views: GroupView[], totalRead: number, total: number): string {
   const progress = total === 0 ? 100 : Math.round(totalRead / total * 100);
-  return `<div class="review-nav-head"><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span><strong data-progress>${totalRead} / ${total} read</strong><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><nav class="group-links" aria-label="Walkthrough groups">${views.map((view) => `<a href="#group-${esc(view.group.id)}"${categoryAttr(view.group)}><i aria-hidden="true"></i><span><small>${esc(groupSequence(view))}</small><strong>${esc(view.group.title)}</strong></span><em data-group-nav-progress data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}">${view.read}/${view.changes.length}</em></a>`).join("")}</nav>`;
+  return `<div class="review-nav-head"><strong data-progress>${totalRead} / ${total} read</strong><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><nav class="group-links" aria-label="Walkthrough groups">${views.map((view) => `<a href="#group-${esc(view.group.id)}"${categoryAttr(view.group)}><i aria-hidden="true"></i><span><small>${esc(groupSequence(view))}</small><strong>${esc(view.group.title)}</strong></span><em data-group-nav-progress data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}">${view.read}/${view.changes.length}</em></a>`).join("")}</nav>`;
 }
 
 function hunkReview(view: GroupView, change: ChangeView, readIds: Set<string>, routes: ReaderRoutes): string {
@@ -707,7 +732,7 @@ function filesInTreeOrder(node: StageTreeNode): StageCaptureFileRow[] {
 
 function focusDialog(
   selected: GroupView | null,
-  views: GroupView[],
+  views: GroupSummary[],
   readIds: Set<string>,
   routes: ReaderRoutes,
   doc: ReaderDoc,
@@ -720,7 +745,7 @@ function focusDialog(
     file,
     changes: selected.changes.filter((change) => change.file.id === file.id),
   })).filter((entry) => entry.changes.length > 0);
-  const groupLinks = views.map((view) => `<a class="focus-group-link${view.group.id === selected.group.id ? " is-active" : ""}" data-focus-group-link data-review="${esc(view.group.id)}"${categoryAttr(view.group)} href="${routes.group(view.group.id)}"><i aria-hidden="true"></i><span><small>${esc(groupSequence(view))}</small><strong>${esc(view.group.title)}</strong></span><em data-group-nav-progress data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}">${view.read}/${view.changes.length}</em></a>`).join("");
+  const groupLinks = views.map((view) => `<a class="focus-group-link${view.group.id === selected.group.id ? " is-active" : ""}" data-focus-group-link data-review="${esc(view.group.id)}"${categoryAttr(view.group)} href="${routes.group(view.group.id)}"><i aria-hidden="true"></i><span><small>${esc(groupSequence(view))}</small><strong>${esc(view.group.title)}</strong></span><em data-group-nav-progress data-change-ids="${view.changeIds.join(",")}">${view.read}/${view.changeIds.length}</em></a>`).join("");
   const headTitle = selected.group.category === null
     ? `${doc.title} · ${String(selected.index + 1).padStart(2, "0")}`
     : `${doc.title} · ${groupSequence(selected)}`;
@@ -739,7 +764,10 @@ function storageFailurePage(nav: NavContext, title: string, status: number): Res
  * evidence revision, and every account published over it.
  *
  * The materializer is the durable-storage seam and the only place bytes come from:
- * nothing on this path can reach GitHub, on any of the three surfaces.
+ * nothing on this path can reach GitHub, on any of the three surfaces. A focus page
+ * materializes the one group it draws; the overview materializes the capture. Every seam
+ * a reader opens on a thousand-file capture used to cost the whole capture, which is the
+ * wrong shape for the sizes the budgets allow.
  */
 export async function renderReaderPage(
   req: Request,
@@ -751,15 +779,41 @@ export async function renderReaderPage(
   readIds: Set<string>,
   label: string,
 ): Promise<Response> {
+  const url = new URL(req.url);
+  const reviewId = url.searchParams.get("review");
+  const requestedChange = url.searchParams.get("change");
+  const selectedIndex = reviewId === null ? -1 : doc.groups.findIndex((group) => group.id === reviewId);
+  if (reviewId !== null && selectedIndex < 0) return softNotFound(req);
+  const selectedGroup = selectedIndex < 0 ? null : doc.groups[selectedIndex]!;
+  const selectedChangeIds = selectedGroup
+    ? new Set(selectedGroup.members.filter((member) => member.type === "change").map((member) => member.id))
+    : null;
+  if (requestedChange !== null && (!selectedChangeIds || !selectedChangeIds.has(requestedChange))) return softNotFound(req);
+
   let changes: MaterializedStageChange[];
   try {
-    changes = await materializeCanonicalChanges(inventory, (digest) => loadStageBytes(workspaceId, digest));
+    changes = await materializeCanonicalChanges(inventory, (digest) => loadStageBytes(workspaceId, digest), selectedChangeIds ?? undefined);
   } catch (err) {
     console.error(`[seer] ${label} could not materialize:`, err);
     return storageFailurePage(nav, doc.title, err instanceof StageStoreUnavailable ? 502 : 500);
   }
-
   const materialized = new Map(changes.map((item) => [item.change.id, item]));
+  const allChangeIds = inventory.changes.map((change) => change.id);
+  const readCount = allChangeIds.filter((id) => readIds.has(id)).length;
+
+  if (selectedGroup) {
+    let selected: GroupView;
+    try {
+      selected = buildGroupViews([selectedGroup], materialized, inventory, readIds, selectedIndex)[0]!;
+    } catch (err) {
+      console.error(`[seer] ${label} walkthrough is inconsistent:`, err);
+      return storageFailurePage(nav, doc.title, 500);
+    }
+    const rail = summarizeGroups(doc.groups, readIds).map((summary) => summary.index === selectedIndex ? summaryOf(selected) : summary);
+    const focusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(selected.group.title)} · ${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}">${focusDialog(selected, rail, readIds, routes, doc, requestedChange)}<script>${STAGE_CLIENT}</script></body></html>`;
+    return html(focusPage);
+  }
+
   let views: GroupView[];
   try {
     views = buildGroupViews(doc.groups, materialized, inventory, readIds);
@@ -767,27 +821,13 @@ export async function renderReaderPage(
     console.error(`[seer] ${label} walkthrough is inconsistent:`, err);
     return storageFailurePage(nav, doc.title, 500);
   }
-
-  const url = new URL(req.url);
-  const reviewId = url.searchParams.get("review");
-  const requestedChange = url.searchParams.get("change");
-  const selected = reviewId === null ? null : views.find((view) => view.group.id === reviewId) ?? null;
-  if (reviewId !== null && !selected) return softNotFound(req);
-  if (requestedChange !== null && (!selected || !selected.changes.some((change) => change.item.change.id === requestedChange))) return softNotFound(req);
-
-  const readCount = changes.filter((item) => readIds.has(item.change.id)).length;
-  const allChangeIds = changes.map((item) => item.change.id);
-  if (selected) {
-    const focusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(selected.group.title)} · ${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}">${focusDialog(selected, views, readIds, routes, doc, requestedChange)}<script>${STAGE_CLIENT}</script></body></html>`;
-    return html(focusPage);
-  }
   const groupCards = views.map((view) => groupCard(view, readIds, routes)).join("");
   const historyLinks = routes.history()
     .map((entry) => `<a href="${entry.href}"${entry.current ? ` aria-current="page"` : ""}>${esc(entry.label)}</a>`)
     .join(" · ");
-  const progress = changes.length === 0 ? 100 : Math.round(readCount / changes.length * 100);
+  const progress = allChangeIds.length === 0 ? 100 : Math.round(readCount / allChangeIds.length * 100);
   const accounts = `${doc.builder ? accountCard("Builder", doc.builder) : ""}${doc.witness ? accountCard("Witness", doc.witness) : ""}`;
-  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"><div data-stage-background><div class="stage-shell">${appBar(nav)}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${focusSection(doc, views, routes)}${evidenceSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, doc, readCount, changes.length)}</aside><main class="walkthrough">${groupCards}<footer class="terminal"><div><h2 data-unread-summary>${readCount === changes.length ? "Read" : `${changes.length - readCount} unread`}</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><p>${esc(doc.standing)} · ${inventory.files.length} files</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button><span data-progress>${readCount} / ${changes.length} read</span></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, views, readIds, routes, doc, null)}<script>${STAGE_CLIENT}</script></body></html>`;
+  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"><div data-stage-background><div class="stage-shell">${appBar(nav)}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${focusSection(doc, views, routes)}${evidenceSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, readCount, allChangeIds.length)}</aside><main class="walkthrough">${groupCards}<footer class="terminal"><div><h2 data-unread-summary>${readCount === allChangeIds.length ? "Read" : `${allChangeIds.length - readCount} unread`}</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div><p>${inventory.files.length} file${inventory.files.length === 1 ? "" : "s"}</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button><span data-progress>${readCount} / ${allChangeIds.length} read</span></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, [], readIds, routes, doc, null)}<script>${STAGE_CLIENT}</script></body></html>`;
   return html(page);
 }
 

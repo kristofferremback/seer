@@ -2392,7 +2392,10 @@ ${appScript()}
 export interface LedgerReview {
   slug: string;
   title: string;
-  latestVersion: number;
+  /** What the Latest column prints: `v3` for a legacy review, and for a promoted one the
+   *  account version, the standing revision, or where its first capture has got to —
+   *  the same words the Project page uses for the same review. */
+  latest: string;
   publishedAt: number;
   /** The pull requests the review names, from `review_prs` — what a reader searching
    *  "where was repo#123 reviewed" is actually searching by. */
@@ -2462,7 +2465,7 @@ export function reviewsPage(nav: NavContext, groups: ReviewLedgerGroup[]): strin
     return `<tr data-filter="${escapeHtml(haystack)}">
           <td class="slug"><a href="${url}">${escapeHtml(r.title)}</a>
             <span class="row-sub mono">${escapeHtml(r.slug)}</span></td>
-          <td class="mono">v${r.latestVersion}</td>
+          <td class="mono">${escapeHtml(r.latest)}</td>
           <td class="mono"><time datetime="${new Date(r.publishedAt).toISOString()}">${fmtInstant(r.publishedAt)}</time></td>
           <td class="status-cell">${refs}${tallyCell(r.tally)}</td>
         </tr>`;
@@ -2758,7 +2761,7 @@ export interface ProjectPageData {
  * case is a review made from a pull request whose capture has not finished — it is on the
  * project because somebody put it there, and saying nothing about it was the old bug.
  */
-function reviewLineageStanding(r: {
+export function reviewLineageStanding(r: {
   latestRevision: number | null;
   latestAccountVersion: number | null;
   captureState: "pending" | "running" | "failed" | null;

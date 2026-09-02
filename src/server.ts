@@ -82,11 +82,14 @@ import { reviewTopic, setFreshnessPublisher } from "./overseer/freshness";
 import { handleReviewAttachment, handleReviewPage } from "./overseer/render";
 import { handleReviewContext } from "./overseer/context";
 import {
+  handleCaptureRetryPage,
   handlePromotedReviewPage,
   handleRevisionReadMutation,
   promotedOwnsSlug,
 } from "./overseer/revision-read";
-import { recoverCaptureJobs, startCaptureSweep } from "./overseer/revision-jobs";
+import { latestCaptureJob, recoverCaptureJobs, startCaptureSweep } from "./overseer/revision-jobs";
+import { listLineages } from "./overseer/revision-db";
+import { getLineagePr, latestObservation, observationStateWord } from "./overseer/revision-pr";
 import {
   agentSkillsIndex,
   apiCatalog,
@@ -120,6 +123,8 @@ import {
   type ProjectLedgerRow,
   type ProjectPageData,
   type ReviewLedgerGroup,
+  type LedgerReview,
+  reviewLineageStanding,
   type SettingsReveal,
 } from "./pages";
 import { escapeHtml } from "./escape";
@@ -144,6 +149,10 @@ const WS_REVIEW_RE = new RegExp(
 // account published over that revision reads with the same handling state.
 const WS_REVISION_READ_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/rev/([^/]+)/changes/([^/]+)/read/?$`,
+);
+// The failed-capture shell's retry form, on the review's own path so it needs no key.
+const WS_CAPTURE_RETRY_RE = new RegExp(
+  `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/r/([^/]+)/capture-jobs/([^/]+)/retry/?$`,
 );
 const WS_STAGE_RE = new RegExp(
   `^/(${WS_ID_RE.source.replace(/^\^|\$$/g, "")})/st/([^/]+)(?:/v/([^/]+))?/?$`,
@@ -515,13 +524,19 @@ function ledgerGroups(userId: string): LedgerGroup[] {
 // off the latest stored version, the tally off `review_prs` joined to the observations
 // already written. Nothing here can reach GitHub, because after the on-view check was
 // deleted no code path from a render to an observation exists at all.
+//
+// Promoted reviews list beside the legacy ones, because to a member they are the same
+// thing and this page is the only way back to one without its URL. Their "latest" is the
+// same word the Project page uses, their pull request is the live relation, and their
+// tally is what the newest stored observation said — capture pending, failed and complete
+// all list, since a review somebody promoted exists from that moment.
 function reviewLedgerGroups(userId: string): ReviewLedgerGroup[] {
   return listUserWorkspaces(userId).map((ws) => ({
     wsId: ws.id,
     name: ws.name,
     visibility: ws.visibility,
-    reviews: listReviews(ws.id)
-      .map((r) => {
+    reviews: [
+      ...listReviews(ws.id).map((r): LedgerReview => {
         const versions = listReviewVersions(ws.id, r.slug);
         const latest = getReviewVersion(ws.id, r.slug, r.latest_version);
         return {
@@ -530,13 +545,32 @@ function reviewLedgerGroups(userId: string): ReviewLedgerGroup[] {
           // createReviewVersion moves both in one transaction — but the index is not
           // the place to throw over it, so the slug stands in for the title.
           title: latest?.doc.title ?? r.slug,
-          latestVersion: r.latest_version,
+          latest: `v${r.latest_version}`,
           publishedAt: versions[0]?.created_at ?? r.created_at,
           prs: listReviewPrs(ws.id, r.slug).map((p) => ({ repo: p.repo, number: p.pr_number })),
           tally: reviewStatusTally(ws.id, r.slug),
         };
-      })
-      .sort((a, b) => b.publishedAt - a.publishedAt),
+      }),
+      ...listLineages(ws.id).map((lineage): LedgerReview => {
+        const relation = getLineagePr(ws.id, lineage.id);
+        const observation = relation ? latestObservation(ws.id, lineage.id) : null;
+        const job = lineage.latest_revision === null ? latestCaptureJob(ws.id, lineage.id) : null;
+        const tally = { merged: 0, closed: 0, draft: 0, open: 0, unknown: 0, total: relation ? 1 : 0 };
+        if (relation) tally[observation ? observationStateWord(observation) : "unknown"] += 1;
+        return {
+          slug: lineage.slug,
+          title: lineage.title,
+          latest: reviewLineageStanding({
+            latestRevision: lineage.latest_revision,
+            latestAccountVersion: lineage.latest_account_version,
+            captureState: job && job.state !== "completed" ? job.state : null,
+          }),
+          publishedAt: lineage.updated_at,
+          prs: relation ? [{ repo: relation.repo, number: relation.pr_number }] : [],
+          tally,
+        };
+      }),
+    ].sort((a, b) => b.publishedAt - a.publishedAt),
   }));
 }
 
@@ -1229,6 +1263,11 @@ export async function startServer() {
       if (revisionRead) {
         if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
         return handleRevisionReadMutation(req, revisionRead[1]!, revisionRead[2]!, revisionRead[3]!, revisionRead[4]!);
+      }
+      const captureRetry = url.pathname.match(WS_CAPTURE_RETRY_RE);
+      if (captureRetry) {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+        return handleCaptureRetryPage(req, captureRetry[1]!, captureRetry[2]!, captureRetry[3]!);
       }
 
       const wsReview = url.pathname.match(WS_REVIEW_RE);

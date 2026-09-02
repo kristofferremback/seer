@@ -758,7 +758,6 @@ describe("reads, dispatch and refusals", () => {
       fetch(`${base}/${workspace}/r/promoted-source/rev/2`, { headers: sessionHeaders() }),
       fetch(`${base}/${workspace}/r/promoted-source/rev/01`, { headers: sessionHeaders() }),
       fetch(`${base}/${workspace}/r/promoted-source/v/9`, { headers: sessionHeaders() }),
-      fetch(`${base}/${workspace}/r/promoted-source/rev/1?review=not-a-seam`, { headers: sessionHeaders() }),
       fetch(`${base}/${workspace}/r/legacy-evidence/rev/1`, { headers: sessionHeaders() }),
       fetch(`${base}/${workspace}/r/never-published`, { headers: sessionHeaders() }),
       fetch(`${base}/${workspace}/r/never-published/rev/1`, { headers: sessionHeaders() }),
@@ -782,6 +781,31 @@ describe("reads, dispatch and refusals", () => {
     expect(api.map((response) => response.status)).toEqual(Array(api.length).fill(404));
     expect(new Set(api.map((response) => response.headers.get("content-type")))).toEqual(new Set(["application/json"]));
     expect(new Set(apiBodies)).toEqual(new Set([JSON.stringify({ error: "No such review" }, null, 2)]));
+  });
+
+  test("a stale focus on a resolved promoted page lands on that page, not on a miss", async () => {
+    // Membership and the lineage already resolved, so a group id an older account used, or
+    // a change from another seam, hides nothing: the reader is sent to the page the link
+    // was pinned to. A bookmark made before a new account changed the group ids still
+    // opens the review. The bare latest URL keeps its own address.
+    const stale = await Promise.all([
+      fetch(`${base}/${workspace}/r/promoted-source/rev/1?review=not-a-seam`, { headers: sessionHeaders(), redirect: "manual" }),
+      fetch(`${base}/${workspace}/r/promoted-source/rev/1?review=seam-1&change=chg_${"0".repeat(64)}`, { headers: sessionHeaders(), redirect: "manual" }),
+      fetch(`${base}/${workspace}/r/promoted-source?review=nope`, { headers: sessionHeaders(), redirect: "manual" }),
+    ]);
+    expect(stale.map((response) => response.status)).toEqual([303, 303, 303]);
+    expect(stale.map((response) => response.headers.get("location"))).toEqual([
+      `/${workspace}/r/promoted-source/rev/1`,
+      `/${workspace}/r/promoted-source/rev/1`,
+      `/${workspace}/r/promoted-source`,
+    ]);
+    expect(new Set(stale.map((response) => response.headers.get("cache-control")))).toEqual(new Set(["no-store"]));
+    const landed = await fetch(`${base}/${workspace}/r/promoted-source/rev/1?review=not-a-seam`, { headers: sessionHeaders() });
+    expect(landed.status).toBe(200);
+    expect(await landed.text()).not.toContain("No such review");
+    // A stranger's stale focus is still the soft miss, because nothing resolved for them;
+    // AUTH_DISABLED makes every session here the root user, so that half is asserted in
+    // revision-privacy.script.ts beside the other read refusals.
   });
 
   test("the same slug in two workspaces is two reviews, and a key writes only in its own", async () => {

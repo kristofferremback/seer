@@ -499,7 +499,16 @@ has no revision at all rather than an empty one. `actor_key` is the queue lane: 
 runs one capture at a time, and the renewable lease is what makes that true across
 processes as well as inside one, so a killed worker's claim can be recovered without two
 healthy workers spending one credential on one capture. A worker whose heartbeat says it no
-longer holds the job stops rather than publishing over the process that took it over.
+longer holds the job stops rather than publishing over the process that took it over — and
+it asks between the metadata phase and the blob pool, and once per object inside it, so a
+taken-over worker spends the trees it already read and not a thousand blob requests.
+
+Retry is one guarded statement: `failed`, or `running` with an expired lease, becomes
+`pending` with its attempt count reset, and nothing else does. A queued job cannot have its
+count reset by anybody who asks, a lane that claimed the job between a read and a write
+keeps its lease, and a completion that landed in between stays completed. The failed
+shell offers the same transition as a plain form to the member who may spend the
+credential; the capturing shell refreshes itself and says how to reload.
 
 Recovery runs at startup and then on a timer one lease period long. Startup alone was not
 enough: a lane a process left because another container held the lease, or because a caller
@@ -593,17 +602,38 @@ queue and completion decision uses those same three keys. A capture that finishe
 source the lineage has already moved past completes as **superseded**, points at the
 revision that overtook it, and appends nothing. Before a claimed job spends a GitHub
 request, a complete observation whose exact source tuple already has a revision completes as
-converged instead. If GitHub later force-pushes back to retained source, drift links the
+converged instead, and an observation the lineage has already moved past completes as
+superseded the same way — a failed job retried after a later push published, or a sibling
+that lost the race, costs no capture. If GitHub later force-pushes back to retained source, drift links the
 matching earlier revision rather than asking for a refresh that cannot create another copy.
+
+**What moved is stored once.** `review_revision_movements` holds the four counts one
+revision's completion computed against the one before it, and
+`review_revision_equivalences` every exact text equivalence that computation found, keyed
+by the target change and indexed by the source. Both captures are immutable and the engine
+is deterministic over them, so these are facts rather than caches; the movement line and
+every API read say the stored counts instead of reloading two inventories, and a revision
+published before the rows existed has them written the first time anything asks.
+`review_revision_read_boundaries` records only that a member explicitly marked or
+unmarked one change on one revision; it is not active state, and it prevents an older
+revision from carrying over that later choice.
 
 **Read carry is per member and exact.** `review_revision_change_reads` is still the one
 active read; `review_revision_read_carries` is why one arrived. Both are written in the
-completion transaction, so a mark whose reason did not commit cannot exist. A text change
+completion transaction, so a mark whose reason did not commit cannot exist. A read marked
+on a revision that already has a successor carries forward in its own transaction through
+the stored equivalences, as far as they go — webhooks land while people read, and a member
+who kept reading revision N after N+1 arrived must not start N+1 from nothing. Each hop
+carries at most once per member and change: carry provenance protects a read that arrived
+before and was later unmarked, while an explicit-read boundary protects a target the
+member handled directly. Whatever the member did on the later revision is theirs. A text change
 carries only when its full key — rename-resolved path plus old, new and context
 fingerprints — occurs exactly once in the previous capture and exactly once in the current
-one. Line positions and canonical ids do not participate. Changed bytes, the same
-fingerprint in another file, a split, a merge, a deletion, a duplicate candidate and an
-ambiguous rename all carry nothing. Duplicate exact evidence still classifies as unchanged
+one. A rename is resolved by its recorded `old_path → path` pair first, because every
+capture records renames against the merge base and a pull request that renamed a file
+carries that pair in every revision. Line positions and canonical ids do not participate.
+Changed bytes, the same fingerprint in another file, a split, a merge, a deletion, a
+duplicate candidate and an ambiguous rename all carry nothing. Duplicate exact evidence still classifies as unchanged
 movement, but its ambiguity creates no carry equivalence. Approval never carries, and no acknowledgement or
 judgment table exists yet, so this is the only carried state there is; a future handling
 write must cite the same equivalence key and source revision rather than infer from display

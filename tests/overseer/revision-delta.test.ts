@@ -210,6 +210,56 @@ describe("a rename is something the capture recorded, or it is nothing", () => {
     expect(carries(delta)).toHaveLength(1);
   });
 
+  test("a rename that persists across captures is the same file, and its read carries", () => {
+    // Every capture records renames against the merge base, so a pull request that
+    // renamed old.ts to new.ts says `old.ts → new.ts` in every revision. The previous
+    // file at new.ts is not a stranger sitting at a name a rename claims; it is the
+    // rename. Reported by the task 4-6 review, where every such push read as
+    // `1 removed · 1 new` and dropped every member's reads on the file.
+    const before = inventory("stg_a", {
+      files: [file("stg_a", "stf_1", "src/new.ts", { old_path: "src/old.ts", status: "renamed" })],
+      changes: [change("stg_a", "a", "stf_1", FP, { oldStart: 1, newStart: 1 })],
+    });
+    const after = inventory("stg_b", {
+      files: [file("stg_b", "stf_2", "src/new.ts", { old_path: "src/old.ts", status: "renamed" })],
+      changes: [change("stg_b", "z", "stf_2", FP, { oldStart: 40, newStart: 41 })],
+    });
+    expect(resolvePaths(before, after).resolve("src/new.ts")).toBe("src/new.ts");
+    const delta = revisionCodeDelta(before, after);
+    expect(delta.counts).toEqual({ unchanged: 1, revised: 0, new: 0, removed: 0 });
+    expect(carries(delta)).toHaveLength(1);
+
+    // A pure rename with identical object ids on both sides is the same file too.
+    const pureBefore = inventory("stg_c", {
+      files: [file("stg_c", "stf_1", "src/new.ts", { old_path: "src/old.ts", status: "renamed", old_kind: "blob", new_kind: "blob", old_mode: "100644", new_mode: "100644", old_object_id: "o".repeat(40), new_object_id: "o".repeat(40) })],
+    });
+    const pureAfter = inventory("stg_d", {
+      files: [file("stg_d", "stf_2", "src/new.ts", { old_path: "src/old.ts", status: "renamed", old_kind: "blob", new_kind: "blob", old_mode: "100644", new_mode: "100644", old_object_id: "o".repeat(40), new_object_id: "o".repeat(40) })],
+    });
+    expect(revisionCodeDelta(pureBefore, pureAfter).counts).toEqual({ unchanged: 1, revised: 0, new: 0, removed: 0 });
+  });
+
+  test("a file renamed again from the same original follows the rename, and a different rename into its name does not", () => {
+    const before = inventory("stg_a", {
+      files: [file("stg_a", "stf_1", "src/new.ts", { old_path: "src/old.ts", status: "renamed" })],
+      changes: [change("stg_a", "a", "stf_1", FP)],
+    });
+    // old.ts → newer.ts now: the same original, renamed further, is the same file.
+    const further = inventory("stg_b", {
+      files: [file("stg_b", "stf_2", "src/newer.ts", { old_path: "src/old.ts", status: "renamed" })],
+      changes: [change("stg_b", "z", "stf_2", FP)],
+    });
+    expect(resolvePaths(before, further).resolve("src/new.ts")).toBe("src/newer.ts");
+    expect(carries(revisionCodeDelta(before, further))).toHaveLength(1);
+    // other.ts → new.ts now: a different file wearing the previous name is not it.
+    const occupied = inventory("stg_c", {
+      files: [file("stg_c", "stf_3", "src/new.ts", { old_path: "src/other.ts", status: "renamed" })],
+      changes: [change("stg_c", "y", "stf_3", FP)],
+    });
+    expect(resolvePaths(before, occupied).resolve("src/new.ts")).toBeNull();
+    expect(revisionCodeDelta(before, occupied).equivalences.size).toBe(0);
+  });
+
   test("two files claiming one previous path resolve to nothing and carry nothing", () => {
     const before = inventory("stg_a", {
       files: [file("stg_a", "stf_1", "src/old.ts")],

@@ -602,6 +602,52 @@ describe("a moving pull request appends one revision at a time", () => {
     expect(count("SELECT COUNT(*) AS n FROM review_accounts WHERE workspace_id = ? AND slug = ?", workspace, "mover")).toBe(1);
   });
 
+  test("a read marked after the next revision exists still carries forward, once", async () => {
+    // Webhooks land while people read. Revision 3 was appended while revision 2 was still
+    // being read, and a member who marks a hunk on 2 now must not start 3 from nothing:
+    // the completion-time carry only saw the reads that existed at that instant.
+    const second2 = getRevision(workspace, "mover", 2)!;
+    const third = getRevision(workspace, "mover", 3)!;
+    const b2 = changeIdFor(second2, "src/b.ts");
+    const b3 = changeIdFor(third, "src/b.ts");
+    expect(listRevisionReadChangeIds(workspace, third.id, owner).has(b3)).toBe(false);
+
+    expect((await markRead("mover", 2, b2, true)).status).toBe(200);
+    expect(listRevisionReadChangeIds(workspace, third.id, owner).has(b3)).toBe(true);
+    const provenance = listRevisionReadCarries(workspace, third.id, owner).find((row) => row.target_change_id === b3)!;
+    expect(provenance.source_revision_id).toBe(second2.id);
+    expect(provenance.source_change_id).toBe(b2);
+
+    // The member unmarks it on revision 3, then marks and unmarks and marks it again on
+    // revision 2. Their explicit unmark on 3 stands: a hop carries at most once.
+    expect((await markRead("mover", 3, b3, false)).status).toBe(200);
+    expect((await markRead("mover", 2, b2, false)).status).toBe(200);
+    expect((await markRead("mover", 2, b2, true)).status).toBe(200);
+    expect(listRevisionReadChangeIds(workspace, third.id, owner).has(b3)).toBe(false);
+    expect(listRevisionReadCarries(workspace, third.id, owner).filter((row) => row.target_change_id === b3)).toHaveLength(1);
+    expect((await markRead("mover", 2, b2, false)).status).toBe(200);
+  });
+
+  test("an explicit target unmark is not overwritten by a later source read", async () => {
+    const second2 = getRevision(workspace, "mover", 2)!;
+    const third = getRevision(workspace, "mover", 3)!;
+    const a2 = changeIdFor(second2, "src/a.ts");
+    const a3 = changeIdFor(third, "src/a.ts");
+
+    // This member handled revision 3 directly, then deliberately reversed it. No carry
+    // provenance exists because the read did not arrive from revision 2.
+    setRevisionChangeRead(workspace, third.id, second, a3, true);
+    setRevisionChangeRead(workspace, third.id, second, a3, false);
+    expect(listRevisionReadCarries(workspace, third.id, second)).toEqual([]);
+
+    // Reading the equivalent source later cannot revive the explicit target state.
+    setRevisionChangeRead(workspace, second2.id, second, a2, true);
+    expect(listRevisionReadChangeIds(workspace, second2.id, second).has(a2)).toBe(true);
+    expect(listRevisionReadChangeIds(workspace, third.id, second).has(a3)).toBe(false);
+    expect(listRevisionReadCarries(workspace, third.id, second)).toEqual([]);
+    setRevisionChangeRead(workspace, second2.id, second, a2, false);
+  });
+
   test("unmarking a carried read removes the active read and leaves the provenance", async () => {
     const revision = getRevision(workspace, "mover", 2)!;
     const carried = changeIdFor(revision, "src/a.ts");
@@ -629,6 +675,28 @@ describe("a moving pull request appends one revision at a time", () => {
         : `/${workspace}/r/mover/v/${label.slice(1)}`;
       expect((await fetch(`${base}${href}`, { headers: { cookie } })).status).toBe(200);
     }
+  });
+
+  test("the witness summary is read in full, and the header says each fact once", async () => {
+    const page = visible(await (await fetch(`${base}/${workspace}/r/mover/v/1`, { headers: { cookie } })).text());
+    expect(page).toContain(`<div class="account-body markdown"><p>Two values moved.</p></div>`);
+    expect(page).not.toContain("Full account");
+    expect(page).not.toContain("<details class=\"account\"");
+    // The pin is said in the header and nowhere else; the footer carries the file count,
+    // pluralized; the account delta stays an API fact.
+    expect(page).toContain("Version 1 · revision 1");
+    expect(page.split("Version 1 · revision 1")).toHaveLength(2);
+    expect(page).toContain("<p>2 files</p>");
+    expect(page).not.toContain("account 1 revised");
+    // An evidence seam is navigation, not a title: it names its directory and count and
+    // the card says so, so the type can be sized as a label rather than a heading.
+    const evidence = visible(await (await fetch(`${base}/${workspace}/r/mover/rev/3`, { headers: { cookie } })).text());
+    expect(evidence).toContain("<h2>src/ · 2 files</h2>");
+    expect(evidence).toContain("data-seam");
+    expect(page).not.toContain("data-seam");
+    const focused = visible(await (await fetch(`${base}/${workspace}/r/mover/rev/3?review=seam-1`, { headers: { cookie } })).text());
+    expect(focused).toContain("Mark read");
+    expect(focused).not.toContain("Mark as read");
   });
 
   test("every promoted page renders with a GitHub factory and router that throw", async () => {
@@ -746,12 +814,101 @@ describe("explicit and unasked-for readings converge on one capture", () => {
     expect(view.drift.sourceRevision).toBe(1);
     expect(view.drift.refreshRequired).toBe(false);
     const page = visible(await (await fetch(`${base}/${workspace}/r/mover-race/rev/2`, { headers: { cookie } })).text());
-    expect(page).toContain("Source matches rev 1");
+    // Named by its subject, so it cannot be read as the movement line beneath it.
+    expect(page).toContain("Pull request source matches rev 1");
     expect(page).not.toContain("refresh required");
   });
 });
 
 // ---- base-only movement, which GitHub does not timestamp ----
+
+describe("a member can recover from a capture that failed, from the page", () => {
+  test("the failed shell offers the retry, the capturing shell reloads, and the retry runs", async () => {
+    const broken = githubFixture(pull({ number: 19 }));
+    currentClient = { ...broken, async getTree() { throw new Error("tree unavailable"); } };
+    const created = await ingest({ repo: REPO, number: 19, slug: "mover-recover" }, "mover-recover-1");
+    expect(created.status).toBe(202);
+    const job = await created.json() as any;
+    await settleCaptureJobs();
+    expect(getCaptureJob(workspace, job.id)!.state).toBe("failed");
+
+    // The failed page: the failure, the source at the completed page's width, and a plain
+    // form — no JavaScript, no OpenAPI document — for the member who may spend it.
+    const failed = visible(await (await fetch(`${base}/${workspace}/r/mover-recover`, { headers: { cookie } })).text());
+    expect(failed).toContain("Capture failed");
+    expect(failed).toContain("tree unavailable");
+    expect(failed).toContain(`main → feature/mover ${HEAD1.slice(0, 12)}`);
+    expect(failed).not.toContain(HEAD1.slice(0, 13));
+    expect(failed).toContain("via the GitHub App installation");
+    expect(failed).not.toContain("Read as");
+    expect(failed).toContain(`action="/${workspace}/r/mover-recover/capture-jobs/${job.id}/retry"`);
+    expect(failed).toContain("Retry capture");
+    expect(failed).not.toContain("http-equiv");
+
+    // The form from a foreign origin is refused before anything moves.
+    const forged = await fetch(`${base}/${workspace}/r/mover-recover/capture-jobs/${job.id}/retry`, {
+      method: "POST", headers: { cookie, origin: "https://elsewhere.example" }, redirect: "manual",
+    });
+    expect(forged.status).toBe(403);
+    expect(getCaptureJob(workspace, job.id)!.state).toBe("failed");
+
+    // Retried from the page, with the fixture repaired but its worker held: the shell now
+    // says capturing, refreshes itself, and says how to reload.
+    currentClient = githubFixture(pull({ number: 19 }));
+    const gate = holdOpenAt(openCount + 1);
+    const retried = await fetch(`${base}/${workspace}/r/mover-recover/capture-jobs/${job.id}/retry`, {
+      method: "POST", headers: { cookie, origin: new URL(config.baseUrl).origin }, redirect: "manual",
+    });
+    expect(retried.status).toBe(303);
+    expect(retried.headers.get("location")).toBe(`/${workspace}/r/mover-recover`);
+    const capturing = visible(await (await fetch(`${base}/${workspace}/r/mover-recover`, { headers: { cookie } })).text());
+    expect(capturing).toContain("Capturing");
+    expect(capturing).toContain(`<meta http-equiv="refresh" content="30">`);
+    expect(capturing).toContain(`<a href="/${workspace}/r/mover-recover">Reload to check</a>`);
+    expect(capturing).not.toContain("Retry capture");
+    gate.release();
+    await settleCaptureJobs();
+    expect(getCaptureJob(workspace, job.id)!.state).toBe("completed");
+    expect(getLineage(workspace, "mover-recover")!.latest_revision).toBe(1);
+  });
+
+  test("the retry is one guarded statement: queued and completed jobs are left alone", async () => {
+    const lineage = getLineage(workspace, "mover-recover")!;
+    const completed = db.query<{ id: string }, [string]>(
+      "SELECT id FROM review_capture_jobs WHERE lineage_id = ? AND state = 'completed'",
+    ).get(lineage.id)!;
+    const refused = await fetch(`${base}/api/review-capture-jobs/${completed.id}/retry`, {
+      method: "POST", headers: { authorization: `Bearer ${key}` },
+    });
+    expect(refused.status).toBe(409);
+    expect(getCaptureJob(workspace, completed.id)!.state).toBe("completed");
+
+    // A queued job with attempts behind it: retrying it would reset the count that
+    // bounds a capture that kills its worker every time. Off the real lane, so nothing
+    // in this process drains it.
+    const observationId = tinyId("pob");
+    db.run(
+      "INSERT INTO review_pr_observations (id, workspace_id, lineage_id, repo_id, repo, pr_number, title, state, merged, draft, base_ref, base_sha, head_ref, head_sha, merge_base_sha, github_updated_at, observed_at, actor_kind, installation_id, user_id, credential_id, digest) " +
+        "VALUES (?, ?, ?, ?, ?, 19, 'Move the values', 'open', 0, 0, 'main', ?, 'feature/mover', ?, NULL, ?, ?, 'installation', ?, NULL, NULL, ?)",
+      [observationId, workspace, lineage.id, REPO_ID, REPO, BASE, HEAD2, Date.now(), Date.now(), INSTALLATION, `queued-${observationId}`],
+    );
+    const queued = tinyId("rcj");
+    db.run(
+      "INSERT INTO review_capture_jobs (id, workspace_id, lineage_id, slug, observation_id, state, actor_kind, installation_id, user_id, credential_id, actor_key, attempts, failure, lease_token, lease_expires_at, capture_id, revision_id, created_at, updated_at) " +
+        "VALUES (?, ?, ?, 'mover-recover', ?, 'pending', 'installation', ?, NULL, NULL, ?, 3, NULL, NULL, NULL, NULL, NULL, ?, ?)",
+      [queued, workspace, lineage.id, observationId, INSTALLATION, `${workspace}/installation/999999`, Date.now(), Date.now()],
+    );
+    const pending = await fetch(`${base}/api/review-capture-jobs/${queued}/retry`, {
+      method: "POST", headers: { authorization: `Bearer ${key}` },
+    });
+    expect(pending.status).toBe(409);
+    expect((await pending.json() as any).error).toBe("This capture is queued.");
+    expect(getCaptureJob(workspace, queued)!.attempts).toBe(3);
+    expect(getCaptureJob(workspace, queued)!.state).toBe("pending");
+    db.run("DELETE FROM review_capture_jobs WHERE id = ?", [queued]);
+    db.run("DELETE FROM review_pr_observations WHERE id = ?", [observationId]);
+  });
+});
 
 describe("a base that moved is a different source", () => {
   test("an unchanged GitHub timestamp still appends, ordered by arrival", async () => {
@@ -900,6 +1057,47 @@ describe("an out-of-order capture completes without appending behind newer sourc
     db.run("DELETE FROM review_pr_observations WHERE id = ?", [staleObservation]);
   });
 
+  test("retrying an overtaken failed job converges without a GitHub read", async () => {
+    // Revision 1; a push whose capture failed during an outage; a later push published
+    // revision 3. The failed job is still listed with its retry URL. Retrying it must not
+    // spend a capture to be told it was superseded: the order is known before the first
+    // GitHub request is made.
+    const lineage = getLineage(workspace, "mover")!;
+    const latest = getRevision(workspace, "mover", 3)!;
+    const observationId = tinyId("pob");
+    db.run(
+      "INSERT INTO review_pr_observations (id, workspace_id, lineage_id, repo_id, repo, pr_number, title, state, merged, draft, base_ref, base_sha, head_ref, head_sha, merge_base_sha, github_updated_at, observed_at, actor_kind, installation_id, user_id, credential_id, digest) " +
+        "VALUES (?, ?, ?, ?, ?, 10, 'Move the values', 'open', 0, 0, 'main', ?, 'feature/mover', ?, NULL, ?, ?, 'installation', ?, NULL, NULL, ?)",
+      [observationId, workspace, lineage.id, REPO_ID, REPO, BASE, HEAD_LATER,
+        Date.parse("2026-04-01T09:30:00Z"), Date.parse("2026-04-01T09:30:00Z"), INSTALLATION, `outage-${observationId}`],
+    );
+    const jobId = tinyId("rcj");
+    db.run(
+      "INSERT INTO review_capture_jobs (id, workspace_id, lineage_id, slug, observation_id, state, actor_kind, installation_id, user_id, credential_id, actor_key, attempts, failure, lease_token, lease_expires_at, capture_id, revision_id, created_at, updated_at) " +
+        "VALUES (?, ?, ?, 'mover', ?, 'failed', 'installation', ?, NULL, NULL, ?, 1, 'GitHub was unavailable.', NULL, NULL, NULL, NULL, ?, ?)",
+      [jobId, workspace, lineage.id, observationId, INSTALLATION, `${workspace}/installation/${INSTALLATION}`, Date.now(), Date.now()],
+    );
+    const capturesBefore = count("SELECT COUNT(*) AS n FROM stage_captures WHERE workspace_id = ?", workspace);
+    opened = [];
+
+    const retried = await fetch(`${base}/api/review-capture-jobs/${jobId}/retry`, {
+      method: "POST", headers: { authorization: `Bearer ${key}` },
+    });
+    expect(retried.status).toBe(202);
+    await settleCaptureJobs();
+
+    const finished = getCaptureJob(workspace, jobId)!;
+    expect(finished.state).toBe("completed");
+    expect(finished.revision_id).toBe(latest.id);
+    expect((captureJobView(finished, getObservation(workspace, observationId)) as any).superseded).toBe(true);
+    // No session was opened, no capture was retained, nothing was appended.
+    expect(opened).toEqual([]);
+    expect(count("SELECT COUNT(*) AS n FROM stage_captures WHERE workspace_id = ?", workspace)).toBe(capturesBefore);
+    expect(getLineage(workspace, "mover")!.latest_revision).toBe(3);
+    db.run("DELETE FROM review_capture_jobs WHERE id = ?", [jobId]);
+    db.run("DELETE FROM review_pr_observations WHERE id = ?", [observationId]);
+  });
+
   test("an unpublished older source completes as superseded and appends nothing", () => {
     const lineage = getLineage(workspace, "mover")!;
     const latest = getRevision(workspace, "mover", 3)!;
@@ -940,6 +1138,67 @@ describe("an out-of-order capture completes without appending behind newer sourc
 });
 
 // ---- who may read what moved ----
+
+describe("a promoted review is reachable from the Reviews page", () => {
+  test("pending, failed and completed lineages list beside legacy reviews, with the Project's words", async () => {
+    // A shell whose capture never returned, and one whose capture failed, beside the
+    // lineages the suite published. All of them exist from the moment somebody promoted
+    // them, and this page is the only way back to one without its URL.
+    const pendingId = tinyId("rln");
+    const failedId = tinyId("rln");
+    for (const [id, slug, title] of [[pendingId, "mover-waiting", "Still capturing"], [failedId, "mover-broken", "Never captured"]] as const) {
+      db.run(
+        "INSERT INTO review_lineages (id, workspace_id, slug, repo, repo_id, branch, original_base_ref, original_base_sha, title, latest_revision, latest_account_version, created_by_user_id, created_by_key_id, created_at, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, 'feature/mover', 'main', ?, ?, NULL, NULL, ?, 'key_ledger', ?, ?)",
+        [id, workspace, slug, REPO, REPO_ID, MERGE, title, owner, Date.now(), Date.now()],
+      );
+      db.run(
+        "INSERT INTO review_lineage_prs (lineage_id, workspace_id, slug, repo_id, repo, pr_number, head_ref, base_ref, actor_kind, installation_id, user_id, credential_id, attached_at, detached_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, 'feature/mover', 'main', 'installation', ?, NULL, NULL, ?, NULL)",
+        [id, workspace, slug, REPO_ID, REPO, slug === "mover-waiting" ? 901 : 902, INSTALLATION, Date.now()],
+      );
+      const observationId = tinyId("pob");
+      db.run(
+        "INSERT INTO review_pr_observations (id, workspace_id, lineage_id, repo_id, repo, pr_number, title, state, merged, draft, base_ref, base_sha, head_ref, head_sha, merge_base_sha, github_updated_at, observed_at, actor_kind, installation_id, user_id, credential_id, digest) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 0, 0, 'main', ?, 'feature/mover', ?, ?, ?, ?, 'installation', ?, NULL, NULL, ?)",
+        [observationId, workspace, id, REPO_ID, REPO, slug === "mover-waiting" ? 901 : 902, title, BASE, HEAD1, MERGE, Date.now(), Date.now(), INSTALLATION, `ledger-${observationId}`],
+      );
+      db.run(
+        "INSERT INTO review_capture_jobs (id, workspace_id, lineage_id, slug, observation_id, state, actor_kind, installation_id, user_id, credential_id, actor_key, attempts, failure, lease_token, lease_expires_at, capture_id, revision_id, created_at, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, 'installation', ?, NULL, NULL, ?, 1, ?, NULL, NULL, NULL, NULL, ?, ?)",
+        [tinyId("rcj"), workspace, id, slug, observationId, slug === "mover-waiting" ? "pending" : "failed", INSTALLATION,
+          `${workspace}/installation/999998`, slug === "mover-waiting" ? null : "GitHub was unavailable.", Date.now(), Date.now()],
+      );
+    }
+
+    const page = await (await fetch(`${base}/${workspace}/reviews`, { headers: { cookie } })).text();
+    expect(page).not.toContain("No reviews here yet.");
+    const row = (slug: string): string => {
+      const start = page.indexOf(`/${workspace}/r/${slug}/`);
+      expect(start).toBeGreaterThan(-1);
+      return page.slice(start, page.indexOf("</tr>", start)).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
+    };
+    // The same words the Project page uses for the same review.
+    expect(row("mover")).toContain("Move the values");
+    expect(row("mover")).toContain(" v1 ");
+    expect(row("mover")).toContain("Mover#10");
+    expect(row("mover")).toContain("1 open");
+    expect(row("mover-race")).toContain(" rev 2 ");
+    expect(row("mover-waiting")).toContain("Still capturing");
+    expect(row("mover-waiting")).toContain("capture pending");
+    expect(row("mover-broken")).toContain("capture failed");
+    expect(row("mover-broken")).toContain("Mover#902");
+    // And the page linked from the row is the review's own.
+    const opened2 = await fetch(`${base}/${workspace}/r/mover-broken/`, { headers: { cookie } });
+    expect(opened2.status).toBe(200);
+    expect(await opened2.text()).toContain("Capture failed");
+
+    db.run("DELETE FROM review_capture_jobs WHERE lineage_id IN (?, ?)", [pendingId, failedId]);
+    db.run("DELETE FROM review_pr_observations WHERE lineage_id IN (?, ?)", [pendingId, failedId]);
+    db.run("DELETE FROM review_lineage_prs WHERE lineage_id IN (?, ?)", [pendingId, failedId]);
+    db.run("DELETE FROM review_lineages WHERE id IN (?, ?)", [pendingId, failedId]);
+  });
+});
 
 describe("what moved is as private as the code it describes", () => {
   test("delta, drift and carried counts answer members, keys and strangers correctly", async () => {

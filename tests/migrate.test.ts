@@ -79,6 +79,13 @@ test("a populated v16 pull request lineage survives v17 and rolls back by restor
   expect(out).toContain("all assertions passed");
 });
 
+// The follow-up release: stored movement is additive, and going back is still a restore.
+test("a populated v17 lineage survives v18 and rolls back by restore", async () => {
+  const { code, out } = await runScenario("v17");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("a database from a newer release is refused rather than walked", async () => {
   const { code, out } = await runScenario("newer");
   expect(code).toBe(0);

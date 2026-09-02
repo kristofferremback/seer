@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 17 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 18 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -544,8 +544,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 17) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 17`);
+  if (uv > 18) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 18`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -564,6 +564,7 @@ export function migrate(): void {
   if (userVersion() < 15) migrateToV15();
   if (userVersion() < 16) migrateToV16();
   if (userVersion() < 17) migrateToV17();
+  if (userVersion() < 18) migrateToV18();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -1311,6 +1312,64 @@ function migrateToV17(): void {
     db.run("PRAGMA user_version = 17");
   })();
   console.log("[seer] migrated to schema v17 (moving pull request handling).");
+}
+
+// v18: what one revision changed about the one before it, stored once.
+//
+// Both captures are immutable, and the delta engine is deterministic over them, so the
+// answer is a fact the completion transaction can write rather than something every page
+// and every API read recomputes from two inventories. The counts are what the movement
+// line says; the equivalences are what a read marked AFTER the next revision existed needs
+// in order to carry forward, which the completion-time carry alone could never do. The
+// boundary table records an explicit later choice so an older read can never overwrite it.
+// All three are additive: v17 reads none of them, and a revision published before this
+// release has its movement rows written the first time anything asks.
+const V18_REVISION_MOVEMENT = `
+  CREATE TABLE IF NOT EXISTS review_revision_movements (
+    revision_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    previous_revision_id TEXT NOT NULL,
+    unchanged INTEGER NOT NULL,
+    revised INTEGER NOT NULL,
+    new INTEGER NOT NULL,
+    removed INTEGER NOT NULL,
+    computed_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS review_revision_equivalences (
+    target_revision_id TEXT NOT NULL,
+    target_change_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    source_revision_id TEXT NOT NULL,
+    source_change_id TEXT NOT NULL,
+    key_digest TEXT NOT NULL,
+    PRIMARY KEY (target_revision_id, target_change_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_equivalences_source
+    ON review_revision_equivalences (source_revision_id, source_change_id);
+
+  -- An explicit mark or unmark on a target revision is a member's boundary: an older
+  -- revision may never carry through it later. Active state remains in
+  -- review_revision_change_reads; this row records only that the member acted here.
+  CREATE TABLE IF NOT EXISTS review_revision_read_boundaries (
+    revision_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    change_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (revision_id, user_id, change_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_revision_read_boundaries_workspace
+    ON review_revision_read_boundaries (workspace_id, revision_id, user_id);
+`;
+
+function migrateToV18(): void {
+  db.transaction(() => {
+    db.exec(V18_REVISION_MOVEMENT);
+    db.run("PRAGMA user_version = 18");
+  })();
+  console.log("[seer] migrated to schema v18 (stored revision movement).");
 }
 
 /**

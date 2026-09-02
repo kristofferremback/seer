@@ -200,7 +200,7 @@ describe("stage reader", () => {
     expect(focused).toContain(`id="${implementationChange}" data-change="${implementationChange}"`);
     expect(focused).toContain("class=\"file-review\"");
     expect(focused).toContain("data-layout=\"unified\"");
-    expect(focused).toContain("Mark as read"); expect(focused).toContain("Load file context");
+    expect(focused).toContain("Mark read"); expect(focused).toContain("Load file context");
     const withoutScripts = focused.replace(/<script[\s\S]*?<\/script>/g, "");
     expect(withoutScripts).toContain("diff-line add");
     expect(withoutScripts).toContain("read-form");
