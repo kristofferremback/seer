@@ -93,9 +93,11 @@ Check startup and health:
 ```sh
 railway logs --service "$SERVICE" --environment "$ENVIRONMENT" --lines 200 --json
 railway ssh --service "$SERVICE" --environment "$ENVIRONMENT" -- \
-  'curl -fsS "http://127.0.0.1:$PORT/healthz"'
-railway ssh --service "$SERVICE" --environment "$ENVIRONMENT" -- \
-  'curl -fsS "http://127.0.0.1:$PORT/openapi.json" | grep -F '"'"'listWitnessRequests'"'"''
+  'bun -e "const base=\"http://127.0.0.1:\"+process.env.PORT;
+    const health=await fetch(base+\"/healthz\"); const body=await health.text();
+    if(health.status!==200||body!==\"ok\")process.exit(1); console.log(body);
+    const spec=await fetch(base+\"/openapi.json\");
+    if(spec.status!==200||!(await spec.text()).includes(\"listWitnessRequests\"))process.exit(1)"'
 ```
 
 Require the v24 migration log once, `ok` from health, and the OpenAPI operation. Measure
@@ -144,68 +146,222 @@ The production rollback is blocked until that rehearsal completes in 240 seconds
 Set these shell values from the Railway service and the recorded rollout evidence:
 
 ```sh
-SERVICE=<exact service name or id>
-ENVIRONMENT=<exact environment name or id>
-REGION=<the service's only Railway region name or id>
-V24_DEPLOYMENT=<verified v24 deployment id>
+REPOSITORY="/absolute/path/to/a/clean/seer-repository"
+PROJECT="exact Railway project id"
+SERVICE="exact Railway service id"
+ENVIRONMENT="exact Railway environment id"
+REGION="Railway CLI alias for the only region, for example eu-west"
+V24_DEPLOYMENT="verified v24 deployment id"
 V23_COMMIT=f3cbb6a5fd5b94485039930fcb2e24caf0beda28
 SNAPSHOT=/data/backups/pre-v24.sqlite
+ROLLOUT_EVIDENCE="/durable/operator-only/rollout.log"
+umask 077
+set -euo pipefail
 ```
 
-The service must have exactly one configured region. Stop if it has more. Run
-`railway status --json` and `railway deployment list --service "$SERVICE" --environment
-"$ENVIRONMENT" --json`; record that the newest deployment is `V24_DEPLOYMENT` from the
-expected task-12 commit before changing anything.
+Replace every example value before enabling `set -euo pipefail`, then run the complete
+sequence in that same shell. Use a dedicated operator directory so commands that require Railway's linked context
+cannot inherit another service:
+
+```sh
+mkdir -p /tmp/seer-railway-rollback-control
+cd /tmp/seer-railway-rollback-control
+railway link --project "$PROJECT" --environment "$ENVIRONMENT" \
+  --service "$SERVICE" --json > /tmp/seer-rollback-link.json
+```
+
+Require the returned project, environment, and service ids to equal the recorded values.
+Create the evidence file before any deployment mutation:
+
+```sh
+mkdir -p "$(dirname "$ROLLOUT_EVIDENCE")"
+touch "$ROLLOUT_EVIDENCE"
+chmod 600 "$ROLLOUT_EVIDENCE"
+test -w "$ROLLOUT_EVIDENCE"
+```
+
+The service must have exactly one configured region. Stop if it has more. Railway's
+service manifest may expose an infrastructure key such as `europe-west4-drams3a`, while
+`railway scale` accepts the stable aliases printed by `railway scale --help`, such as
+`eu-west`. Set `REGION` to that alias and stop if the mapping is ambiguous. Run `railway
+status --project "$PROJECT" --environment "$ENVIRONMENT" --json` and `railway deployment
+list --project "$PROJECT" --service "$SERVICE" --environment "$ENVIRONMENT" --json`;
+record that the newest deployment is `V24_DEPLOYMENT` from the expected task-12 commit
+before changing anything.
 
 1. Verify the snapshot again while v24 still has the volume:
 
    ```sh
-   railway ssh --service "$SERVICE" --environment "$ENVIRONMENT" -- \
-     "bun run db:verify -- $SNAPSHOT"
+   railway ssh --project "$PROJECT" --service "$SERVICE" \
+     --environment "$ENVIRONMENT" -- "bun run db:verify -- $SNAPSHOT"
    ```
 
-2. Stop the service and wait until no deployment or restart is running:
+2. Stop the service and wait until status reports no running instance:
 
    ```sh
-   railway scale --service "$SERVICE" --environment "$ENVIRONMENT" "$REGION=0"
+   cd /tmp/seer-railway-rollback-control
+   test "$(jq -r '.projectId' /tmp/seer-rollback-link.json)" = "$PROJECT"
+   test "$(jq -r '.environmentId' /tmp/seer-rollback-link.json)" = "$ENVIRONMENT"
+   test "$(jq -r '.serviceId' /tmp/seer-rollback-link.json)" = "$SERVICE"
+   railway scale --service "$SERVICE" --environment "$ENVIRONMENT" "$REGION=0" --json \
+     | tee /tmp/seer-rollback-scale.json
+   test "$(jq '.regions | length' /tmp/seer-rollback-scale.json)" = 1
+   test "$(jq '[.regions[] | select(. != null)] | length' \
+     /tmp/seer-rollback-scale.json)" = 0
+   deadline=$((SECONDS + 120))
+   while :; do
+     railway status --project "$PROJECT" --environment "$ENVIRONMENT" --json \
+       > /tmp/seer-rollback-status.json
+     test "$(jq --arg service "$SERVICE" --arg environment "$ENVIRONMENT" \
+       '[.environments.edges[].node | select(.id == $environment) |
+         .serviceInstances.edges[].node | select(.serviceId == $service)] | length' \
+       /tmp/seer-rollback-status.json)" = 1
+     live=$(jq --arg service "$SERVICE" --arg environment "$ENVIRONMENT" \
+       '[.environments.edges[].node | select(.id == $environment) |
+         .serviceInstances.edges[].node | select(.serviceId == $service) |
+         .activeDeployments[].instances[] |
+         select(.status == "CREATED" or .status == "INITIALIZING" or
+           .status == "RESTARTING" or .status == "RUNNING")] | length' \
+       /tmp/seer-rollback-status.json)
+     railway deployment list --project "$PROJECT" --service "$SERVICE" \
+       --environment "$ENVIRONMENT" --json > /tmp/seer-rollback-deployments.json
+     moving=$(jq '[.[] | select(.status == "QUEUED" or .status == "INITIALIZING" or
+       .status == "WAITING" or .status == "BUILDING" or .status == "DEPLOYING")] |
+       length' /tmp/seer-rollback-deployments.json)
+     test "$live" != 0 || test "$moving" != 0 || break
+     test "$SECONDS" -lt "$deadline" || { echo "service did not stop" >&2; exit 1; }
+     sleep 5
+   done
    ```
+
+   Require the returned internal region to have zero replicas. Stop if Railway introduces
+   another region, starts a replacement, or leaves a deployment in progress.
 
 3. Wait 35 seconds. Do not delete heartbeat files. Stage the restore variable without
    triggering a deployment:
 
    ```sh
-   railway variable set --service "$SERVICE" --environment "$ENVIRONMENT" \
-     --skip-deploys "SEER_MAINTENANCE_RESTORE=$SNAPSHOT"
+   sleep 35
+   railway variable set --project "$PROJECT" --service "$SERVICE" \
+     --environment "$ENVIRONMENT" --skip-deploys \
+     "SEER_MAINTENANCE_RESTORE=$SNAPSHOT"
+   railway variable list --project "$PROJECT" --service "$SERVICE" \
+     --environment "$ENVIRONMENT" --json \
+     | jq -e --arg path "$SNAPSHOT" '.SEER_MAINTENANCE_RESTORE == $path'
    ```
 
-   Read the variables back and require that exact path. A plain `variable set` is unsafe
-   here because it deploys immediately.
+   Require the read-back to succeed. A plain `variable set` is unsafe here because it
+   deploys immediately.
 
-4. Confirm again that the newest deployment is still `V24_DEPLOYMENT`, then run
-   `railway redeploy --service "$SERVICE" --yes` in the exact linked environment. Do not
-   use `railway up`, a dashboard start-command override, or a newer deployment. The
-   staged variable and the committed `bun run start` select restore-only maintenance;
-   task 12's committed replica setting starts exactly one process.
+4. Redeploy the recorded v24 artifact by id. Scaling may mark it removed or create a
+   source deployment, so `railway redeploy` is unsafe because it only addresses whatever
+   is newest. Query the recorded deployment first and require `canRedeploy: true`, then
+   use Railway's public GraphQL operation and record the returned id:
 
-5. Wait for terminal deployment status `SUCCESS`. Require `maintenance restore verified`,
-   `user_version=23`, `integrity=ok`, and the quarantine path in its logs. Check from
+   ```sh
+   railway api 'query($id:String!){deployment(id:$id){id status canRedeploy}}' \
+     --raw-var "id=$V24_DEPLOYMENT" --compact > /tmp/seer-v24-state.json
+   test "$(jq -r '.data.deployment.canRedeploy' /tmp/seer-v24-state.json)" = true
+   railway api 'mutation($id:String!){deploymentRedeploy(id:$id){id status}}' \
+     --raw-var "id=$V24_DEPLOYMENT" --compact \
+     | tee /tmp/seer-maintenance-deployment.json
+   MAINTENANCE_DEPLOYMENT=$(jq -er '.data.deploymentRedeploy.id' \
+     /tmp/seer-maintenance-deployment.json)
+   printf 'maintenance_deployment=%s\n' "$MAINTENANCE_DEPLOYMENT" \
+     >> "$ROLLOUT_EVIDENCE"
+   cat /tmp/seer-maintenance-deployment.json >> "$ROLLOUT_EVIDENCE"
+   ```
+
+   Do not use `railway up`, a dashboard start-command override,
+   `serviceInstanceRedeploy`, or the CLI's latest-deployment redeploy. Railway's current
+   environment variables apply to an exact artifact redeploy; the private rehearsal must
+   prove this before production. The staged variable selects restore-only maintenance,
+   and the recorded artifact's committed replica setting starts one process. If the next
+   step sees normal application routes or anything other than one running instance,
+   remove that attempted deployment and stop.
+
+5. Poll that exact id with `railway api`, not the service's newest deployment. Require
+   terminal status `SUCCESS`, exactly one successful instance, and record its id:
+
+   ```sh
+   deadline=$((SECONDS + 240))
+   while :; do
+     railway api \
+       'query($id:String!){deployment(id:$id){id status deploymentStopped instances{id status}}}' \
+       --raw-var "id=$MAINTENANCE_DEPLOYMENT" --compact \
+       > /tmp/seer-maintenance-state.json
+     status=$(jq -r '.data.deployment.status' /tmp/seer-maintenance-state.json)
+     case "$status" in
+       SUCCESS) break ;;
+       FAILED|CRASHED|REMOVED|NEEDS_APPROVAL) echo "$status" >&2; exit 1 ;;
+     esac
+     test "$SECONDS" -lt "$deadline" || { echo "maintenance timed out" >&2; exit 1; }
+     sleep 5
+   done
+   test "$(jq -r '.data.deployment.deploymentStopped' \
+     /tmp/seer-maintenance-state.json)" = false
+   test "$(jq '[.data.deployment.instances[] |
+     select(.status == "CREATED" or .status == "INITIALIZING" or
+       .status == "RESTARTING" or .status == "RUNNING")] | length' \
+     /tmp/seer-maintenance-state.json)" = 1
+   test "$(jq '[.data.deployment.instances[] | select(.status == "RUNNING")] | length' \
+     /tmp/seer-maintenance-state.json)" = 1
+   MAINTENANCE_INSTANCE=$(jq -er \
+     '.data.deployment.instances[] | select(.status == "RUNNING") | .id' \
+     /tmp/seer-maintenance-state.json)
+   printf 'maintenance_instance=%s\n' "$MAINTENANCE_INSTANCE" >> "$ROLLOUT_EVIDENCE"
+   ```
+
+   Require `maintenance restore verified`, `user_version=23`, `integrity=ok`, and the
+   quarantine path in that deployment's exact logs. Then check the exact instance from
    inside the container:
 
    ```sh
-   curl -fsS "http://127.0.0.1:$PORT/healthz"
-   test "$(curl -sS -o /dev/null -w '%{http_code}' \
-     "http://127.0.0.1:$PORT/openapi.json")" = 404
+   railway logs "$MAINTENANCE_DEPLOYMENT" --deployment --project "$PROJECT" \
+     --service "$SERVICE" --environment "$ENVIRONMENT" --lines 200 --json \
+     | jq -r '.message // .' > /tmp/seer-maintenance.log
+   grep -Fq 'maintenance restore verified:' /tmp/seer-maintenance.log
+   grep -Fq 'user_version=23' /tmp/seer-maintenance.log
+   grep -Fq 'integrity=ok' /tmp/seer-maintenance.log
+   grep -Fq 'quarantine=' /tmp/seer-maintenance.log
+   railway ssh --project "$PROJECT" --service "$SERVICE" \
+     --environment "$ENVIRONMENT" --deployment-instance "$MAINTENANCE_INSTANCE" -- \
+     'bun -e "const base=\"http://127.0.0.1:\"+process.env.PORT;
+       const health=await fetch(base+\"/healthz\"); const body=await health.text();
+       if(health.status!==200||body!==\"ok\")process.exit(1); console.log(body);
+       if((await fetch(base+\"/openapi.json\")).status!==404)process.exit(1)"'
    ```
 
    Health must print `ok`; the application route must be 404. Railway allows 300 seconds
    for health, and the private rehearsal must have finished in at most 240. A maintenance
    restart must report the same quarantine path.
 
-6. Stop maintenance and wait until it is gone:
+6. Stop that exact maintenance deployment and wait until status reports no running
+   instance. Removing by id avoids starting the repository's configured source revision:
 
    ```sh
-   railway scale --service "$SERVICE" --environment "$ENVIRONMENT" "$REGION=0"
+   railway api 'mutation($id:String!){deploymentRemove(id:$id)}' \
+     --raw-var "id=$MAINTENANCE_DEPLOYMENT" --compact
+   deadline=$((SECONDS + 120))
+   while :; do
+     railway api 'query($id:String!){deployment(id:$id){id status instances{id status}}}' \
+       --raw-var "id=$MAINTENANCE_DEPLOYMENT" --compact \
+       > /tmp/seer-maintenance-removed.json
+     status=$(jq -r '.data.deployment.status' /tmp/seer-maintenance-removed.json)
+     test "$status" != REMOVED || break
+     test "$SECONDS" -lt "$deadline" || { echo "maintenance did not stop" >&2; exit 1; }
+     sleep 5
+   done
+   test "$(jq '[((.data.deployment.instances // [])[]) |
+     select(.status == "CREATED" or .status == "INITIALIZING" or
+       .status == "RESTARTING" or .status == "RUNNING")] | length' \
+     /tmp/seer-maintenance-removed.json)" = 0
    ```
+
+   If the shell is interrupted after step 4, recover the maintenance id from `railway
+   deployment list --project "$PROJECT" --service "$SERVICE" --environment
+   "$ENVIRONMENT" --json`. Match the rollout time and the v24 image digest, then record
+   the recovered id before continuing.
 
 7. Keep `SEER_MAINTENANCE_RESTORE` set. The v23 image does not contain the maintenance
    branch and ignores it, while keeping it prevents any accidental v24 start from opening
@@ -215,29 +371,58 @@ expected task-12 commit before changing anything.
    `V23_COMMIT`, then deploy that directory to the same service and environment:
 
    ```sh
-   git worktree add /tmp/seer-v23-rollback "$V23_COMMIT"
-   test "$(git -C /tmp/seer-v23-rollback rev-parse HEAD)" = "$V23_COMMIT"
-   cd /tmp/seer-v23-rollback
-   railway up --detach --service "$SERVICE" --environment "$ENVIRONMENT"
+   ROLLBACK_WORKTREE="/tmp/seer-v23-rollback.$(date +%s).$$"
+   test ! -e "$ROLLBACK_WORKTREE"
+   git -C "$REPOSITORY" worktree add --detach "$ROLLBACK_WORKTREE" "$V23_COMMIT"
+   test "$(git -C "$ROLLBACK_WORKTREE" rev-parse HEAD)" = "$V23_COMMIT"
+   cd "$ROLLBACK_WORKTREE"
+   railway status --project "$PROJECT" --environment "$ENVIRONMENT" --json \
+     > /tmp/seer-v23-target.json
+   test "$(jq --arg service "$SERVICE" --arg environment "$ENVIRONMENT" \
+     '[.environments.edges[].node | select(.id == $environment) |
+       .serviceInstances.edges[].node | select(.serviceId == $service)] | length' \
+     /tmp/seer-v23-target.json)" = 1
+   railway up --detach --json --project "$PROJECT" --service "$SERVICE" \
+     --environment "$ENVIRONMENT" -m "Restore exact Seer v23" \
+     | tee /tmp/seer-v23-deployment.json
+   cat /tmp/seer-v23-deployment.json >> "$ROLLOUT_EVIDENCE"
+   V23_DEPLOYMENT=$(jq -er '.deploymentId' /tmp/seer-v23-deployment.json)
+   printf 'v23_deployment=%s\n' "$V23_DEPLOYMENT" >> "$ROLLOUT_EVIDENCE"
    ```
 
-   Poll `railway deployment list --service "$SERVICE" --environment "$ENVIRONMENT"
-   --json` until that exact deployment reaches terminal `SUCCESS`. A queued build is not
-   success. Do not run v24 again if this deployment fails; fix or retry the v23 deployment.
+   Poll that exact deployment to terminal `SUCCESS`:
+
+   ```sh
+   deadline=$((SECONDS + 240))
+   while :; do
+     railway deployment list --project "$PROJECT" --service "$SERVICE" \
+       --environment "$ENVIRONMENT" --json > /tmp/seer-v23-deployments.json
+     status=$(jq -r --arg id "$V23_DEPLOYMENT" \
+       '.[] | select(.id == $id) | .status' /tmp/seer-v23-deployments.json)
+     case "$status" in
+       SUCCESS) break ;;
+       FAILED|CRASHED|REMOVED|NEEDS_APPROVAL) echo "$status" >&2; exit 1 ;;
+     esac
+     test "$SECONDS" -lt "$deadline" || { echo "v23 deploy timed out" >&2; exit 1; }
+     sleep 5
+   done
+   ```
+
+   A queued build is not success. Do not run v24 again if this deployment fails; fix or
+   retry the v23 deployment.
 
 9. Check `/healthz`, the v23 startup log, one legacy page, one Stage V1 page, and
    representative local or S3 blob reads. Confirm the startup log does not contain a v24
-   migration. Only after v23 is healthy, delete the maintenance variable:
+   migration. Keep `SEER_MAINTENANCE_RESTORE` set throughout the rollback. Deleting a
+   variable can deploy the repository's configured source, which still points at v24 even
+   after a local v23 upload.
 
-   ```sh
-   railway variable delete --service "$SERVICE" --environment "$ENVIRONMENT" \
-     SEER_MAINTENANCE_RESTORE
-   ```
+Remove the maintenance variable only as part of a separately approved roll-forward after
+`main` points at a corrected v24 revision. Treat the variable-triggered deployment as that
+v24 rollout and monitor it to terminal `SUCCESS` before declaring recovery complete.
 
-   Variable deletion may deploy. That is safe only now because the newest code is v23.
-   Wait for its resulting deployment to reach terminal `SUCCESS` and repeat `/healthz`.
-
-Never remove the maintenance variable while v24 is the newest deployable image. Never
+Never remove the maintenance variable while a broken v24 is the configured source. Never
 start v23 against `user_version = 24`; `assertDatabaseVersionSupported(23)` refuses it.
-Never delete the quarantine or restore-state file during the incident. Remove the clean
-rollback worktree only by its exact path after the incident is closed.
+Never delete the quarantine or restore-state file during the incident. After the incident
+or rehearsal is closed, remove only the recorded `ROLLBACK_WORKTREE` with `git -C
+"$REPOSITORY" worktree remove "$ROLLBACK_WORKTREE"`.
