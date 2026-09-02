@@ -25,6 +25,7 @@
 // one answer.
 
 import { requireApiKey } from "../auth";
+import { latestImportedConversation, runConversationImport, startConversationImport, type ConversationImportRow } from "./conversation-import";
 import { config } from "../config";
 import { db } from "../db";
 import { json } from "../http";
@@ -1205,6 +1206,32 @@ function reusedView(lineage: ReviewLineageRow, observation: ReviewPrObservationR
  * outstanding. 409 means the work failed and needs a decision — so the failure text and
  * the retry URL travel with it rather than being something to go and look up.
  */
+function importView(row: ConversationImportRow | null): unknown {
+  return row === null ? null : { id: row.id, state: row.state, complete: row.complete === 1, truncated: row.truncated === 1, threads: row.thread_count, comments: row.comment_count, reviews: row.review_count, failure: row.failure, startedAt: new Date(row.started_at).toISOString(), completedAt: row.completed_at === null ? null : new Date(row.completed_at).toISOString() };
+}
+
+async function withImport(result: Response, row: ConversationImportRow | null): Promise<Response> {
+  const value = await result.json() as Record<string, unknown>;
+  return prJson({ ...value, conversationImport: importView(row) }, result.status);
+}
+
+function importForObservation(workspaceId: string, observationId: string): ConversationImportRow | null {
+  return db.query<ConversationImportRow, [string, string]>("SELECT * FROM review_conversation_imports WHERE workspace_id = ? AND observation_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1").get(workspaceId, observationId);
+}
+
+async function importObservedConversation(workspaceId: string, lineage: ReviewLineageRow, observation: ReviewPrObservationRow, actor: ReadActor): Promise<ConversationImportRow | null> {
+  try {
+    const started = startConversationImport({ workspaceId, lineageId: lineage.id, observationId: observation.id, actor });
+    return await runConversationImport(workspaceId, lineage, observation, started);
+  } catch (error) {
+    // Conversation import never rolls back a stored PR observation or strands its capture.
+    // A concurrent import is already doing the work; any other start failure stays visible
+    // in logs while the retained source path proceeds.
+    console.error(`[seer] conversation import did not start for ${workspaceId}/${lineage.slug}:`, error);
+    return latestImportedConversation(workspaceId, lineage.id);
+  }
+}
+
 function outcomeResponse(outcome: PrIngestOutcome): Response {
   if (outcome.kind === "reused") {
     return prJson(reusedView(outcome.lineage, outcome.observation, outcome.revisionId), 200);
@@ -1251,7 +1278,8 @@ export async function handleCreatePullRequestLineage(req: Request): Promise<Resp
         return prJson({ error: "This Idempotency-Key was already used for a different pull request request." }, 409);
       }
       // Replayed before any GitHub call, which is the whole value of a replay.
-      return outcomeResponse(replayPrOperation(auth.workspaceId, held));
+      const replayed = replayPrOperation(auth.workspaceId, held);
+      return withImport(outcomeResponse(replayed), importForObservation(auth.workspaceId, replayed.observation.id));
     } else {
       // Said before a token is minted, because a slug collision is not GitHub's business
       // and the caller can fix it without one. Rechecked inside the transaction, because
@@ -1288,8 +1316,9 @@ export async function handleCreatePullRequestLineage(req: Request): Promise<Resp
       facts: observed.facts,
       legacyOwnsSlug: (candidate) => getReview(auth.workspaceId, candidate) !== null,
     });
+    const imported = await importObservedConversation(auth.workspaceId, outcome.lineage, outcome.observation, observed.actor);
     if (outcome.kind === "job" && outcome.job.state === "pending") scheduleActorQueue(outcome.job.actor_key);
-    return outcomeResponse(outcome);
+    return withImport(outcomeResponse(outcome), imported);
   } catch (err) {
     return ingestFailure(err);
   }
@@ -1325,7 +1354,8 @@ export async function handleAttachPullRequest(req: Request, slug: string): Promi
       if (held.request_hash !== requestHash) {
         return prJson({ error: "This Idempotency-Key was already used for a different pull request request." }, 409);
       }
-      return outcomeResponse(replayPrOperation(auth.workspaceId, held));
+      const replayed = replayPrOperation(auth.workspaceId, held);
+      return withImport(outcomeResponse(replayed), importForObservation(auth.workspaceId, replayed.observation.id));
     }
 
     const session = await resolveReadSession(auth.workspaceId, repo, auth.userId);
@@ -1355,8 +1385,9 @@ export async function handleAttachPullRequest(req: Request, slug: string): Promi
       facts,
       legacyOwnsSlug: (candidate) => getReview(auth.workspaceId, candidate) !== null,
     });
+    const imported = await importObservedConversation(auth.workspaceId, outcome.lineage, outcome.observation, observed.actor);
     if (outcome.kind === "job" && outcome.job.state === "pending") scheduleActorQueue(outcome.job.actor_key);
-    return outcomeResponse(outcome);
+    return withImport(outcomeResponse(outcome), imported);
   } catch (err) {
     return ingestFailure(err);
   }
@@ -1402,11 +1433,11 @@ export async function handleRefreshLineagePullRequest(req: Request, slug: string
       // capture state is re-read rather than remembered, so a replay after the work
       // finished says so instead of repeating the pending answer.
       if (stored) {
-        return prJson(refreshView(lineage, actor, {
+        return withImport(prJson(refreshView(lineage, actor, {
           observation: stored,
           job: replayed.capture_job_id ? getCaptureJob(auth.workspaceId, replayed.capture_job_id) : null,
           sourceRevisionId: replayed.revision_id,
-        }));
+        })), importForObservation(auth.workspaceId, stored.id));
       }
     }
     const session = await openReadSession(auth.workspaceId, actor, relation.repo, relation.repo_id);
@@ -1422,10 +1453,11 @@ export async function handleRefreshLineagePullRequest(req: Request, slug: string
       actor,
       facts: observed.facts,
     });
-    // After the transaction committed, exactly as ingestion does it: a lane driven from
-    // inside would be capturing against rows that might still roll back.
+    // Import before scheduling the capture lane. Import failure is stored and does not
+    // roll back the observation or prevent retained source capture.
+    const imported = await importObservedConversation(auth.workspaceId, lineage, outcome.observation, actor);
     if (outcome.job && outcome.job.state === "pending") scheduleActorQueue(outcome.job.actor_key);
-    return prJson(refreshView(getLineage(auth.workspaceId, slug) ?? lineage, actor, outcome));
+    return withImport(prJson(refreshView(getLineage(auth.workspaceId, slug) ?? lineage, actor, outcome)), imported);
   } catch (err) {
     return ingestFailure(err);
   }

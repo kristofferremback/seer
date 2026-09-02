@@ -32,6 +32,7 @@ setGithubClientFactory(() => { throw new Error("GitHub must not be reachable whi
 setReadRouter({
   async resolve() { throw new Error("GitHub must not be resolved while reading a capability"); },
   async open() { throw new Error("GitHub must not be opened while reading a capability"); },
+  async openGraphql() { throw new Error("GitHub GraphQL must not be opened while reading a capability"); },
 });
 
 const server = await startServer();
@@ -42,9 +43,9 @@ const visible = (page: string): string => page.replace(/<script[\s\S]*?<\/script
 const attributeUrls = (page: string): string[] => [...page.matchAll(/\s(?:href|action|data-[a-z0-9-]+)="([^"]*)"/gi)]
   .map((match) => match[1]!)
   .filter((value) => value.startsWith("/") || /^https?:\/\//.test(value));
-const mint = (kind: string, target: string, headers: Record<string, string>) => fetch(`${base}/api/shares`, {
+const mint = (kind: string, target: string, headers: Record<string, string>, conversation = false) => fetch(`${base}/api/shares`, {
   method: "POST", headers: { "content-type": "application/json", ...headers },
-  body: JSON.stringify({ workspace, kind, target, label: `${kind}-${target}` }),
+  body: JSON.stringify({ workspace, kind, target, label: `${kind}-${target}`, ...(conversation ? { conversation: true } : {}) }),
 });
 const shape = async (response: Response) => ({
   status: response.status,
@@ -56,6 +57,18 @@ const shape = async (response: Response) => ({
 });
 
 try {
+  const { createLocalThread, appendLocalReply } = await import("../../src/overseer/thread-db");
+  const revisionRow = db.query<{ lineage_id: string }, [string]>("SELECT lineage_id FROM review_revisions WHERE id = ?").get(revisionId)!;
+  const local = createLocalThread({ workspaceId: workspace, scopeKind: "lineage", scopeId: revisionRow.lineage_id, anchor: { workspace_id: workspace, anchor_kind: "review", lineage_id: revisionRow.lineage_id, revision_id: revisionId, account_id: null, stack_id: null, stack_manifest_id: null, stack_account_id: null, group_id: null, change_id: null, file_id: null, side: null, start_line: null, end_line: null, range_kind: null, old_object_digest: null, new_object_digest: null, object_digest: null }, body: "Capability conversation at mint", author: { kind: "member", userId: owner }, idempotencyKey: "privacy-capability-conversation" });
+  const conversationMint = await mint("review_document", revisionId, { cookie: cookie(owner) }, true);
+  assert(conversationMint.status === 200, "an explicit conversation capability was not minted");
+  const conversation = await conversationMint.json() as any;
+  appendLocalReply({ workspaceId: workspace, threadId: local.thread.id, body: "Later private reply", author: { kind: "member", userId: owner }, idempotencyKey: "privacy-capability-later" });
+  const conversationHtml = visible(await (await fetch(`${base}/s/${conversation.token}`)).text());
+  assert(conversationHtml.includes("Capability conversation at mint"), "the explicit conversation snapshot omitted its local thread");
+  assert(!conversationHtml.includes("Later private reply"), "the conversation snapshot widened to a later reply");
+  for (const secret of [owner, ownerEmail, "usr_", "key_", "thread-reply", "thread-new", "/refresh"]) assert(!conversationHtml.includes(secret), `conversation capability exposed ${secret}`);
+
   const sessionMint = await mint("review_document", revisionId, { cookie: cookie(owner) });
   const keyMint = await mint("review_document", accountId, { authorization: `Bearer ${key}` });
   const manifestMint = await mint("stack_document", manifestId, { authorization: `Bearer ${key}` });

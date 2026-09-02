@@ -53,6 +53,12 @@ const V17_TABLES = ["review_revision_read_carries", "review_witness_supersession
 const V18_TABLES = ["review_revision_movements", "review_revision_equivalences", "review_revision_read_boundaries"];
 const V19_TABLES = ["review_stacks", "review_stack_members", "review_stack_manifests", "review_stack_accounts", "review_stack_witness_requests", "review_stack_witness_claims", "review_stack_witness_supersessions", "review_stack_pr_observations", "review_stack_refresh_jobs", "review_stack_idempotency", "project_review_stacks"];
 const V20_TABLES = ["share_document_capabilities", "share_capability_files", "share_capability_items", "share_capability_attachments"];
+const V21_TABLES = [
+  "review_thread_scopes", "review_threads", "review_thread_anchors", "review_thread_entries", "review_thread_idempotency",
+  "review_github_threads", "review_github_thread_observations", "review_github_comments", "review_github_comment_observations",
+  "review_github_reviews", "review_github_review_observations", "review_conversation_imports", "review_conversation_refresh_idempotency",
+  "share_capability_local_threads", "share_capability_github_threads", "share_capability_github_comments", "share_capability_github_reviews",
+];
 
 /** The credential table has two properties the design argues for at length and the
  *  table-exists loops cannot see. A credential belongs to a PERSON: a workspace_id column
@@ -120,7 +126,7 @@ if (SCENARIO === "v0") {
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `user_version should be 20, got ${uv}`);
+  assert(uv === 21, `user_version should be 21, got ${uv}`);
 
   const user = db.query("SELECT * FROM users").get() as { id: string; email: string } | null;
   assert(!!user, "root user exists");
@@ -194,13 +200,13 @@ if (SCENARIO === "v11") {
   const { db } = await import("../src/db");
   migrate();
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `v11 database reaches 20, got ${uv}`);
+  assert(uv === 21, `v11 database reaches 21, got ${uv}`);
   assert(!!db.query("SELECT 1 FROM project_notes WHERE id = 'note_seed'").get(), "populated v11 data survives");
   for (const table of V12_TABLES) assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `table ${table} exists after v11 migration`);
   for (const table of V13_TABLES) assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `table ${table} exists after v13 migration`);
   for (const table of V14_TABLES) assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `table ${table} exists after v14 migration`);
   for (const table of V15_TABLES) assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `table ${table} exists after v15 migration`);
-  for (const table of [...V16_TABLES, ...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES]) assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `table ${table} exists after the v16 through v19 migrations`);
+  for (const table of [...V16_TABLES, ...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES, ...V21_TABLES]) assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `table ${table} exists after the v16 through v19 migrations`);
   console.log("migrate v11: all assertions passed");
   process.exit(0);
 }
@@ -226,7 +232,7 @@ if (SCENARIO === "v12") {
   const { db } = await import("../src/db");
   migrate();
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `v12 database reaches 20, got ${uv}`);
+  assert(uv === 21, `v12 database reaches 21, got ${uv}`);
   assert(!!db.query("SELECT 1 FROM stage_captures WHERE id = 'stg_capture01' AND slug = 'legacy-stage'").get(), "populated v12 capture survives");
   assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'stage_capture_builders'").get(), "builder table is additive");
   assert(db.query("SELECT 1 FROM stage_capture_builders WHERE capture_id = 'stg_capture01'").get() === null, "legacy capture has no invented builder packet");
@@ -248,7 +254,7 @@ if (SCENARIO === "fresh") {
   const wsId = getMeta("legacy_workspace_id")!;
   assert(/^ws_[0-9abcdefghjkmnpqrstvwxyz]{10}$/.test(wsId), `ws id shape: ${wsId}`);
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `user_version should be 20, got ${uv}`);
+  assert(uv === 21, `user_version should be 21, got ${uv}`);
   const iCount = (db.query("SELECT COUNT(*) c FROM images").get() as { c: number }).c;
   assert(iCount === 0, `fresh db has an empty images table, got ${iCount}`);
   const user = db.query("SELECT * FROM users").get() as { email: string } | null;
@@ -263,7 +269,7 @@ if (SCENARIO === "fresh") {
   assert(bCount === 0, `fresh db has no bundles, got ${bCount}`);
   // v3/v4: the overseer tables and the shares table exist on a fresh boot too.
   assertCredentialShape(db as unknown as Database);
-  for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES, ...V6_TABLES, ...V12_TABLES, ...V13_TABLES, ...V14_TABLES, ...V15_TABLES, ...V16_TABLES, ...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES]) {
+  for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES, ...V6_TABLES, ...V12_TABLES, ...V13_TABLES, ...V14_TABLES, ...V15_TABLES, ...V16_TABLES, ...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES, ...V21_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `table ${table} exists on a fresh db`);
   }
@@ -343,7 +349,7 @@ if (SCENARIO === "v2") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `user_version should be 20, got ${uv}`);
+  assert(uv === 21, `user_version should be 21, got ${uv}`);
 
   assertCredentialShape(db as unknown as Database);
   for (const table of [...V3_TABLES, ...V4_TABLES, ...V5_TABLES, ...V6_TABLES]) {
@@ -360,7 +366,7 @@ if (SCENARIO === "v2") {
   // A second run is a no-op: still v4, no duplicate rows, no throw.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 20, `user_version stays 20 after re-run, got ${uv2}`);
+  assert(uv2 === 21, `user_version stays 21 after re-run, got ${uv2}`);
   const bCount2 = (db.query("SELECT COUNT(*) c FROM bundles").get() as { c: number }).c;
   assert(bCount2 === 1, `no duplicate bundles after re-run, got ${bCount2}`);
   const rCount = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
@@ -369,13 +375,13 @@ if (SCENARIO === "v2") {
   // A database from a newer binary is refused rather than half-read. One above the
   // ladder's top, which moves with it: stamping the CURRENT maximum would prove nothing,
   // because this release accepts it.
-  db.run("PRAGMA user_version = 21");
+  db.run("PRAGMA user_version = 22");
   let threw = false;
   try {
     migrate();
   } catch (err) {
     threw = true;
-    assert(/user_version 21/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
+    assert(/user_version 22/.test((err as Error).message), `actionable message, got: ${(err as Error).message}`);
   }
   assert(threw, "migrate must throw on a user_version newer than it knows");
   db.run("PRAGMA user_version = 12");
@@ -426,7 +432,7 @@ if (SCENARIO === "v3") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `user_version should be 20, got ${uv}`);
+  assert(uv === 21, `user_version should be 21, got ${uv}`);
   assertCredentialShape(db as unknown as Database);
   for (const table of [...V4_TABLES, ...V5_TABLES, ...V6_TABLES]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
@@ -471,7 +477,7 @@ if (SCENARIO === "v3") {
   // A second run is a no-op.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 20, `user_version stays 20 after re-run, got ${uv2}`);
+  assert(uv2 === 21, `user_version stays 21 after re-run, got ${uv2}`);
   const rCount2 = (db.query("SELECT COUNT(*) c FROM reviews").get() as { c: number }).c;
   assert(rCount2 === 1, `no duplicate reviews after re-run, got ${rCount2}`);
   const sCount = (db.query("SELECT COUNT(*) c FROM shares").get() as { c: number }).c;
@@ -708,7 +714,7 @@ if (SCENARIO === "v5stops") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `ordinary boot reaches 20, got ${uv}`);
+  assert(uv === 21, `ordinary boot reaches 21, got ${uv}`);
   const still = db
     .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
     .get();
@@ -744,7 +750,7 @@ if (SCENARIO === "v5dropafterboot") {
   // Boot one: ordinary, no opt-in. The table stands, as the release intends.
   migrate();
   const first = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(first === 20, `ordinary boot reaches 20, got ${first}`);
+  assert(first === 21, `ordinary boot reaches 21, got ${first}`);
   assert(
     !!db
       .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
@@ -768,7 +774,7 @@ if (SCENARIO === "v5dropafterboot") {
     .get("freshness_dropped") as { value: string } | null;
   assert(!!stamped, "the drop is recorded in meta rather than in user_version");
   const after = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(after === 20, `and the version is untouched by it, got ${after}`);
+  assert(after === 21, `and the version is untouched by it, got ${after}`);
 
   // Idempotent: a third boot with the variable still set does nothing and says nothing.
   migrate();
@@ -795,7 +801,7 @@ if (SCENARIO === "v5drop") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `user_version should be 20, got ${uv}`);
+  assert(uv === 21, `user_version should be 21, got ${uv}`);
   const dropped = db
     .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'review_freshness'")
     .get();
@@ -849,7 +855,7 @@ if (SCENARIO === "v5drop") {
   // A second run is a no-op: still 6, nothing to re-drop.
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 20, `user_version stays 20 after re-run, got ${uv2}`);
+  assert(uv2 === 21, `user_version stays 21 after re-run, got ${uv2}`);
 
   console.log("migrate v5drop: all assertions passed");
   process.exit(0);
@@ -877,7 +883,7 @@ if (SCENARIO === "v6ambiguous") {
     DROP TABLE IF EXISTS github_user_credentials;
     DROP TABLE IF EXISTS github_user_oauth_claims;
     DROP TABLE IF EXISTS review_freshness;
-    ${V20_TABLES.map((table) => `DROP TABLE ${table};`).join("\n")}
+    ${[...V20_TABLES, ...V21_TABLES].map((table) => `DROP TABLE ${table};`).join("\n")}
     PRAGMA user_version = 6;
   `);
   const stamped = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
@@ -890,7 +896,7 @@ if (SCENARIO === "v6ambiguous") {
   migrate();
 
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `user_version should be 20, got ${uv}`);
+  assert(uv === 21, `user_version should be 21, got ${uv}`);
   for (const table of ["github_user_credentials", "github_user_oauth_claims"]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `${table} exists after the repair`);
@@ -898,7 +904,7 @@ if (SCENARIO === "v6ambiguous") {
 
   migrate();
   const uv2 = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv2 === 20, `user_version stays 20 after re-run, got ${uv2}`);
+  assert(uv2 === 21, `user_version stays 21 after re-run, got ${uv2}`);
   for (const table of ["github_user_credentials", "github_user_oauth_claims"]) {
     const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     assert(!!row, `${table} survives the second run`);
@@ -914,7 +920,7 @@ if (SCENARIO === "v13") {
   const { migrate } = await import("../src/migrate");
   const { db } = await import("../src/db");
   migrate();
-  db.exec([...V20_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " DROP TABLE stage_change_reads; PRAGMA user_version = 13;");
+  db.exec([...V20_TABLES, ...V21_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " DROP TABLE stage_change_reads; PRAGMA user_version = 13;");
   db.run(
     "INSERT INTO stages (id, workspace_id, slug, repo, repo_id, branch, lineage_base_ref, lineage_base_sha, latest_version, created_by_user_id, created_by_key_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
     ["sta_0000000000", "ws_0000000000", "migration-stage", "acme/repo", 1, "feature", "main", "a".repeat(40), "usr_0000000000", "key_0000000000", 1, 1],
@@ -925,7 +931,7 @@ if (SCENARIO === "v13") {
   );
   migrate();
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `user_version should be 20, got ${uv}`);
+  assert(uv === 21, `user_version should be 21, got ${uv}`);
   assert(!!db.query("SELECT 1 FROM stages WHERE slug = 'migration-stage'").get(), "the populated v13 stage survives");
   assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'stage_change_reads'").get(), "the v14 read table exists");
   db.run("INSERT INTO stage_change_reads VALUES (?, ?, ?, ?, ?)", ["ws_0000000000", "stv_0000000000", "usr_0000000000", "chg_" + "b".repeat(64), 2]);
@@ -957,7 +963,7 @@ if (SCENARIO === "v14") {
 
   migrate();
   // Back down to the shape the previous image left behind, then populate it.
-  db.exec([...V15_TABLES, ...V16_TABLES, ...V17_TABLES, ...V20_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 14;");
+  db.exec([...V15_TABLES, ...V16_TABLES, ...V17_TABLES, ...V20_TABLES, ...V21_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 14;");
 
   const STAGE_DOC = JSON.stringify({
     identity: { id: "sta_0000000000", slug: "carried-stage", version: 1, title: "Carried stage", createdAt: "2026-01-01T00:00:00.000Z" },
@@ -991,7 +997,7 @@ if (SCENARIO === "v14") {
 
   migrate();
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `a populated v14 database reaches 20, got ${uv}`);
+  assert(uv === 21, `a populated v14 database reaches 21, got ${uv}`);
 
   const stageDoc = (db.query("SELECT doc FROM stage_versions WHERE id = 'stv_0000000000'").get() as { doc: string } | null)?.doc;
   assert(stageDoc === STAGE_DOC, "the StageDoc V1 JSON survives byte for byte");
@@ -1053,7 +1059,7 @@ if (SCENARIO === "v15") {
   const { rmSync, writeFileSync: writeBackup } = await import("node:fs");
 
   migrate();
-  db.exec([...V16_TABLES, ...V17_TABLES, ...V20_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 15;");
+  db.exec([...V16_TABLES, ...V17_TABLES, ...V20_TABLES, ...V21_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 15;");
 
   const HEAD = "a".repeat(40), BASE_TIP = "b".repeat(40), MERGE = "c".repeat(40);
   const REVISION_DOC = JSON.stringify({
@@ -1114,7 +1120,7 @@ if (SCENARIO === "v15") {
 
   migrate();
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `a populated v15 database reaches 20, got ${uv}`);
+  assert(uv === 21, `a populated v15 database reaches 21, got ${uv}`);
 
   assert((db.query("SELECT doc FROM review_revisions WHERE id = 'rvr_0000000000'").get() as { doc: string }).doc === REVISION_DOC, "the V1 evidence document survives byte for byte");
   assert((db.query("SELECT doc FROM review_accounts WHERE id = 'rac_0000000000'").get() as { doc: string }).doc === ACCOUNT_DOC, "the V1 account document survives byte for byte");
@@ -1176,7 +1182,7 @@ if (SCENARIO === "v16") {
   const { rmSync, writeFileSync: writeBackup } = await import("node:fs");
 
   migrate();
-  db.exec([...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 16;");
+  db.exec([...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES, ...V21_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 16;");
 
   const HEAD = "a".repeat(40), BASE_TIP = "b".repeat(40), MERGE = "c".repeat(40), MOVED = "d".repeat(40);
   const REVISION_DOC = JSON.stringify({
@@ -1265,7 +1271,7 @@ if (SCENARIO === "v16") {
 
   migrate();
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `a populated v16 database reaches 20, got ${uv}`);
+  assert(uv === 21, `a populated v16 database reaches 21, got ${uv}`);
 
   assert((db.query("SELECT doc FROM review_revisions WHERE id = 'rvr_0000000000'").get() as { doc: string }).doc === REVISION_DOC, "the V1 evidence document survives byte for byte");
   assert((db.query("SELECT doc FROM review_accounts WHERE id = 'rac_0000000000'").get() as { doc: string }).doc === ACCOUNT_DOC, "the V1 account document survives byte for byte");
@@ -1288,7 +1294,7 @@ if (SCENARIO === "v16") {
   const requestSchema = (db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'review_witness_requests'").get() as { sql: string }).sql;
   assert(/state IN \('pending','failed','published'\)/.test(requestSchema), `the witness-request CHECK was rewritten: ${requestSchema}`);
 
-  for (const table of [...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES]) {
+  for (const table of [...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES, ...V21_TABLES]) {
     assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `table ${table} exists after the v17 through v19 migrations`);
     const rows = (db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
     assert(rows === 0, `${table} starts empty, got ${rows}`);
@@ -1309,7 +1315,7 @@ if (SCENARIO === "v16") {
   assert((restored.query("SELECT doc FROM review_revisions WHERE id = 'rvr_0000000000'").get() as { doc: string }).doc === REVISION_DOC, "a v16 reader reopens the exact evidence document");
   assert((restored.query("SELECT doc FROM review_accounts WHERE id = 'rac_0000000000'").get() as { doc: string }).doc === ACCOUNT_DOC, "a v16 reader reopens the exact account document");
   assert(!!restored.query("SELECT 1 FROM review_pr_observations WHERE id = 'pob_0000000001'").get(), "a v16 reader reopens the webhook observation");
-  for (const table of [...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES]) {
+  for (const table of [...V17_TABLES, ...V18_TABLES, ...V19_TABLES, ...V20_TABLES, ...V21_TABLES]) {
     assert(restored.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) === null, `${table} is gone after the restore`);
   }
   restored.close();
@@ -1329,7 +1335,7 @@ if (SCENARIO === "v17") {
   const { rmSync, writeFileSync: writeBackup } = await import("node:fs");
 
   migrate();
-  db.exec([...V18_TABLES, ...V19_TABLES, ...V20_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 17;");
+  db.exec([...V18_TABLES, ...V19_TABLES, ...V20_TABLES, ...V21_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 17;");
   db.run(
     "INSERT INTO review_lineages (id, workspace_id, slug, repo, repo_id, branch, original_base_ref, original_base_sha, title, latest_revision, latest_account_version, created_by_user_id, created_by_key_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 2, NULL, ?, ?, ?, ?)",
     ["rln_0000000017", "ws_0000000000", "carried-lineage", "acme/repo", 7, "feature", "main", "c".repeat(40), "Carried lineage", "usr_0000000000", "key_0000000000", 1, 1],
@@ -1343,11 +1349,11 @@ if (SCENARIO === "v17") {
 
   migrate();
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `a populated v17 database reaches 20, got ${uv}`);
+  assert(uv === 21, `a populated v17 database reaches 21, got ${uv}`);
   assert(!!db.query("SELECT 1 FROM review_lineages WHERE id = 'rln_0000000017' AND latest_revision = 2").get(), "the lineage survives");
   assert(!!db.query("SELECT 1 FROM review_revision_change_reads WHERE revision_id = 'rvr_0000000017'").get(), "the member's read survives");
   assert(!!db.query("SELECT 1 FROM review_revision_read_carries WHERE target_revision_id = 'rvr_0000000018'").get(), "the carry provenance survives");
-  for (const table of [...V18_TABLES, ...V19_TABLES, ...V20_TABLES]) {
+  for (const table of [...V18_TABLES, ...V19_TABLES, ...V20_TABLES, ...V21_TABLES]) {
     assert(!!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `table ${table} exists after the v18 and v19 migrations`);
     const rows = (db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
     assert(rows === 0, `${table} starts empty, got ${rows}`);
@@ -1365,7 +1371,7 @@ if (SCENARIO === "v17") {
   const restoredVersion = (restored.query("PRAGMA user_version").get() as { user_version: number }).user_version;
   assert(restoredVersion === 17, `the restored backup is a v17 database, got ${restoredVersion}`);
   assert(!!restored.query("SELECT 1 FROM review_revision_read_carries WHERE target_revision_id = 'rvr_0000000018'").get(), "a v17 reader reopens the carry provenance");
-  for (const table of [...V18_TABLES, ...V19_TABLES, ...V20_TABLES]) {
+  for (const table of [...V18_TABLES, ...V19_TABLES, ...V20_TABLES, ...V21_TABLES]) {
     assert(restored.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) === null, `${table} is gone after the restore`);
   }
   restored.close();
@@ -1387,7 +1393,7 @@ if (SCENARIO === "v18") {
   const { rmSync, writeFileSync: writeBackup } = await import("node:fs");
 
   migrate();
-  db.exec([...V19_TABLES, ...V20_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 18;");
+  db.exec([...V19_TABLES, ...V20_TABLES, ...V21_TABLES].map((table) => `DROP TABLE ${table};`).join(" ") + " PRAGMA user_version = 18;");
 
   const HEAD = "a".repeat(40), BASE_TIP = "b".repeat(40), MERGE = "c".repeat(40), HEAD2 = "d".repeat(40);
   const REVISION_DOC = JSON.stringify({
@@ -1489,7 +1495,7 @@ if (SCENARIO === "v18") {
 
   migrate();
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 20, `a populated v18 database reaches 20, got ${uv}`);
+  assert(uv === 21, `a populated v18 database reaches 21, got ${uv}`);
   for (const table of populated) {
     const after = db.query(`SELECT * FROM ${table} ORDER BY rowid`).all();
     assert(JSON.stringify(after) === JSON.stringify(before.get(table)), `every ${table} row survives byte for byte`);
@@ -1553,6 +1559,7 @@ if (SCENARIO === "v19") {
   const { createHash } = await import("node:crypto");
   const { strToU8, unzipSync, zipSync } = await import("fflate");
   migrate();
+  db.exec(V21_TABLES.map((table) => `DROP TABLE ${table};`).join(" "));
   db.exec(`
     DROP TABLE share_capability_attachments;
     DROP TABLE share_capability_items;
@@ -1621,7 +1628,7 @@ if (SCENARIO === "v19") {
   const bundleBackup = new Uint8Array(readFileSync(bundleObject));
 
   migrate();
-  assert((db.query("PRAGMA user_version").get() as { user_version: number }).user_version === 20, "v19 reaches v20");
+  assert((db.query("PRAGMA user_version").get() as { user_version: number }).user_version === 21, "v19 reaches v21");
   assert(JSON.stringify(db.query("SELECT * FROM shares ORDER BY id").all()) === JSON.stringify(before), "every legacy share column survives exactly");
   for (const [id, , , , raw] of seeded) {
     const row = db.query<{ token_hash: string }, [string]>("SELECT token_hash FROM shares WHERE id = ?").get(id)!;
@@ -1660,7 +1667,7 @@ if (SCENARIO === "v19") {
   } catch (err) {
     v19Refused = true;
     const message = (err as Error).message;
-    assert(/user_version 20/.test(message) && /0 through 19/.test(message), `the v19 refusal names the version and range, got: ${message}`);
+    assert(/user_version 21/.test(message) && /0 through 19/.test(message), `the v19 refusal names the version and range, got: ${message}`);
   }
   assert(v19Refused, "a binary capped at v19 refuses the migrated database");
 
@@ -1683,6 +1690,80 @@ if (SCENARIO === "v19") {
   process.exit(0);
 }
 
+// The v21 additive conversation migration over populated task-8 capability authority.
+if (SCENARIO === "v20") {
+  process.env.AUTH_DISABLED = "true";
+  delete process.env.ALLOWED_EMAILS;
+  const { migrate, assertDatabaseVersionSupported } = await import("../src/migrate");
+  const { db } = await import("../src/db");
+  const { Database: Sqlite } = await import("bun:sqlite");
+  const { rmSync, writeFileSync: writeBackup } = await import("node:fs");
+  migrate();
+  db.exec(V21_TABLES.map((table) => `DROP TABLE ${table};`).join(" "));
+  db.exec(`
+    ALTER TABLE share_document_capabilities RENAME TO share_document_capabilities_v21;
+    CREATE TABLE share_document_capabilities (
+      share_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+      document_kind TEXT NOT NULL CHECK (document_kind IN ('review_revision','review_account','stack_manifest','stack_account')),
+      document_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+      UNIQUE (share_id, workspace_id, document_kind, document_id)
+    );
+    INSERT INTO share_document_capabilities (share_id, workspace_id, document_kind, document_id, created_at)
+      SELECT share_id, workspace_id, document_kind, document_id, created_at FROM share_document_capabilities_v21;
+    DROP TABLE share_document_capabilities_v21;
+    CREATE INDEX idx_share_document_capabilities_document ON share_document_capabilities (workspace_id, document_kind, document_id);
+    PRAGMA user_version = 20;
+  `);
+  const kinds = ["review_revision", "review_account", "stack_manifest", "stack_account"];
+  kinds.forEach((kind, index) => {
+    const id = `shr_00000002${index.toString().padStart(2, "0")}`;
+    db.run("INSERT INTO shares (id, workspace_id, kind, target, label, token_hash, created_by, created_at) VALUES (?, 'ws_0000000000', ?, ?, ?, ?, 'usr_0000000000', ?)", [id, kind.startsWith("stack") ? "stack_document" : "review_document", `${kind.startsWith("stack") ? kind === "stack_manifest" ? "rsm" : "rsa" : kind === "review_revision" ? "rvr" : "rac"}_0000000200`, kind, `hash-${kind}`, index + 1]);
+    db.run("INSERT INTO share_document_capabilities VALUES (?, 'ws_0000000000', ?, ?, ?)", [id, kind, `${kind.startsWith("stack") ? kind === "stack_manifest" ? "rsm" : "rsa" : kind === "review_revision" ? "rvr" : "rac"}_0000000200`, index + 1]);
+    db.run("INSERT INTO share_capability_files VALUES (?, 'ws_0000000000', 1, 'rvr_0000000200', 'stg_0000000200', ?, 1)", [id, `stf_00000002${index.toString().padStart(2, "0")}`]);
+    db.run("INSERT INTO share_capability_items VALUES (?, 'ws_0000000000', 1, 'rvr_0000000200', 'file', ?, 1)", [id, `stf_00000002${index.toString().padStart(2, "0")}`]);
+  });
+  db.run("INSERT INTO review_revisions (id, workspace_id, lineage_id, slug, revision, capture_id, schema_version, doc, digest, created_at) VALUES ('rvr_0000000200', 'ws_0000000000', 'rln_0000000200', 'v20-review', 1, 'stg_0000000200', 1, ?, 'revision-v20', 1)", ['{"v20":"revision"}']);
+  db.run("INSERT INTO review_accounts (id, workspace_id, lineage_id, revision_id, revision, slug, version, schema_version, doc, digest, witness_user_id, witness_key_id, created_at) VALUES ('rac_0000000200', 'ws_0000000000', 'rln_0000000200', 'rvr_0000000200', 1, 'v20-review', 1, 1, ?, 'account-v20', 'usr_0000000000', 'key_0000000000', 1)", ['{"v20":"account"}']);
+  db.run("INSERT INTO review_stack_manifests (id, stack_id, workspace_id, slug, version, predecessor_version, reason, schema_version, doc, digest, created_at) VALUES ('rsm_0000000200', 'rsk_0000000200', 'ws_0000000000', 'v20-stack', 1, 0, 'created', 1, ?, 'manifest-v20', 1)", ['{"v20":"manifest"}']);
+  db.run("INSERT INTO review_stack_accounts (id, stack_id, manifest_id, workspace_id, slug, version, schema_version, doc, digest, witness_user_id, witness_key_id, created_at) VALUES ('rsa_0000000200', 'rsk_0000000200', 'rsm_0000000200', 'ws_0000000000', 'v20-stack', 1, 1, ?, 'stack-account-v20', 'usr_0000000000', 'key_0000000000', 1)", ['{"v20":"stack-account"}']);
+  db.run("INSERT INTO review_revision_change_reads VALUES ('ws_0000000000', 'rvr_0000000200', 'usr_0000000000', ?, 1)", [`chg_${"c".repeat(64)}`]);
+  db.run("INSERT INTO project_review_lineages VALUES ('prj_0000000200', 'ws_0000000000', 'v20-review', 1)");
+  db.run("INSERT INTO project_review_stacks VALUES ('prj_0000000200', 'ws_0000000000', 'v20-stack', 1)");
+  const beforeScopes = db.query("SELECT * FROM share_document_capabilities ORDER BY share_id").all();
+  const beforeShares = db.query("SELECT * FROM shares WHERE id LIKE 'shr_00000002%' ORDER BY id").all();
+  const beforeDocuments = db.query("SELECT doc, digest FROM review_revisions WHERE id = 'rvr_0000000200' UNION ALL SELECT doc, digest FROM review_accounts WHERE id = 'rac_0000000200' UNION ALL SELECT doc, digest FROM review_stack_manifests WHERE id = 'rsm_0000000200' UNION ALL SELECT doc, digest FROM review_stack_accounts WHERE id = 'rsa_0000000200'").all();
+  const backup = db.serialize();
+  migrate();
+  assert((db.query("PRAGMA user_version").get() as { user_version: number }).user_version === 21, "v20 reaches v21");
+  assert(JSON.stringify(db.query("SELECT share_id, workspace_id, document_kind, document_id, created_at FROM share_document_capabilities ORDER BY share_id").all()) === JSON.stringify(beforeScopes), "every v20 capability scope column survives");
+  assert(JSON.stringify(db.query("SELECT * FROM shares WHERE id LIKE 'shr_00000002%' ORDER BY id").all()) === JSON.stringify(beforeShares), "every v20 share byte survives");
+  assert(JSON.stringify(db.query("SELECT doc, digest FROM review_revisions WHERE id = 'rvr_0000000200' UNION ALL SELECT doc, digest FROM review_accounts WHERE id = 'rac_0000000200' UNION ALL SELECT doc, digest FROM review_stack_manifests WHERE id = 'rsm_0000000200' UNION ALL SELECT doc, digest FROM review_stack_accounts WHERE id = 'rsa_0000000200'").all()) === JSON.stringify(beforeDocuments), "every immutable document byte survives");
+  assert(!!db.query("SELECT 1 FROM review_revision_change_reads WHERE revision_id = 'rvr_0000000200'").get(), "revision read survives");
+  assert(!!db.query("SELECT 1 FROM project_review_lineages WHERE slug = 'v20-review'").get() && !!db.query("SELECT 1 FROM project_review_stacks WHERE slug = 'v20-stack'").get(), "Project joins survive");
+  assert((db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM share_document_capabilities WHERE conversation_scope = 'none'").get()!.n) === 4, "all existing capabilities default to conversation none");
+  for (const table of V21_TABLES) assert((db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n === 0, `${table} starts empty`);
+  const scopeColumns = db.query<{ name: string }, []>("PRAGMA table_info(review_thread_scopes)").all().map((row) => row.name);
+  assert(scopeColumns.includes("document_id") && !scopeColumns.includes("scope_id"), "local budgets key the immutable document");
+  for (const table of ["share_capability_local_threads", "share_capability_github_threads", "share_capability_github_comments", "share_capability_github_reviews"]) {
+    assert(db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().some((row) => row.name === "workspace_id"), `${table} carries workspace containment`);
+  }
+  const commentSchema = db.query<{ sql: string }, [string]>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get("review_github_comments")!.sql;
+  const reviewSchema = db.query<{ sql: string }, [string]>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get("review_github_reviews")!.sql;
+  assert(commentSchema.includes("workspace_id, thread_id, github_database_id") && reviewSchema.includes("workspace_id, lineage_id, github_database_id"), "imported identities include their thread or lineage boundary");
+  let refused = false;
+  try { assertDatabaseVersionSupported(20); } catch { refused = true; }
+  assert(refused, "the v20 maximum refuses v21");
+  db.close();
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(join(dataDir, `seer.db${suffix}`), { force: true });
+  writeBackup(join(dataDir, "seer.db"), backup);
+  const restored = new Sqlite(join(dataDir, "seer.db"), { readonly: true });
+  assert((restored.query("PRAGMA user_version").get() as { user_version: number }).user_version === 20, "restore reopens under v20");
+  assert(!restored.query<{ name: string }, []>("PRAGMA table_info(share_document_capabilities)").all().some((row) => row.name === "conversation_scope"), "v20 restore has no conversation column");
+  restored.close();
+  console.log("migrate v20: all assertions passed");
+  process.exit(0);
+}
+
 // A database from a FUTURE release. The old image must refuse rather than walk it, and
 // the refusal has to name the range it understands: an image that quietly served a
 // schema it does not know is the failure this guard exists to prevent.
@@ -1692,18 +1773,18 @@ if (SCENARIO === "newer") {
   const { migrate } = await import("../src/migrate");
   const { db } = await import("../src/db");
   migrate();
-  db.exec("PRAGMA user_version = 21;");
+  db.exec("PRAGMA user_version = 22;");
   let threw = false;
   try {
     migrate();
   } catch (err) {
     threw = true;
     const message = (err as Error).message;
-    assert(/user_version 21/.test(message) && /0 through 20/.test(message), `the refusal names the version and the range, got: ${message}`);
+    assert(/user_version 22/.test(message) && /0 through 21/.test(message), `the refusal names the version and the range, got: ${message}`);
   }
   assert(threw, "a user_version above the ladder's top must be refused");
   const uv = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-  assert(uv === 21, `the refused database is left untouched, got ${uv}`);
+  assert(uv === 22, `the refused database is left untouched, got ${uv}`);
   console.log("migrate newer: all assertions passed");
   process.exit(0);
 }

@@ -58,11 +58,24 @@ publishing, no refresh. Every write path keeps requiring a session or an API key
 share resolver returns a reader identity that fails those checks by construction rather
 than by a forgotten branch.
 
-**It does not show the workspace's own conversation.** Legacy review links permanently
-keep their shipped no-annotation and no-conversation behavior. New document capabilities
-also default to no conversation. Task 8 accepts no `conversation` field, so a client cannot
-mistake an unsupported field for a grant. A later explicit conversation scope must be a
-new snapshotted grant; it cannot widen an existing token.
+**Conversation is a separate exact grant.** Legacy review links permanently keep their
+shipped no-annotation and no-conversation behavior. Document capabilities default to
+`conversation_scope = none`. Existing task-8 capabilities keep that default and never
+consult snapshot rows, including malformed or stray rows inserted later.
+
+A new document capability may set `conversation: true`. Minting copies local threads only
+from the exact revision, account, manifest, and stack account named by the document. It
+copies an imported thread only when retained commit, path, side, object, and line facts
+place it on an exact pinned revision. Comments copy only under those threads. A review
+observation copies only when its commit is an exact pinned head. Unmappable and later
+conversation bodies never enter the grant.
+
+Each copied row carries the workspace and the reader rechecks its thread, observation,
+and document relationship before returning anything. Later local replies, threads, and
+imported identities do not appear. A later GitHub deletion tombstone is terminal and
+replaces a copied body with `Deleted on GitHub`. Conversation capabilities remain
+read-only, expose projected actors only, and render without refresh state or private Seer
+links.
 
 **It carries the change, not the codebase.** A shared review draws its hunks, the same
 ones the walkthrough drew. It does not draw the file around them: for a member the

@@ -20,6 +20,14 @@ import {
   type StackManifestRow,
 } from "./stack-db";
 import type { StackMemberSnapshot } from "./stack-types";
+import { conversationImportRunning } from "./conversation-import";
+import {
+  buildCapabilityImportedSnapshot,
+  capabilityConversationFingerprint,
+  type CapabilityImportedSnapshotPlan,
+  type ExactConversationPin,
+} from "./conversation-read";
+import { ConversationError } from "./conversation-types";
 import type {
   CapabilityAttachmentRow,
   CapabilityDocumentKind,
@@ -303,20 +311,78 @@ function attachmentRows(shareId: string, workspaceId: string, members: ExactMemb
   return rows;
 }
 
+function conversationPins(target: ExactDocument): ExactConversationPin[] {
+  return target.members.map((member) => ({
+    lineage: member.lineage,
+    revisionId: member.revision.id,
+    accountId: member.account?.id ?? null,
+    headSha: member.revision.doc.source.sourceHeadSha,
+  }));
+}
+
+/** Copy conversation authority while the exact document and share write are under the
+ * same SQLite transaction. Blob-backed placement was prepared before this short write;
+ * its complete identity fingerprint is rechecked under the lock before any row lands. */
+function snapshotConversation(shareId: string, workspaceId: string, target: ExactDocument, importedPlan: CapabilityImportedSnapshotPlan): void {
+  const lineageIds = target.members.map((member) => member.lineage.id);
+  if (lineageIds.some((id) => conversationImportRunning(workspaceId, id))) {
+    throw new ConversationError(409, "conversation_refresh_in_progress", "Conversation refresh is in progress.");
+  }
+  const revisionIds = new Set(target.members.map((member) => member.revision.id));
+  const accountIds = new Set(target.members.flatMap((member) => member.account ? [member.account.id] : []));
+  const stackAccountId = target.kind === "stack" ? target.account?.id ?? null : null;
+  const localCandidates = db.query<{ id: string; append_version: number; anchor_kind: string; revision_id: string | null; account_id: string | null; stack_account_id: string | null }, string[]>(
+    `SELECT DISTINCT t.id, t.append_version, a.anchor_kind, a.revision_id, a.account_id, a.stack_account_id
+     FROM review_threads t JOIN review_thread_anchors a ON a.thread_id = t.id
+     WHERE t.workspace_id = ? AND (
+       a.revision_id IN (${[...revisionIds].map(() => "?").join(",") || "NULL"})
+       OR a.account_id IN (${[...accountIds].map(() => "?").join(",") || "NULL"})
+       ${stackAccountId ? "OR a.stack_account_id = ?" : ""}
+     ) ORDER BY t.created_at, t.id`,
+  ).all(workspaceId, ...revisionIds, ...accountIds, ...(stackAccountId ? [stackAccountId] : []));
+  const local = localCandidates.filter((row) =>
+    (row.revision_id !== null && revisionIds.has(row.revision_id) && ["review", "change", "range"].includes(row.anchor_kind)) ||
+    (row.account_id !== null && accountIds.has(row.account_id) && ["account", "member_group"].includes(row.anchor_kind)) ||
+    (stackAccountId !== null && row.stack_account_id === stackAccountId && ["stack", "stack_group"].includes(row.anchor_kind))
+  );
+  const insertLocal = db.prepare("INSERT INTO share_capability_local_threads VALUES (?, ?, ?, ?, ?)");
+  local.forEach((row, index) => insertLocal.run(shareId, workspaceId, row.id, row.append_version, index + 1));
+
+  if (capabilityConversationFingerprint(workspaceId, conversationPins(target)) !== importedPlan.fingerprint) {
+    throw new ConversationError(409, "conversation_changed", "Conversation changed while the link was being created. Try again.");
+  }
+  let threadOrdinal = 1;
+  let commentOrdinal = 1;
+  let reviewOrdinal = 1;
+  const insertThread = db.prepare("INSERT INTO share_capability_github_threads VALUES (?, ?, ?, ?, ?)");
+  const insertComment = db.prepare("INSERT INTO share_capability_github_comments VALUES (?, ?, ?, ?, ?, ?)");
+  const insertReview = db.prepare("INSERT INTO share_capability_github_reviews VALUES (?, ?, ?, ?, ?)");
+  for (const thread of importedPlan.threads) {
+    insertThread.run(shareId, workspaceId, thread.threadId, thread.observationId, threadOrdinal++);
+    for (const comment of thread.comments) {
+      insertComment.run(shareId, workspaceId, thread.threadId, comment.commentId, comment.observationId, commentOrdinal++);
+    }
+  }
+  for (const review of importedPlan.reviews) insertReview.run(shareId, workspaceId, review.reviewId, review.observationId, reviewOrdinal++);
+}
+
 export interface CreatedDocumentCapability {
   id: string;
   token: string;
   projection: CapabilityDocumentProjection;
 }
 
-export const createDocumentCapability = db.transaction((input: {
+interface CreateDocumentCapabilityInput {
   wsId: string;
   kind: "review_document" | "stack_document";
   target: string;
   label: string;
   userId: string;
   expiresAt: number | null;
-}): CreatedDocumentCapability => {
+  conversation?: boolean;
+}
+
+const insertDocumentCapability = db.transaction((input: CreateDocumentCapabilityInput, importedPlan: CapabilityImportedSnapshotPlan | null): CreatedDocumentCapability => {
   const target = resolveCapabilityTargetForMint(input.wsId, input.kind, input.target);
   const id = tinyId("shr");
   const token = newShareToken();
@@ -326,8 +392,8 @@ export const createDocumentCapability = db.transaction((input: {
     [id, input.wsId, input.kind, target.documentId, input.label, hashKey(token), input.userId, now, input.expiresAt],
   );
   db.run(
-    "INSERT INTO share_document_capabilities (share_id, workspace_id, document_kind, document_id, created_at) VALUES (?, ?, ?, ?, ?)",
-    [id, input.wsId, target.documentKind, target.documentId, now],
+    "INSERT INTO share_document_capabilities (share_id, workspace_id, document_kind, document_id, created_at, conversation_scope) VALUES (?, ?, ?, ?, ?, ?)",
+    [id, input.wsId, target.documentKind, target.documentId, now, input.conversation ? "snapshot" : "none"],
   );
   const insertFile = db.prepare(
     "INSERT INTO share_capability_files (share_id, workspace_id, member_position, revision_id, capture_id, file_id, ordinal) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -341,15 +407,20 @@ export const createDocumentCapability = db.transaction((input: {
     "INSERT INTO share_capability_attachments (share_id, workspace_id, attachment_id, review_slug, ordinal) VALUES (?, ?, ?, ?, ?)",
   );
   for (const row of attachmentRows(id, input.wsId, target.members)) insertAttachment.run(row.share_id, row.workspace_id, row.attachment_id, row.review_slug, row.ordinal);
+  if (input.conversation) {
+    if (!importedPlan) throw new Error("Conversation capability has no prepared imported snapshot");
+    snapshotConversation(id, input.wsId, target, importedPlan);
+  }
   return { id, token, projection: projectionOf(target) };
-}) as (input: {
-  wsId: string;
-  kind: "review_document" | "stack_document";
-  target: string;
-  label: string;
-  userId: string;
-  expiresAt: number | null;
-}) => CreatedDocumentCapability;
+}) as (input: CreateDocumentCapabilityInput, importedPlan: CapabilityImportedSnapshotPlan | null) => CreatedDocumentCapability;
+
+export async function createDocumentCapability(input: CreateDocumentCapabilityInput): Promise<CreatedDocumentCapability> {
+  const target = resolveCapabilityTargetForMint(input.wsId, input.kind, input.target);
+  const importedPlan = input.conversation
+    ? await buildCapabilityImportedSnapshot(input.wsId, conversationPins(target))
+    : null;
+  return insertDocumentCapability(input, importedPlan);
+}
 
 function projectionOf(target: ExactDocument): CapabilityDocumentProjection {
   if (target.kind === "review") {

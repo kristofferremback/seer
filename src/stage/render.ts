@@ -17,6 +17,8 @@ import { getWorkspace, isMember, listUserWorkspaces } from "../db";
 import { escapeHtml } from "../escape";
 import { SLUG_RE } from "../ids";
 import { render as renderMarkdown } from "../overseer/markdown";
+import type { ProjectedGithubReview, ProjectedGithubThread, ProjectedLocalThread } from "../overseer/conversation-types";
+import type { ProjectedActor } from "../overseer/actor-projection";
 import { codeHtml, langOfPath, stats } from "../overseer/render-diff";
 import type { Hunk, HunkLine } from "../overseer/types";
 import { appBar, softNotFoundPage, type NavContext } from "../pages";
@@ -26,6 +28,7 @@ import {
   getStageCaptureForWorkspaces,
   getStageVersion,
   listStageReadChangeIds,
+  type StageCaptureChangeRow,
   type StageCaptureFileRow,
   type StageCaptureInventory,
   type StageIncompleteRow,
@@ -172,6 +175,26 @@ export interface ReaderDoc {
   /** The same thing short enough for the focus header: "v3", "rev 1". */
   pin: string;
   latest: boolean;
+  conversation?: ReaderConversation | null;
+}
+
+export interface ReaderConversation {
+  local: ProjectedLocalThread[];
+  imported: ProjectedGithubThread[];
+  reviews: ProjectedGithubReview[];
+  importState: "never" | "running" | "completed" | "failed";
+  complete: boolean;
+  truncated: boolean;
+  exactRevisionId: string;
+  exactAccountId: string | null;
+  createAction: string | null;
+  replyAction: ((threadId: string) => string) | null;
+  resolutionAction: ((threadId: string) => string) | null;
+  refreshAction: string | null;
+  returnTo: string;
+  overviewAnchor?: Record<string, string>;
+  changeIdOf?: (renderedId: string) => string;
+  fileIdOf?: (renderedId: string) => string;
 }
 
 /** Every URL the reader draws. The only thing in this module that knows what a promoted
@@ -342,7 +365,8 @@ function lineHtml(line: HunkLine, side: "unified" | "old" | "new", path: string)
   const mark = line.kind === "add" ? "+" : line.kind === "del" ? "−" : " ";
   const old = side === "new" ? "" : oldNumber;
   const newer = side === "old" ? "" : newNumber;
-  return `<div class="diff-line ${line.kind}"><span class="line-old">${old}</span><span class="line-new">${newer}</span><span class="line-mark">${mark}</span><span class="line-code">${codeHtml(line.content, language, line.wordRanges)}</span></div>`;
+  const number = (value: string, selectedSide: "old" | "new") => value === "" ? `<span class="line-${selectedSide}"></span>` : `<button type="button" class="line-${selectedSide}" data-line-select data-line-side="${selectedSide}" data-line-number="${value}" aria-label="Select ${selectedSide} line ${value}">${value}</button>`;
+  return `<div class="diff-line ${line.kind}">${number(old, "old")}${number(newer, "new")}<span class="line-mark">${mark}</span><span class="line-code">${codeHtml(line.content, language, line.wordRanges)}</span></div>`;
 }
 
 function diffHtml(hunk: Hunk): string {
@@ -628,12 +652,25 @@ function seamAttr(group: ReaderGroup): string {
   return group.category === null && group.explanation === null ? " data-seam" : "";
 }
 
-function groupCard(view: GroupView, readIds: Set<string>, routes: ReaderRoutes): string {
+function groupConversation(doc: ReaderDoc, groupId: string): string {
+  const conversation = doc.conversation;
+  if (!conversation) return "";
+  const threads = conversation.local.filter((thread) => thread.anchor.group_id === groupId);
+  const anchor: Record<string, string> | null = conversation.exactAccountId
+    ? { anchorKind: "member_group", accountId: conversation.exactAccountId, groupId }
+    : conversation.overviewAnchor?.stackAccountId
+      ? { anchorKind: "stack_group", stackAccountId: conversation.overviewAnchor.stackAccountId, groupId }
+      : null;
+  const create = anchor ? newThreadForm(conversation, anchor) : "";
+  return threads.length || create ? `<div class="group-conversation">${threads.map((thread) => localThreadHtml(thread, conversation)).join("")}${create}</div>` : "";
+}
+
+function groupCard(view: GroupView, readIds: Set<string>, routes: ReaderRoutes, doc: ReaderDoc): string {
   const tree = stageTree(view.treeFiles);
   const total = view.changes.length;
   const reviewLabel = total === 0 ? "Review material" : `Review ${total} change${total === 1 ? "" : "s"}`;
   const points = view.changes.slice(0, 3);
-  return `<section class="review-group-card" id="group-${esc(view.group.id)}" data-group="${esc(view.group.id)}"${categoryAttr(view.group)}${seamAttr(view.group)} data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}"><header class="group-head"><div class="group-sequence"><i aria-hidden="true"></i><span>${esc(groupSequence(view))}</span></div><h2>${esc(view.group.title)}</h2>${dimensions(view.group, undefined, "in-group")}</header>${view.group.explanation === null ? "" : accountCopy(view.group.explanation, "group-copy")}${view.group.attention ? `<p class="group-attention">${esc(view.group.attention)}</p>` : ""}${points.length === 0 ? "" : `<ol class="group-points">${points.map((change) => {
+  return `<section class="review-group-card" id="group-${esc(view.group.id)}" data-group="${esc(view.group.id)}"${categoryAttr(view.group)}${seamAttr(view.group)} data-change-ids="${view.changes.map((change) => change.item.change.id).join(",")}"><header class="group-head"><div class="group-sequence"><i aria-hidden="true"></i><span>${esc(groupSequence(view))}</span></div><h2>${esc(view.group.title)}</h2>${dimensions(view.group, undefined, "in-group")}</header>${view.group.explanation === null ? "" : accountCopy(view.group.explanation, "group-copy")}${groupConversation(doc, view.group.id)}${view.group.attention ? `<p class="group-attention">${esc(view.group.attention)}</p>` : ""}${points.length === 0 ? "" : `<ol class="group-points">${points.map((change) => {
     const line = change.item.hunk.newLines > 0 ? change.item.hunk.newStart : change.item.hunk.oldStart;
     return `<li><span>${String(change.ordinal).padStart(2, "0")}</span><code>${esc(change.file.path)}:L${line}</code>${change.member.description === null ? "" : `<p>${esc(exactExcerpt(change.member.description, 160).text)}</p>`}</li>`;
   }).join("")}${view.changes.length > points.length ? `<li class="remaining"><span>+</span><code></code><p>${view.changes.length - points.length} more in review</p></li>` : ""}</ol>`}${view.group.examples.length === 0 ? "" : `<ul class="group-examples">${view.group.examples.map((example) => `<li><code>${esc(example.code)}</code><span>${esc(example.text)}</span></li>`).join("")}</ul>`}<div class="group-preview"><div class="group-preview-files">${overviewTreeHtml(tree, view, readIds, routes)}</div>${extraMaterialHtml(view)}<footer>${routes.read ? `<span data-group-progress>${view.read} / ${total} read</span>` : ""}<a class="review-group-action" data-focus-link data-review="${esc(view.group.id)}" href="${routes.group(view.group.id)}">${reviewLabel}<span aria-hidden="true">→</span></a></footer></div></section>`;
@@ -780,6 +817,100 @@ function evidenceSection(doc: ReaderDoc): string {
   return `<section class="account-evidence" aria-label="Evidence"><h2>Evidence</h2><ul>${doc.evidence.map((item) => `<li>${item.href === null ? `<span>${esc(item.label)}</span>` : `<a href="${esc(item.href)}">${esc(item.label)}</a>`}<span>${esc(item.detail)}</span></li>`).join("")}</ul></section>`;
 }
 
+function actorName(actor: ProjectedActor): string {
+  if (actor.kind === "agent") return `${actor.label} · ${actor.model}`;
+  if (actor.kind === "github") return actor.login;
+  return actor.label;
+}
+
+function hiddenIdempotency(): string {
+  return `<input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`;
+}
+
+function localThreadHtml(thread: ProjectedLocalThread, conversation: ReaderConversation): string {
+  const entries = thread.entries.map((entry) => `<div class="thread-entry" data-entry-kind="${entry.kind}"><p><span>${esc(actorName(entry.author))}</span><time datetime="${esc(entry.createdAt)}">${esc(agoWords(Date.now() - Date.parse(entry.createdAt)))}</time></p>${entry.body === null ? `<small>${entry.kind === "resolved" ? "Resolved" : "Reopened"}</small>` : `<div class="markdown">${markdown(entry.body)}</div>`}</div>`).join("");
+  const place = thread.anchor.anchor_kind === "range" ? `<p class="thread-place">${esc(`${thread.anchor.side} L${thread.anchor.start_line}–${thread.anchor.end_line}`)}</p>` : "";
+  const reply = thread.state === "open" && conversation.replyAction ? `<form class="thread-reply" method="post" action="${esc(conversation.replyAction(thread.id))}">${hiddenIdempotency()}<input type="hidden" name="return" value="${esc(conversation.returnTo)}"><label>Reply<textarea name="body" maxlength="4000" required></textarea></label><span role="status" aria-live="polite"></span><button type="submit">Reply</button></form>` : "";
+  const resolution = conversation.resolutionAction ? `<form class="thread-resolution" method="post" action="${esc(conversation.resolutionAction(thread.id))}">${hiddenIdempotency()}<input type="hidden" name="state" value="${thread.state === "open" ? "resolved" : "open"}"><input type="hidden" name="return" value="${esc(conversation.returnTo)}"><button type="submit">${thread.state === "open" ? "Resolve" : "Reopen"}</button></form>` : "";
+  return `<article class="review-thread" id="${esc(thread.id)}" data-thread-state="${thread.state}">${place}${entries}${reply}${resolution}</article>`;
+}
+
+function githubThreadHtml(thread: ProjectedGithubThread): string {
+  const place = thread.placement.kind === "code" ? `on rev ${thread.placement.revision}` : thread.placement.reason.replaceAll("_", " ");
+  const comments = thread.comments.map((comment) => `<div class="thread-entry"><p><span>${esc(actorName(comment.author))}</span>${comment.url ? `<a href="${esc(comment.url)}" rel="noreferrer noopener">GitHub</a>` : ""}</p>${comment.deleted ? `<small>Deleted on GitHub</small>` : `<div class="markdown">${markdown(comment.body ?? "")}</div>`}</div>`).join("");
+  return `<article class="review-thread imported" id="${esc(thread.id)}" data-thread-state="${thread.resolved ? "resolved" : "open"}"><p class="thread-place">${esc(place)}</p>${thread.deleted ? `<p>Deleted on GitHub</p>` : comments}</article>`;
+}
+
+function newThreadForm(conversation: ReaderConversation, anchor: Record<string, string>, label = "New thread"): string {
+  if (!conversation.createAction) return "";
+  const hidden = Object.entries(anchor).map(([name, value]) => `<input type="hidden" name="${esc(name)}" value="${esc(value)}">`).join("");
+  return `<form class="thread-new" method="post" action="${esc(conversation.createAction)}">${hiddenIdempotency()}${hidden}<input type="hidden" name="return" value="${esc(conversation.returnTo)}"><label>${esc(label)}<textarea name="body" maxlength="4000" required></textarea></label><span role="status" aria-live="polite"></span><button type="submit">Add</button></form>`;
+}
+
+function discussionSection(doc: ReaderDoc): string {
+  const conversation = doc.conversation;
+  if (!conversation) return "";
+  const currentStackAccount = conversation.overviewAnchor?.stackAccountId ?? null;
+  const exact = conversation.local.filter((thread) => {
+    const anchor = thread.anchor;
+    if (currentStackAccount !== null) return anchor.stack_account_id === currentStackAccount && anchor.anchor_kind === "stack";
+    return anchor.revision_id === conversation.exactRevisionId &&
+      (anchor.anchor_kind === "review" || (anchor.anchor_kind === "account" && anchor.account_id === conversation.exactAccountId));
+  });
+  const earlier = conversation.local.filter((thread) => {
+    const anchor = thread.anchor;
+    if (anchor.anchor_kind === "range") return false;
+    if (currentStackAccount !== null) return anchor.stack_account_id !== currentStackAccount;
+    return anchor.revision_id !== conversation.exactRevisionId || (anchor.account_id !== null && anchor.account_id !== conversation.exactAccountId);
+  });
+  const imported = conversation.imported.filter((thread) => thread.placement.kind === "conversation" || thread.placement.revisionId !== conversation.exactRevisionId);
+  const reviews = conversation.reviews.filter((review) => !review.deleted).map((review) => `<article class="review-thread imported"><p><span>${esc(actorName(review.author))}</span><span>${esc(review.state.replaceAll("_", " "))}</span>${review.url ? `<a href="${esc(review.url)}" rel="noreferrer noopener">GitHub</a>` : ""}</p>${review.body ? `<div class="markdown">${markdown(review.body)}</div>` : ""}</article>`).join("");
+  const state = conversation.importState === "failed" ? `<p class="conversation-state">Refresh failed</p>` : conversation.truncated ? `<p class="conversation-state">Import truncated</p>` : "";
+  const refresh = conversation.refreshAction ? `<form class="conversation-refresh" method="post" action="${esc(conversation.refreshAction)}">${hiddenIdempotency()}<input type="hidden" name="return" value="${esc(conversation.returnTo)}"><button type="submit">Refresh</button></form>` : "";
+  const createAnchor: Record<string, string> = conversation.overviewAnchor ?? (conversation.exactAccountId ? { anchorKind: "account", accountId: conversation.exactAccountId } : { anchorKind: "review" });
+  const content = exact.map((thread) => localThreadHtml(thread, conversation)).join("") + imported.map(githubThreadHtml).join("") + reviews + (earlier.length ? `<details class="earlier-discussion"><summary>Earlier discussion</summary>${earlier.map((thread) => localThreadHtml(thread, conversation)).join("")}</details>` : "");
+  if (!content && !state && !refresh && !conversation.createAction) return "";
+  return `<section class="discussion" aria-label="Discussion"><h2>Discussion</h2>${state}${content}${newThreadForm(conversation, createAnchor)}${refresh}</section>`;
+}
+
+function overlaps(start: number, end: number, changeStart: number, changeLines: number): boolean {
+  return changeLines > 0 && start <= changeStart + changeLines - 1 && end >= changeStart;
+}
+
+export function conversationPlacementHomes(conversation: ReaderConversation | null | undefined, changes: StageCaptureChangeRow[]): { local: Map<string, string>; imported: Map<string, string> } {
+  const local = new Map<string, string>();
+  const imported = new Map<string, string>();
+  if (!conversation) return { local, imported };
+  const sourceFile = (id: string) => conversation.fileIdOf?.(id) ?? id;
+  const choose = (fileId: string, side: "old" | "new", start: number, end: number): string | null => {
+    const candidates = changes.filter((change) => sourceFile(change.file_id) === fileId);
+    const matching = candidates.find((change) => overlaps(start, end, side === "old" ? change.old_start : change.new_start, side === "old" ? change.old_lines : change.new_lines));
+    return matching?.id ?? candidates[0]?.id ?? null;
+  };
+  for (const thread of conversation.local) {
+    const anchor = thread.anchor;
+    if (anchor.anchor_kind !== "range" || !anchor.file_id || !anchor.side || !anchor.start_line || !anchor.end_line) continue;
+    const home = choose(anchor.file_id, anchor.side, anchor.start_line, anchor.end_line);
+    if (home) local.set(thread.id, home);
+  }
+  for (const thread of conversation.imported) {
+    if (thread.placement.kind !== "code") continue;
+    const home = choose(thread.placement.fileId, thread.placement.side, thread.placement.startLine, thread.placement.endLine);
+    if (home) imported.set(thread.id, home);
+  }
+  return { local, imported };
+}
+
+function changeConversation(doc: ReaderDoc, change: ChangeView, homes: ReturnType<typeof conversationPlacementHomes>): string {
+  const conversation = doc.conversation;
+  if (!conversation) return "";
+  const local = conversation.local.filter((thread) => thread.anchor.revision_id === conversation.exactRevisionId && (thread.anchor.change_id === (conversation.changeIdOf?.(change.item.change.id) ?? change.item.change.id) || homes.local.get(thread.id) === change.item.change.id));
+  const imported = conversation.imported.filter((thread) => thread.placement.kind === "code" && thread.placement.revisionId === conversation.exactRevisionId && homes.imported.get(thread.id) === change.item.change.id);
+  const anchor = { anchorKind: "change", changeId: conversation.changeIdOf?.(change.item.change.id) ?? change.item.change.id };
+  const range = conversation.createAction ? `<details class="range-thread"><summary>Line range</summary><form class="thread-new range" method="post" action="${esc(conversation.createAction)}">${hiddenIdempotency()}<input type="hidden" name="anchorKind" value="range"><input type="hidden" name="fileId" value="${esc(conversation.fileIdOf?.(change.file.id) ?? change.file.id)}"><label>Side<select name="side"><option value="new">New</option><option value="old">Old</option></select></label><label>Start line<input name="startLine" type="number" min="1" required></label><label>End line<input name="endLine" type="number" min="1" required></label><label>Message<textarea name="body" maxlength="4000" required></textarea></label><input type="hidden" name="return" value="${esc(conversation.returnTo)}"><span role="status" aria-live="polite"></span><button type="submit">Add</button></form></details>` : "";
+  return `<div class="ledger-conversation">${local.map((thread) => localThreadHtml(thread, conversation)).join("")}${imported.map(githubThreadHtml).join("")}${newThreadForm(conversation, anchor)}${range}</div>`;
+}
+
 /** The pin is said once, in the header; the rail carries only the progress. */
 function groupNavigation(views: GroupView[], totalRead: number, total: number, handling: boolean): string {
   const progress = total === 0 ? 100 : Math.round(totalRead / total * 100);
@@ -809,13 +940,15 @@ function fileReview(
   return `<details class="file-review" id="${esc(anchor)}" open><summary class="file-review-head"><span class="file-disclosure" aria-hidden="true">⌄</span><span class="file-review-title"><strong>${esc(file.old_path ? `${file.old_path} → ${file.path}` : file.path)}</strong>${routes.read ? `<small><span data-file-progress>${read} / ${changes.length} read</span></small>` : ""}</span>${diffStat(added, removed)}</summary><div class="file-review-body">${changes.map((change, index) => `${index === 0 ? "" : gapControl(routes, changes[index - 1]!, change)}${hunkReview(view, change, readIds, routes)}`).join("")}</div></details>`;
 }
 
-function focusLedger(view: GroupView, readIds: Set<string>, routes: ReaderRoutes): string {
-  if (view.changes.length === 0) return `<p class="empty-ledger">No code changes in this group.</p>`;
-  return view.changes.map((change) => {
+function focusLedger(view: GroupView, readIds: Set<string>, routes: ReaderRoutes, doc: ReaderDoc, allChanges: StageCaptureChangeRow[]): string {
+  const groupThreads = groupConversation(doc, view.group.id);
+  if (view.changes.length === 0) return `${groupThreads}<p class="empty-ledger">No code changes in this group.</p>`;
+  const homes = conversationPlacementHomes(doc.conversation, allChanges);
+  return groupThreads + view.changes.map((change) => {
     const id = change.item.change.id;
     const read = readIds.has(id);
     const line = change.item.hunk.newLines > 0 ? change.item.hunk.newStart : change.item.hunk.oldStart;
-    return `<article class="ledger-card${routes.read && read ? " is-read" : ""}" data-ledger-change="${id}" data-change="${id}"${routes.read ? ` data-read="${read}"` : ""}><button type="button" data-activate-change="${id}"><span>${String(change.ordinal).padStart(2, "0")}</span><code>${esc(change.file.path)}:L${line}</code>${diffStat(change.diff.added, change.diff.removed)}</button><div class="ledger-body">${dimensions(view.group, routes.read ? (read ? "Read" : "Unread") : undefined, "in-ledger")}${change.member.description === null ? "" : `<p>${esc(change.member.description)}</p>`}${readForm(routes, view.group.id, id, read, "ledger-read")}</div></article>`;
+    return `<article class="ledger-card${routes.read && read ? " is-read" : ""}" data-ledger-change="${id}" data-change="${id}"${routes.read ? ` data-read="${read}"` : ""}><button type="button" data-activate-change="${id}"><span>${String(change.ordinal).padStart(2, "0")}</span><code>${esc(change.file.path)}:L${line}</code>${diffStat(change.diff.added, change.diff.removed)}</button><div class="ledger-body">${dimensions(view.group, routes.read ? (read ? "Read" : "Unread") : undefined, "in-ledger")}${change.member.description === null ? "" : `<p>${esc(change.member.description)}</p>`}${readForm(routes, view.group.id, id, read, "ledger-read")}${changeConversation(doc, change, homes)}</div></article>`;
   }).join("");
 }
 
@@ -877,6 +1010,7 @@ function focusDialog(
   doc: ReaderDoc,
   activeChange: string | null,
   options: RenderReaderOptions = {},
+  allChanges: StageCaptureChangeRow[] = [],
 ): string {
   const scopeAttrs = ` data-layer="${esc(options.scope?.current ?? "")}" data-page="${options.page ? options.page.number : ""}"`;
   if (!selected) return `<dialog class="focus-dialog" data-focus-dialog${scopeAttrs} aria-label="Group review"></dialog>`;
@@ -932,7 +1066,7 @@ function focusDialog(
       ? fileEntries
       : [...fileEntries, { id: materials[0]?.member.id ?? leafFiles[0]!.member.id, html: materialHtml }];
   });
-  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}"${scopeAttrs} data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="${esc(options.brandPath ?? "/bundles")}">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong>${subtitle}</div><div class="focus-head-actions"><span${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span>${doc.pullRequest ? pullRequestLink(doc.pullRequest) : ""}${pageControls(options.page, "header")}<button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream${seams ? " data-seams" : ""}><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}${scopeControl(options.scope)}</div>${diffStat(selected.added, selected.removed)}</header>${layered(streamEntries)}</main><aside class="focus-right" aria-label="Review details"><header>${routes.read ? `<button type="button" data-filter-unread aria-pressed="false">Unread</button>` : ""}<button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${ledgerHead}${focusPullRequest(doc.pullRequest)}${focusLedger(selected, readIds, routes)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
+  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}"${scopeAttrs} data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="${esc(options.brandPath ?? "/bundles")}">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong>${subtitle}</div><div class="focus-head-actions"><span${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span>${doc.pullRequest ? pullRequestLink(doc.pullRequest) : ""}${pageControls(options.page, "header")}<button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream${seams ? " data-seams" : ""}><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}${scopeControl(options.scope)}</div>${diffStat(selected.added, selected.removed)}</header>${layered(streamEntries)}</main><aside class="focus-right" aria-label="Review details"><header>${routes.read ? `<button type="button" data-filter-unread aria-pressed="false">Unread</button>` : ""}<button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${ledgerHead}${focusPullRequest(doc.pullRequest)}${focusLedger(selected, readIds, routes, doc, allChanges)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
 }
 
 function shareControl(access: ReaderAccess): string {
@@ -1025,7 +1159,7 @@ export async function renderReaderPage(
     }
     const rail = summarizeGroups(doc.groups, readIds).map((summary) => summary.index === selectedIndex ? summaryOf(selected) : summary);
     const bodyState = handling ? ` data-stage-change-ids="${allChangeIds.join(",")}" data-stage-read-ids="${[...readIds].join(",")}"` : "";
-    const focusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(selected.group.title)} · ${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}>${focusDialog(selected, rail, readIds, routes, doc, requestedChange, options)}<script>${STAGE_CLIENT}</script></body></html>`;
+    const focusPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(selected.group.title)} · ${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}>${focusDialog(selected, rail, readIds, routes, doc, requestedChange, options, inventory.changes)}<script>${STAGE_CLIENT}</script></body></html>`;
     return html(focusPage);
   }
 
@@ -1036,7 +1170,7 @@ export async function renderReaderPage(
     console.error(`[seer] ${label} walkthrough is inconsistent:`, err);
     return storageFailurePage(access, doc.title, 500);
   }
-  const groupCards = views.map((view) => groupCard(view, readIds, routes)).join("");
+  const groupCards = views.map((view) => groupCard(view, readIds, routes, doc)).join("");
   const historyLinks = routes.history()
     .map((entry) => `<a href="${entry.href}"${entry.current ? ` aria-current="page"` : ""}>${esc(entry.label)}</a>`)
     .join(" · ");
@@ -1046,7 +1180,7 @@ export async function renderReaderPage(
   const shell = access.kind === "member" ? appBar(access.nav) : `<a class="focus-brand" href="${esc(access.basePath)}">Seer</a>`;
   const terminalState = handling ? `<div><h2 data-unread-summary>${readCount === allChangeIds.length ? "Read" : `${allChangeIds.length - readCount} unread`}</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div>` : "";
   const mobileState = handling ? `<span data-progress>${readCount} / ${allChangeIds.length} read</span>` : "";
-  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}><div data-stage-background><div class="stage-shell">${shell}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${options.aside ?? ""}${focusSection(doc, views, routes)}${evidenceSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, readCount, allChangeIds.length, handling)}</aside><main class="walkthrough">${groupCards}<footer class="terminal">${terminalState}<p>${inventory.files.length} file${inventory.files.length === 1 ? "" : "s"}</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section>${shareControl(access)}</aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button>${mobileState}</nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, [], readIds, routes, doc, null, options)}<script>${STAGE_CLIENT}${access.kind === "member" && access.share ? DOCUMENT_SHARE_CLIENT : ""}</script></body></html>`;
+  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}><div data-stage-background><div class="stage-shell">${shell}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${options.aside ?? ""}${focusSection(doc, views, routes)}${evidenceSection(doc)}${discussionSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, readCount, allChangeIds.length, handling)}</aside><main class="walkthrough">${groupCards}<footer class="terminal">${terminalState}<p>${inventory.files.length} file${inventory.files.length === 1 ? "" : "s"}</p></footer></main><aside class="source-rail"><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section>${shareControl(access)}</aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button>${mobileState}</nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close review navigation"></button></div>${focusDialog(null, [], readIds, routes, doc, null, options, inventory.changes)}<script>${STAGE_CLIENT}${access.kind === "member" && access.share ? DOCUMENT_SHARE_CLIENT : ""}</script></body></html>`;
   return html(page);
 }
 

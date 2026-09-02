@@ -18,6 +18,7 @@ import { observationForRevision, observationStateWord, pullRequestUrl } from "./
 import { evidenceSeams } from "./revision-read";
 import { softNotFound } from "./render";
 import { renderStackCapability } from "./stack-render";
+import { readCapabilityConversation } from "./conversation-read";
 
 const REVIEW_FILE_RE = /^files\/([^/]+)\/?$/;
 const STACK_FILE_RE = /^m\/([1-9][0-9]?)\/files\/([^/]+)\/?$/;
@@ -98,6 +99,11 @@ async function root(req: Request, share: ShareRow, token: string): Promise<Respo
     return response.status === 404 ? softNotFound() : response;
   }
   const doc = reviewDoc(resolved, basePath);
+  if (resolved.scope.conversation_scope === "snapshot") {
+    const conversation = await readCapabilityConversation(resolved);
+    if (!conversation) return softNotFound();
+    doc.conversation = { ...conversation, importState: "never", complete: true, truncated: false, exactRevisionId: resolved.revision.id, exactAccountId: resolved.account?.id ?? null, createAction: null, replyAction: null, resolutionAction: null, refreshAction: null, returnTo: basePath };
+  }
   const routes = capabilityRoutes(basePath);
   routes.history = () => [{ label: doc.pin, href: basePath, current: true }];
   const response = await renderReaderPage(

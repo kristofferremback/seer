@@ -14,6 +14,12 @@ export const STAGE_CLIENT = String.raw`(()=>{
   let reviewRequest=0;
   let activeObserver=null;
   let pendingPanelAction=null;
+  let lineSelection=null;
+  let draggingLines=false;
+  let draggedLines=false;
+  let dragStartLine=null;
+  let suppressLineClick=false;
+  let touchLine=false;
 
   const theme=()=>{
     const mode=root.dataset.themeMode||'system';
@@ -217,6 +223,8 @@ export const STAGE_CLIENT = String.raw`(()=>{
     try{const response=await fetch(button.dataset.contextUrl,{headers:{accept:'application/json'}});const body=await response.json();if(!response.ok)throw new Error(body.error||'Context unavailable');output.replaceChildren();for(const line of body.lines){const row=document.createElement('div');row.className='context-line';const number=document.createElement('span');number.textContent=String(line.number);const code=document.createElement('span');code.textContent=line.text;row.append(number,code);output.append(row)}button.remove()}catch(error){output.textContent=error.message||'Context unavailable';button.disabled=false}
   };
 
+  const threadSubmissionBody=form=>{const input=form.elements.namedItem('idempotencyKey');const fields=[...new FormData(form).entries()].filter(([name])=>name!=='idempotencyKey').map(([name,value])=>[name,String(value)]);const signature=JSON.stringify(fields);if(form.dataset.submissionSignature!==signature){if(input)input.value=crypto.randomUUID();form.dataset.submissionSignature=signature}return new FormData(form)};
+
   document.addEventListener('click',event=>{
     const target=event.target;if(!(target instanceof Element))return;
     const themeButton=target.closest('[data-theme-toggle]');if(themeButton){const modes=['light','dark','system'];const mode=modes[(modes.indexOf(root.dataset.themeMode||'system')+1)%3];root.dataset.themeMode=mode;try{mode==='system'?localStorage.removeItem('seer:theme'):localStorage.setItem('seer:theme',mode)}catch(e){}theme();return}
@@ -236,14 +244,20 @@ export const STAGE_CLIENT = String.raw`(()=>{
     const disclosure=target.closest('[data-toggle-change]');if(disclosure){const hunk=findChange('.hunk-review[data-change]',disclosure.dataset.toggleChange);setCollapsed(hunk,hunk?.dataset.collapsed!=='true');return}
     const filter=target.closest('[data-filter-unread]');if(filter){filter.setAttribute('aria-pressed',String(filter.getAttribute('aria-pressed')!=='true'));applyUnreadFilter();return}
     const context=target.closest('[data-context-trigger]');if(context){event.preventDefault();loadContext(context);return}
+    const line=target.closest('[data-line-select]');if(line){event.preventDefault();if(suppressLineClick&&event.detail>0){suppressLineClick=false;touchLine=false;return}suppressLineClick=false;const hunk=line.closest('[data-change]');const side=line.dataset.lineSide;const number=Number(line.dataset.lineNumber);if(!hunk||!side||!number)return;const same=lineSelection&&lineSelection.change===hunk.dataset.change&&lineSelection.side===side;lineSelection=same&&(event.shiftKey||touchLine)?{...lineSelection,end:number}:{change:hunk.dataset.change,side,start:number,end:number};touchLine=false;if(lineSelection.end<lineSelection.start)[lineSelection.start,lineSelection.end]=[lineSelection.end,lineSelection.start];document.querySelectorAll('[data-line-select]').forEach(button=>button.setAttribute('aria-pressed',String(button.closest('[data-change]')?.dataset.change===lineSelection.change&&button.dataset.lineSide===lineSelection.side&&Number(button.dataset.lineNumber)>=lineSelection.start&&Number(button.dataset.lineNumber)<=lineSelection.end)));const form=findChange('[data-ledger-change]',lineSelection.change)?.querySelector('.range-thread form');if(form){form.elements.namedItem('side').value=lineSelection.side;form.elements.namedItem('startLine').value=String(lineSelection.start);form.elements.namedItem('endLine').value=String(lineSelection.end)}return}
   });
 
   document.addEventListener('submit',async event=>{
-    const form=event.target;if(!(form instanceof HTMLFormElement)||!form.matches('.read-form'))return;
-    event.preventDefault();const button=form.querySelector('[data-read-button]');if(button)button.disabled=true;
-    try{const response=await fetch(form.action,{method:'POST',body:new FormData(form),headers:{accept:'application/json'}});if(!response.ok)throw new Error('Read state failed');const result=await response.json();setRead(result.changeId,result.read)}catch(error){const failure=form.querySelector('[data-read-failure]');if(failure)failure.textContent='Could not save'}finally{if(button)button.disabled=false}
+    const form=event.target;if(!(form instanceof HTMLFormElement))return;
+    if(form.matches('.read-form')){event.preventDefault();const button=form.querySelector('[data-read-button]');if(button)button.disabled=true;try{const response=await fetch(form.action,{method:'POST',body:new FormData(form),headers:{accept:'application/json'}});if(!response.ok)throw new Error('Read state failed');const result=await response.json();setRead(result.changeId,result.read)}catch(error){const failure=form.querySelector('[data-read-failure]');if(failure)failure.textContent='Could not save'}finally{if(button)button.disabled=false}return}
+    if(!form.matches('.thread-new,.thread-reply,.thread-resolution'))return;
+    event.preventDefault();const button=form.querySelector('button[type=submit]');if(button)button.disabled=true;const status=form.querySelector('[role=status]');if(status)status.textContent='';try{const response=await fetch(form.action,{method:'POST',body:threadSubmissionBody(form),headers:{accept:'application/json'}});const result=await response.json().catch(()=>({}));if(!response.ok&&result.rule==='anchor_mixed'&&Array.isArray(result.details?.ranges)&&status){status.replaceChildren(document.createTextNode(result.error||'Choose one range'));for(const range of result.details.ranges){const choice=document.createElement('button');choice.type='button';choice.textContent=(range.kind==='changed'?'Changed':'Unchanged')+' L'+range.startLine+'–'+range.endLine;choice.addEventListener('click',()=>{form.elements.namedItem('startLine').value=String(range.startLine);form.elements.namedItem('endLine').value=String(range.endLine);status.textContent=''});status.append(choice)}if(button)button.disabled=false;return}if(!response.ok)throw new Error(result.error||'Could not save');const url=new URL(location.href);url.hash=result.id||'';history.replaceState(history.state,'',url);location.reload()}catch(error){if(status)status.textContent=error.message||'Could not save';if(button)button.disabled=false}
   });
 
+  dialog?.addEventListener('pointerdown',event=>{const line=event.target.closest?.('[data-line-select]');if(line){suppressLineClick=false;draggingLines=true;draggedLines=false;dragStartLine=line;touchLine=event.pointerType==='touch'}});
+  dialog?.addEventListener('pointermove',event=>{if(!draggingLines)return;const line=event.target.closest?.('[data-line-select]');if(!line||!dragStartLine)return;if(!draggedLines){draggedLines=true;touchLine=false;dragStartLine.dispatchEvent(new MouseEvent('click',{bubbles:true}))}line.dispatchEvent(new MouseEvent('click',{bubbles:true,shiftKey:true}))});
+  dialog?.addEventListener('pointerup',()=>{draggingLines=false;if(draggedLines)suppressLineClick=true;draggedLines=false;dragStartLine=null});
+  dialog?.addEventListener('pointercancel',()=>{draggingLines=false;draggedLines=false;dragStartLine=null;suppressLineClick=false;touchLine=false});
   dialog?.addEventListener('pointerover',event=>{const linked=event.target.closest?.('.hunk-review[data-change],[data-ledger-change]');if(!linked)return;const id=linked.dataset.change||linked.dataset.ledgerChange;findChange('.hunk-review[data-change]',id)?.classList.add('is-linked-hover');findChange('[data-ledger-change]',id)?.classList.add('is-linked-hover')});
   dialog?.addEventListener('pointerout',event=>{const linked=event.target.closest?.('.hunk-review[data-change],[data-ledger-change]');if(!linked)return;const id=linked.dataset.change||linked.dataset.ledgerChange;findChange('.hunk-review[data-change]',id)?.classList.remove('is-linked-hover');findChange('[data-ledger-change]',id)?.classList.remove('is-linked-hover')});
   dialog?.addEventListener('cancel',event=>{event.preventDefault();closeFocus()});

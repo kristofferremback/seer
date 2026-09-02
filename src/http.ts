@@ -21,7 +21,8 @@ export function originOk(req: Request): boolean {
   const src = req.headers.get("origin") ?? req.headers.get("referer");
   if (!src) return true;
   try {
-    return new URL(src).host === new URL(config.baseUrl).host;
+    const sourceHost = new URL(src).host;
+    return sourceHost === new URL(req.url).host || sourceHost === new URL(config.baseUrl).host;
   } catch {
     return false;
   }

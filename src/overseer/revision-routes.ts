@@ -8,6 +8,8 @@
 // it is a legacy review, a promoted lineage, or nothing at all.
 
 import { requireApiKey, sessionUser } from "../auth";
+import { conversationImportRunning } from "./conversation-import";
+import { witnessConversationContext } from "./conversation-read";
 import { config } from "../config";
 import { json } from "../http";
 import { SLUG_RE, WTR_ID_RE } from "../ids";
@@ -472,9 +474,12 @@ function resolveRequest(
  * anyone without touching the retry count, because the count records failures rather than
  * handovers.
  */
-export function handleClaimWitnessRequest(req: Request, id: string): Response {
+export async function handleClaimWitnessRequest(req: Request, id: string): Promise<Response> {
   const resolved = resolveRequest(req, id);
   if (resolved instanceof Response) return resolved;
+  if (conversationImportRunning(resolved.request.workspace_id, resolved.request.lineage_id)) {
+    return reviewJson({ error: "Conversation refresh is in progress.", rule: "conversation_refresh_in_progress" }, 409);
+  }
   try {
     const result = claimWitnessRequest({
       workspaceId: resolved.request.workspace_id,
@@ -491,6 +496,9 @@ export function handleClaimWitnessRequest(req: Request, id: string): Response {
       resolved.request.lineage_id,
       resolved.request.revision,
     );
+    const lineage = getLineage(resolved.request.workspace_id, resolved.slug);
+    if (!lineage) return softNotFound();
+    const threads = await witnessConversationContext(resolved.request.workspace_id, lineage);
     return reviewJson({
       ...(witnessView(result.request, resolved.slug) as Record<string, unknown>),
       claim: {
@@ -499,6 +507,7 @@ export function handleClaimWitnessRequest(req: Request, id: string): Response {
         leaseExpiresAt: new Date(result.claim.lease_expires_at).toISOString(),
         claimedAt: new Date(result.claim.claimed_at).toISOString(),
       },
+      threads,
       priorAccount: prior === null ? null : {
         id: prior.id,
         revision: prior.revision,

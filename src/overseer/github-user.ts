@@ -4,6 +4,7 @@ import {
   GithubError,
   type GithubClient,
 } from "./github";
+import { createGithubGraphqlReader, type GithubGraphqlReader } from "./github-graphql";
 import {
   getGithubUserCredential,
   listGithubUserCredentials,
@@ -146,7 +147,7 @@ function credentialTools(userId: string, options: UserGithubClientOptions = {}) 
     };
   }
 
-  return { now, probe, guarded };
+  return { now, probe, guarded, dead };
 }
 
 /**
@@ -306,4 +307,28 @@ export function exactUserGithubClient(
   }
   touchGithubUserCredential(credentialId, userId, now());
   return guarded(credentialId, token);
+}
+
+/** The read-only GraphQL counterpart of exactUserGithubClient. It reopens one stored
+ * credential and turns a later 401 into the same terminal credential notice. */
+export function exactUserGithubGraphqlReader(
+  userId: string,
+  credentialId: string,
+  options: UserGithubClientOptions = {},
+): GithubGraphqlReader {
+  const { now, dead } = credentialTools(userId, options);
+  const token = openGithubUserCredential(credentialId, userId);
+  if (!token) throw dead(credentialId);
+  touchGithubUserCredential(credentialId, userId, now());
+  const reader = createGithubGraphqlReader({ token, apiBase: options.apiBase, fetchImpl: options.fetchImpl, timeoutMs: options.timeoutMs });
+  return {
+    async listReviewThreads(repo, number) {
+      try {
+        return await reader.listReviewThreads(repo, number);
+      } catch (error) {
+        if (error instanceof GithubError && error.status === 401) throw dead(credentialId);
+        throw error;
+      }
+    },
+  };
 }
