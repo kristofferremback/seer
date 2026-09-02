@@ -152,7 +152,7 @@ SERVICE="exact Railway service id"
 ENVIRONMENT="exact Railway environment id"
 REGION="Railway CLI alias for the only region, for example eu-west"
 V24_DEPLOYMENT="verified v24 deployment id"
-V23_COMMIT=f3cbb6a5fd5b94485039930fcb2e24caf0beda28
+V23_COMMIT=b0c136cd870935d31afc42f1cef67b21000b9d85
 SNAPSHOT=/data/backups/pre-v24.sqlite
 ROLLOUT_EVIDENCE="/durable/operator-only/rollout.log"
 umask 077
