@@ -112,6 +112,12 @@ test("a populated v21 review database gains judgment authority and the movement 
   expect(out).toContain("all assertions passed");
 });
 
+test("a populated v22 review database gains personal projection workflows, then restores", async () => {
+  const { code, out } = await runScenario("v22");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("a database from a newer release is refused rather than walked", async () => {
   const { code, out } = await runScenario("newer");
   expect(code).toBe(0);

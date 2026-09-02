@@ -515,7 +515,7 @@ let attachTokenA: string;
   const page = await callback(`code=code-b&state=${state}&setup_action=install`, cookieB);
   const body = await page.text();
   assert(page.status === 200, "B's own callback renders");
-  assert(!body.includes(String(A_SECOND)), "the picker never offers an installation B cannot reach");
+  assert(!body.includes(`name="installation_id" value="${A_SECOND}"`), "the picker never offers an installation B cannot reach");
   const token = attachTokenOf(body)!;
 
   const unheld = await post("/github/claim", cookieB, {

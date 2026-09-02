@@ -371,7 +371,10 @@ export class GithubCredentialDeadError extends GithubAppRefusal {
 
 /** The app JWT's rate limit, which is shared across every workspace on this instance. */
 export class GithubRateLimitError extends GithubAppRefusal {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly retryAt: number | null = null,
+  ) {
     super(message);
     this.name = "GithubRateLimitError";
   }

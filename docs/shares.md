@@ -151,7 +151,9 @@ key ids, credential and installation ids, email, Projects, reads, carry provenan
 progress, unread filters, acknowledgements, judgments, refresh state, GitHub actions,
 private canonical links, all forms, and every mutation stay absent. Schema v22 does not
 copy active acknowledgements, acknowledgement boundaries or carry rows, verdicts, or
-verdict-item snapshots into a capability inventory. Bundle evidence in an account is inert
+verdict-item snapshots into a capability inventory. Schema v23 likewise never copies a
+personal credential choice, Viewed preference, job, ownership row, submission, mapping,
+rate reading, or GitHub action. Bundle evidence in an account is inert
 text. Only copied attachment ids are readable.
 
 Every `/s/` response carries `Referrer-Policy: no-referrer` and

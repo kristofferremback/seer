@@ -191,7 +191,7 @@ export function carryAcknowledgementForward(
 
 /** Set or reverse one active acknowledgement. The exact identity comes from the caller's
  * already-authorized immutable inventory. */
-export const setRevisionAcknowledgement = db.transaction((input: {
+export function setRevisionAcknowledgementInTransaction(input: {
   workspaceId: string;
   lineageId: string;
   revisionId: string;
@@ -199,7 +199,7 @@ export const setRevisionAcknowledgement = db.transaction((input: {
   item: ReviewItemIdentity;
   acknowledged: boolean;
   now?: number;
-}): AcknowledgementRow | null => {
+}): AcknowledgementRow | null {
   if (!acknowledgeable(input.item)) throw new Error(`Review item ${input.item.id} is not acknowledgeable`);
   const revision = db.query<{ found: number }, [string, string, string]>(
     "SELECT 1 AS found FROM review_revisions WHERE workspace_id = ? AND lineage_id = ? AND id = ?",
@@ -236,12 +236,7 @@ export const setRevisionAcknowledgement = db.transaction((input: {
   return db.query<AcknowledgementRow, [string, string, string, string]>(
     "SELECT * FROM review_revision_acknowledgements WHERE workspace_id = ? AND revision_id = ? AND user_id = ? AND item_id = ?",
   ).get(input.workspaceId, input.revisionId, input.userId, input.item.id);
-}) as (input: {
-  workspaceId: string;
-  lineageId: string;
-  revisionId: string;
-  userId: string;
-  item: ReviewItemIdentity;
-  acknowledged: boolean;
-  now?: number;
-}) => AcknowledgementRow | null;
+}
+
+export const setRevisionAcknowledgement = db.transaction(setRevisionAcknowledgementInTransaction) as
+  typeof setRevisionAcknowledgementInTransaction;

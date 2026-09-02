@@ -131,7 +131,7 @@ own rule and says nothing about `stage_versions.capture_id`: neither consumes th
 and the promoted slug may differ from the capture slug so an existing collision can be
 resolved by naming a new one. See docs/overseer/data-model.md.
 
-A capture is consumed by the unique `stage_versions.capture_id` rule. Publication assumes one SQLite writer process; uniqueness remains the final integrity guard, not a cross-process race protocol. Repeating an identical normalized narrative returns the existing version; a different narrative is a conflict. Later versions, shares, comments, missing-material acknowledgement, approval, deltas, and pull request attachments are deferred.
+A capture is consumed by the unique `stage_versions.capture_id` rule. Publication assumes one SQLite writer process; uniqueness remains the final integrity guard, not a cross-process race protocol. Repeating an identical normalized narrative returns the existing version; a different narrative is a conflict. StageDoc V1 itself does not gain promoted-review sharing, conversation, acknowledgement, judgment, pull request, or GitHub projection state. Those live beside promoted review revisions as described in `docs/overseer/data-model.md`.
 
 ## Pinned-ref capture
 

@@ -20,6 +20,7 @@ import { render as renderMarkdown } from "../overseer/markdown";
 import type { ProjectedGithubReview, ProjectedGithubThread, ProjectedLocalThread } from "../overseer/conversation-types";
 import type { ProjectedActor } from "../overseer/actor-projection";
 import type { AcknowledgementView, JudgmentView } from "../overseer/judgments-db";
+import type { ReaderGithubProjection, ReaderGithubThreadAction } from "../overseer/github-projection-read";
 import { codeHtml, langOfPath, stats } from "../overseer/render-diff";
 import type { Hunk, HunkLine } from "../overseer/types";
 import { appBar, softNotFoundPage, type NavContext } from "../pages";
@@ -196,6 +197,7 @@ export interface ReaderConversation {
   overviewAnchor?: Record<string, string>;
   changeIdOf?: (renderedId: string) => string;
   fileIdOf?: (renderedId: string) => string;
+  githubActions?: Map<string, ReaderGithubThreadAction>;
 }
 
 /** Every URL the reader draws. The only thing in this module that knows what a promoted
@@ -260,6 +262,7 @@ export interface ReaderHandling {
   acknowledgements: Map<string, AcknowledgementView>;
   acknowledgementAction?: (item: ReaderMember) => string;
   returnTo: string;
+  github: ReaderGithubProjection | null;
   judgment: {
     mine: JudgmentView | null;
     others: JudgmentView[];
@@ -871,12 +874,64 @@ function hiddenIdempotency(): string {
   return `<input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">`;
 }
 
+function githubCredentialSelect(
+  credentials: ReaderGithubThreadAction["credentials"],
+  selected: string | null = null,
+): string {
+  if (credentials.length === 0) return "";
+  return `<label>GitHub account<select name="credential" required>${credentials.map((credential) => `<option value="${esc(credential.value)}"${credential.value === selected ? " selected" : ""}>${esc(credential.label)}</option>`).join("")}</select></label>`;
+}
+
+function githubSubmissionStatus(
+  submissions: ReaderGithubThreadAction["submissions"],
+  retryAction: (submissionId: string) => string,
+  returnTo: string,
+  credentials: ReaderGithubThreadAction["credentials"] = [],
+): string {
+  if (submissions.length === 0) return "";
+  const row = submissions[submissions.length - 1]!;
+  const done = row.kind === "approve" ? "Approved on GitHub"
+    : row.kind === "request_changes" ? "Changes requested on GitHub"
+    : row.kind === "reply" ? "Replied on GitHub"
+    : row.kind === "resolve" ? "Resolved on GitHub"
+    : row.kind === "unresolve" ? "Reopened on GitHub"
+    : "Posted to GitHub";
+  const words = row.state === "submitted" ? done
+    : row.state === "submitted_stale" ? `${done} · head moved`
+    : row.state === "pending" || row.state === "running" ? "Pending on GitHub"
+    : row.state === "unknown" ? "Unknown on GitHub"
+    : row.failure ?? "GitHub action failed";
+  const retryCredential = row.rebindable ? githubCredentialSelect(credentials) : "";
+  const retry = ["failed", "refused", "unknown"].includes(row.state)
+    ? `<form class="github-submission-retry" method="post" action="${esc(retryAction(row.id))}"><input type="hidden" name="return" value="${esc(returnTo)}">${retryCredential}<button type="submit">Retry GitHub action</button></form>`
+    : "";
+  return `<div class="github-action-state" data-github-state="${esc(row.state)}"><span>${esc(words)}</span>${retry}</div>`;
+}
+
+function githubThreadControls(thread: ProjectedLocalThread, conversation: ReaderConversation): string {
+  const action = conversation.githubActions?.get(thread.id);
+  if (!action) return "";
+  const account = githubCredentialSelect(action.credentials);
+  const publish = action.publishAction && account
+    ? `<form class="github-thread-publish" method="post" action="${esc(action.publishAction)}">${account}<input type="hidden" name="return" value="${esc(conversation.returnTo)}"><span role="status" aria-live="polite"></span><button type="submit">Post to GitHub</button></form>`
+    : "";
+  const reply = action.replyAction && thread.state === "open" && account
+    ? `<form class="github-thread-reply" method="post" action="${esc(action.replyAction)}">${hiddenIdempotency()}${account}<input type="hidden" name="return" value="${esc(conversation.returnTo)}"><label>Reply on GitHub<textarea name="body" maxlength="4000" required></textarea></label><span role="status" aria-live="polite"></span><button type="submit">Reply on GitHub</button></form>`
+    : "";
+  const githubState = action.githubState ?? "open";
+  const resolution = action.resolutionAction && account
+    ? `<form class="github-thread-resolution" method="post" action="${esc(action.resolutionAction)}">${hiddenIdempotency()}${account}<input type="hidden" name="state" value="${githubState === "open" ? "resolved" : "open"}"><input type="hidden" name="return" value="${esc(conversation.returnTo)}"><span role="status" aria-live="polite"></span><button type="submit">${githubState === "open" ? "Resolve on GitHub" : "Reopen on GitHub"}</button></form>`
+    : "";
+  const state = action.mapped ? `<span class="github-thread-state">GitHub ${githubState}</span>` : "";
+  return `<div class="github-thread-actions">${state}${githubSubmissionStatus(action.submissions, action.retryAction, conversation.returnTo, action.credentials)}${publish}${reply}${resolution}</div>`;
+}
+
 function localThreadHtml(thread: ProjectedLocalThread, conversation: ReaderConversation): string {
-  const entries = thread.entries.map((entry) => `<div class="thread-entry" data-entry-kind="${entry.kind}"><p><span>${esc(actorName(entry.author))}</span><time datetime="${esc(entry.createdAt)}">${esc(agoWords(Date.now() - Date.parse(entry.createdAt)))}</time></p>${entry.body === null ? `<small>${entry.kind === "resolved" ? "Resolved" : "Reopened"}</small>` : `<div class="markdown">${markdown(entry.body)}</div>`}</div>`).join("");
+  const entries = thread.entries.map((entry) => `<div class="thread-entry" data-entry-kind="${entry.kind}"${entry.github ? ` data-entry-source="github"` : ""}><p><span>${esc(actorName(entry.author))}</span><time datetime="${esc(entry.createdAt)}">${esc(agoWords(Date.now() - Date.parse(entry.createdAt)))}</time></p>${entry.deletedOnGithub ? `<small>Deleted on GitHub</small>` : entry.body === null ? `<small>${entry.kind === "resolved" ? "Resolved" : "Reopened"}</small>` : `<div class="markdown">${markdown(entry.body)}</div>`}</div>`).join("");
   const place = thread.anchor.anchor_kind === "range" ? `<p class="thread-place">${esc(`${thread.anchor.side} L${thread.anchor.start_line}–${thread.anchor.end_line}`)}</p>` : "";
   const reply = thread.state === "open" && conversation.replyAction ? `<form class="thread-reply" method="post" action="${esc(conversation.replyAction(thread.id))}">${hiddenIdempotency()}<input type="hidden" name="return" value="${esc(conversation.returnTo)}"><label>Reply<textarea name="body" maxlength="4000" required></textarea></label><span role="status" aria-live="polite"></span><button type="submit">Reply</button></form>` : "";
   const resolution = conversation.resolutionAction ? `<form class="thread-resolution" method="post" action="${esc(conversation.resolutionAction(thread.id))}">${hiddenIdempotency()}<input type="hidden" name="state" value="${thread.state === "open" ? "resolved" : "open"}"><input type="hidden" name="return" value="${esc(conversation.returnTo)}"><button type="submit">${thread.state === "open" ? "Resolve" : "Reopen"}</button></form>` : "";
-  return `<article class="review-thread" id="${esc(thread.id)}" data-thread-state="${thread.state}">${place}${entries}${reply}${resolution}</article>`;
+  return `<article class="review-thread" id="${esc(thread.id)}" data-thread-state="${thread.state}">${place}${entries}${reply}${resolution}${githubThreadControls(thread, conversation)}</article>`;
 }
 
 function githubThreadHtml(thread: ProjectedGithubThread): string {
@@ -979,6 +1034,44 @@ function judgmentSection(handling: ReaderHandling | null, doc: ReaderDoc): strin
     ...state.others.map(judgmentRow),
   ].join("");
   return `<section class="judgment" aria-label="Judgment"><h2>Judgment</h2>${scopeState}${blockers}${facts}${error}${form}${history}</section>`;
+}
+
+function githubProjectionSection(handling: ReaderHandling | null): string {
+  const github = handling?.github;
+  if (!github) return "";
+  const account = githubCredentialSelect(github.credentials, github.viewed.credential);
+  const returnField = `<input type="hidden" name="return" value="${esc(handling.returnTo)}">`;
+  const viewedControl = (github.viewed.enabled
+    ? `<p class="github-inline">Viewed sync · ${esc(github.viewed.credentialLabel ?? "credential unavailable")}</p><form class="github-viewed-control" method="post" action="${esc(github.viewed.action)}">${returnField}<input type="hidden" name="enabled" value="false"><button type="submit">Stop syncing Viewed</button></form>`
+    : account
+      ? `<form class="github-viewed-control" method="post" action="${esc(github.viewed.action)}">${returnField}<input type="hidden" name="enabled" value="true">${account}<button type="submit">Sync Viewed</button></form>`
+      : `<p class="github-inline">No GitHub credential</p>`) +
+    (github.viewed.owned > 0 ? `<form class="github-viewed-control" method="post" action="${esc(github.viewed.action)}">${returnField}<input type="hidden" name="action" value="remove"><button type="submit">Remove Seer marks</button></form>` : "");
+  const viewedWaiting = github.viewed.waitingForRevision ? `<p class="github-inline">Waiting for the new revision</p>` : "";
+  const viewedStates = github.viewed.statuses.map((row) => {
+    const words = row.state === "synced" ? "Synced"
+      : row.state === "foreign" ? "Already Viewed on GitHub"
+      : row.state === "pending" || row.state === "running" ? "Pending"
+      : row.state === "unknown" ? "Unknown on GitHub"
+      : row.failure ?? row.state;
+    const retry = row.retryable
+      ? `<form class="github-viewed-retry" method="post" action="${esc(github.viewed.retryAction)}">${returnField}<input type="hidden" name="path" value="${esc(row.path)}"><button type="submit">Retry</button></form>`
+      : "";
+    return `<li data-github-state="${esc(row.state)}"><code>${esc(row.path)}</code><span>${esc(words)}</span>${retry}</li>`;
+  }).join("");
+  const verdictAccount = githubCredentialSelect(github.credentials);
+  const localComment = github.review.localComment === "" ? "" : `<label class="github-local-comment"><input type="checkbox" name="includeLocalComment" value="true"> Include local comment</label><blockquote>${esc(github.review.localComment)}</blockquote>`;
+  const reviewForm = github.review.action && verdictAccount
+    ? `<form class="github-review-form" method="post" action="${esc(github.review.action)}" data-local-comment="${esc(github.review.localComment)}">${returnField}${verdictAccount}<label>GitHub review comment<textarea name="body" maxlength="4000"></textarea></label>${localComment}<pre data-github-review-preview aria-label="GitHub review body" hidden></pre><div><button type="submit" name="verdict" value="approve">Approve this commit ${esc(shortSha(github.review.headSha))}</button><button type="submit" name="verdict" value="request_changes">Request changes on this commit ${esc(shortSha(github.review.headSha))}</button></div><span role="status" aria-live="polite"></span></form>`
+    : "";
+  const submissionBase = github.viewed.action.replace(/\/github\/viewed$/, "");
+  const reviewStates = github.review.submissions.map((row) => githubSubmissionStatus(
+    [row],
+    (id) => `${submissionBase}/github/submissions/${id}/retry`,
+    handling.returnTo,
+    github.credentials,
+  )).join("");
+  return `<section class="github-projection" aria-label="GitHub"><h2>GitHub</h2>${viewedControl}${viewedWaiting}${viewedStates ? `<ul class="github-viewed-states">${viewedStates}</ul>` : ""}${reviewForm}${reviewStates}</section>`;
 }
 
 function handledProgress(
@@ -1160,7 +1253,7 @@ function focusDialog(
       ? fileEntries
       : [...fileEntries, { id: materials[0]?.member.id ?? leafFiles[0]!.member.id, html: materialHtml }];
   });
-  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}"${scopeAttrs} data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="${esc(options.brandPath ?? "/bundles")}">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong>${subtitle}</div><div class="focus-head-actions"><span${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span>${doc.pullRequest ? pullRequestLink(doc.pullRequest) : ""}${pageControls(options.page, "header")}<button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream${seams ? " data-seams" : ""}><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}${scopeControl(options.scope)}</div>${diffStat(selected.added, selected.removed)}</header>${layered(streamEntries)}</main><aside class="focus-right" aria-label="Review details"><header>${routes.read ? `<button type="button" data-filter-unread aria-pressed="false">Unread</button>` : ""}<button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${ledgerHead}${focusPullRequest(doc.pullRequest)}<div data-judgment-host="focus">${judgmentSection(handling, doc)}</div>${focusLedger(selected, readIds, routes, doc, allChanges)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
+  return `<dialog class="focus-dialog" data-focus-dialog data-review="${esc(selected.group.id)}"${scopeAttrs} data-active-change="${esc(activeChange ?? selected.changes[0]?.item.change.id ?? "")}" aria-label="${esc(selected.group.title)} review" open><div class="focus-shell"><header class="focus-header"><div class="focus-head-left"><a class="focus-brand" href="${esc(options.brandPath ?? "/bundles")}">Seer</a><button type="button" data-focus-toggle="tree" aria-label="Toggle review navigation"><span aria-hidden="true">☰</span></button></div><div class="focus-head-title"><span>${esc(headTitle)}</span><strong>${esc(selected.group.title)}</strong>${subtitle}</div><div class="focus-head-actions"><span${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(doc.pin)} · ${esc(shortSha(doc.source.sourceHeadSha))}</span>${doc.pullRequest ? pullRequestLink(doc.pullRequest) : ""}${pageControls(options.page, "header")}<button type="button" data-change-step="previous" aria-label="Previous change">↑</button><button type="button" data-change-step="next" aria-label="Next change">↓</button><button type="button" data-focus-toggle="detail" aria-label="Toggle review details"><span aria-hidden="true">◫</span></button><a data-focus-close href="${routes.close()}" aria-label="Close group review"><span aria-hidden="true">×</span></a></div></header><div class="focus-layout" data-focus-layout data-left="open" data-right="open"><aside class="focus-left" aria-label="Review navigation"><header><button type="button" data-focus-toggle="tree" aria-label="Collapse review navigation">‹</button></header><nav><div class="focus-group-links">${groupLinks}</div><div class="focus-file-tree">${tree}</div></nav></aside><main class="focus-stream" data-focus-stream${seams ? " data-seams" : ""}><header class="focus-stream-head"${categoryAttr(selected.group)}><div><span>${esc(groupSequence(selected))}</span><h2>${esc(selected.group.title)}</h2>${selected.group.explanation === null ? "" : accountCopy(selected.group.explanation, "focus-account", 160)}${scopeControl(options.scope)}</div>${diffStat(selected.added, selected.removed)}</header>${layered(streamEntries)}</main><aside class="focus-right" aria-label="Review details"><header>${routes.read ? `<button type="button" data-filter-unread aria-pressed="false">Unread</button>` : ""}<button type="button" data-focus-toggle="detail" aria-label="Collapse review details">›</button></header><div class="focus-ledger">${ledgerHead}${focusPullRequest(doc.pullRequest)}${githubProjectionSection(handling)}<div data-judgment-host="focus">${judgmentSection(handling, doc)}</div>${focusLedger(selected, readIds, routes, doc, allChanges)}</div></aside><button class="focus-scrim" type="button" data-focus-panel-close hidden aria-label="Close panel"></button></div><nav class="focus-mobile-bar" aria-label="Review panels"><button type="button" data-focus-toggle="tree">Review</button><span data-focus-change-position></span><button type="button" data-focus-toggle="detail">Details</button></nav></div></dialog>`;
 }
 
 function shareControl(access: ReaderAccess): string {
@@ -1285,7 +1378,7 @@ export async function renderReaderPage(
   const shell = access.kind === "member" ? appBar(access.nav) : `<a class="focus-brand" href="${esc(access.basePath)}">Seer</a>`;
   const terminalState = hasHandling ? `<div><h2 data-progress>${handledCount} / ${handlingTotal} handled</h2><span class="progress-track"><i data-progress-fill style="width:${progress}%"></i></span></div>` : "";
   const mobileState = hasHandling ? `<span data-progress>${handledCount} / ${handlingTotal} handled</span>` : `<span></span>`;
-  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}><div data-stage-background><div class="stage-shell">${shell}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${options.aside ?? ""}${focusSection(doc, views, routes)}${evidenceSection(doc)}${discussionSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, handledCount, handlingTotal, handling)}</aside><main class="walkthrough">${groupCards}<footer class="terminal">${terminalState}<p>${inventory.files.length} file${inventory.files.length === 1 ? "" : "s"}</p></footer></main><aside class="source-rail" data-page-details data-open="false"><div class="mobile-detail-head"><button type="button" data-page-details-close>Close</button></div><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section>${shareControl(access)}<div data-judgment-host="overview">${judgmentSection(handling, doc)}</div></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button>${mobileState}<button type="button" data-page-details-open>Details</button></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close panel"></button></div>${focusDialog(null, [], readIds, routes, doc, null, options, inventory.changes, handling)}<script>${STAGE_CLIENT}${access.kind === "member" && access.share ? DOCUMENT_SHARE_CLIENT : ""}</script></body></html>`;
+  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><script>${STAGE_THEME_BOOTSTRAP}</script><title>${esc(doc.title)} · Seer</title><style>${STAGE_CSS}</style></head><body${bodyState}><div data-stage-background><div class="stage-shell">${shell}</div><div class="stage-grid stage-overview"><header class="stage-header"><p class="stage-context">${esc(doc.source.repo)} · ${esc(doc.source.branch)}${doc.pullRequest ? ` · ${pullRequestLink(doc.pullRequest)}` : ""}</p><h1>${esc(doc.title)}</h1><div class="stage-source"><span>${esc(`${shortSha(doc.source.mergeBaseSha)} → ${shortSha(doc.source.sourceHeadSha)}`)}</span><span>${esc(doc.standing)}${doc.latest ? " · latest" : ""}</span>${doc.pullRequest ? `<span class="source-observation">${esc(pullRequestStanding(doc.pullRequest))}</span>` : ""}</div>${workflowLine(doc.workflow)}${driftLine(doc.drift)}${movementLine(doc.movement)}${doc.authored ? categorySummary(views) : ""}${doc.authored ? attentionBar(views) : ""}</header>${accounts === "" ? "" : `<section class="accounts" aria-label="Accounts">${accounts}</section>`}${options.aside ?? ""}${focusSection(doc, views, routes)}${evidenceSection(doc)}${discussionSection(doc)}</div><div class="stage-grid stage-body"><aside class="review-nav" data-review-nav data-open="false"><div class="mobile-nav-head"><button type="button" data-review-nav-close aria-label="Close review navigation">Close</button></div>${groupNavigation(views, handledCount, handlingTotal, handling)}</aside><main class="walkthrough">${groupCards}<footer class="terminal">${terminalState}<p>${inventory.files.length} file${inventory.files.length === 1 ? "" : "s"}</p></footer></main><aside class="source-rail" data-page-details data-open="false"><div class="mobile-detail-head"><button type="button" data-page-details-close>Close</button></div><h2>Source</h2><p>${historyLinks}</p><section><p>${esc(doc.source.repo)}</p><p>${esc(doc.source.branch)}</p><code${doc.pullRequest ? ` title="${esc(doc.source.sourceHeadSha)}"` : ""}>${esc(shortSha(doc.source.sourceHeadSha))}</code></section>${shareControl(access)}${githubProjectionSection(handling)}<div data-judgment-host="overview">${judgmentSection(handling, doc)}</div></aside></div><nav class="mobile-bar" aria-label="Stage navigation"><button type="button" data-review-nav-open>${esc(doc.pin)}</button>${mobileState}<button type="button" data-page-details-open>Details</button></nav><button class="page-scrim" type="button" data-page-scrim hidden aria-label="Close panel"></button></div>${focusDialog(null, [], readIds, routes, doc, null, options, inventory.changes, handling)}<script>${STAGE_CLIENT}${access.kind === "member" && access.share ? DOCUMENT_SHARE_CLIENT : ""}</script></body></html>`;
   return html(page);
 }
 
@@ -1393,6 +1486,7 @@ export async function handleStagePage(
         requiredAcknowledgementIds: new Set(),
         acknowledgements: new Map(),
         returnTo: new URL(req.url).pathname + new URL(req.url).search,
+        github: null,
         judgment: null,
       },
     },

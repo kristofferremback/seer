@@ -858,6 +858,83 @@ revision or manifest judgment appears once in the overview source rail, in the p
 Details panel, and in focused review Details. The client moves that one form between the
 overview and focused hosts instead of duplicating forms or ids.
 
+### Explicit personal GitHub projection
+
+Schema v23 keeps GitHub workflow beside local handling and never feeds it back into
+retained evidence. A member binds Viewed sync for one lineage to one live
+`github_user_credentials` row they own. Local handling and durable Viewed intent commit in
+one transaction. GraphQL starts after commit. A refusal, timeout, restart, exhausted retry,
+or head race cannot reverse a local read or acknowledgement. GitHub Viewed is never
+imported as a Seer read.
+
+A current file is complete when every canonical change for that file is read, every
+path-bound incomplete item is acknowledged, and its leafless file item is acknowledged.
+Capture-wide material belongs to no path. Viewed ownership is keyed by lineage, member,
+and current file path, the identity GitHub uses for one pull request. Revision id and head
+SHA record the mark attempt. They are not ownership identity. A push observation arriving
+before its retained revision leaves ownership and jobs untouched, and the reader reports
+that sync is waiting. Publication carries local handling and queues every enabled member,
+including members whose work carried completely. Untouched marks remain owned across the
+push. A dismissed mark can be made again, and a local reversal or `Remove Seer marks` can
+unmark it at the new head. If the ownership credential is dead, removal may use only the
+member's current live preference credential with the same immutable GitHub account id and
+case-insensitive login. The ownership row keeps the credential that made the mark;
+`review_github_viewed_credential_substitutions` records the job generation, both
+credentials, and resolved account identity. Another account is refused before any job is
+changed or credential is opened. A pre-existing `VIEWED` state remains foreign across
+every head and is never unmarked.
+
+One credential lane covers Viewed jobs and submissions across processes. Re-queueing a
+leased Viewed row changes only its target facts and generation. It keeps the running state
+and lease. The holder stops when it sees the generation change, while another container
+waits for release or expiry. A confirmed old side effect is recorded before the new
+generation runs. Webhook and import confirmation adopts only an `unknown` resolution row.
+It never changes a running row or clears its lease while the holder's mutation promise is
+open. No SQLite transaction stays open during a network call.
+
+`Post to GitHub` accepts only an anchor on the current revision that GitHub can address in
+the diff. A change anchor must still resolve. A range must have `range_kind='changed'` and
+overlap an actual hunk on its selected side. Unchanged and out-of-diff threads stay local,
+the action is absent, and the route returns `github_anchor_out_of_diff`. Reader rendering
+passes its one exact retained capture inventory through every draft check; thread count
+does not cause another capture load. GitHub always receives the file's current `path`;
+`LEFT` or `RIGHT` alone selects old or new text.
+Approve and request changes submit the exact revision head and never read or write a Seer
+judgment. The local judgment comment is copied only when the member selects it.
+
+Reply actions commit local state with durable outbound intent. Resolve and reopen commit
+the local append in its own transaction before projection insertion. An actor conflict or
+other projection refusal can therefore return from the route without removing that event;
+replay keeps one local event, and it never substitutes another actor. One `local_entry_id`
+identity covers local messages and exact state events. A repeated local resolution no-op
+creates no fake message anchor. Resolution requests instead record their
+idempotency key and the exact imported observation or submitted transition they respond
+to. The requested remote transition emits once when stored GitHub state differs. A later
+open, resolved, open sequence appends each remote state event and cannot replay an old
+submission.
+
+An uncertain reply is reconciled when an import finds exactly one unknown outbound reply
+on the mapped thread with the same member-owned GitHub login and normalized body. Seer
+adopts that comment id, marks the submission submitted, and renders the local message once.
+Zero matches remain recoverable and multiple matches stay unknown. Empty COMMENT reviews
+whose node id is the recorded wrapper for a local thread are hidden. A nonempty review body
+and APPROVED or CHANGES_REQUESTED review remain visible.
+
+Parsed HTTP-200 GraphQL errors are definite failures or permission refusals. Only a fetch
+failure or non-OK HTTP status after a mutating call can enter `unknown`. A read or response
+shape failure is definite. Dead, revoked, missing, and expired credentials finish as
+`credential_dead`; Viewed sync is disabled so the page offers the member's remaining live
+choices without opening one. A refused submission with no GitHub object id may rebind to
+another live credential owned by the same member. The old actor, attempt count, failure,
+and head readings remain in `review_github_submission_rebinds`; unknown and linked actions
+cannot change actor.
+
+Every mutation route requires a signed-in workspace member and same-origin request. Forms
+carry an HMAC choice instead of an internal credential id. App installations, API keys,
+capabilities, another member's credential, and anonymous transport cannot enter a personal
+mutation. Rendering reads stored rows only. A session sees its own safe detail. An API key
+receives `projection: null`, with no personal detail or aggregate counts.
+
 ### Exact document capabilities
 
 Schema v20 adds immutable document capabilities beside the promoted review and stack

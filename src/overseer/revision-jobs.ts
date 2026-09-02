@@ -39,6 +39,8 @@ import {
 } from "./revision-db";
 import { revisionCodeDelta } from "./revision-delta";
 import { carryRevisionAcknowledgements } from "./acknowledgements-db";
+import { scheduleGithubProjectionCredential } from "./github-projection-worker";
+import { queueViewedJobsForPublishedRevision } from "./github-viewed";
 import { recoverStackRefreshJobs } from "./stack-jobs";
 import {
   enrichWebhookObservation,
@@ -311,6 +313,8 @@ export interface CompletedCapture {
   superseded: boolean;
   /** How many members' reads the append carried forward on exact equivalence. */
   carried: number;
+  /** Personal Viewed lanes queued in the publication transaction and scheduled after it. */
+  viewedCredentials: string[];
 }
 
 /**
@@ -332,7 +336,7 @@ export const completeCaptureJob = db.transaction((input: {
   if (!job) throw new Error(`Capture job ${input.jobId} disappeared before completion`);
   if (job.state === "completed" && job.revision_id) {
     const revision = db.query<{ revision: number }, [string]>("SELECT revision FROM review_revisions WHERE id = ?").get(job.revision_id);
-    return { job, revisionId: job.revision_id, revision: revision?.revision ?? 0, appended: false, superseded: false, carried: 0 };
+    return { job, revisionId: job.revision_id, revision: revision?.revision ?? 0, appended: false, superseded: false, carried: 0, viewedCredentials: [] };
   }
   if (job.state !== "running" || job.lease_token !== input.leaseToken) {
     throw new CaptureJobError(409, "This capture job is no longer held by this worker.");
@@ -365,7 +369,7 @@ export const completeCaptureJob = db.transaction((input: {
       [input.captureId, held.revision_id, now, job.id],
     );
     const revision = db.query<{ revision: number }, [string]>("SELECT revision FROM review_revisions WHERE id = ?").get(held.revision_id);
-    return { job: getCaptureJobById(job.id)!, revisionId: held.revision_id, revision: revision?.revision ?? 0, appended: false, superseded: false, carried: 0 };
+    return { job: getCaptureJobById(job.id)!, revisionId: held.revision_id, revision: revision?.revision ?? 0, appended: false, superseded: false, carried: 0, viewedCredentials: [] };
   }
 
   // Order, against the observation the newest revision was captured from and under the
@@ -390,6 +394,7 @@ export const completeCaptureJob = db.transaction((input: {
       appended: false,
       superseded: true,
       carried: 0,
+      viewedCredentials: [],
     };
   }
 
@@ -467,6 +472,11 @@ export const completeCaptureJob = db.transaction((input: {
     });
   }
   supersedeOpenWitnessRequests(job.workspace_id, job.lineage_id, appended.revision.id, appended.revision.revision, now);
+  const viewedCredentials = queueViewedJobsForPublishedRevision({
+    workspaceId: job.workspace_id,
+    lineageId: job.lineage_id,
+    now,
+  });
 
   db.run(
     "UPDATE review_capture_jobs SET state = 'completed', failure = NULL, lease_token = NULL, lease_expires_at = NULL, capture_id = ?, revision_id = ?, updated_at = ? WHERE id = ?",
@@ -479,6 +489,7 @@ export const completeCaptureJob = db.transaction((input: {
     appended: true,
     superseded: false,
     carried,
+    viewedCredentials,
   };
 }) as (input: { jobId: string; leaseToken: string; captureId: string }) => CompletedCapture;
 
@@ -686,7 +697,9 @@ export async function runCaptureJob(job: ReviewCaptureJobRow): Promise<void> {
     if (lost || !heartbeatCaptureJob(job.id, leaseToken)) {
       throw new CaptureJobError(409, "This capture job's lease was taken over while it ran, so its result was discarded.");
     }
-    completeCaptureJob({ jobId: job.id, leaseToken, captureId: result.captureId });
+    const completed = completeCaptureJob({ jobId: job.id, leaseToken, captureId: result.captureId });
+    // Publication committed before a lane can open a personal network client.
+    for (const credentialId of completed.viewedCredentials) scheduleGithubProjectionCredential(credentialId);
   } catch (err) {
     // Bounded, actionable, and the lane is released either way. A capture that failed is
     // a fact about this attempt; the lineage's completed revisions are untouched.

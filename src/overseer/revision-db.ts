@@ -681,14 +681,14 @@ export function listRevisionReadChangeIds(workspaceId: string, revisionId: strin
  *  transaction, through the stored equivalences the successor's completion wrote. Every
  *  explicit mark or unmark also records a boundary so an older revision cannot later
  *  overwrite this member's state here. */
-export const setRevisionChangeRead = db.transaction((
+export function setRevisionChangeReadInTransaction(
   workspaceId: string,
   revisionId: string,
   userId: string,
   changeId: string,
   read: boolean,
-): void => {
-  const now = Date.now();
+  now = Date.now(),
+): void {
   db.run(
     "INSERT OR IGNORE INTO review_revision_read_boundaries (revision_id, user_id, change_id, workspace_id, created_at) VALUES (?, ?, ?, ?, ?)",
     [revisionId, userId, changeId, workspaceId, now],
@@ -706,7 +706,15 @@ export const setRevisionChangeRead = db.transaction((
     "DELETE FROM review_revision_change_reads WHERE workspace_id = ? AND revision_id = ? AND user_id = ? AND change_id = ?",
     [workspaceId, revisionId, userId, changeId],
   );
-});
+}
+
+export const setRevisionChangeRead = db.transaction((
+  workspaceId: string,
+  revisionId: string,
+  userId: string,
+  changeId: string,
+  read: boolean,
+): void => setRevisionChangeReadInTransaction(workspaceId, revisionId, userId, changeId, read));
 
 // ---- writes ----
 

@@ -85,6 +85,7 @@ import {
 import { handleReadStackRefreshJob, handleRetryStackRefreshJob } from "./overseer/stack-jobs";
 import { handleAgentThreadReply, handleLineageConversations, handleRefreshConversations, handleStackConversations } from "./overseer/thread-routes";
 import { handleRevisionJudgments, handleStackJudgments } from "./overseer/judgment-routes";
+import { handleGithubProjection } from "./overseer/github-projection-routes";
 
 // ---- the shape of an entry ----
 
@@ -987,9 +988,9 @@ const localConversationThreadSchema = {
   required: ["id", "anchor", "state", "entries", "createdAt"],
   additionalProperties: false,
   properties: {
-    id: { type: "string" }, anchor: conversationAnchorSchema, state: { type: "string", enum: ["open", "resolved"] }, createdAt: { type: "string", format: "date-time" },
+    id: { type: "string" }, anchor: conversationAnchorSchema, state: { type: "string", enum: ["open", "resolved"] }, githubState: { type: "string", enum: ["open", "resolved"] }, createdAt: { type: "string", format: "date-time" },
     entries: { type: "array", items: { type: "object", required: ["id", "seq", "kind", "author", "body", "createdAt"], additionalProperties: false, properties: {
-      id: { type: "string" }, seq: { type: "integer", minimum: 1 }, kind: { type: "string", enum: ["message", "resolved", "reopened"] }, author: conversationActorSchema, body: { type: ["string", "null"] }, createdAt: { type: "string", format: "date-time" },
+      id: { type: "string" }, seq: { type: "integer", minimum: 1 }, kind: { type: "string", enum: ["message", "resolved", "reopened"] }, author: conversationActorSchema, body: { type: ["string", "null"] }, createdAt: { type: "string", format: "date-time" }, github: { const: true }, deletedOnGithub: { type: "boolean" },
     } } },
   },
 };
@@ -1486,6 +1487,94 @@ const revisionJudgmentsSchema = {
           },
         },
         { type: "null" },
+      ],
+    },
+  },
+};
+
+const githubSubmissionViewSchema = {
+  type: "object",
+  required: ["id", "kind", "state", "failure", "retryAt", "rebindable", "createdAt"],
+  additionalProperties: false,
+  properties: {
+    id: { type: "string", pattern: "^ghs_" },
+    kind: { type: "string", enum: ["thread", "reply", "resolve", "unresolve", "approve", "request_changes"] },
+    state: { type: "string", enum: ["pending", "running", "submitted", "submitted_stale", "failed", "refused", "unknown"] },
+    failure: { type: ["string", "null"] }, retryAt: { type: ["string", "null"], format: "date-time" }, rebindable: { type: "boolean" }, createdAt: { type: "string", format: "date-time" },
+  },
+};
+
+const githubProjectionSchema = {
+  type: "object",
+  required: ["workspace", "slug", "projection"],
+  additionalProperties: false,
+  properties: {
+    workspace: { type: "string" },
+    slug: { type: "string", pattern: SLUG_RE.source },
+    projection: {
+      oneOf: [
+        { type: "null" },
+        {
+          type: "object",
+          required: ["credentials", "viewed", "review"],
+          additionalProperties: false,
+          properties: {
+            credentials: {
+              type: "array",
+              items: {
+                type: "object",
+                required: ["value", "label", "account"],
+                additionalProperties: false,
+                properties: {
+                  value: { type: "string" },
+                  label: { type: "string" },
+                  account: { type: "string" },
+                },
+              },
+            },
+            viewed: {
+              type: "object",
+              required: ["enabled", "credential", "credentialLabel", "action", "retryAction", "owned", "waitingForRevision", "statuses"],
+              additionalProperties: false,
+              properties: {
+                enabled: { type: "boolean" },
+                credential: { type: ["string", "null"] },
+                credentialLabel: { type: ["string", "null"] },
+                action: { type: "string" },
+                retryAction: { type: "string" },
+                owned: { type: "integer", minimum: 0 },
+                waitingForRevision: { type: "boolean" },
+                statuses: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    required: ["path", "desired", "state", "failure", "retryAt", "retryable"],
+                    additionalProperties: false,
+                    properties: {
+                      path: { type: "string" },
+                      desired: { type: "string", enum: ["viewed", "unviewed"] },
+                      state: { type: "string" },
+                      failure: { type: ["string", "null"] },
+                      retryAt: { type: ["string", "null"], format: "date-time" },
+                      retryable: { type: "boolean" },
+                    },
+                  },
+                },
+              },
+            },
+            review: {
+              type: "object",
+              required: ["action", "headSha", "localComment", "submissions"],
+              additionalProperties: false,
+              properties: {
+                action: { type: ["string", "null"] },
+                headSha: { type: "string" },
+                localComment: { type: "string" },
+                submissions: { type: "array", items: githubSubmissionViewSchema },
+              },
+            },
+          },
+        },
       ],
     },
   },
@@ -2517,6 +2606,23 @@ export const API_ROUTES: readonly ApiRoute[] = [
         },
       },
       run: (req) => handleReadReviewLineage(req, req.params.slug),
+    },
+  }),
+
+  route("/api/review-lineages/:slug/github-projection", {
+    GET: {
+      doc: {
+        operationId: "readReviewGithubProjection",
+        summary: "Read stored personal GitHub projection state",
+        description: "A session sees only its own safe projection detail. API keys receive projection null, matching other personal handling APIs. Reading this route never calls GitHub, imports Viewed, or returns a credential id or token.",
+        security: "keyOrSession",
+        parameters: [slugParam, { name: "workspace", in: "query", required: false, schema: { type: "string" }, description: "Required for a session when this slug exists in more than one member workspace." }],
+        responses: {
+          "200": { description: "Stored projection workflow state.", content: { "application/json": { schema: githubProjectionSchema } } },
+          "404": reviewNotFound,
+        },
+      },
+      run: (req) => handleGithubProjection(req, req.params.slug),
     },
   }),
 
