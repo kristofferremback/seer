@@ -109,6 +109,16 @@ export function lineageOwnsSlug(wsId: string, slug: string): boolean {
     .get(wsId, slug);
 }
 
+/** Whether a review stack owns this workspace slug. Kept beside lineageOwnsSlug so legacy
+ * and promoted writers can enforce the shared namespace without importing stack writers. */
+export function stackOwnsSlug(wsId: string, slug: string): boolean {
+  return !!db
+    .query<{ one: number }, [string, string]>(
+      "SELECT 1 AS one FROM review_stacks WHERE workspace_id = ? AND slug = ?",
+    )
+    .get(wsId, slug);
+}
+
 export function listReviews(wsId: string): ReviewRow[] {
   return db
     .query<ReviewRow, [string]>(
@@ -154,11 +164,11 @@ export function listReviewVersions(
  *  the first publish and carried forward from the previous version on every republish.
  *  A stored document therefore always names itself correctly, and a review keeps one
  *  identity for its whole life. */
-/** A slug a promoted lineage already owns is refused here, so the route can put a 409
- *  on it without matching a message. */
+/** A slug another promoted model already owns is refused here, so the route can put a
+ *  409 on it without matching a message. */
 export class ReviewSlugTaken extends Error {
   constructor(slug: string) {
-    super(`Review slug "${slug}" already names a promoted review in this workspace`);
+    super(`Review slug "${slug}" already names another review or stack in this workspace`);
     this.name = "ReviewSlugTaken";
   }
 }
@@ -167,11 +177,11 @@ export const createReviewVersion = db.transaction(
   (wsId: string, slug: string, doc: Omit<ReviewDoc, "id" | "slug" | "version">): number => {
     const now = Date.now();
     const existing = getReview(wsId, slug);
-    // The other direction of the same rule the promoted publish enforces: `/r/<slug>`
-    // has to mean one thing, so a FIRST publish cannot take a name a lineage holds. A
-    // review that already exists is untouched by this — it owned the slug first, and
+    // The other direction of the same rule promoted writers enforce: a FIRST publish
+    // cannot take a name a lineage or stack holds. A review that already exists is
+    // untouched by this: it owned the slug first, and
     // appending a version to it changes nothing about who the slug names.
-    if (!existing && lineageOwnsSlug(wsId, slug)) throw new ReviewSlugTaken(slug);
+    if (!existing && (lineageOwnsSlug(wsId, slug) || stackOwnsSlug(wsId, slug))) throw new ReviewSlugTaken(slug);
     const version = (existing?.latest_version ?? 0) + 1;
     let id: string;
     if (existing) {

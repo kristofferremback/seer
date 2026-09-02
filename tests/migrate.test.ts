@@ -86,6 +86,14 @@ test("a populated v17 lineage survives v18 and rolls back by restore", async () 
   expect(out).toContain("all assertions passed");
 });
 
+// The release this slice ships: the stack tables are additive beside every populated
+// promoted-review row, and going back is still a restore.
+test("a populated v18 database survives v19 and rolls back by restore", async () => {
+  const { code, out } = await runScenario("v18");
+  expect(code).toBe(0);
+  expect(out).toContain("all assertions passed");
+});
+
 test("a database from a newer release is refused rather than walked", async () => {
   const { code, out } = await runScenario("newer");
   expect(code).toBe(0);

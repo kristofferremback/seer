@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 18 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 19 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -73,6 +73,12 @@ import { hashKey, tinyId } from "./ids";
 // request. Purely additive — no v16 table, constraint, job row, observation or stored
 // document is touched, and the existing witness-request CHECK is deliberately not rebuilt,
 // because `superseded` is derived from a join rather than stored as a fourth state.
+//
+// v19 adds the stack of promoted reviews: the stack, its immutable ordered manifests, one
+// account per manifest, the witness workflow beside it, the provider membership
+// observations a delivery records, the installation-owned refresh job, client idempotency,
+// and Project membership. Purely additive — no lineage, revision, account, read or
+// observation row is touched, and a workspace with no stacks keeps every table empty.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -544,8 +550,8 @@ function backfillReviewPrs(): number {
 
 export function migrate(): void {
   const uv = userVersion();
-  if (uv > 18) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 18`);
+  if (uv > 19) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 19`);
   }
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
@@ -565,6 +571,7 @@ export function migrate(): void {
   if (userVersion() < 16) migrateToV16();
   if (userVersion() < 17) migrateToV17();
   if (userVersion() < 18) migrateToV18();
+  if (userVersion() < 19) migrateToV19();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -1370,6 +1377,215 @@ function migrateToV18(): void {
     db.run("PRAGMA user_version = 18");
   })();
   console.log("[seer] migrated to schema v18 (stored revision movement).");
+}
+
+// v19: a stack groups review lineages, and owns none of what they own.
+//
+// A lineage stays the only owner of its source revisions, accounts, reads and witness
+// workflow. What a stack adds is ORDER and a WHOLE: an immutable manifest pins each member
+// at an exact revision (and, once it exists, an exact account), and one account over that
+// manifest explains the completed result by partitioning every member account group exactly
+// once. No stack read table exists: progress is the sum of member reads.
+//
+// `review_stack_members` is the live membership webhooks and reconciliation join. It carries
+// no position on purpose — order is the manifest's, and a row that said otherwise would be a
+// second place for the order to drift. `UNIQUE (stack_id, predecessor_version)` on the
+// manifests is what makes "one successor per predecessor" a constraint rather than a
+// convention, whichever of refresh and account-ready commits first.
+//
+// `review_stack_pr_observations` gives each accepted membership receipt its own identity.
+// It links to the complete promoted pull request observation when the payload supported one;
+// that link is null for accepted partial payloads. `provider_stack_number` NULL is the only
+// unstack signal GitHub sends, so absence is stored rather than inferred.
+const V19_REVIEW_STACKS = `
+  CREATE TABLE IF NOT EXISTS review_stacks (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    repo_id INTEGER NOT NULL,
+    base_ref TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('native','inferred')),
+    provider_stack_id INTEGER,
+    provider_stack_number INTEGER,
+    actor_kind TEXT NOT NULL CHECK (actor_kind IN ('installation','user','anonymous')),
+    installation_id INTEGER,
+    user_id TEXT,
+    credential_id TEXT,
+    latest_manifest_version INTEGER NOT NULL CHECK (latest_manifest_version >= 1),
+    created_by_user_id TEXT NOT NULL,
+    created_by_key_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, slug),
+    CHECK ((source = 'native') = (provider_stack_number IS NOT NULL)),
+    CHECK (
+      (actor_kind = 'installation' AND installation_id IS NOT NULL AND user_id IS NULL AND credential_id IS NULL) OR
+      (actor_kind = 'user' AND installation_id IS NULL AND user_id IS NOT NULL AND credential_id IS NOT NULL) OR
+      (actor_kind = 'anonymous' AND installation_id IS NULL AND user_id IS NULL AND credential_id IS NULL)
+    )
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_stacks_workspace ON review_stacks (workspace_id, updated_at);
+
+  CREATE TABLE IF NOT EXISTS review_stack_members (
+    stack_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    lineage_slug TEXT NOT NULL,
+    repo_id INTEGER NOT NULL,
+    pr_number INTEGER NOT NULL CHECK (pr_number >= 1),
+    added_manifest_id TEXT NOT NULL,
+    removed_at INTEGER,
+    removed_reason TEXT CHECK (removed_reason IN ('unstacked','merged','closed','detached')),
+    removed_manifest_id TEXT,
+    PRIMARY KEY (stack_id, lineage_id),
+    CHECK ((removed_at IS NULL) = (removed_reason IS NULL) AND (removed_at IS NULL) = (removed_manifest_id IS NULL))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_review_stack_members_live_lineage
+    ON review_stack_members (lineage_id) WHERE removed_at IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_review_stack_members_pr
+    ON review_stack_members (repo_id, pr_number) WHERE removed_at IS NULL;
+
+  CREATE TABLE IF NOT EXISTS review_stack_manifests (
+    id TEXT PRIMARY KEY,
+    stack_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    predecessor_version INTEGER NOT NULL CHECK (predecessor_version >= 0),
+    reason TEXT NOT NULL CHECK (reason IN ('created','refresh','account-ready')),
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+    doc TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, slug, version),
+    UNIQUE (stack_id, predecessor_version)
+  );
+
+  CREATE TABLE IF NOT EXISTS review_stack_accounts (
+    id TEXT PRIMARY KEY,
+    stack_id TEXT NOT NULL,
+    manifest_id TEXT NOT NULL UNIQUE,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+    doc TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    witness_user_id TEXT NOT NULL,
+    witness_key_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, slug, version)
+  );
+
+  CREATE TABLE IF NOT EXISTS review_stack_witness_requests (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    stack_id TEXT NOT NULL,
+    manifest_id TEXT NOT NULL UNIQUE,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    state TEXT NOT NULL CHECK (state IN ('pending','failed','published')),
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+    failure TEXT,
+    account_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_stack_witness_requests_stack
+    ON review_stack_witness_requests (workspace_id, stack_id);
+
+  CREATE TABLE IF NOT EXISTS review_stack_witness_claims (
+    request_id TEXT NOT NULL,
+    retry_count INTEGER NOT NULL CHECK (retry_count >= 0),
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    lease_expires_at INTEGER NOT NULL,
+    claimed_at INTEGER NOT NULL,
+    PRIMARY KEY (request_id, retry_count)
+  );
+
+  CREATE TABLE IF NOT EXISTS review_stack_witness_supersessions (
+    request_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    stack_id TEXT NOT NULL,
+    superseded_manifest_id TEXT NOT NULL,
+    successor_manifest_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS review_stack_pr_observations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    receipt_id TEXT NOT NULL,
+    pull_request_observation_id TEXT,
+    repo_id INTEGER NOT NULL,
+    pr_number INTEGER NOT NULL,
+    provider_stack_id INTEGER,
+    provider_stack_number INTEGER,
+    position INTEGER,
+    size INTEGER,
+    stack_base_ref TEXT,
+    stack_base_sha TEXT,
+    observed_at INTEGER NOT NULL,
+    UNIQUE (workspace_id, receipt_id),
+    CHECK ((provider_stack_number IS NULL) = (provider_stack_id IS NULL))
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_stack_pr_observations_pr
+    ON review_stack_pr_observations (workspace_id, repo_id, pr_number, observed_at);
+
+  CREATE TABLE IF NOT EXISTS review_stack_refresh_jobs (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    stack_id TEXT NOT NULL,
+    stack_observation_id TEXT,
+    pull_request_observation_id TEXT,
+    state TEXT NOT NULL CHECK (state IN ('pending','running','failed','completed')),
+    installation_id INTEGER NOT NULL,
+    actor_key TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    failure TEXT,
+    lease_token TEXT,
+    lease_expires_at INTEGER,
+    result_manifest_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (stack_id, stack_observation_id),
+    UNIQUE (stack_id, pull_request_observation_id),
+    CHECK ((stack_observation_id IS NULL) != (pull_request_observation_id IS NULL))
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_stack_refresh_jobs_lane
+    ON review_stack_refresh_jobs (actor_key, state, created_at);
+
+  CREATE TABLE IF NOT EXISTS review_stack_idempotency (
+    workspace_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('create','refresh')),
+    stack_id TEXT NOT NULL,
+    manifest_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, idempotency_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS project_review_stacks (
+    project_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, slug)
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_review_stacks_stack ON project_review_stacks (workspace_id, slug);
+`;
+
+function migrateToV19(): void {
+  db.transaction(() => {
+    db.exec(V19_REVIEW_STACKS);
+    db.run("PRAGMA user_version = 19");
+  })();
+  console.log("[seer] migrated to schema v19 (review stacks).");
 }
 
 /**

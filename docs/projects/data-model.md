@@ -73,9 +73,9 @@ itself. Its page derives the contents by query, so there is one source of truth 
 nothing to drift.
 
 Memberships are written at upload or publish (`PUT /api/bundles/:slug?project=<slug>`,
-a `projects[]` field in a review, stage, or promoted-review-lineage document). Bundle and
-review memberships are attachable or detachable later; stage and promoted-review
-memberships are publication-only in this slice.
+a `projects[]` field in a review, stage, promoted-review-lineage, or stack document).
+Bundle, review and stack memberships are attachable or detachable later; stage and
+promoted-review memberships are publication-only in this slice.
 
 Legacy reviews and promoted reviews are counted and listed apart in the state — `reviews`
 and `reviewLineages` — because they resolve through different readers and a join that
@@ -83,6 +83,14 @@ could mean either would have to guess. The human page composes them under one Re
 heading, because to a person they are the same thing. A promoted review whose witness has
 not published yet has no version to name, so the page says which revision is standing
 instead.
+
+Stacks of promoted reviews are a third list, `reviewStacks`, with their own join
+`project_review_stacks`, and their own attach and detach routes
+(`PUT`/`DELETE /api/projects/:slug/review-stacks/:stack`). Creation owns the join too, through
+the stack's `projects[]`. The page lists a stack under Reviews as `stack v<n>` — its latest
+manifest, marked `evidence` while that manifest carries no stack account. Project and
+sub-project summary tallies count all three review forms, including a project whose only
+review is a stack.
 
 Tasks and notes are the exception: each belongs to exactly one project, because they
 are the project's own content rather than assets that visit it.

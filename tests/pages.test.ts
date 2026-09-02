@@ -933,7 +933,7 @@ function projectData(over: Partial<ProjectPageData> = {}): ProjectPageData {
     parent: null,
     description: "The whole effort, with `code` in it.",
     descriptionHtml: "<p>The whole effort, with <code>code</code> in it.</p>",
-    children: [{ slug: "video", title: "Video", status: "done", bundles: 1, reviews: 0, reviewLineages: 0, tasks: 0 }],
+    children: [{ slug: "video", title: "Video", status: "done", bundles: 1, reviews: 0, reviewLineages: 0, reviewStacks: 0, tasks: 0 }],
     tasks: [],
     plans: [],
     bundles: [

@@ -2705,7 +2705,7 @@ export interface ProjectPageData {
   description: string;
   /** The same field rendered to HTML by the server; "" renders nothing. */
   descriptionHtml: string;
-  children: { slug: string; title: string; status: ProjectStatusWord; bundles: number; reviews: number; reviewLineages: number; tasks: number }[];
+  children: { slug: string; title: string; status: ProjectStatusWord; bundles: number; reviews: number; reviewLineages: number; reviewStacks: number; tasks: number }[];
   /** Derived views plus the body rendered by the server; reading order is the list order. */
   tasks: (TaskView & { bodyHtml: string })[];
   plans: { slug: string; latestVersion: number; updatedAt: number; url: string }[];
@@ -2725,6 +2725,9 @@ export interface ProjectPageData {
     updatedAt: number;
     url: string;
   }[];
+  /** Stacks of promoted reviews. They read under the Reviews heading beside the reviews they
+   *  group; a stack's "latest" is its manifest, and its account when one has been published. */
+  reviewStacks?: { slug: string; title: string; latestManifestVersion: number; latestAccountVersion: number | null; updatedAt: number; url: string }[];
   stages?: { slug: string; title: string; latestVersion: number; updatedAt: number; url: string; versionUrl: string; apiUrl: string; apiVersionUrl: string }[];
   /** The bounded tail of the record: authored notes (body rendered by the server)
    *  interleaved with derived status events, oldest first. */
@@ -2772,6 +2775,11 @@ export function reviewLineageStanding(r: {
   return r.captureState === "running" ? "capturing" : "capture pending";
 }
 
+/** A stack's "latest": its manifest, and whether that manifest carries the stack account. */
+export function reviewStackStanding(s: { latestManifestVersion: number; latestAccountVersion: number | null }): string {
+  return s.latestAccountVersion === s.latestManifestVersion ? `stack v${s.latestManifestVersion}` : `stack v${s.latestManifestVersion} evidence`;
+}
+
 export function projectPage(d: ProjectPageData): string {
   const title = `${d.title} · ${d.nav.current?.name ?? "Seer"} · Seer`;
   const og = { "og:title": title, "og:type": "website", robots: "noindex" };
@@ -2792,7 +2800,7 @@ export function projectPage(d: ProjectPageData): string {
           <td class="slug"><a href="/${d.wsId}/p/${encodeURIComponent(c.slug)}">${escapeHtml(c.title)}</a>
             <span class="row-sub mono">${escapeHtml(c.slug)}</span></td>
           <td>${statusWord(c.status)}</td>
-          <td class="status-cell">${holdsCell(c.bundles, c.reviews + c.reviewLineages, 0, c.tasks)}</td>
+          <td class="status-cell">${holdsCell(c.bundles, c.reviews + c.reviewLineages + c.reviewStacks, 0, c.tasks)}</td>
         </tr>`,
           )
           .join("\n")}
@@ -2921,6 +2929,13 @@ export function projectPage(d: ProjectPageData): string {
       latest: reviewLineageStanding(r),
       at: r.updatedAt,
       url: r.url,
+    })),
+    ...(d.reviewStacks ?? []).map((s) => ({
+      slug: s.slug,
+      title: s.title,
+      latest: reviewStackStanding(s),
+      at: s.updatedAt,
+      url: s.url,
     })),
   ];
   const reviewsSection =
@@ -3076,11 +3091,14 @@ export function projectMarkdown(d: ProjectPageData): string {
     lines.push("", "## Bundles", "");
     for (const b of d.bundles) lines.push(`- ${b.slug} v${b.latestVersion}: ${b.url}`);
   }
-  if (d.reviews.length > 0 || (d.reviewLineages ?? []).length > 0) {
+  if (d.reviews.length > 0 || (d.reviewLineages ?? []).length > 0 || (d.reviewStacks ?? []).length > 0) {
     lines.push("", "## Reviews", "");
     for (const r of d.reviews) lines.push(`- ${r.title} (${r.slug}) v${r.latestVersion}: ${r.url}`);
     for (const r of d.reviewLineages ?? []) {
       lines.push(`- ${r.title} (${r.slug}) ${reviewLineageStanding(r)}: ${r.url}`);
+    }
+    for (const s of d.reviewStacks ?? []) {
+      lines.push(`- ${s.title} (${s.slug}) ${reviewStackStanding(s)}: ${s.url}`);
     }
   }
   if ((d.stages ?? []).length > 0) {

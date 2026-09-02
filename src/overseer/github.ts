@@ -90,6 +90,27 @@ export interface GithubCompare {
   total_commits?: number;
 }
 
+/**
+ * One native GitHub stack, as `GET /repos/{owner}/{repo}/stacks?pull_request=N` answers it
+ * under the `2026-03-10` API version. Entries are bottom-to-top as GitHub returned them.
+ * The per-entry base ref is deliberately NOT here: it comes from Seer's own observation of
+ * each pull request, never from the stack listing.
+ */
+export interface GithubPullStack {
+  id: number;
+  number: number;
+  baseRef: string;
+  open: boolean;
+  pullRequests: {
+    number: number;
+    state: "open" | "closed";
+    draft: boolean;
+    mergedAt: string | null;
+    headRef: string;
+    headSha: string;
+  }[];
+}
+
 export interface GithubReviewComment {
   id: number;
   path: string;
@@ -130,6 +151,9 @@ export interface GithubClient {
    * only place that knows it.
    */
   installationFor?(repo: string): Promise<number | null>;
+  /** The native stack one pull request belongs to, or null when it is in none. Optional
+   *  keeps existing fakes source-compatible; the stack path refuses a client without it. */
+  getPullStack?(repo: string, pullRequest: number): Promise<GithubPullStack | null>;
 }
 
 /** Every failure out of this module is one of these, with the call site in the message. */
@@ -262,11 +286,11 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
   const token = options.token;
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
-  async function request(path: string, accept: string): Promise<Response> {
+  async function request(path: string, accept: string, apiVersion = "2022-11-28"): Promise<Response> {
     const url = path.startsWith("http") ? path : `${base}${path}`;
     const headers: Record<string, string> = {
       Accept: accept,
-      "X-GitHub-Api-Version": "2022-11-28",
+      "X-GitHub-Api-Version": apiVersion,
       "User-Agent": "overseer",
     };
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -290,8 +314,8 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
     return res;
   }
 
-  async function json<T>(path: string): Promise<T> {
-    const res = await request(path, "application/vnd.github+json");
+  async function json<T>(path: string, apiVersion?: string): Promise<T> {
+    const res = await request(path, "application/vnd.github+json", apiVersion);
     return (await res.json()) as T;
   }
 
@@ -481,7 +505,67 @@ export function createFetchGithubClient(options: FetchGithubClientOptions = {}):
       const res = await request(`/repos/${repo}/pulls/${number}`, "application/vnd.github.diff");
       return res.text();
     },
+    async getPullStack(repo, number) {
+      assertRepo(repo);
+      assertNumber(number);
+      const path = `/repos/${repo}/stacks?pull_request=${number}&per_page=2`;
+      const url = `${base}${path}`;
+      const body = await json<unknown>(path, STACKS_API_VERSION);
+      if (!Array.isArray(body)) throw new GithubError(`GitHub returned an invalid stack list for ${url}.`, 0, url);
+      if (body.length === 0) return null;
+      if (body.length > 1) throw new GithubError(`GitHub returned two stacks for one pull request at ${url}.`, 0, url);
+      return parseGithubStack(body[0], url);
+    },
   };
+}
+
+/** The API version the stack endpoints answer under. Every other call keeps 2022-11-28. */
+export const STACKS_API_VERSION = "2026-03-10";
+/** GitHub's own ceiling for one stack; a longer list is a malformed answer, not a stack. */
+const MAX_STACK_ENTRIES = 100;
+
+function positiveInteger(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) > 0;
+}
+
+/** Validate one stack payload field by field. Every stored fact here — ids, numbers, refs,
+ *  SHAs — is written into an immutable manifest, so a string where a number belongs is a
+ *  named refusal before anything is written. */
+function parseGithubStack(raw: unknown, url: string): GithubPullStack {
+  const invalid = (what: string): GithubError => new GithubError(`GitHub returned an invalid stack ${what} for ${url}.`, 0, url);
+  const stack = raw as Record<string, unknown> | null;
+  if (!stack || typeof stack !== "object" || Array.isArray(stack)) throw invalid("payload");
+  if (!positiveInteger(stack.id)) throw invalid("id");
+  if (!positiveInteger(stack.number)) throw invalid("number");
+  const base = stack.base as Record<string, unknown> | null | undefined;
+  const baseRef = typeof stack.base_ref === "string" ? stack.base_ref : base?.ref;
+  if (typeof baseRef !== "string") throw invalid("base ref");
+  try { assertRef(baseRef); } catch { throw invalid("base ref"); }
+  const state = stack.state;
+  const open = state === undefined ? true : state === "open";
+  if (state !== undefined && state !== "open" && state !== "closed") throw invalid("state");
+  if (!Array.isArray(stack.pull_requests) || stack.pull_requests.length < 1 || stack.pull_requests.length > MAX_STACK_ENTRIES) {
+    throw invalid("pull request list");
+  }
+  const numbers = new Set<number>();
+  const pullRequests = stack.pull_requests.map((entry) => {
+    const pull = entry as Record<string, unknown> | null;
+    if (!pull || typeof pull !== "object") throw invalid("pull request entry");
+    if (!positiveInteger(pull.number)) throw invalid("pull request number");
+    if (numbers.has(pull.number)) throw invalid("pull request list: a number repeats");
+    numbers.add(pull.number);
+    if (pull.state !== "open" && pull.state !== "closed") throw invalid("pull request state");
+    const mergedAt = pull.merged_at ?? null;
+    if (mergedAt !== null && (typeof mergedAt !== "string" || !Number.isFinite(Date.parse(mergedAt)))) throw invalid("pull request merge time");
+    const head = pull.head as Record<string, unknown> | null | undefined;
+    const headRef = typeof pull.head_ref === "string" ? pull.head_ref : head?.ref;
+    const headSha = typeof pull.head_sha === "string" ? pull.head_sha : head?.sha;
+    if (typeof headRef !== "string") throw invalid("pull request head ref");
+    try { assertRef(headRef); } catch { throw invalid("pull request head ref"); }
+    if (typeof headSha !== "string" || !/^[0-9a-f]{40}$/i.test(headSha)) throw invalid("pull request head commit id");
+    return { number: pull.number, state: pull.state as "open" | "closed", draft: pull.draft === true, mergedAt: mergedAt as string | null, headRef, headSha };
+  });
+  return { id: stack.id, number: stack.number, baseRef, open, pullRequests };
 }
 
 // ---- a pull request, checked rather than trusted ----
