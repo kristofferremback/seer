@@ -25,6 +25,7 @@ import {
   filesInTreeOrder,
   renderReaderPage,
   type ReaderDoc,
+  type ReaderEvidence,
   type ReaderGroup,
   type ReaderMember,
   type ReaderPageState,
@@ -64,10 +65,13 @@ import {
 } from "./stack-db";
 import { getLineageById, stackDrift } from "./stack-pr";
 import { stackPages, type StackPageUnit, type StackUnit } from "./stack-read";
-import { STACK_PAGE_HTML_MAX_BYTES, type StackMemberSnapshot } from "./stack-types";
+import { MAX_STACK_MEMBER_POSITIONS, STACK_PAGE_HTML_MAX_BYTES, type StackMemberSnapshot } from "./stack-types";
+import type { StackCapability } from "./capability-types";
+import { projectAgent } from "./actor-projection";
 
 const NUMBER_RE = /^[1-9][0-9]{0,8}$/;
 const POSITION_RE = /^[1-9][0-9]?$/;
+const validPosition = (value: string): boolean => POSITION_RE.test(value) && Number(value) <= MAX_STACK_MEMBER_POSITIONS;
 
 function esc(value: unknown): string {
   return escapeHtml(String(value ?? ""));
@@ -82,7 +86,7 @@ export function prefixId(position: number, id: string): string {
 /** `l<pos>-<bare>` → its parts, or null for anything else. */
 export function splitStackId(id: string): { position: number; bare: string } | null {
   const match = /^l([1-9][0-9]?)-(.+)$/.exec(id);
-  return match ? { position: Number(match[1]), bare: match[2]! } : null;
+  return match && validPosition(match[1]!) ? { position: Number(match[1]), bare: match[2]! } : null;
 }
 
 // ---- resolution ----
@@ -148,7 +152,12 @@ function memberUrl(workspaceId: string, member: CompositeMember): string {
   return `/${workspaceId}/r/${member.lineage.slug}/rev/${member.revision.revision}`;
 }
 
-function composite(resolved: ResolvedStackRead, members: CompositeMember[], userId: string): Composite {
+function composite(
+  resolved: ResolvedStackRead,
+  members: CompositeMember[],
+  userId: string | null,
+  memberHref: (member: CompositeMember) => string,
+): Composite {
   const { workspaceId } = resolved;
   const files: StageCaptureFileRow[] = [];
   const changes: StageCaptureChangeRow[] = [];
@@ -160,14 +169,16 @@ function composite(resolved: ResolvedStackRead, members: CompositeMember[], user
     for (const file of member.inventory.files) files.push({ ...file, id: prefixId(member.position, file.id) });
     for (const change of member.inventory.changes) changes.push({ ...change, id: prefixId(member.position, change.id), file_id: prefixId(member.position, change.file_id) });
     for (const item of member.inventory.incomplete) incomplete.push({ ...item, id: prefixId(member.position, item.id) });
-    for (const id of listRevisionReadChangeIds(workspaceId, member.revision.id, userId)) readIds.add(prefixId(member.position, id));
+    if (userId !== null) {
+      for (const id of listRevisionReadChangeIds(workspaceId, member.revision.id, userId)) readIds.add(prefixId(member.position, id));
+    }
   }
   const seams = new Map<number, ReaderSeam>(members.map((member) => [member.position, {
     id: `l${member.position}`,
     position: member.position,
     label: `PR #${member.snapshot.prNumber}`,
     detail: member.snapshot.title,
-    href: memberUrl(workspaceId, member),
+    href: memberHref(member),
   }]));
   return {
     inventory: { capture: members[0]!.inventory.capture, builder: null, files, changes, incomplete },
@@ -437,9 +448,9 @@ function fallbackHref(url: URL, page: number): string {
   return `${url.pathname}${query === "" ? "" : `?${query}`}`;
 }
 
-function fallbackBody(resolved: ResolvedStackRead, url: URL, items: string[], page: number, count: number, totalItems: number, sourceBytes: number): string {
+function fallbackBody(resolved: ResolvedStackRead, url: URL, items: string[], page: number, count: number, totalItems: number, sourceBytes: number, pinnedOverride?: string): string {
   const controls = `<nav aria-label="Fallback pages">${page > 1 ? `<a rel="prev" href="${esc(fallbackHref(url, page - 1))}">Previous</a> · ` : ""}<span>Page ${page} of ${count}</span>${page < count ? ` · <a rel="next" href="${esc(fallbackHref(url, page + 1))}">Next</a>` : ""}</nav>`;
-  const pinned = `${stackPath(resolved.workspaceId, resolved.stack.slug, resolved.manifest.version)}${resolved.account ? "/account" : ""}`;
+  const pinned = pinnedOverride ?? `${stackPath(resolved.workspaceId, resolved.stack.slug, resolved.manifest.version)}${resolved.account ? "/account" : ""}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${esc(resolved.stack.title)} · Seer</title><style>:root{color-scheme:light dark}body{font:16px/1.5 system-ui,sans-serif;max-width:72rem;margin:auto;padding:1rem}a{color:inherit}nav{margin:1rem 0}li{overflow-wrap:anywhere;margin:.35rem 0}</style></head><body><main><a href="${esc(pinned)}">${esc(resolved.stack.title)}</a><h1>Page too large</h1><p>${Math.round(sourceBytes / 1024)} KiB exceeds the ${Math.round(STACK_PAGE_HTML_MAX_BYTES / 1024 / 1024)} MiB response limit. All ${totalItems} items remain available through their member pages.</p>${controls}<ol>${items.join("")}</ol>${controls}</main></body></html>`;
 }
 
@@ -455,6 +466,7 @@ function overLimitPage(
   filter: (id: string) => boolean,
   composite: Composite,
   sourceBytes: number,
+  capabilityBase?: string,
 ): Response {
   const files = new Map(composite.inventory.files.map((file) => [file.id, file]));
   const changes = new Map(composite.inventory.changes.map((change) => [change.id, change]));
@@ -472,10 +484,11 @@ function overLimitPage(
       const pinned = resolved.account && owner.snapshot.accountVersion !== null
         ? `/${resolved.workspaceId}/r/${owner.lineage.slug}/v/${owner.snapshot.accountVersion}`
         : memberUrl(resolved.workspaceId, owner);
-      const params = new URLSearchParams({ review: entry.unit.memberGroupId });
-      if (member.type === "change") params.set("change", parts.bare);
-      const anchor = member.type === "change" ? parts.bare : `focus-${parts.bare}`;
-      const href = `${pinned}?${params.toString()}#${encodeURIComponent(anchor)}`;
+      const params = new URLSearchParams({ review: capabilityBase ? group.group.id : entry.unit.memberGroupId });
+      if (member.type === "change") params.set("change", capabilityBase ? member.id : parts.bare);
+      if (capabilityBase && member.type !== "change" && url.searchParams.get("page")) params.set("page", url.searchParams.get("page")!);
+      const anchor = member.type === "change" ? (capabilityBase ? member.id : parts.bare) : `focus-${capabilityBase ? member.id : parts.bare}`;
+      const href = `${capabilityBase ?? pinned}?${params.toString()}#${encodeURIComponent(anchor)}`;
       const change = member.type === "change" ? changes.get(member.id) : null;
       const file = change ? files.get(change.file_id) : member.type === "file" ? files.get(member.id) : null;
       const material = member.type === "material" ? materials.get(member.id) : null;
@@ -496,7 +509,7 @@ function overLimitPage(
   // Use a 15-digit page/count while packing. Every realizable array has fewer pages, so
   // the actual navigation can only be shorter than the body measured here.
   const sentinel = 999_999_999_999_999;
-  const shellBytes = Buffer.byteLength(fallbackBody(resolved, url, [], sentinel, sentinel, items.length, sourceBytes));
+  const shellBytes = Buffer.byteLength(fallbackBody(resolved, url, [], sentinel, sentinel, items.length, sourceBytes, capabilityBase));
   const chunks: string[][] = [];
   let chunk: string[] = [];
   let chunkBytes = shellBytes;
@@ -520,7 +533,7 @@ function overLimitPage(
   if (rawPage !== null && !NUMBER_RE.test(rawPage)) return softMiss(new Request(url.toString()), url);
   const page = rawPage === null ? 1 : Number(rawPage);
   if (page > chunks.length) return softMiss(new Request(url.toString()), url);
-  const body = fallbackBody(resolved, url, chunks[page - 1]!, page, chunks.length, items.length, sourceBytes);
+  const body = fallbackBody(resolved, url, chunks[page - 1]!, page, chunks.length, items.length, sourceBytes, capabilityBase);
   const fallbackBytes = Buffer.byteLength(body);
   if (fallbackBytes > STACK_PAGE_HTML_MAX_BYTES) throw new Error(`Fallback page exceeded its hard limit: ${fallbackBytes}`);
   return new Response(body, { status: 200, headers: {
@@ -557,8 +570,9 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
   const layer = url.searchParams.get("layer");
   const layerMember = layer === null ? null : resolved.members.find((member) => member.lineage.slug === layer) ?? null;
   if (layer !== null && !layerMember) return softReviewPage();
-  const whole = composite(resolved, resolved.members, user.id);
-  const built = layerMember ? composite(resolved, [layerMember], user.id) : whole;
+  const memberHref = (member: CompositeMember) => memberUrl(workspaceId, member);
+  const whole = composite(resolved, resolved.members, user.id, memberHref);
+  const built = layerMember ? composite(resolved, [layerMember], user.id, memberHref) : whole;
   const filter = (id: string): boolean => layerMember === null || splitStackId(id)?.position === layerMember.position;
   // Under a layer, a stack group keeps its identity with fewer members; an evidence seam
   // of another member is nobody's group here and is dropped rather than drawn empty.
@@ -607,7 +621,12 @@ export async function handleStackPage(req: Request, workspaceId: string, slug: s
   }
 
   const aside = `${driftLines(resolved)}${memberCards(resolved, resolved.members, whole.readIds)}`;
-  const response = await renderReaderPage(req, nav, workspaceId, doc, routes, built.inventory, built.readIds, `stack ${pinned}`, {
+  const response = await renderReaderPage(req, {
+    kind: "member",
+    nav,
+    handling: { readIds: built.readIds },
+    share: { workspace: workspaceId, kind: "stack_document", target: resolved.account?.id ?? resolved.manifest.id },
+  }, workspaceId, doc, routes, built.inventory, `stack ${pinned}`, {
     seamOf: built.seamOf,
     materialize: built.materialize,
     scope,
@@ -641,6 +660,174 @@ function softMiss(req: Request, url: URL): Response {
   return softHtml(req);
 }
 
+function capabilityStackRoutes(resolved: ResolvedStackRead, basePath: string, layer: string | null): ReaderRoutes {
+  return {
+    group: (groupId, changeId) => focusUrl(basePath, groupId, layer, null, changeId),
+    close: () => basePath,
+    lines: (fileId, side, start, end) => {
+      const parts = splitStackId(fileId);
+      return `${basePath}/m/${parts?.position ?? 0}/files/${parts?.bare ?? fileId}?side=${side}&start=${start}&end=${end}`;
+    },
+    history: () => [{
+      label: resolved.account ? `v${resolved.manifest.version} account` : `v${resolved.manifest.version}`,
+      href: basePath,
+      current: true,
+    }],
+    contextLinks: true,
+  };
+}
+
+function capabilityMemberCards(resolved: ResolvedStackRead, basePath: string): string {
+  const cards = resolved.manifest.doc.members.map((snapshot, index) => {
+    const position = index + 1;
+    const member = resolved.members.find((candidate) => candidate.position === position);
+    if (!member) {
+      const word = snapshot.status === "removed" ? REMOVED_WORDS[snapshot.removedReason!] : "unavailable";
+      return `<div class="stack-member" data-status="${esc(snapshot.status)}"><span>${position}</span><span><strong>#${snapshot.prNumber} ${esc(snapshot.title)}</strong><small>rev ${snapshot.revision} · ${esc(word)}</small></span></div>`;
+    }
+    const params = new URLSearchParams({ layer: member.lineage.slug });
+    const facts = [`rev ${snapshot.revision}`, ...(snapshot.accountVersion === null ? [] : [`v${snapshot.accountVersion}`]), `${member.inventory.files.length} file${member.inventory.files.length === 1 ? "" : "s"}`];
+    return `<a class="stack-member" data-status="${esc(snapshot.status)}" href="${esc(`${basePath}?${params}`)}"><span>${position}</span><span><strong>#${snapshot.prNumber} ${esc(snapshot.title)}</strong><small>${esc(facts.join(" · "))}</small></span></a>`;
+  });
+  return `<section class="stack-members" aria-label="Members">${cards.join("")}</section>`;
+}
+
+/** Render one exact stack capability from copied authority. No current stack state or
+ * personal handling is consulted, and every generated URL remains under the token. */
+export async function renderStackCapability(req: Request, capability: StackCapability, basePath: string): Promise<Response> {
+  const members: CompositeMember[] = capability.members.map((member) => ({
+    position: member.position,
+    snapshot: member.snapshot!,
+    lineage: member.lineage,
+    revision: member.revision,
+    inventory: member.inventory,
+    account: member.account,
+  }));
+  const resolved: ResolvedStackRead = {
+    workspaceId: capability.share.workspace_id,
+    stack: capability.stack,
+    manifest: capability.manifest,
+    account: capability.account,
+    members,
+  };
+  const url = new URL(req.url);
+  const layer = url.searchParams.get("layer");
+  const layerMember = layer === null ? null : members.find((member) => member.lineage.slug === layer) ?? null;
+  if (layer !== null && !layerMember) return softHtml(req);
+  const memberHref = (member: CompositeMember) => `${basePath}?${new URLSearchParams({ layer: member.lineage.slug })}`;
+  const whole = composite(resolved, members, null, memberHref);
+  const built = layerMember ? composite(resolved, [layerMember], null, memberHref) : whole;
+  const filter = (id: string): boolean => layerMember === null || splitStackId(id)?.position === layerMember.position;
+  const groups = readerGroups(resolved, members)
+    .map((entry) => ({ ...entry, group: { ...entry.group, members: entry.group.members.filter((member) => filter(member.id)) }, units: entry.units.filter((unit) => filter(unit.key)) }))
+    .filter((entry) => resolved.account !== null || entry.group.members.length > 0);
+  const witness = capability.account?.doc.witness;
+  const projected = witness ? projectAgent(witness.agent.name, witness.agent.model) : null;
+  const top = members[members.length - 1]!;
+  const bottom = members[0]!;
+  const seenEvidence = new Set<string>();
+  const evidence: ReaderEvidence[] = [];
+  for (const member of members) {
+    for (const item of member.account?.doc.evidence ?? []) {
+      const key = item.kind === "bundle" ? `bundle:${item.slug}:${item.version}` : `attachment:${item.id}`;
+      if (seenEvidence.has(key)) continue;
+      seenEvidence.add(key);
+      evidence.push(item.kind === "bundle"
+        ? { label: `${item.slug} v${item.version}`, href: null, detail: "bundle" }
+        : { label: item.caption || item.alt, href: `${basePath}/a/${item.id}`, detail: item.mediaType });
+    }
+  }
+  const doc: ReaderDoc = {
+    title: capability.manifest.doc.identity.title,
+    source: {
+      repo: capability.manifest.doc.repository.repo,
+      branch: `${capability.manifest.doc.repository.baseRef} → ${top.snapshot.headRef}`,
+      sourceHeadSha: top.snapshot.headSha,
+      mergeBaseSha: bottom.revision.doc.source.mergeBaseSha,
+    },
+    pullRequest: null,
+    builder: null,
+    witness: projected?.kind === "agent" && witness ? { agent: { name: projected.label, model: projected.model }, body: witness.summary } : null,
+    groups: groups.map((entry) => entry.group),
+    focus: [],
+    evidence,
+    authored: capability.account !== null,
+    workflow: null,
+    drift: null,
+    movement: null,
+    standing: capability.account ? `Manifest ${capability.manifest.version} · account` : `Manifest ${capability.manifest.version}`,
+    pin: capability.account ? `v${capability.manifest.version} account` : `v${capability.manifest.version}`,
+    latest: false,
+  };
+  const routes = capabilityStackRoutes(resolved, basePath, layer);
+  const scope: ReaderScope = {
+    current: layer,
+    subtitle: layerMember ? `Layer ${layerMember.position}/${members.length} · PR #${layerMember.snapshot.prNumber}` : `Whole stack · ${members.length} layers`,
+    options: members.map((member) => ({ value: member.lineage.slug, label: `PR #${member.snapshot.prNumber} · ${member.snapshot.title}` })),
+    action: basePath,
+    hidden: url.searchParams.has("review") ? { review: url.searchParams.get("review")! } : {},
+  };
+
+  let page: ReaderPageState | undefined;
+  let pageEntries: StackPageUnit[] = [];
+  let pageGroup: StackReaderGroup | null = null;
+  const reviewId = url.searchParams.get("review");
+  const rawPage = url.searchParams.get("page");
+  if (reviewId !== null) {
+    const selected = groups.find((entry) => entry.group.id === reviewId);
+    if (!selected || (rawPage !== null && !NUMBER_RE.test(rawPage))) return softHtml(req);
+    const plan = stackPages(selected.units);
+    const change = url.searchParams.get("change");
+    let number = rawPage === null ? 1 : Number(rawPage);
+    if (rawPage === null && change !== null) {
+      const index = plan.pages.findIndex((entries) => entries.some((entry) => entry.changeIds.includes(change)));
+      if (index >= 0) number = index + 1;
+    }
+    if (number > plan.pages.length) return softHtml(req);
+    const entries = plan.pages[number - 1]!;
+    pageEntries = entries;
+    pageGroup = selected;
+    page = {
+      number,
+      count: plan.pages.length,
+      overBudget: plan.overBudget.has(number),
+      part: entries.length === 1 ? entries[0]!.part : null,
+      members: pageMembers(entries, selected, filter),
+      href: (target) => focusUrl(basePath, reviewId, layer, target),
+    };
+  } else if (rawPage !== null || url.searchParams.has("change")) {
+    return softHtml(req);
+  }
+
+  const response = await renderReaderPage(
+    req,
+    { kind: "capability", nav: null, handling: null, basePath },
+    capability.share.workspace_id,
+    doc,
+    routes,
+    built.inventory,
+    `stack capability ${capability.share.id}`,
+    {
+      seamOf: built.seamOf,
+      materialize: built.materialize,
+      scope,
+      ...(page ? { page } : {}),
+      aside: capabilityMemberCards(resolved, basePath),
+      brandPath: basePath,
+    },
+  );
+  if (response.status !== 200 || !page) return response;
+  const text = await response.text();
+  const bytes = Buffer.byteLength(text);
+  if (bytes > STACK_PAGE_HTML_MAX_BYTES && pageGroup) {
+    return overLimitPage(resolved, url, pageEntries, pageGroup, filter, built, bytes, basePath);
+  }
+  const headers = new Headers(response.headers);
+  headers.set("x-seer-page-bytes", String(bytes));
+  headers.set("x-seer-page-count", String(page.count));
+  return new Response(text, { status: 200, headers });
+}
+
 function hasControlCharacter(value: string): boolean {
   for (let index = 0; index < value.length; index++) {
     const code = value.charCodeAt(index);
@@ -664,7 +851,7 @@ function readJson(value: unknown, status = 200): Response {
 export async function handleStackReadMutation(req: Request, workspaceId: string, slug: string, rawVersion: string, rawPosition: string, changeId: string): Promise<Response> {
   if (!originOk(req)) return new Response("Bad origin", { status: 403 });
   const user = sessionUser(req);
-  if (!user || !isMember(workspaceId, user.id) || !STACK_CHANGE_ID_RE.test(changeId) || !POSITION_RE.test(rawPosition)) return softHtml(req);
+  if (!user || !isMember(workspaceId, user.id) || !STACK_CHANGE_ID_RE.test(changeId) || !validPosition(rawPosition)) return softHtml(req);
   const parts = splitStackId(changeId);
   if (!parts || parts.position !== Number(rawPosition)) return softHtml(req);
   const resolved = resolveStackRead(workspaceId, slug, { version: rawVersion, account: false });

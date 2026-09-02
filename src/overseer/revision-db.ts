@@ -281,6 +281,13 @@ export function getRevision(workspaceId: string, slug: string, revision: number)
   return row ? parseRevision(row) : null;
 }
 
+export function getRevisionById(workspaceId: string, revisionId: string): ReviewRevisionRow | null {
+  const row = db.query<Raw<ReviewRevisionRow>, [string, string]>(
+    "SELECT * FROM review_revisions WHERE workspace_id = ? AND id = ?",
+  ).get(workspaceId, revisionId);
+  return row ? parseRevision(row) : null;
+}
+
 export function getRevisionByCapture(workspaceId: string, captureId: string): ReviewRevisionRow | null {
   const row = db.query<Raw<ReviewRevisionRow>, [string, string]>(
     "SELECT * FROM review_revisions WHERE workspace_id = ? AND capture_id = ?",
@@ -292,6 +299,13 @@ export function getAccount(workspaceId: string, slug: string, version: number): 
   const row = db.query<Raw<ReviewAccountRow>, [string, string, number]>(
     "SELECT * FROM review_accounts WHERE workspace_id = ? AND slug = ? AND version = ?",
   ).get(workspaceId, slug, version);
+  return row ? parseAccount(row) : null;
+}
+
+export function getAccountById(workspaceId: string, accountId: string): ReviewAccountRow | null {
+  const row = db.query<Raw<ReviewAccountRow>, [string, string]>(
+    "SELECT * FROM review_accounts WHERE workspace_id = ? AND id = ?",
+  ).get(workspaceId, accountId);
   return row ? parseAccount(row) : null;
 }
 

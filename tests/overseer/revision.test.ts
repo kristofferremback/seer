@@ -27,6 +27,7 @@ import {
   listRevisionReadChangeIds,
 } from "../../src/overseer/revision-db";
 import { evidenceSeams } from "../../src/overseer/revision-read";
+import { createDocumentCapability } from "../../src/overseer/capability-db";
 import { getStageCapture } from "../../src/stage/db";
 import { MAX_EVIDENCE_PAGE_CHANGES } from "../../src/overseer/revision-types";
 import { storeGoldenReview } from "./fixtures/stored-review";
@@ -402,6 +403,19 @@ describe("reading evidence before a witness has answered", () => {
     const linesBody = await lines.json() as any;
     validateResponse("readReviewRevisionFileLines", linesBody);
     expect(linesBody.lines).toEqual([{ number: 1, text: "export const value = 2;" }]);
+  });
+
+  test("an exact revision capability keeps the real changed-file context control under its token", async () => {
+    const revision = getRevision(workspace, "promoted-source", 1)!;
+    const inventory = getStageCapture(revision.capture_id, workspace)!;
+    const seam = evidenceSeams(inventory).find((group) => group.members.some((member) => member.type === "change"))!;
+    const change = seam.members.find((member) => member.type === "change")!;
+    const capability = createDocumentCapability({ wsId: workspace, kind: "review_document", target: revision.id, label: "retained context", userId: owner, expiresAt: null });
+    const page = visible(await (await fetch(`${base}/s/${capability.token}?review=${seam.id}&change=${change.id}`)).text());
+    expect(page).toContain("Load file context");
+    expect(page).toContain(`/s/${capability.token}/files/`);
+    expect(page).not.toContain(`/api/review-lineages/`);
+    expect(page).not.toContain("read-form");
   });
 
   test("the workflow line says pending, failed and retrying as the request moves", async () => {

@@ -784,11 +784,52 @@ same hard limit. The measured cost is about
 620 bytes per rendered diff line, so the line bound and the byte target are not the same
 promise; a line-byte cap stored at capture time is the change that would make them one.
 
-Deferred here on purpose: sharing a stack, discussion, judgment, and any GitHub write.
+Deferred here on purpose: discussion, judgment, and any GitHub write.
+
+### Exact document capabilities
+
+Schema v20 adds immutable document capabilities beside the promoted review and stack
+rows. It does not change a stored RevisionDoc V1, AccountDoc V1, StackManifestDoc V1, or
+StackAccountDoc V1 byte. A capability adapter parses those rows through their existing
+versioned readers and projects a public reader model.
+
+A `review_document` share targets one exact `rvr_` revision or `rac_` account. A
+`stack_document` share targets one exact `rsm_` manifest or `rsa_` stack account. Minting
+copies every authorized retained file id, review item, and cited account attachment into
+`share_capability_files`, `share_capability_items`, and
+`share_capability_attachments`. Stack rows preserve the manifest's one-based member
+position, including historical slots through 64, and exact pinned revision and optional
+account ids. Removed stubs authorize no file read. Bundle evidence is not copied.
+
+The copied rows are authority. A holder may read one copied file by opaque id, side, and
+a bounded 400-line, 512 KiB window. The request cannot name a revision, capture, path,
+object id, or blob digest. A later revision, account, manifest, stack account, attachment,
+or conversation never enters an existing grant. Revision and manifest capabilities stay
+evidence-only after an account publishes. Account capabilities stay on the exact account
+and its exact source document.
+
+Capability rendering is retained-only. Builder and witness identity is projected to agent
+name and model. Workspace and Project navigation, email, internal member and credential
+ids, personal reads and progress, carry provenance, workflow, drift, refresh, judgments,
+acknowledgements, GitHub actions, forms, private canonical links, and all mutations are
+absent. Account bundle evidence renders as inert text. Retained context is an ordinary
+capability-relative link, enhanced in place when JavaScript runs, and copied attachments
+remain available under the token. Document capability responses are `no-store`; every
+`/s/` response is `no-referrer` and `noindex, nofollow`. Legacy bundle successes retain
+`private, no-cache`. Malformed, dead, corrupt, cross-workspace, and out-of-inventory reads
+share one soft miss.
+
+The request schema has no conversation field in v20. Unknown fields are refused, which
+makes the current scope explicit: no conversation. A future conversation grant must add a
+new snapshotted scope and cannot reinterpret an existing capability. Legacy `review`
+shares keep their latest-version behavior and permanent no-context, no-conversation
+contract. Legacy `bundle` shares and live reload keep their routing and token identity.
 
 ## Privacy differs from Seer
 
-Seer bundles are public by link, because a bundle is something you want to hand to someone. A review contains private source code, so reviews belong to a workspace, the same unit bundles now live under, and are private within it: viewing needs a workspace session. If sharing is ever wanted it should be an explicit, revocable share token per review rather than a guessable slug.
+Seer bundles are public by link, because a bundle is something you want to hand to someone.
+A review contains private source code and remains workspace-only unless a member or owned
+API key mints an explicit revocable capability.
 
 ## Deliberately not built yet
 

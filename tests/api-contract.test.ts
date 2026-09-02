@@ -147,6 +147,14 @@ describe("the document and the router are one list", () => {
     }
   });
 
+  test("the share request schema keeps legacy extensions open and closes document capabilities", () => {
+    const schema = (openApiPaths()["/api/shares"] as any).post.requestBody.content["application/json"].schema;
+    expect(schema.additionalProperties).toBeUndefined();
+    expect(schema.oneOf).toHaveLength(2);
+    expect(schema.oneOf[0]).toMatchObject({ additionalProperties: true, properties: { kind: { enum: ["bundle", "review"] } } });
+    expect(schema.oneOf[1]).toMatchObject({ additionalProperties: false, properties: { kind: { enum: ["review_document", "stack_document"] } } });
+  });
+
   test("every described path is one Bun actually routes", async () => {
     // The projection rewrites `:slug` to `{slug}`. That rewrite, and nothing else, stands
     // between the two spellings — so this is the one structural thing still worth

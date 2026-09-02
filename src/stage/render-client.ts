@@ -235,7 +235,7 @@ export const STAGE_CLIENT = String.raw`(()=>{
     const file=target.closest('[data-scroll-file]');if(file&&dialog?.open){event.preventDefault();const anchor=file.dataset.scrollFile;afterFocusPanel(()=>{scrollInside(dialog.querySelector('[data-focus-stream]'),document.getElementById(anchor),'start');if(isMobile()){const url=new URL(location.href);url.searchParams.delete('panel');history.replaceState({...history.state,stageReview:true,directReview:history.state?.directReview===true},'',url);applyFocusPanels(url)}});return}
     const disclosure=target.closest('[data-toggle-change]');if(disclosure){const hunk=findChange('.hunk-review[data-change]',disclosure.dataset.toggleChange);setCollapsed(hunk,hunk?.dataset.collapsed!=='true');return}
     const filter=target.closest('[data-filter-unread]');if(filter){filter.setAttribute('aria-pressed',String(filter.getAttribute('aria-pressed')!=='true'));applyUnreadFilter();return}
-    const context=target.closest('[data-context-trigger]');if(context){loadContext(context);return}
+    const context=target.closest('[data-context-trigger]');if(context){event.preventDefault();loadContext(context);return}
   });
 
   document.addEventListener('submit',async event=>{

@@ -19,9 +19,17 @@
 import { config } from "./config";
 import { requireApiKey, sessionUser } from "./auth";
 import { db, getBundle, getVersion, isMember } from "./db";
-import { hashKey, newShareToken, tinyId, SHARE_TOKEN_RE, SHR_ID_RE, WS_ID_RE } from "./ids";
+import { RAC_ID_RE, RSA_ID_RE, RSM_ID_RE, RVR_ID_RE, hashKey, newShareToken, tinyId, SHARE_TOKEN_RE, SHR_ID_RE, WS_ID_RE } from "./ids";
 import { serveBundleFile, type BundleMeta } from "./serve-bundle";
 import { getReview } from "./overseer/db";
+import {
+  CapabilityTargetError,
+  capabilityAssetPath,
+  createDocumentCapability,
+  documentProjectionForShare,
+  resolveCapabilityTargetForMint,
+} from "./overseer/capability-db";
+import { handleDocumentCapabilityRequest } from "./overseer/capability-read";
 import {
   handleSharedReviewAttachment,
   handleSharedReviewPage,
@@ -30,19 +38,20 @@ import {
 
 // ---- the shape ----
 
-export type ShareKind = "review" | "bundle";
+export type LegacyShareKind = "review" | "bundle";
+export type ShareKind = LegacyShareKind | "review_document" | "stack_document";
 
 /** The kinds a share may name. Closed, and the same list the table's CHECK holds:
  *  a resolver dispatches on this, so a row naming anything else is a link that cannot
  *  open. */
-export const SHARE_KINDS: readonly ShareKind[] = ["review", "bundle"];
+export const SHARE_KINDS = ["review", "bundle", "review_document", "stack_document"] as const;
 
 /** The kinds the read route actually serves. A kind in SHARE_KINDS but not here is one
  *  the resolver understands and no route opens, so minting it is refused rather than
  *  handing over a link that dead-ends: see handleCreateShare(). Both kinds are served
  *  today, so the guard is a standing check on the next kind rather than a live refusal,
  *  and it is deliberately kept — the mint and the read route must not drift. */
-export const SERVED_SHARE_KINDS: readonly ShareKind[] = ["review", "bundle"];
+export const SERVED_SHARE_KINDS = SHARE_KINDS;
 
 export interface ShareRow {
   id: string;
@@ -68,7 +77,7 @@ const SHARE_COLS =
  *  not recoverable after. */
 export function createShare(args: {
   wsId: string;
-  kind: ShareKind;
+  kind: LegacyShareKind;
   target: string;
   label: string;
   userId: string;
@@ -151,7 +160,7 @@ export function resolveShare(token: string): ShareRow | null {
  *  named: an unknown token names no kind at all, so a per-kind refusal would say which
  *  tokens exist. */
 function softNotFound(): Response {
-  return withShareHeaders(reviewSoftNotFound());
+  return withNoStoreShareHeaders(reviewSoftNotFound());
 }
 
 /** The two headers every answer on this route carries, refusal included — set here
@@ -170,6 +179,11 @@ function withShareHeaders(res: Response): Response {
   res.headers.set("referrer-policy", "no-referrer");
   res.headers.set("x-robots-tag", "noindex, nofollow");
   return res;
+}
+
+function withNoStoreShareHeaders(res: Response): Response {
+  res.headers.set("cache-control", "no-store");
+  return withShareHeaders(res);
 }
 
 /** A review's remainder: nothing, a version pin, or one attachment. Trailing slash
@@ -199,7 +213,7 @@ export async function handleShareRequest(req: Request): Promise<Response> {
   // refusal is a plain 405 rather than the soft-404: it says nothing about the token,
   // which is not even looked at.
   if (req.method !== "GET" && req.method !== "HEAD") {
-    return withShareHeaders(new Response("Method not allowed", { status: 405 }));
+    return withNoStoreShareHeaders(new Response("Method not allowed", { status: 405 }));
   }
 
   const url = new URL(req.url);
@@ -214,6 +228,9 @@ export async function handleShareRequest(req: Request): Promise<Response> {
   if (!share) return deadShare(req, token);
   if (share.kind === "review") return sharedReview(req, share, token, rest);
   if (share.kind === "bundle") return sharedBundle(url, share, token, rest);
+  if (share.kind === "review_document" || share.kind === "stack_document") {
+    return withNoStoreShareHeaders(await handleDocumentCapabilityRequest(req, share, token, rest));
+  }
   // A kind the resolver knows and no branch here serves. Unreachable while
   // SERVED_SHARE_KINDS and this switch agree, which is what the mint guard enforces.
   return softNotFound();
@@ -308,7 +325,7 @@ async function sharedBundle(
 function assetPath(row: ShareRow): string | null {
   if (row.kind === "review") return `/${row.workspace_id}/r/${row.target}`;
   if (row.kind === "bundle") return `/${row.workspace_id}/b/${row.target}/`;
-  return null;
+  return capabilityAssetPath(row);
 }
 
 /** A token that is unknown, revoked or expired. The one exception in the design: a
@@ -318,11 +335,15 @@ function assetPath(row: ShareRow): string | null {
  *  one refusal. */
 function deadShare(req: Request, token: string): Response {
   const row = lookupShare(token);
-  const path = row ? assetPath(row) : null;
-  if (row && path) {
+  if (row) {
     const user = sessionUser(req);
     if (user && isMember(row.workspace_id, user.id)) {
-      return withShareHeaders(new Response(null, { status: 302, headers: { location: path } }));
+      const path = assetPath(row);
+      if (!path) return softNotFound();
+      const response = new Response(null, { status: 302, headers: { location: path } });
+      return row.kind === "review_document" || row.kind === "stack_document"
+        ? withNoStoreShareHeaders(response)
+        : withShareHeaders(response);
     }
   }
   return softNotFound();
@@ -417,7 +438,7 @@ function readExpiry(raw: unknown): { at: number | null } | ApiError {
 
 /** Whether an asset a share would name is actually there. A target that does not exist
  *  in that workspace is a 422 rather than a link that opens onto the soft-404. */
-function targetExists(wsId: string, kind: ShareKind, target: string): boolean {
+function targetExists(wsId: string, kind: LegacyShareKind, target: string): boolean {
   return kind === "review" ? !!getReview(wsId, target) : !!getBundle(wsId, target);
 }
 
@@ -438,6 +459,11 @@ export async function handleCreateShare(req: Request): Promise<Response> {
 
   const errors: ApiError[] = [];
   const kind = body.kind;
+  const documentKind = kind === "review_document" || kind === "stack_document";
+  if (documentKind) {
+    const extra = Object.keys(body).find((field) => !["workspace", "kind", "target", "label", "expiresAt"].includes(field));
+    if (extra) errors.push({ field: extra, rule: "field_unknown", message: `${extra} is not a supported share field` });
+  }
   const kindOk = typeof kind === "string" && (SHARE_KINDS as readonly string[]).includes(kind);
   if (!kindOk) {
     errors.push({
@@ -456,21 +482,26 @@ export async function handleCreateShare(req: Request): Promise<Response> {
   }
 
   const target = body.target;
-  if (typeof target !== "string" || !SLUG_RE.test(target)) {
-    errors.push({
-      field: "target",
-      rule: "target_malformed",
-      message: "target is required and must match [a-z0-9][a-z0-9-]{0,63}",
-    });
-  } else if (kindOk && !targetExists(gate.ws, kind as ShareKind, target)) {
-    // A target in another workspace lands here too, and says the same thing: this
-    // workspace has no such asset. What another workspace holds is not this reply's
-    // to disclose.
-    errors.push({
-      field: "target",
-      rule: "target_unknown",
-      message: `${gate.ws} has no ${String(kind)} called ${target}`,
-    });
+  if (typeof target !== "string") {
+    errors.push({ field: "target", rule: "target_malformed", message: "target is required" });
+  } else if (kindOk && (kind === "review_document" || kind === "stack_document")) {
+    const familyOk = kind === "review_document"
+      ? RVR_ID_RE.test(target) || RAC_ID_RE.test(target)
+      : RSM_ID_RE.test(target) || RSA_ID_RE.test(target);
+    if (!familyOk) {
+      errors.push({ field: "target", rule: "target_malformed", message: kind === "review_document" ? "target must be an rvr_ revision or rac_ account id" : "target must be an rsm_ manifest or rsa_ account id" });
+    } else {
+      try {
+        resolveCapabilityTargetForMint(gate.ws, kind, target);
+      } catch (err) {
+        const rule = err instanceof CapabilityTargetError ? err.rule : "target_unknown";
+        errors.push({ field: "target", rule, message: err instanceof Error ? err.message : "No such document in this workspace" });
+      }
+    }
+  } else if (!SLUG_RE.test(target)) {
+    errors.push({ field: "target", rule: "target_malformed", message: "target is required and must match [a-z0-9][a-z0-9-]{0,63}" });
+  } else if (kindOk && !targetExists(gate.ws, kind as LegacyShareKind, target)) {
+    errors.push({ field: "target", rule: "target_unknown", message: `${gate.ws} has no ${String(kind)} called ${target}` });
   }
 
   const label = body.label === undefined || body.label === null ? "" : body.label;
@@ -487,23 +518,20 @@ export async function handleCreateShare(req: Request): Promise<Response> {
 
   if (errors.length > 0) return unprocessable(errors);
 
-  const { id, token } = createShare({
-    wsId: gate.ws,
-    kind: kind as ShareKind,
-    target: target as string,
-    label: label as string,
-    userId: gate.userId,
-    expiresAt: (expiry as { at: number | null }).at,
-  });
+  const expiresAt = (expiry as { at: number | null }).at;
+  const created = kind === "review_document" || kind === "stack_document"
+    ? createDocumentCapability({ wsId: gate.ws, kind, target: target as string, label: label as string, userId: gate.userId, expiresAt })
+    : createShare({ wsId: gate.ws, kind: kind as LegacyShareKind, target: target as string, label: label as string, userId: gate.userId, expiresAt });
   return json({
-    id,
+    id: created.id,
     workspace: gate.ws,
     kind,
     target,
     label,
-    expiresAt: (expiry as { at: number | null }).at,
-    token,
-    url: `${config.baseUrl}/s/${token}`,
+    expiresAt,
+    token: created.token,
+    url: `${config.baseUrl}/s/${created.token}`,
+    ...("projection" in created ? { document: created.projection } : {}),
   });
 }
 
@@ -516,15 +544,19 @@ export function handleListShares(req: Request): Response {
   if (gate instanceof Response) return gate;
   return json({
     workspace: gate.ws,
-    shares: listShares(gate.ws).map((s) => ({
-      id: s.id,
-      kind: s.kind,
-      target: s.target,
-      label: s.label,
-      createdBy: s.created_by,
-      createdAt: new Date(s.created_at).toISOString(),
-      expiresAt: s.expires_at === null ? null : new Date(s.expires_at).toISOString(),
-    })),
+    shares: listShares(gate.ws).map((s) => {
+      const document = documentProjectionForShare(s);
+      return {
+        id: s.id,
+        kind: s.kind,
+        target: s.target,
+        label: s.label,
+        createdBy: s.created_by,
+        createdAt: new Date(s.created_at).toISOString(),
+        expiresAt: s.expires_at === null ? null : new Date(s.expires_at).toISOString(),
+        ...(document ? { document } : {}),
+      };
+    }),
   });
 }
 

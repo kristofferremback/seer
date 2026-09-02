@@ -486,11 +486,7 @@ describe("a shared bundle", () => {
     }
   });
 
-  test("nothing a share serves may be cached by anything but the reader", async () => {
-    // What revocation withdraws here is authorization, not content — so the reasoning
-    // the workspace path uses (a pinned version's bytes never change, therefore cache
-    // them forever) does not carry across. A year-long `public` entry is a copy of the
-    // bytes in an intermediary that no revocation can reach.
+  test("a shared bundle preserves its private revalidation cache policy", async () => {
     const { token } = bundleShare();
     for (const path of ["/", "/assets/app.css", "/v/1/", "/v/1/assets/app.css"]) {
       const res = await fetch(`${base}/s/${token}${path}`);
@@ -498,8 +494,7 @@ describe("a shared bundle", () => {
       expect(res.headers.get("cache-control")).toBe("private, no-cache");
     }
 
-    // The control: on the workspace path a pinned version still caches forever, which
-    // is what makes the line above a decision rather than a blanket rule.
+    // The control: on the workspace path a pinned version still caches forever.
     const own = await fetch(`${base}/${rootWs}/b/own-bundle/v/1/`);
     expect(own.status).toBe(200);
     expect(own.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
@@ -702,6 +697,16 @@ describe("the shares API", () => {
       expiresAt: Date.now() - 1000,
     });
     expect((await errorOf(past)).field).toBe("expiresAt");
+  });
+
+  test("legacy review and bundle bodies continue to ignore unknown fields", async () => {
+    for (const [kind, target] of [["review", "own-review"], ["bundle", "own-bundle"]] as const) {
+      const res = await post({ workspace: rootWs, kind, target, note: "legacy client metadata" });
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.kind).toBe(kind);
+      expect(body).not.toHaveProperty("note");
+    }
   });
 
   test("an unknown kind is a 422 naming kind", async () => {

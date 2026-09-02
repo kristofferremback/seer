@@ -49,6 +49,7 @@ import {
   revokeShare,
   setShareRevokedHook,
 } from "./shares";
+import { documentProjectionForShare } from "./overseer/capability-db";
 import { serveBundleFile } from "./serve-bundle";
 import {
   handleClaimInstallation,
@@ -367,15 +368,18 @@ function settingsResponse(wsId: string, user: SessionUser, reveal?: SettingsReve
       })),
       githubInstallUrl: installUrl(),
       githubUserOAuthEnabled: config.githubUserOAuth !== null,
-      shares: listShares(wsId).map((sh) => ({
+      shares: listShares(wsId).map((sh) => {
+        const document = documentProjectionForShare(sh);
+        return {
         id: sh.id,
         label: sh.label,
         kind: sh.kind,
-        target: sh.target,
+        target: document ? `${document.title} · ${document.pin}` : sh.target,
         created: fmtDate(sh.created_at),
         expires: sh.expires_at === null ? "never" : fmtDate(sh.expires_at),
         isExpired: sh.expires_at !== null && sh.expires_at <= Date.now(),
-      })),
+      };
+      }),
       reveal,
     }),
   );

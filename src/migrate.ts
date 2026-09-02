@@ -4,7 +4,7 @@ import { config } from "./config";
 import { db, getMeta, setMeta } from "./db";
 import { hashKey, tinyId } from "./ids";
 
-// Schema versioning is driven by `PRAGMA user_version`. Target is 19 in this release.
+// Schema versioning is driven by `PRAGMA user_version`. Target is 20 in this release.
 //
 // v1 (the multi-user migration) handles two entry states:
 //   - v0-with-data: the pre-multi-user prod shape (bundles(slug PK), versions(slug,
@@ -79,6 +79,10 @@ import { hashKey, tinyId } from "./ids";
 // observations a delivery records, the installation-owned refresh job, client idempotency,
 // and Project membership. Purely additive — no lineage, revision, account, read or
 // observation row is touched, and a workspace with no stacks keeps every table empty.
+//
+// v20 rebuilds the closed shares.kind check to admit exact promoted-review and stack
+// document capabilities, then adds their immutable copied file, item, and attachment
+// inventories. Every old share column is copied unchanged in the same transaction.
 //
 // The freshness table's drop is NOT a version. It used to be a gated v6, and v6 is now
 // this table, which is not a renumbering for tidiness: a conditional step inside a
@@ -548,11 +552,16 @@ function backfillReviewPrs(): number {
   return written;
 }
 
-export function migrate(): void {
+export function assertDatabaseVersionSupported(maxVersion: number): void {
   const uv = userVersion();
-  if (uv > 19) {
-    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through 19`);
+  if (uv > maxVersion) {
+    throw new Error(`Unexpected database user_version ${uv}; expected a version from 0 through ${maxVersion}`);
   }
+}
+
+export function migrate(): void {
+  assertDatabaseVersionSupported(20);
+  const uv = userVersion();
   if (uv === 0) migrateToV1();
   if (userVersion() < 2) migrateToV2();
   if (userVersion() < 3) migrateToV3();
@@ -572,6 +581,7 @@ export function migrate(): void {
   if (userVersion() < 17) migrateToV17();
   if (userVersion() < 18) migrateToV18();
   if (userVersion() < 19) migrateToV19();
+  if (userVersion() < 20) migrateToV20();
   // THE LADDER IS CONTIGUOUS AND UNGATED, AND MUST STAY THAT WAY. A conditional step in
   // the middle of it is a trap, and this file fell into it once: the freshness drop was
   // a gated v6, the very next migration added below it was an ungated v7, and an
@@ -1586,6 +1596,94 @@ function migrateToV19(): void {
     db.run("PRAGMA user_version = 19");
   })();
   console.log("[seer] migrated to schema v19 (review stacks).");
+}
+
+const V20_REVIEW_DOCUMENT_SHARES = `
+  ALTER TABLE shares RENAME TO shares_v4;
+
+  CREATE TABLE shares (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('review','bundle','review_document','stack_document')),
+    target TEXT NOT NULL,
+    label TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    revoked_at INTEGER
+  );
+
+  INSERT INTO shares (
+    id, workspace_id, kind, target, label, token_hash,
+    created_by, created_at, expires_at, revoked_at
+  )
+  SELECT
+    id, workspace_id, kind, target, label, token_hash,
+    created_by, created_at, expires_at, revoked_at
+  FROM shares_v4;
+
+  DROP TABLE shares_v4;
+
+  CREATE INDEX idx_shares_workspace ON shares (workspace_id);
+  CREATE INDEX idx_shares_target ON shares (workspace_id, kind, target, created_at);
+
+  CREATE TABLE share_document_capabilities (
+    share_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    document_kind TEXT NOT NULL CHECK (document_kind IN ('review_revision','review_account','stack_manifest','stack_account')),
+    document_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (share_id, workspace_id, document_kind, document_id)
+  );
+  CREATE INDEX idx_share_document_capabilities_document
+    ON share_document_capabilities (workspace_id, document_kind, document_id);
+
+  CREATE TABLE share_capability_files (
+    share_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    member_position INTEGER NOT NULL CHECK (member_position >= 1 AND member_position <= 64),
+    revision_id TEXT NOT NULL,
+    capture_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    PRIMARY KEY (share_id, member_position, file_id),
+    UNIQUE (share_id, ordinal)
+  );
+  CREATE INDEX idx_share_capability_files_lookup
+    ON share_capability_files (share_id, member_position, file_id);
+
+  CREATE TABLE share_capability_items (
+    share_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    member_position INTEGER NOT NULL CHECK (member_position >= 1 AND member_position <= 64),
+    revision_id TEXT NOT NULL,
+    item_kind TEXT NOT NULL CHECK (item_kind IN ('change','material','file')),
+    item_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    PRIMARY KEY (share_id, member_position, item_kind, item_id),
+    UNIQUE (share_id, ordinal)
+  );
+  CREATE INDEX idx_share_capability_items_lookup
+    ON share_capability_items (share_id, member_position, item_kind, item_id);
+
+  CREATE TABLE share_capability_attachments (
+    share_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    attachment_id TEXT NOT NULL,
+    review_slug TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+    PRIMARY KEY (share_id, attachment_id),
+    UNIQUE (share_id, ordinal)
+  );
+`;
+
+function migrateToV20(): void {
+  db.transaction(() => {
+    db.exec(V20_REVIEW_DOCUMENT_SHARES);
+    db.run("PRAGMA user_version = 20");
+  })();
+  console.log("[seer] migrated to schema v20 (exact review document capabilities).");
 }
 
 /**
